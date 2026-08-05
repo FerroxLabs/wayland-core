@@ -101,6 +101,27 @@ pub async fn connect_plugin_mcp_servers(
     specs: &[McpServerSpec],
     tool_registry: &mut wcore_tools::registry::ToolRegistry,
     builtin_names: &[String],
+    defer_cold: &wcore_config::tools::DeferColdConfig,
+) -> Option<Arc<wcore_mcp::manager::McpManager>> {
+    connect_plugin_mcp_servers_with_policy(
+        specs,
+        tool_registry,
+        builtin_names,
+        wcore_egress::default_policy(),
+        defer_cold,
+    )
+    .await
+}
+
+/// Connect plugin-supplied MCP servers with the immutable policy owned by the
+/// calling session. Runtime bootstrap paths use this variant so work spawned
+/// later cannot fall back to another session's task-local default.
+pub async fn connect_plugin_mcp_servers_with_policy(
+    specs: &[McpServerSpec],
+    tool_registry: &mut wcore_tools::registry::ToolRegistry,
+    builtin_names: &[String],
+    egress_policy: wcore_egress::SharedPolicy,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) -> Option<Arc<wcore_mcp::manager::McpManager>> {
     if specs.is_empty() {
         return None;
@@ -119,15 +140,22 @@ pub async fn connect_plugin_mcp_servers(
     // instead of 30s. The cause of any skip is still preserved in the
     // manager's health() map (surfaced in /doctor).
     const PLUGIN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
-    match wcore_mcp::manager::McpManager::connect_all_with_connect_timeout(
+    match wcore_mcp::manager::McpManager::connect_all_with_policy_and_timeout(
         &configs,
         PLUGIN_CONNECT_TIMEOUT,
+        egress_policy,
     )
     .await
     {
         Ok(mgr) => {
             let mgr = Arc::new(mgr);
-            wcore_mcp::tool_proxy::register_mcp_tools(tool_registry, &mgr, builtin_names, &configs);
+            wcore_mcp::tool_proxy::register_mcp_tools(
+                tool_registry,
+                &mgr,
+                builtin_names,
+                &configs,
+                defer_cold,
+            );
             Some(mgr)
         }
         Err(e) => {

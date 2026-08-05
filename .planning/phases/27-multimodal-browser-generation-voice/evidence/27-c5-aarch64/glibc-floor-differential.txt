@@ -1,0 +1,28 @@
+c4fe22f4c5bb713181f38e6e308a56de0d033380bb1134d3834dd89d561c6751  wayland-core-v0.12.25-x86_64-unknown-linux-gnu.tar.gz
+Unable to find image 'ubuntu:24.04' locally
+24.04: Pulling from library/ubuntu
+4b987da45db4: Pulling fs layer
+4b987da45db4: Download complete
+5ba1b3e1daa0: Download complete
+4b987da45db4: Pull complete
+Digest: sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+Status: Downloaded newer image for ubuntu:24.04
+=== linux-arm64 max GLIBC version required ===
+GLIBC_2.30
+GLIBC_2.32
+GLIBC_2.33
+GLIBC_2.34
+GLIBC_2.38
+GLIBC_2.39
+=== linux-amd64 max GLIBC version required ===
+GLIBC_2.30
+GLIBC_2.32
+GLIBC_2.33
+GLIBC_2.34
+GLIBC_2.38
+GLIBC_2.39
+=== known-positive control: a symbol that MUST be there ===
+91
+=== known-negative control: a version that cannot exist ===
+0
+rc=1

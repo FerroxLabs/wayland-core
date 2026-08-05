@@ -8,10 +8,10 @@
 //!
 //! [`build`] therefore:
 //! 1. Mints a `TempDir`.
-//! 2. Writes `<tempdir>/.wayland-core/config.toml` with an **absolute**
-//!    `[session].directory = "<tempdir>/sessions"`.
-//! 3. Writes `[provider.<id>] api_key = "..."` so the binary picks up
-//!    the key from config rather than env (more deterministic).
+//! 2. Uses `<tempdir>/.wayland-core` as the isolated `WAYLAND_HOME` and writes
+//!    its config with an **absolute** session directory below that home.
+//! 3. Writes provider identity/model only. Credentials are injected through
+//!    the child-only environment at the final spawn boundary.
 //! 4. Optionally writes `[budget] max_cost_usd = X` for scenarios
 //!    that exercise the budget cap (per H-6 — env vars don't work).
 //!
@@ -22,6 +22,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::providers::ProviderConfig;
@@ -31,7 +32,9 @@ use crate::providers::ProviderConfig;
 /// child process.
 pub struct TempEnv {
     dir: TempDir,
-    /// Cached for ergonomics — same as `dir.path().join("sessions")`.
+    /// Evaluator-owned Core state, isolated from the candidate workspace.
+    home_dir: PathBuf,
+    /// Cached for ergonomics — same as `home_dir.join("sessions")`.
     sessions_dir: PathBuf,
 }
 
@@ -43,27 +46,29 @@ pub struct TempEnvOptions {
     /// If set, writes `[budget] max_cost_usd = X` into the seeded
     /// `config.toml` so the engine halts at that cap (H-6).
     pub budget_max_cost_usd: Option<f64>,
+    /// Evaluator-only provider transport override. Emitted in the same compat
+    /// table as known-free billing so fixture config never duplicates a table.
+    pub provider_read_timeout_ms: Option<u64>,
 }
 
 /// Build a fresh hermetic env for one run.
 ///
-/// The seeded config picks up the API key from `provider.resolved_key()`
-/// — if the caller has no key resolved, an empty string is written and
-/// the spawned binary will surface a clear "missing api key" error
-/// rather than 401-ing against a real provider with a placeholder. T4's
-/// `--strict` mode catches this earlier (SKIP vs FAIL).
+/// The seeded config never persists the API key. T4's `--strict` mode catches
+/// missing credentials before this builder runs.
 pub fn build(provider: &ProviderConfig) -> anyhow::Result<TempEnv> {
     build_with(provider, &TempEnvOptions::default())
 }
 
 pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::Result<TempEnv> {
+    if provider.cost_is_known_free && !provider_uses_loopback(provider) {
+        anyhow::bail!("cost_is_known_free is restricted to evaluator-owned loopback providers");
+    }
     let dir = TempDir::new()?;
     let root = dir.path();
-    let sessions_dir = root.join("sessions");
-    fs::create_dir_all(&sessions_dir)?;
-
     let cfg_dir = root.join(".wayland-core");
     fs::create_dir_all(&cfg_dir)?;
+    let sessions_dir = cfg_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
 
     // Build the TOML by hand — `toml::to_string` of a `serde_json::Value`
     // would re-quote keys awkwardly, and we want the file to read cleanly
@@ -71,7 +76,6 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
     // basic string), and the session dir is absolute (per C-3).
     let session_dir_abs = sessions_dir.to_string_lossy().to_string();
     let provider_id = provider.id.cli_name();
-    let api_key = provider.resolved_key().unwrap_or_default();
 
     let mut toml = String::new();
     toml.push_str("# wcore-eval-scenarios — seeded per-scenario config\n");
@@ -98,11 +102,21 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
     toml.push_str("egress_allow = [\"example.com\"]\n\n");
 
     toml.push_str(&format!("[provider.{provider_id}]\n"));
-    toml.push_str(&format!("api_key = \"{}\"\n", escape_toml_basic(&api_key)));
     toml.push_str(&format!(
         "model = \"{}\"\n\n",
         escape_toml_basic(&provider.model)
     ));
+
+    if provider.cost_is_known_free || opts.provider_read_timeout_ms.is_some() {
+        toml.push_str(&format!("[providers.{provider_id}.compat]\n"));
+        if provider.cost_is_known_free {
+            toml.push_str("cost_is_known_free = true\n");
+        }
+        if let Some(read_timeout_ms) = opts.provider_read_timeout_ms {
+            toml.push_str(&format!("read_timeout_ms = {read_timeout_ms}\n"));
+        }
+        toml.push('\n');
+    }
 
     if let Some(cap) = opts.budget_max_cost_usd {
         toml.push_str("[budget]\n");
@@ -111,7 +125,25 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
 
     fs::write(cfg_dir.join("config.toml"), toml)?;
 
-    Ok(TempEnv { dir, sessions_dir })
+    Ok(TempEnv {
+        dir,
+        home_dir: cfg_dir,
+        sessions_dir,
+    })
+}
+
+fn provider_uses_loopback(provider: &ProviderConfig) -> bool {
+    provider
+        .base_url
+        .as_deref()
+        .and_then(|base_url| reqwest::Url::parse(base_url).ok())
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 impl TempEnv {
@@ -121,12 +153,55 @@ impl TempEnv {
         self.dir.path()
     }
 
+    pub fn home(&self) -> &Path {
+        &self.home_dir
+    }
+
     /// Absolute session directory — the engine writes
     /// `<sessions_dir>/<date>_<id>.json` here after each session. The
     /// runner re-reads files from this directory post-run for the T3
     /// trace cross-check.
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
+    }
+}
+
+pub(crate) fn config_sha256(root: &Path) -> anyhow::Result<String> {
+    let config = fs::read_to_string(root.join(".wayland-core").join("config.toml"))?;
+    let mut config = toml::from_str::<toml::Value>(&config)?;
+    normalize_fixture_config(&mut config, &root.to_string_lossy());
+    let canonical = toml::to_string(&config)?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
+/// Remove only evaluator-owned run identity from the effective config hash.
+/// Security settings and non-loopback destinations remain byte-significant.
+fn normalize_fixture_config(value: &mut toml::Value, root: &str) {
+    match value {
+        toml::Value::String(text) => {
+            *text = text.replace(root, "<EVAL_ROOT>");
+            if let Ok(mut url) = reqwest::Url::parse(text)
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+                && url.port().is_some()
+                && url.set_port(Some(0)).is_ok()
+            {
+                *text = url.to_string();
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                normalize_fixture_config(value, root);
+            }
+        }
+        toml::Value::Table(values) => {
+            for (_, value) in values.iter_mut() {
+                normalize_fixture_config(value, root);
+            }
+        }
+        toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_) => {}
     }
 }
 
@@ -179,14 +254,15 @@ mod tests {
     }
 
     #[test]
-    fn seeded_config_includes_provider_api_key() {
+    fn seeded_config_never_contains_provider_api_key() {
         let p = ProviderConfig::new(ProviderId::Anthropic, "claude-sonnet-4-6")
             .with_api_key("sk-ant-test-12345");
         let env = build(&p).expect("build env");
         let cfg = fs::read_to_string(env.path().join(".wayland-core/config.toml"))
             .expect("seeded config exists");
         assert!(cfg.contains("[provider.anthropic]"), "config: {cfg}");
-        assert!(cfg.contains("sk-ant-test-12345"), "config: {cfg}");
+        assert!(!cfg.contains("api_key"), "config: {cfg}");
+        assert!(!cfg.contains("sk-ant-test-12345"), "config: {cfg}");
     }
 
     #[test]
@@ -196,6 +272,7 @@ mod tests {
             &p,
             &TempEnvOptions {
                 budget_max_cost_usd: Some(0.05),
+                ..TempEnvOptions::default()
             },
         )
         .expect("build env");
@@ -206,7 +283,85 @@ mod tests {
     }
 
     #[test]
+    fn known_free_provider_fixture_is_declared_through_compat() {
+        let p = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+            .with_api_key("test-key")
+            .with_base_url("http://127.0.0.1:43111")
+            .with_known_free_cost();
+        let env = build(&p).expect("build env");
+        let cfg = fs::read_to_string(env.path().join(".wayland-core/config.toml"))
+            .expect("seeded config exists");
+        assert!(cfg.contains("[providers.openai.compat]"), "config: {cfg}");
+        assert!(cfg.contains("cost_is_known_free = true"), "config: {cfg}");
+    }
+
+    #[test]
+    fn known_free_declaration_rejects_non_loopback_provider() {
+        let p = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+            .with_api_key("test-key")
+            .with_base_url("https://api.example.com")
+            .with_known_free_cost();
+        let error = match build(&p) {
+            Ok(_) => panic!("remote provider must not be certified free"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("restricted to evaluator-owned loopback")
+        );
+    }
+
+    #[test]
     fn escape_quotes_and_backslashes() {
         assert_eq!(escape_toml_basic(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn config_digest_ignores_the_hermetic_root() {
+        let provider =
+            ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1").with_api_key("test-key");
+        let first = build(&provider).expect("first environment");
+        let second = build(&provider).expect("second environment");
+
+        assert_ne!(first.path(), second.path());
+        assert_eq!(
+            config_sha256(first.path()).expect("first config digest"),
+            config_sha256(second.path()).expect("second config digest"),
+            "receipt behavior identity must not depend on a random temp path"
+        );
+    }
+
+    #[test]
+    fn config_digest_ignores_only_loopback_fixture_ports() {
+        let provider =
+            ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1").with_api_key("test-key");
+        let first = build(&provider).expect("first environment");
+        let second = build(&provider).expect("second environment");
+        for (env, port) in [(&first, 43111), (&second, 49222)] {
+            let path = env.path().join(".wayland-core").join("config.toml");
+            let mut config = fs::read_to_string(&path).expect("seeded config");
+            config.push_str(&format!(
+                "[mcp.servers.fixture]\ntransport = \"streamable-http\"\nurl = \"http://127.0.0.1:{port}/mcp\"\n"
+            ));
+            fs::write(path, config).expect("append fixture config");
+        }
+
+        assert_eq!(
+            config_sha256(first.path()).expect("first config digest"),
+            config_sha256(second.path()).expect("second config digest")
+        );
+
+        let path = second.path().join(".wayland-core").join("config.toml");
+        let mut config = fs::read_to_string(&path).expect("seeded config");
+        config = config.replace(
+            "http://127.0.0.1:49222/mcp",
+            "https://api.example.com:49222/mcp",
+        );
+        fs::write(path, config).expect("replace fixture destination");
+        assert_ne!(
+            config_sha256(first.path()).expect("first config digest"),
+            config_sha256(second.path()).expect("non-loopback config digest")
+        );
     }
 }

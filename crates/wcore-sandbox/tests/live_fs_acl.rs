@@ -1,7 +1,7 @@
 //! Live filesystem-ACL verification for R61 (Windows AppContainer DACL grants).
 //!
-//! Proves, on real Windows hardware (gated behind `WAYLAND_SANDBOX_LIVE_WINDOWS`,
-//! which the CI Windows runner sets), that `fs_read_allow`/`fs_write_allow` are
+//! Proves, on real Windows hardware through an explicit ignored-test run with
+//! `WAYLAND_SANDBOX_LIVE_WINDOWS=1`, that `fs_read_allow`/`fs_write_allow` are
 //! actually wired to AppContainer DACLs:
 //!   1. WITHOUT a grant, a sandboxed `cmd /c type <file>` is DENIED.
 //!   2. WITH `fs_read_allow`, the same command SUCCEEDS and reads the content.
@@ -15,16 +15,65 @@
 
 #![cfg(windows)]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use wcore_sandbox::backends::SandboxBackend;
 use wcore_sandbox::backends::appcontainer::AppContainerBackend;
 use wcore_sandbox::{SandboxCommand, SandboxManifest};
 
 const MARKER: &str = "HEADROOM_R61_GRANT_OK";
+const NATIVE_ACCEPTANCE_CASES: usize = 12;
 
-fn live() -> bool {
-    std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_ok()
+fn require_live_acceptance() {
+    assert_eq!(
+        std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
+        Ok("1"),
+        "native acceptance requires WAYLAND_SANDBOX_LIVE_WINDOWS=1"
+    );
+    assert!(
+        AppContainerBackend::new().is_available(),
+        "explicit native acceptance requires an available AppContainer backend"
+    );
+}
+
+/// Zero-execution guard — and it has to RUN to be one.
+///
+/// This test used to carry `#[ignore]`, which made it inert against the exact
+/// scenario it exists for: with every test in the binary ignored,
+/// `cargo test -p wcore-sandbox --test live_fs_acl` executed 0 of 12 and still
+/// exited 0 printing `test result: ok`. The guard could only fire under
+/// `--ignored`, by which point the real cases were running anyway and nothing
+/// needed guarding. An instrument that can only report success is not an
+/// instrument.
+///
+/// It now always runs, so this binary can never report success on zero executed
+/// tests, and it FAILS when a caller declares live intent by setting
+/// `WAYLAND_SANDBOX_LIVE_WINDOWS=1` while asking for a run that cannot execute
+/// any acceptance case — precisely the case where a green would be misread as
+/// certification. Skipped under nextest, whose `--run-ignored`/`--no-tests=fail`
+/// handling covers the same ground and which runs each test in its own process.
+///
+/// Falsifiable: `WAYLAND_SANDBOX_LIVE_WINDOWS=1 cargo test --test live_fs_acl`
+/// FAILS; adding `-- --ignored` passes and runs the real cases.
+#[test]
+fn native_acceptance_gate_marker() {
+    assert_eq!(NATIVE_ACCEPTANCE_CASES, 12);
+    if std::env::var_os("NEXTEST").is_some() {
+        return;
+    }
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref() != Ok("1") {
+        return;
+    }
+    let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
+    assert!(
+        asked_for_ignored,
+        "WAYLAND_SANDBOX_LIVE_WINDOWS=1 declares a live acceptance run, but this \
+         invocation cannot execute any of the {NATIVE_ACCEPTANCE_CASES} acceptance cases \
+         — they are #[ignore]d and neither --ignored nor --include-ignored was passed. \
+         Exiting 0 here would certify nothing. Re-run with: \
+         cargo test -p wcore-sandbox --test live_fs_acl -- --ignored --test-threads=1"
+    );
 }
 
 /// Seed a unique test dir under `%PUBLIC%` holding a file containing [`MARKER`].
@@ -47,6 +96,94 @@ fn icacls(path: &Path) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn has_appcontainer_ace(path: &Path) -> bool {
+    // Match ONLY the raw AppContainer package-SID prefix `s-1-15-2-`. The former
+    // `wcore-` substring disjunct was unconditionally true: `icacls <path>`
+    // echoes the seed-dir path (`wcore-r61-<pid>-<tag>`, produced by `seed_file`)
+    // in every line of its output, so every absent/revoke check built on this
+    // detector was unfalsifiable. Matching only the raw package SID mirrors the
+    // belt-and-braces present/absent assertions at lines 240/297/613 (which
+    // negate both `S-1-15-2-` and the resolved `wcoresandbox` profile rendering).
+    // While a grant is live the ephemeral package SID renders as raw
+    // `S-1-15-2-…`, so present-checks still pass.
+    let acl = icacls(path).to_ascii_lowercase();
+    acl.contains("s-1-15-2-")
+}
+
+fn lease_profiles() -> BTreeSet<String> {
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+        return BTreeSet::new();
+    };
+    let directory = PathBuf::from(local)
+        .join("Wayland")
+        .join("Core")
+        .join("AppContainerLeases")
+        .join("v1");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return BTreeSet::new();
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|value| value.to_str()) == Some("toml"))
+                .then(|| path.file_stem()?.to_str().map(str::to_owned))?
+        })
+        .collect()
+}
+
+async fn wait_until(mut predicate: impl FnMut() -> bool, message: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting for {message}");
+}
+
+fn cmd_script(script: String) -> SandboxCommand {
+    SandboxCommand {
+        argv: vec![
+            "cmd.exe".into(),
+            "/d".into(),
+            "/s".into(),
+            "/c".into(),
+            script,
+        ],
+        cwd: None,
+    }
+}
+
+// waitfor.exe / timeout.exe / ping / choice.exe all exit in <80ms under the
+// Low-IL AppContainer restricted token (console/DLL/network deps fail to load),
+// so none actually held. A `for /L` loop is a cmd BUILTIN — no child image, no
+// DLL, no stdin, no network — the only primitive that holds under this sandbox
+// (hardware-verified). It MUST stay bare: a parenthesized `(for /L ...)` fails
+// to parse under `cmd /d /s /c` (instant exit 1). Command-line form uses single
+// `%i` (NOT `%%i`). Iterations are capped so the hold is ~2s on reference
+// hardware — above the 50ms present-poll, below the 10s manifest timeout —
+// rather than a machine-timed value that could overrun the timeout on slow CI.
+fn hold_iterations(seconds: u8) -> u64 {
+    4_000_000 * u64::from(seconds).clamp(1, 2)
+}
+
+fn type_and_hold(file: &Path, seconds: u8) -> SandboxCommand {
+    cmd_script(format!(
+        "type \"{}\" && for /L %i in (1,1,{}) do @rem",
+        file.display(),
+        hold_iterations(seconds),
+    ))
+}
+
+fn echo_temp_and_hold(seconds: u8) -> SandboxCommand {
+    cmd_script(format!(
+        "echo %TEMP% & for /L %i in (1,1,{}) do @rem",
+        hold_iterations(seconds),
+    ))
+}
+
 fn type_file(file: &Path) -> SandboxCommand {
     SandboxCommand {
         argv: vec![
@@ -60,10 +197,9 @@ fn type_file(file: &Path) -> SandboxCommand {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn ungranted_path_is_denied_in_sandbox() {
-    if !live() {
-        return;
-    }
+    require_live_acceptance();
     let (dir, file) = seed_file("denied");
     let backend = AppContainerBackend::new();
     let manifest = SandboxManifest {
@@ -86,27 +222,38 @@ async fn ungranted_path_is_denied_in_sandbox() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn granted_path_is_readable_then_revoked() {
-    if !live() {
-        return;
-    }
+    require_live_acceptance();
     let (dir, file) = seed_file("granted");
-    let backend = AppContainerBackend::new();
     let manifest = SandboxManifest {
         timeout: Some(Duration::from_secs(10)),
         fs_read_allow: vec![dir.clone()],
         ..Default::default()
     };
-    let out = backend
-        .execute(&manifest, type_file(&file))
+    // Hold the granted read alive so the grant ACE can be proven PRESENT on the
+    // host DACL *during* the run, then joined for the read result (exit 0 +
+    // content), then proven ABSENT after. Asserting both present-during and
+    // absent-after makes the revoke genuinely falsifiable: a grant that never
+    // applied fails the present-during wait, and a leaked grant fails the
+    // absent-after wait — neither can be masked by an unrelated success.
+    let read_file = file.clone();
+    let read = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&manifest, type_and_hold(&read_file, 3))
+            .await
+    });
+    wait_until(
+        || has_appcontainer_ace(&dir),
+        "granted read AppContainer ACE present during run",
+    )
+    .await;
+
+    let out = read
         .await
-        .expect("execute");
-
+        .expect("join granted read")
+        .expect("granted read");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    // Capture the DACL while the file still exists, before cleanup.
-    let acl_after = icacls(&file);
-    let _ = std::fs::remove_dir_all(&dir);
-
     assert_eq!(
         out.exit_code,
         0,
@@ -118,33 +265,37 @@ async fn granted_path_is_readable_then_revoked() {
         "sandbox must read the granted file's content; got stdout={stdout:?}"
     );
     // The grant must be revoked once the spawn finished — no permanent
-    // AppContainer ACE left on the host. icacls renders the package SID either
-    // as the raw `S-1-15-2-…` or a resolved name containing the profile moniker.
+    // AppContainer ACE left on the host.
+    wait_until(
+        || !has_appcontainer_ace(&dir),
+        "granted read grant revoked after run",
+    )
+    .await;
+    // Belt-and-braces: the file's own DACL carries no residual AppContainer ACE.
+    // icacls renders the package SID either as the raw `S-1-15-2-…` or a resolved
+    // name containing the profile moniker.
+    let acl_after = icacls(&file);
     let acl_lower = acl_after.to_lowercase();
     assert!(
         !acl_after.contains("S-1-15-2-") && !acl_lower.contains("wcoresandbox"),
         "AppContainer grant must be revoked after the run (no host ACL leak); icacls:\n{acl_after}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Task 4: A secret file under a granted parent directory is unreadable when
 /// its path is in `fs_read_deny` (DENY ACE overrides the parent ALLOW grant),
 /// and the DENY ACE is revoked after the spawn completes.
 #[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
 async fn denied_secret_under_granted_parent_is_unreadable_and_revoked() {
-    if !live() {
-        return;
-    }
+    require_live_acceptance();
     let (dir, _) = seed_file("deny-parent");
     // Place the secret inside the granted parent.
     let secret_file = dir.join("secret.env");
     std::fs::write(&secret_file, "SECRET_TOKEN=supersecret").expect("write secret");
 
     let backend = AppContainerBackend::new();
-    if !backend.is_available() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return;
-    }
 
     // Grant the PARENT directory (so the AppContainer can traverse it) but
     // deny the specific secret file. The DENY ACE overrides the ALLOW.
@@ -186,4 +337,494 @@ async fn denied_secret_under_granted_parent_is_unreadable_and_revoked() {
         !acl_after.contains("S-1-15-2-") && !acl_lower.contains("wcoresandbox"),
         "AppContainer DENY ACE must be revoked after the run; icacls:\n{acl_after}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn one_exit_does_not_remove_another_execution_grant() {
+    require_live_acceptance();
+    let (b_dir, b_file) = seed_file("overlap-b");
+    let (a_dir, a_file) = seed_file("overlap-a");
+    let b_manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![b_dir.clone()],
+        ..Default::default()
+    };
+    let b = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&b_manifest, type_and_hold(&b_file, 4))
+            .await
+    });
+    wait_until(
+        || has_appcontainer_ace(&b_dir),
+        "execution B AppContainer ACE",
+    )
+    .await;
+
+    let a_manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![a_dir.clone()],
+        ..Default::default()
+    };
+    let a_out = AppContainerBackend::new()
+        .execute(&a_manifest, type_file(&a_file))
+        .await
+        .expect("execution A");
+    assert_eq!(a_out.exit_code, 0, "execution A must finish cleanly");
+    assert!(
+        has_appcontainer_ace(&b_dir),
+        "execution A cleanup must preserve execution B's distinct ACE"
+    );
+
+    let b_out = b.await.expect("join execution B").expect("execution B");
+    assert_eq!(b_out.exit_code, 0, "execution B must remain functional");
+    wait_until(
+        || !has_appcontainer_ace(&b_dir),
+        "execution B exact-SID cleanup",
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(a_dir);
+    let _ = std::fs::remove_dir_all(b_dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn one_execution_grant_never_leaks_to_another_identity() {
+    require_live_acceptance();
+    let (dir, file) = seed_file("no-cross-grant");
+    let a_manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![dir.clone()],
+        ..Default::default()
+    };
+    let a_file = file.clone();
+    let a = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&a_manifest, type_and_hold(&a_file, 3))
+            .await
+    });
+    wait_until(|| has_appcontainer_ace(&dir), "execution A grant").await;
+
+    let b_out = AppContainerBackend::new()
+        .execute(
+            &SandboxManifest {
+                timeout: Some(Duration::from_secs(10)),
+                ..Default::default()
+            },
+            type_file(&file),
+        )
+        .await
+        .expect("execution B");
+    assert_ne!(b_out.exit_code, 0, "B must not inherit A's grant");
+    assert!(
+        !String::from_utf8_lossy(&b_out.stdout).contains(MARKER),
+        "B must not read bytes granted only to A"
+    );
+    // A's script exit code reflects the granted READ succeeding (exit 0 via
+    // `type && for /L … do @rem`): the `&&` gates the hold on the read, and the
+    // `for /L` busy-loop completes with exit 0. Gate on that read: A must exit 0
+    // AND have actually read the granted bytes.
+    let a_out = a.await.expect("join execution A").expect("execution A");
+    assert_eq!(
+        a_out.exit_code, 0,
+        "the granting identity's read must succeed (exit 0), not the hold primitive's residual exit code"
+    );
+    assert!(
+        String::from_utf8_lossy(&a_out.stdout).contains(MARKER),
+        "the granting identity must actually read the granted bytes"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn concurrent_allow_and_deny_identities_do_not_interfere() {
+    require_live_acceptance();
+    let (dir, _) = seed_file("allow-deny");
+    let secret = dir.join("secret.txt");
+    std::fs::write(&secret, MARKER).expect("write secret");
+    let allow_manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![dir.clone()],
+        ..Default::default()
+    };
+    let deny_manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![dir.clone()],
+        fs_read_deny: vec![secret.clone()],
+        ..Default::default()
+    };
+    let allow_file = secret.clone();
+    let allow = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&allow_manifest, type_and_hold(&allow_file, 2))
+            .await
+    });
+    let deny_file = secret.clone();
+    let deny = tokio::spawn(async move {
+        AppContainerBackend::new()
+            .execute(&deny_manifest, type_file(&deny_file))
+            .await
+    });
+    let allow_out = allow.await.expect("join allow").expect("allow execution");
+    let deny_out = deny.await.expect("join deny").expect("deny execution");
+    assert!(
+        String::from_utf8_lossy(&allow_out.stdout).contains(MARKER),
+        "ordinary allow identity must retain access"
+    );
+    assert!(
+        !String::from_utf8_lossy(&deny_out.stdout).contains(MARKER),
+        "delegated deny identity must not read the secret"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn twenty_concurrent_executions_have_unique_temp_roots() {
+    require_live_acceptance();
+    let baseline = lease_profiles();
+    let mut tasks = Vec::new();
+    for _ in 0..20 {
+        tasks.push(tokio::spawn(async {
+            AppContainerBackend::new()
+                .execute(
+                    &SandboxManifest {
+                        timeout: Some(Duration::from_secs(10)),
+                        ..Default::default()
+                    },
+                    echo_temp_and_hold(2),
+                )
+                .await
+        }));
+    }
+    wait_until(
+        || lease_profiles().difference(&baseline).count() == 20,
+        "20 concurrent durable leases",
+    )
+    .await;
+    let live_profiles: BTreeSet<_> = lease_profiles().difference(&baseline).cloned().collect();
+    assert_eq!(live_profiles.len(), 20, "every live command needs one SID");
+    assert!(
+        live_profiles.iter().all(|name| name.len() <= 64),
+        "all AppContainer profile names must satisfy the Win32 limit"
+    );
+
+    let mut temp_roots = BTreeSet::new();
+    for task in tasks {
+        let output = task.await.expect("join command").expect("execute command");
+        assert_eq!(output.exit_code, 0);
+        let temp = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        assert!(temp.to_ascii_lowercase().contains("\\packages\\wcore-"));
+        temp_roots.insert(temp);
+    }
+    assert_eq!(temp_roots.len(), 20, "TEMP must be unique per execution");
+    wait_until(
+        || lease_profiles().is_subset(&baseline),
+        "all concurrent leases to be removed",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn timeout_and_cancellation_remove_their_leases() {
+    require_live_acceptance();
+    let baseline = lease_profiles();
+    let timeout = AppContainerBackend::new()
+        .execute(
+            &SandboxManifest {
+                timeout: Some(Duration::from_millis(150)),
+                ..Default::default()
+            },
+            echo_temp_and_hold(8),
+        )
+        .await;
+    assert!(timeout.is_err(), "timeout path must return an error");
+    wait_until(
+        || lease_profiles().is_subset(&baseline),
+        "timeout lease cleanup",
+    )
+    .await;
+
+    let task = tokio::spawn(async {
+        AppContainerBackend::new()
+            .execute(
+                &SandboxManifest {
+                    timeout: Some(Duration::from_secs(8)),
+                    ..Default::default()
+                },
+                echo_temp_and_hold(8),
+            )
+            .await
+    });
+    wait_until(
+        || !lease_profiles().is_subset(&baseline),
+        "cancellable execution lease",
+    )
+    .await;
+    task.abort();
+    let _ = task.await;
+    wait_until(
+        || lease_profiles().is_subset(&baseline),
+        "cancelled execution lease cleanup",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn unrelated_acl_survives_exact_sid_cleanup() {
+    require_live_acceptance();
+    let (dir, file) = seed_file("unrelated-ace");
+    let grant = std::process::Command::new("icacls")
+        .arg(&file)
+        .args(["/grant", "*S-1-1-0:(R)"])
+        .output()
+        .expect("grant Everyone read ACE");
+    assert!(grant.status.success(), "seed unrelated ACE: {grant:?}");
+    let output = AppContainerBackend::new()
+        .execute(
+            &SandboxManifest {
+                timeout: Some(Duration::from_secs(10)),
+                fs_read_allow: vec![dir.clone()],
+                ..Default::default()
+            },
+            type_file(&file),
+        )
+        .await
+        .expect("sandbox read");
+    assert_eq!(output.exit_code, 0);
+    let acl = icacls(&file).to_ascii_lowercase();
+    assert!(
+        acl.contains("everyone") || acl.contains("s-1-1-0"),
+        "exact-SID cleanup must preserve unrelated trustees: {acl}"
+    );
+    assert!(!has_appcontainer_ace(&file));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Isolation proof (REQ-native-r2 / CONTEXT D4): an explicit DENY ace still
+/// blocks the sandboxed child even when a matching package-SID grant is ALSO
+/// present. Windows evaluates DENY aces before ALLOW, so the DENY must win.
+///
+/// Falsifiable: the file's directory is `fs_read_allow`-granted (so absent the
+/// DENY the child WOULD read it, as `granted_path_is_readable_then_revoked`
+/// proves), and the file itself is `fs_read_deny`-denied. If dropping the
+/// deny-only SIDs in 20-19 had weakened the boundary so a DENY could be
+/// bypassed, this read would succeed (exit 0, MARKER present) and the test
+/// would FAIL.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn deny_ace_still_blocks_granted_read() {
+    require_live_acceptance();
+    let (dir, file) = seed_file("deny-wins");
+    let backend = AppContainerBackend::new();
+    // Same target: a package-SID ALLOW grant (via the granted directory) PLUS an
+    // explicit package-SID DENY on the file. The DENY must override the grant.
+    let manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![dir.clone()],
+        fs_read_deny: vec![file.clone()],
+        ..Default::default()
+    };
+    let out = backend
+        .execute(&manifest, type_file(&file))
+        .await
+        .expect("execute");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Capture the DACL while the file still exists, before cleanup.
+    let acl_after = icacls(&file);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_ne!(
+        out.exit_code, 0,
+        "an explicit DENY ace must block the read even with a matching grant; \
+         got exit 0 stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "a DENY-blocked read must not disclose the file's bytes; stdout={stdout:?}"
+    );
+    // Both the ALLOW grant and the DENY ace are revoked after the run — no
+    // permanent AppContainer ACE (grant or deny) left on the host.
+    let acl_lower = acl_after.to_lowercase();
+    assert!(
+        !acl_after.contains("S-1-15-2-") && !acl_lower.contains("wcoresandbox"),
+        "AppContainer grant/deny aces must be revoked after the run; icacls:\n{acl_after}"
+    );
+}
+
+/// Isolation proof (REQ-native-r2 / CONTEXT D4): a file granted ONLY to a
+/// normal SID (`Everyone` / `S-1-1-0`), with NO AppContainer package-SID grant
+/// (no `fs_read_allow`), is STILL denied to the sandboxed child.
+///
+/// This is the load-bearing proof that dropping the deny-only SIDs in 20-19 did
+/// not weaken the sandbox: isolation is intrinsic to the AppContainer package-SID
+/// access model, which ignores normal SIDs for granting. Falsifiable: if the
+/// child could use a normal-SID grant, this read would succeed (exit 0, MARKER)
+/// and the test would FAIL — the exact regression the deny-only marking was
+/// (redundantly) thought to guard against.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn normal_sid_only_grant_is_denied() {
+    require_live_acceptance();
+    let (dir, file) = seed_file("normal-sid-only");
+    // Grant the file to a NORMAL sid only (Everyone / S-1-1-0). No package-SID
+    // grant is issued (no fs_read_allow), so the ONLY ACE the child could try to
+    // use is the normal-SID one the AppContainer model must ignore.
+    let grant = std::process::Command::new("icacls")
+        .arg(&file)
+        .args(["/grant", "*S-1-1-0:(R)"])
+        .output()
+        .expect("grant Everyone read ACE");
+    assert!(grant.status.success(), "seed normal-SID grant: {grant:?}");
+
+    let backend = AppContainerBackend::new();
+    let manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        // Deliberately NO fs_read_allow: prove denial is intrinsic, not a
+        // side effect of withholding a package-SID grant on a shared dir.
+        ..Default::default()
+    };
+    let out = backend
+        .execute(&manifest, type_file(&file))
+        .await
+        .expect("execute");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_ne!(
+        out.exit_code, 0,
+        "a file granted only to a normal SID must stay denied to the AppContainer \
+         child; got exit 0 stdout={stdout:?}"
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "a normal-SID-only grant must not disclose bytes to the sandboxed child; \
+         stdout={stdout:?}"
+    );
+}
+
+/// 21-C3-01 cross-backend check: Windows AppContainer must NOT have
+/// bubblewrap's overlapping-deny defect.
+///
+/// bubblewrap enforces a deny by MOUNTING over the denied path, so a deny
+/// nested inside a *directory* deny needed a mount point in a read-only mask
+/// and aborted the spawn outright (`bwrap: Can't mkdir …\.git: Read-only file
+/// system`) — a delegated mutating child could not run any command on Linux.
+/// AppContainer instead applies a protected DACL per object, so a nested pair
+/// should be two independent objects and enforce twice.
+///
+/// The finding lane explicitly did NOT measure this. It is measured here rather
+/// than inferred from the Linux behaviour, on the exact pair `spawner.rs` hands
+/// the sandbox for an isolated-mutation child: `[parent, parent\.git]`.
+///
+/// Three arms, because two questions are in play and they must not be
+/// conflated:
+///   1. CONTROL, no deny — the child must read BOTH secrets. Without this a
+///      "refused" reading is free (a wrong path, an untraversable ancestor or a
+///      dead command all produce it), and the containment half is vacuous.
+///   2. SINGLE deny on the granted directory — isolates the allow-then-deny
+///      ordering on ONE path. `canonical_intents` keys a `BTreeMap` on
+///      `(path, IntentKind)` with `Allow` ordered before `Deny`, so the deny is
+///      applied last; this proves that live rather than by reading the derive.
+///   3. OVERLAPPING pair — the bubblewrap analogue. Arm 3 vs arm 2 isolates the
+///      nesting; arm 2 vs arm 1 isolates the ordering.
+///
+/// Falsifiable in both directions: if AppContainer shared bubblewrap's defect,
+/// arm 3 would fail to run the command and the marker would be absent; if the
+/// nested deny weakened the boundary, a secret would appear in stdout.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn overlapping_directory_denies_run_the_command_and_still_contain() {
+    require_live_acceptance();
+    let (dir, _) = seed_file("deny-overlap");
+    let git_dir = dir.join(".git");
+    std::fs::create_dir_all(&git_dir).expect("create .git");
+    std::fs::write(dir.join("secret.txt"), "PARENTSECRET").expect("write parent secret");
+    std::fs::write(git_dir.join("config"), "GITSECRET").expect("write git secret");
+
+    // `^` is cmd's escape character, so `SHELL^RAN` is assembled by cmd at
+    // runtime into `SHELLRAN` and cannot be produced by anything that merely
+    // carried the command text (21-C3 §6 — a literal marker in the command is
+    // satisfiable without the command ever running).
+    let script = format!(
+        "echo SHELL^RAN & type \"{}\" 2>nul & type \"{}\" 2>nul",
+        dir.join("secret.txt").display(),
+        git_dir.join("config").display(),
+    );
+    let backend = AppContainerBackend::new();
+    let run = |deny: Vec<PathBuf>| {
+        let manifest = SandboxManifest {
+            timeout: Some(Duration::from_secs(10)),
+            fs_read_allow: vec![dir.clone()],
+            fs_read_deny: deny,
+            ..Default::default()
+        };
+        let command = cmd_script(script.clone());
+        let backend = &backend;
+        async move { backend.execute(&manifest, command).await.expect("execute") }
+    };
+
+    // ── Arm 1: control. No deny — both secrets MUST be readable. ─────────────
+    let control = run(Vec::new()).await;
+    let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+    assert!(
+        control_stdout.contains("SHELLRAN")
+            && control_stdout.contains("PARENTSECRET")
+            && control_stdout.contains("GITSECRET"),
+        "instrument is dead: with NO deny the sandboxed child must run and read both \
+         secrets, so a REFUSED reading in arms 2/3 would prove nothing; \
+         stdout={control_stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+
+    // ── Arm 2: one deny on the granted directory (ordering only). ────────────
+    let single = run(vec![dir.clone()]).await;
+    let single_stdout = String::from_utf8_lossy(&single.stdout).into_owned();
+    assert!(
+        single_stdout.contains("SHELLRAN"),
+        "a single directory deny must not stop the command from running; \
+         stdout={single_stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&single.stderr)
+    );
+    assert!(
+        !single_stdout.contains("PARENTSECRET") && !single_stdout.contains("GITSECRET"),
+        "a directory deny must beat the matching directory ALLOW on the same path \
+         (Allow is applied before Deny); stdout={single_stdout:?}"
+    );
+
+    // ── Arm 3: the overlapping pair — the bubblewrap analogue. ───────────────
+    let overlapping = run(vec![dir.clone(), git_dir.clone()]).await;
+    let overlapping_stdout = String::from_utf8_lossy(&overlapping.stdout).into_owned();
+    let overlapping_stderr = String::from_utf8_lossy(&overlapping.stderr).into_owned();
+    let acl_parent_after = icacls(&dir);
+    let acl_git_after = icacls(&git_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        overlapping_stdout.contains("SHELLRAN"),
+        "AppContainer must run the command under an overlapping directory-deny pair — \
+         21-C3-01 must NOT have a Windows analogue; stdout={overlapping_stdout:?} \
+         stderr={overlapping_stderr:?}"
+    );
+    assert!(
+        !overlapping_stdout.contains("PARENTSECRET") && !overlapping_stdout.contains("GITSECRET"),
+        "both nested denies must still be enforced; stdout={overlapping_stdout:?}"
+    );
+    // No permanent host ACL leak from either object of the nested pair.
+    for (label, acl) in [
+        ("parent", &acl_parent_after),
+        ("parent/.git", &acl_git_after),
+    ] {
+        let lower = acl.to_lowercase();
+        assert!(
+            !acl.contains("S-1-15-2-") && !lower.contains("wcoresandbox"),
+            "AppContainer aces on the {label} object must be revoked after the run; \
+             icacls:\n{acl}"
+        );
+    }
 }

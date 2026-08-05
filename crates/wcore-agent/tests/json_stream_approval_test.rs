@@ -214,17 +214,24 @@ async fn test_auto_approve_bypasses_approval() {
 
     let output = silent_output();
     let approval_manager = Arc::new(ToolApprovalManager::new());
+    // Host-backed sessions use the manager as the sole live posture authority.
+    // Production seeds it from the resolved config before installing it.
+    approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
     let writer = Arc::new(ProtocolWriter::new());
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(writer);
 
-    // No background task to approve — should not hang
-    let result = engine
-        .run("Use the tool", "msg-3")
-        .await
-        .expect("should succeed");
+    // No background task to approve. Bound the wait so future posture drift
+    // fails this test instead of wedging the entire integration suite.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.run("Use the tool", "msg-3"),
+    )
+    .await
+    .expect("Force mode must bypass the host approval wait")
+    .expect("should succeed");
     assert_eq!(result.text, "Auto done");
     assert_eq!(result.turns, 2);
 }

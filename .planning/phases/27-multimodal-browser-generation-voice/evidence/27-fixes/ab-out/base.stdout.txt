@@ -1,0 +1,2 @@
+
+* There is no `transcribe_audio` tool available. Audio transcription is listed as an **unavailable capability** — it requires `GROQ_API_KEY` or `OPENAI_API_KEY` to be set, and neither is configured in this session. The only audio tool present is `text_to_speech` (synthesis, not recognition).

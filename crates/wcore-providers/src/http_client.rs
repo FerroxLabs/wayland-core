@@ -43,6 +43,39 @@
 
 use std::time::Duration;
 
+use futures::{Stream, StreamExt};
+use tokio::sync::mpsc;
+use wcore_types::llm::LlmEvent;
+
+/// Result of polling a provider response stream while also observing whether
+/// the engine-side event consumer still exists.
+pub(crate) enum StreamPoll<T> {
+    Item(T),
+    End,
+    ConsumerClosed,
+}
+
+/// Poll one provider-stream item, returning immediately when the engine drops
+/// its receiver (for example after user cancellation). Without this select,
+/// spawned response workers can remain parked in `bytes_stream().next()` until
+/// the five-minute read timeout even though nobody can consume their output.
+pub(crate) async fn next_or_consumer_closed<S, T>(
+    stream: &mut S,
+    tx: &mpsc::Sender<LlmEvent>,
+) -> StreamPoll<T>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = tx.closed() => StreamPoll::ConsumerClosed,
+        item = stream.next() => match item {
+            Some(item) => StreamPoll::Item(item),
+            None => StreamPoll::End,
+        },
+    }
+}
+
 /// Default TCP+TLS connect timeout for provider clients.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -108,6 +141,37 @@ pub fn build_tool_client() -> wcore_egress::EgressClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stream_poll_stops_when_event_consumer_is_dropped() {
+        let (tx, rx) = mpsc::channel::<LlmEvent>(1);
+        drop(rx);
+        let mut stream = futures::stream::pending::<u8>();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            next_or_consumer_closed(&mut stream, &tx),
+        )
+        .await
+        .expect("a dropped event consumer must cancel the pending stream poll");
+
+        assert!(matches!(result, StreamPoll::ConsumerClosed));
+    }
+
+    #[tokio::test]
+    async fn stream_poll_preserves_items_and_end_of_stream() {
+        let (tx, _rx) = mpsc::channel::<LlmEvent>(1);
+        let mut stream = futures::stream::iter([7_u8]);
+
+        assert!(matches!(
+            next_or_consumer_closed(&mut stream, &tx).await,
+            StreamPoll::Item(7)
+        ));
+        assert!(matches!(
+            next_or_consumer_closed(&mut stream, &tx).await,
+            StreamPoll::End
+        ));
+    }
 
     #[test]
     fn build_constructs_a_client() {

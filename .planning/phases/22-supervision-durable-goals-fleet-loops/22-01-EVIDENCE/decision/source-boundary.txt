@@ -1,0 +1,15 @@
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:48 [journal schema constant] pub const SESSION_JOURNAL_SCHEMA_VERSION: u32 = 5;
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:49 [journal legacy companion] pub const LEGACY_SESSION_JOURNAL_SCHEMA_VERSION: u32 = 4;
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:62 [envelope unknown-field posture] #[serde(deny_unknown_fields)]
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2129 [reader admitting exactly two versions] fn validate_journal_schema_for_reader(found: u32) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2140 [schema-regression guard] fn reject_schema_regression(previous: Option<u32>, found: u32) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2150 [event-schema boundary enforcer] fn enforce_event_schema_boundary(body: &[u8], schema_version: u32) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2179 [typed sibling of the boundary enforcer] fn enforce_typed_event_schema_boundary(envelope: &JournalEnvelope) -> Result<(), JournalError> {
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2190 [in-source note above the frozen list] // Frozen at the v4 boundary. New event variants belong to v5+ and must never
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2192 [frozen legacy event-type list] const LEGACY_EVENT_TYPES: &[&str] = &[
+SOURCE-CITE: crates/wcore-agent/src/session_journal.rs:2279 [re-encode-and-compare guard] pub(super) fn reject_dropped_typed_fields(
+SOURCE-CITE: crates/wcore-agent/src/session_journal/snapshot.rs:9 [snapshot schema constant] pub const SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+SOURCE-CITE: crates/wcore-agent/src/session_journal/snapshot.rs:10 [snapshot legacy companion] pub const LEGACY_SESSION_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+SOURCE-CITE: crates/wcore-agent/src/session_journal/model.rs:488 [the durable event enum the records would join] pub enum SessionEvent {
+SOURCE-CITE: crates/wcore-agent/src/session_journal/model.rs:1166 [the reduced state whose equality IS the compatibility claim] pub struct ReducedSessionState {
+LEGACY-EVENT-TYPES-COUNT: 49

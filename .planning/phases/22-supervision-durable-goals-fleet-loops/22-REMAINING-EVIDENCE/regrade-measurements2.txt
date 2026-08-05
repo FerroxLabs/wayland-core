@@ -1,0 +1,26 @@
+=== C4: who ENFORCES iteration_ceiling? (all call sites, no head) ===
+crates/wcore-protocol/src/contract/spec.rs:1217:        iteration_ceiling: Some(8),
+crates/wcore-protocol/src/goal.rs:201:    pub iteration_ceiling: Option<u32>,
+crates/wcore-protocol/src/goal.rs:290:            iteration_ceiling: None,
+crates/wcore-protocol/src/goal.rs:303:            value.get("iteration_ceiling").is_none(),
+crates/wcore-agent/src/session_journal/reducer.rs:326:            if let Some(ceiling) = goal.authority.iteration_ceiling()
+crates/wcore-agent/src/goal/record.rs:143:    pub fn iteration_ceiling(&self) -> Option<u32> {
+crates/wcore-agent/src/goal/record.rs:204:    fn every_loop_policy_except_manual_carries_a_numeric_iteration_ceiling() {
+crates/wcore-agent/src/goal/record.rs:221:            assert_eq!(record.iteration_ceiling(), expected, "{policy:?}");
+crates/wcore-agent/src/goal/wire.rs:139:        iteration_ceiling: state.authority.iteration_ceiling(),
+crates/wcore-agent/src/goal/wire.rs:535:        assert_eq!(goal_projection(&state).iteration_ceiling, None);
+crates/wcore-agent/src/goal/wire.rs:538:        assert_eq!(goal_projection(&state).iteration_ceiling, Some(8));
+crates/wcore-cli/src/tui/protocol_bridge.rs:4757:            iteration_ceiling: Some(1),
+--- count:
+      12
+
+=== C1: goal producer fixtures on disk (correct path this time) ===
+-- goal fixtures:
+0
+-- KNOWN-POSITIVE, same dir, same matcher shape (ready.json):
+0
+-- total fixtures:
+      49
+
+=== C1: does EVENT_SPECS declare them? (declared but not materialised) ===
+8

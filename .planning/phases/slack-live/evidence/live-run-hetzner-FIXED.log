@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/live_slack_actions.rs (target/debug/deps/live_slack_actions-b1d153982d505b3f)
+
+running 1 test
+test five_message_actions_against_the_real_slack_api ... 
+=== live slack action matrix (run 3354411-1785385972817328147) ===
+  PASS  send         sent ts=1785385973.483039 and read it back from history; a fabricated channel was refused with rejected by platform: channel_not_found
+  PASS  edit         edited ts=1785385974.539399; history text changed "WL-LIVE-SLACK 3354411-1785385972817328147 edit-before" -> "WL-LIVE-SLACK 3354411-1785385972817328147 edit-after"; a fabricated ts was refused with rejected by platform: message_not_found
+  PASS  delete       deleted ts=1785385975.855699 and confirmed its absence from history; the second delete was refused with rejected by platform: message_not_found
+  PASS  receive      read ts=1785385977.303459 back from conversations.history; the real record, independently signed and replayed through ingest_webhook, surfaced as MessageReceived; a corrupted signature was rejected and enqueued nothing
+  PASS  idempotency  declared=false; replayed key -> 2 arrival(s) (ts 1785385977.719929 then 1785385977.987069); a distinct key -> 3
+  clean channel: no marker messages remain
+  5/5 legs passed
+
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.16s
+

@@ -1,0 +1,26 @@
+lines=1605
+ 1581|             assert!(result.is_error, "1-based contract: sheet 0 must error");
+ 1582|             assert!(
+ 1583|                 result.content.contains("out of range"),
+ 1584|                 "got: {}",
+ 1585|                 result.content
+ 1586|             );
+ 1587|         }
+ 1588|     }
+ 1589| 
+ 1590|     /// Feature-off: the tool still registers and fails loudly.
+ 1591|     #[cfg(not(feature = "doc-extract"))]
+ 1592|     #[tokio::test]
+ 1593|     async fn degrades_gracefully_without_feature() {
+ 1594|         let dir = tempdir().unwrap();
+ 1595|         let path = dir.path().join("doc.docx");
+ 1596|         std::fs::write(&path, b"PK\x03\x04").unwrap();
+ 1597|         let tool = DocExtractTool::new();
+ 1598|         let result = tool
+ 1599|             .execute(json!({ "path": path.to_str().unwrap() }))
+ 1600|             .await;
+ 1601|         assert!(result.is_error);
+ 1602|         assert!(result.content.contains("without the `doc-extract` feature"));
+ 1603|     }
+ 1604| }
+ 1605| 

@@ -1,0 +1,46 @@
+CORPUS-SKILL-MD: 1911
+CORPUS-SOUL-MD:  14
+=== ARM before : /root/f26-import/wayland-core-BEFORE ===
+  before| Accounting: discovered=301 imported=299 quarantined=2 excluded=0 (the last three sum to the first).
+  before| 
+  before| Quarantined 2 items — inert until an explicit promotion:
+  before|   • skill:skills/probe-exec-shallow — skill body carries a shell directive
+  before|   • mcp_server:peer-launcher — mcp definition carries a launch command
+  before|   Review with: wayland-core migrate quarantined
+FILES-before-config:      1
+FILES-before-quarantine:  3
+FILES-before-skills:      0
+FILES-before-personas:    0
+FILES-before-memory:      0
+FILES-before-provenance:  0
+FILES-before-TOTAL:       4
+PUBLISHED-before-skills:  276
+PUBLISHED-before-persona: 0
+PUBLISHED-before-memory:  0
+=== ARM after : /root/f26-import/wayland-core-HEAD ===
+  after| 
+  after| Quarantined 3 items — inert until an explicit promotion:
+  after|   • skill:profiles/flux-backend-eng/skills/creative/probe-exec-nested — skill body carries a shell directive
+  after|   • skill:skills/probe-exec-shallow — skill body carries a shell directive
+  after|   • mcp_server:peer-launcher — mcp definition carries a launch command
+  after|   Review with: wayland-core migrate quarantined
+FILES-after-config:      1
+FILES-after-quarantine:  4
+FILES-after-skills:      1730
+FILES-after-personas:    13
+FILES-after-memory:      24
+FILES-after-provenance:  1
+FILES-after-TOTAL:       1773
+PUBLISHED-after-skills:  1668
+PUBLISHED-after-persona: 13
+PUBLISHED-after-memory:  24
+
+=== QUARANTINE INERTNESS ===
+P0 POSITIVE-CONTROL: PASS  the harness observes execution (sentinel created by running the payload command)
+N1 INERTNESS: PASS  neither sentinel exists after a full import
+N2 PAYLOAD-CONTAINED: 2 quarantined SKILL.md on disk
+N3 NO-EXEC-IN-LIVE-SKILLS: 0 (expect 0)
+N3-CONTROL matcher-fires-elsewhere: 4 (expect >0)
+N4 PROVENANCE-LINES: 3
+
+PROOF: COMPLETE

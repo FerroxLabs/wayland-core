@@ -1,0 +1,50 @@
+FILELIST_COUNT=    1866
+=== INSTRUMENT CONTROLS ===
+KNOWN-POSITIVE browser_policy_denied files=3
+KNOWN-POSITIVE host_send_message_request files=4
+KNOWN-NEGATIVE zzz_wayland_uat_sentinel_absent_zzz files=0
+=== 19 CANDIDATE-MISSING EVENT TYPES ===
+EVENT anvil_receipt files=0
+EVENT anvil_receipt_invalidated files=0
+EVENT budget_grant_result files=0
+EVENT execution_policy files=0
+EVENT goal_control_refused files=0
+EVENT goal_snapshot files=0
+EVENT goal_transition files=0
+EVENT mcp_removal_result files=0
+EVENT provider_failover_receipt files=0
+EVENT runtime_diagnostics_snapshot files=0
+EVENT runtime_diagnostics_unavailable files=0
+EVENT session_recovery_replay files=0
+EVENT session_recovery_snapshot files=0
+EVENT session_recovery_unavailable files=0
+EVENT turn_recovery_lifecycle files=0
+EVENT unknown_tool_effect_resolved files=0
+EVENT workflow_finished files=0
+EVENT workflow_node_event files=0
+EVENT workflow_started files=0
+=== ALL 23 CORPUS COMMAND TYPES (does Desktop ever send them?) ===
+CMD add_mcp_server files=5
+CMD approval_resume files=4
+CMD continue_with_budget files=0
+CMD get_runtime_diagnostics files=0
+CMD goal_advance files=0
+CMD goal_cancel files=0
+CMD goal_declare_task files=0
+CMD goal_open files=0
+CMD goal_resync files=0
+CMD host_send_message_result files=3
+CMD init_history files=4
+CMD message files=710
+CMD ping files=307
+CMD remove_mcp_server files=0
+CMD resolve_interrupted_approval files=0
+CMD resolve_unknown_tool_effect files=0
+CMD resume_turn files=0
+CMD session_resync files=0
+CMD set_config files=6
+CMD set_mode files=18
+CMD stop files=258
+CMD tool_approve files=4
+CMD tool_deny files=2
+DONE_SWEEP

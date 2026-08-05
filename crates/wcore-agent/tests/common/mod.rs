@@ -10,13 +10,119 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use wcore_agent::confirm::ToolConfirmer;
+use wcore_agent::engine::AgentEngine;
+use wcore_agent::session::SessionManager;
+use wcore_agent::session_journal::SessionJournal;
+use wcore_agent::spawner::AgentSpawner;
 use wcore_config::config::{Config, ProviderType, SessionConfig, ToolsConfig};
+use wcore_egress::{AllowAllPolicy, EgressClient};
 use wcore_protocol::events::ToolCategory;
+use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::Tool;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{StopReason, TokenUsage};
 use wcore_types::tool::ToolResult;
+
+/// Stable in-memory key for unrelated integration harnesses that need the
+/// durable session path. Dedicated encrypted-vault tests prove production
+/// storage; these tests keep recovery protection instance-local so parallel
+/// test binaries never mutate process-global profile environment.
+pub const RECOVERY_TEST_KEY: [u8; 32] = [0x5a; 32];
+
+pub fn configure_persisted_test_session(config: &mut Config, session_root: &std::path::Path) {
+    config.session.enabled = true;
+    config.session.directory = session_root.join("sessions").to_string_lossy().into_owned();
+}
+
+/// Bind an integration-test spawner to the same canonical journal authority
+/// production child launches require. The returned tempdir must remain alive
+/// until every child task and journal assertion has completed.
+pub fn bind_test_spawner(
+    spawner: AgentSpawner,
+) -> (AgentSpawner, SessionJournal, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("create durable spawner test root");
+    let workspace = root.path().to_string_lossy().into_owned();
+    let manager = SessionManager::new(root.path().join("sessions"), 10);
+    let active = manager
+        .create_for_run("test-provider", "test-model", &workspace, None)
+        .expect("create canonical durable spawner test session");
+    let journal = active.journal.clone();
+    // Bind the parent-workspace authority the production spawner requires before
+    // any child (shared read-only OR isolated mutating) can resolve its
+    // workspace — the same authority the CLI/bootstrap bind in production.
+    let spawner = spawner
+        .with_parent_workspace(root.path())
+        .expect("bind canonical parent workspace");
+    spawner
+        .bind_durable_session(active.journal, &active.session.id)
+        .expect("bind canonical durable spawner test session");
+    (spawner, journal, root)
+}
+
+/// Bind ONLY the durable session, deliberately leaving the parent-workspace
+/// authority UNBOUND. This reconstructs the "durable session bound + no parent
+/// workspace" state that `bind_test_spawner` used to produce before 20-05
+/// (`a528dbc`) made it always bind a parent — so the fail-closed guard tests
+/// (a child must never resolve without a bound parent workspace) can actually
+/// reach that guard. Never add `with_parent_workspace` here.
+pub fn bind_durable_session_only(
+    spawner: AgentSpawner,
+) -> (AgentSpawner, SessionJournal, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("create durable spawner test root");
+    let workspace = root.path().to_string_lossy().into_owned();
+    let manager = SessionManager::new(root.path().join("sessions"), 10);
+    let active = manager
+        .create_for_run("test-provider", "test-model", &workspace, None)
+        .expect("create canonical durable spawner test session");
+    let journal = active.journal.clone();
+    // parent_workspace deliberately left UNBOUND — that is the whole point.
+    spawner
+        .bind_durable_session(active.journal, &active.session.id)
+        .expect("bind canonical durable spawner test session");
+    (spawner, journal, root)
+}
+
+/// Bind a test spawner when the caller does not inspect the journal directly.
+pub fn bound_test_spawner(spawner: AgentSpawner) -> (AgentSpawner, tempfile::TempDir) {
+    let (spawner, _journal, root) = bind_test_spawner(spawner);
+    (spawner, root)
+}
+
+/// Bind and share a test spawner for tools that own it behind an `Arc`.
+pub fn bound_test_spawner_arc(spawner: AgentSpawner) -> (Arc<AgentSpawner>, tempfile::TempDir) {
+    let (spawner, root) = bound_test_spawner(spawner);
+    (Arc::new(spawner), root)
+}
+
+/// Bind a directly-constructed engine to a canonical child-session authority.
+pub fn bind_test_engine(engine: &mut AgentEngine) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("create durable engine test root");
+    let manager = SessionManager::new(root.path().join("sessions"), 10);
+    let active = manager
+        .create_for_run("test-provider", "test-model", "/tmp", None)
+        .expect("create canonical durable engine test session");
+    engine
+        .bind_test_durable_session(active.journal, &active.session.id)
+        .expect("bind canonical durable engine test session");
+    root
+}
+
+/// Local HTTP boundary used by persisted-session mock providers. Durable
+/// recovery records the accepted physical attempt before scripted LLM events
+/// become visible, so a purely in-memory provider is intentionally
+/// insufficient for these production-path tests.
+pub async fn physical_attempt_server() -> wiremock::MockServer {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    server
+}
 
 // ---------------------------------------------------------------------------
 // MockLlmProvider — deterministic LLM for engine / spawn tests
@@ -27,6 +133,7 @@ use wcore_types::tool::ToolResult;
 /// When `responses` is empty it falls back to a single EndTurn with empty text.
 pub struct MockLlmProvider {
     responses: Mutex<Vec<Vec<LlmEvent>>>,
+    physical_url: Option<String>,
 }
 
 impl MockLlmProvider {
@@ -49,6 +156,7 @@ impl MockLlmProvider {
         ];
         Self {
             responses: Mutex::new(vec![events]),
+            physical_url: None,
         }
     }
 
@@ -76,6 +184,7 @@ impl MockLlmProvider {
         ];
         Self {
             responses: Mutex::new(vec![events]),
+            physical_url: None,
         }
     }
 
@@ -84,6 +193,7 @@ impl MockLlmProvider {
     pub fn with_turns(turns: Vec<Vec<LlmEvent>>) -> Self {
         Self {
             responses: Mutex::new(turns),
+            physical_url: None,
         }
     }
 
@@ -91,7 +201,16 @@ impl MockLlmProvider {
     pub fn with_events(events: Vec<LlmEvent>) -> Self {
         Self {
             responses: Mutex::new(vec![events]),
+            physical_url: None,
         }
+    }
+
+    /// Route each scripted response through a real provider send boundary.
+    /// Persisted-session tests opt in so the journal receives authoritative
+    /// physical-attempt identity before the scripted stream becomes visible.
+    pub fn with_physical_url(mut self, url: impl Into<String>) -> Self {
+        self.physical_url = Some(url.into());
+        self
     }
 }
 
@@ -101,6 +220,17 @@ impl LlmProvider for MockLlmProvider {
         &self,
         _request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        if let Some(url) = self.physical_url.as_deref() {
+            let client = EgressClient::new().with_policy(Arc::new(AllowAllPolicy));
+            let response = scope_max_retries(0, builder_send_with_retry(client.get(url))).await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::Api {
+                    status: response.status().as_u16(),
+                    message: "fixture response".into(),
+                });
+            }
+        }
+
         let events = {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
@@ -137,6 +267,7 @@ pub struct MockTool {
     pub tool_description: String,
     pub concurrent_safe: bool,
     pub result: Mutex<ToolResult>,
+    pub max_result_size: usize,
 }
 
 impl MockTool {
@@ -149,6 +280,7 @@ impl MockTool {
                 content: result.to_string(),
                 is_error,
             }),
+            max_result_size: 50_000,
         }
     }
 
@@ -161,7 +293,13 @@ impl MockTool {
                 content: result.to_string(),
                 is_error: false,
             }),
+            max_result_size: 50_000,
         }
+    }
+
+    pub fn with_max_result_size(mut self, max_result_size: usize) -> Self {
+        self.max_result_size = max_result_size;
+        self
     }
 }
 
@@ -189,6 +327,10 @@ impl Tool for MockTool {
 
     async fn execute(&self, _input: Value) -> ToolResult {
         self.result.lock().unwrap().clone()
+    }
+
+    fn max_result_size(&self) -> usize {
+        self.max_result_size
     }
 }
 
@@ -265,6 +407,7 @@ pub fn test_config() -> Config {
             env_passthrough: Vec::new(),
             sandbox: None,
             allow_no_sandbox: None,
+            media_pricing: Default::default(),
         },
         session: SessionConfig {
             enabled: false,
@@ -276,6 +419,7 @@ pub fn test_config() -> Config {
                 .to_string_lossy()
                 .into_owned(),
             max_sessions: 5,
+            ..Default::default()
         },
         ..Default::default()
     }

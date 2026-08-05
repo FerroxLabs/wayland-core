@@ -136,7 +136,13 @@ async fn connect_plugin_mcp_servers_empty_is_noop() {
     let mut registry = ToolRegistry::new();
     let initial_count = registry.tool_names().len();
 
-    let result = connect_plugin_mcp_servers(&[], &mut registry, &[]).await;
+    let result = connect_plugin_mcp_servers(
+        &[],
+        &mut registry,
+        &[],
+        &wcore_config::tools::DeferColdConfig::default(),
+    )
+    .await;
 
     // No MCP specs → no manager → None returned.
     assert!(result.is_none(), "empty specs must return None");

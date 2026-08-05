@@ -1,0 +1,149 @@
+FINDINGS RECONCILIATION — Phase 26
+==================================
+
+Reclassification is invisible when you read only the list that resulted from it.
+So this is built from each earlier plan's OWN SUMMARY, with the severity the
+finding carried THERE, and compared key by key against the certification's list.
+A severity falling from critical or high to anything lower forces
+`send-back-finding-reclassified` regardless of how the certification explains it.
+
+Sources: 26-01-SUMMARY.md, 26-02-SUMMARY.md, 26-03-SUMMARY.md (the completed
+lane-26c version, which supersedes the `partial` body it retains verbatim), and
+this plan's own findings.
+
+FINDING-RECON: id=F26-01-HEADERS was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-01-GATEWAY was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-02-A was=medium now=medium disposition=fixed
+FINDING-RECON: id=F26-02-B was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-02-C was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-02-D was=low now=low disposition=backlog
+FINDING-RECON: id=F26-02-E was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-03-A was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-03-B was=medium now=medium disposition=fixed
+FINDING-RECON: id=F26-03-C was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-03-D was=high now=high disposition=fixed
+FINDING-RECON: id=F26-03-E was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-04-A was=medium now=medium disposition=fixed
+FINDING-RECON: id=F26-04-B was=medium now=medium disposition=backlog
+FINDING-RECON: id=F26-04-C was=low now=low disposition=backlog
+
+NOT ONE SEVERITY FELL FROM CRITICAL OR HIGH.
+The only critical-or-high finding the phase recorded is F26-03-D, and it did not
+move: it is still HIGH and it was FIXED at the product with the fixture left
+intact and deeper than when it was red (342 relative / 377 absolute characters).
+
+Per-finding provenance
+----------------------
+
+F26-01-HEADERS  26-01 recorded this in "Still open" as a "HIGH-adjacent
+                residual", explicitly NOT as HIGH: `McpServerConfig::headers` is
+                not currently emitted, but a future edit that began emitting it
+                would reopen a value channel, and the redaction probe does not
+                cover it. RE-MEASURED at the certified SHA rather than taken on
+                the earlier plan's word: `crates/wcore-cli/src/migrate/mod.rs`
+                references `headers` exactly once, as `headers: None`, and
+                `MigrationPlan::to_portability` inserts only `transport`,
+                `command` and `url` into an item's details. The channel is
+                closed TODAY. Recorded medium/medium because "HIGH-adjacent" is
+                26-01's own words for "not high", and because the measurement
+                supports that reading rather than contradicting it. 26-01 asked
+                26-02 to close or fence it; 26-02 did neither, so it stays open.
+
+F26-01-GATEWAY  The pre-existing `wcore-config::hermeticity_audit_test::
+                no_dirs_config_dir_bypasses_outside_canonical_helper` failure,
+                naming `crates/wcore-gateway/src/service.rs`. Verified
+                pre-existing by BOTH 26-01 and 26-03 against their own bases, in
+                a file no plan in this phase touches. Lane 24's area.
+
+F26-02-A        Promotion aborted an entire set on the first name collision,
+                costing one operator invocation per item at real scale — the
+                "operator routes around containment" failure. FIXED in 26-02 and
+                regression-guarded; re-measured there at invocations=1.
+
+F26-02-B        The 512-item store ceiling refuses 29 of a realistic 541-item
+                executable surface and the NAIVE recovery does not work. A
+                working recovery exists and is discoverable from the tool's own
+                output. `MAX_EXECUTABLE_FILES` was NOT raised.
+
+F26-02-C        `scripts/panel-decision-check.sh` REJECTS a capture carrying a
+                repeated IDENTICAL verdict line, which is a shape codex
+                measurably emits. 26-02 escalated it to 26-01 rather than
+                editing a file outside its declared set, per that plan's own
+                direction. This plan is under the same direction and does the
+                same. See the trap-gate result in 26-04-SUMMARY.md, and the
+                measurement of whether a vote was ACTUALLY lost in this run.
+
+F26-02-D        The 540 scale point was materialised by the measurement script
+                rather than shipped by the corpus, and the script prints
+                `SCALE-CORPUS-MATERIALISED-SKILLS: 540` so it can never be
+                mistaken for a number the corpus carried.
+
+F26-02-E        `wcore-protocol::desktop_contract_corpus::…byte_for_byte` fails.
+                Verified PRE-EXISTING by 26-02 at its own merge-base with
+                byte-identical drift text. Sean authorised and ran the
+                regeneration at `c743f398` on 2026-07-28 (schema_digest
+                UNCHANGED); `wcore-protocol` now reports 302/302. Desktop still
+                owes the matching re-pin in the SAME release train.
+
+F26-03-A        `CredentialCapture.external_paths` copies `cipher_path` /
+                `key_params_path` verbatim into the embedded manifest — the same
+                untyped-string-channel shape 26-01 closed in
+                `DiscoveredItem.details`. No secret VALUE is carried, which is
+                why 26-03 rated it MEDIUM rather than HIGH.
+
+F26-03-B        `cargo fmt --all -- --check` was red at base for every lane, from
+                `crates/wcore-agent/examples/p22_goal_live.rs` landing
+                unformatted in lane 22. Fixed by 26-03 in a droppable commit.
+
+F26-03-C        `powershell -NoProfile -File <missing.ps1>; exit $LASTEXITCODE`
+                returns 0 — a live self-passing-gate shape on the shared Windows
+                box. This plan's Windows driver guards against it by proving the
+                matrix script RED against a binary that does not exist before
+                its real report is believed.
+
+F26-03-D        HIGH. `backup create` produced archives `backup restore` could
+                not restore on Windows past MAX_PATH. FIXED at the product in
+                lane 26c — in `wcore_config::atomic_io`, which is where the
+                defect actually lived — with the deep-path fixture left intact
+                and made deeper. Red at `d48f35b8`, green at `e570bf90` on the
+                identical fixture: a real red-to-green transition. STILL HIGH,
+                and closed by a fix rather than by a reclassification.
+
+F26-03-E        On Windows the handler probe does not fire, so `fired=no` there
+                is corroborated by documented Win32 semantics plus a
+                delivered-but-unrecorded event rather than by an instrumented
+                probe. None of the four load-bearing measurements depends on it,
+                which is why it is a control gap and not a vacuous leg.
+
+F26-04-A        NEW, this plan, FIXED in-plan. Found by the hostile case
+                `malformed-deepnest`: a 400-level-deep YAML document carrying no
+                key the importer recognises deserialises cleanly into an
+                all-`None` config, and the profile was then reported as imported
+                with nothing in it and NO warning — the silently-empty result
+                that reads as success. Fixed in
+                `crates/wcore-cli/src/migrate/hermes.rs` by naming it, with the
+                RELATIVE source path so a machine path does not cross the
+                boundary 26-01 closed. MEDIUM: no data is lost and the source is
+                untouched, but an operator believes a profile migrated when
+                nothing did.
+
+F26-04-B        NEW, this plan. On macOS (APFS) BOTH the case-only and the
+                normal-form-only peer name distinctions COLLAPSE at
+                materialisation — measured, not assumed, by the generator's own
+                post-creation verification on Sean's own Mac. On Windows (NTFS)
+                the case-only distinction collapses and the normal-form one does
+                NOT. Consequence: an operator migrating on macOS loses one of two
+                case-distinct peer profiles at the SOURCE, before the product
+                ever sees it, and the product cannot detect what it was never
+                shown. MEDIUM, and it belongs to Phase 28's native certification
+                because macOS is not a gate host in this phase.
+
+F26-04-C        NEW, this plan. `escape-symlink-dir` (an entire skill directory
+                replaced by a symlink out of the root) is not traversed at all,
+                so the product emits no refusal NAMING that item; the case's
+                evidence is the sentinel digest and the item's absence from the
+                store rather than a named refusal. That is a weaker signal than
+                the file-level escape cases, which do produce
+                `refused: imported executable content contains a symlink`. LOW,
+                and recorded so nobody later mistakes the case for stronger
+                evidence than it is.

@@ -1,0 +1,20 @@
+EVIDENCE ID : F21-VERDICT@f2d186f6
+LEDGER ROW  : 9
+ARTIFACT    : `phases/21-child-authority-and-budget-inheritance/21-04-PHASE-VERDICT.md` — Phase 21's own grading at base `f2d186f6`: Criterion 1 NOT MET, Criterion 2 MET-WITH-STATED-EXCEPTIONS, Criterion 3 NOT MET; six HIGH findings; all four requirements OPEN
+
+== PATH RESOLUTION ==
+[OK]   stat phases/21-child-authority-and-budget-inheritance/21-04-PHASE-VERDICT.md
+       -> .planning/phases/21-child-authority-and-budget-inheritance/21-04-PHASE-VERDICT.md  size=23032
+       head:
+# Phase 21 — Verdict
+
+**Phase**: 21, Child Authority and Budget Inheritance
+**Goal (ROADMAP.md:75)**: Every delegated actor remains inside the parent's
+authority and resource envelope.
+
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t f2d186f6 -> commit
+       git log -1 f2d186f6 -> f2d186f6c3e77b99961171632fbbfce5c5b5d776 2026-07-26 test(21-04): make an absent sibling diagnosable, not silent
+
+== VERDICT == CONFIRMED

@@ -427,12 +427,26 @@ pub(crate) fn build_contents(
                 }
                 ContentBlock::Image { mime, data } => {
                     // Gemini native shape: `parts:[{inlineData:{mimeType,data}}]`.
-                    parts.push(json!({
-                        "inlineData": {
-                            "mimeType": mime,
-                            "data": data,
-                        }
-                    }));
+                    //
+                    // Phase 27 (F27-01): this builder, like the Anthropic one,
+                    // emitted the image part unconditionally and so ignored the
+                    // `supports_vision` compatibility record entirely. A user
+                    // pointing the Gemini surface at a text-only endpoint got a
+                    // hard provider rejection rather than the explicit
+                    // substitution every other builder performs. Gate it on the
+                    // same field, with the same wording.
+                    if compat.supports_vision() {
+                        parts.push(json!({
+                            "inlineData": {
+                                "mimeType": mime,
+                                "data": data,
+                            }
+                        }));
+                    } else {
+                        parts.push(json!({
+                            "text": crate::anthropic_shared::VISION_OMITTED_PLACEHOLDER,
+                        }));
+                    }
                 }
             }
         }
@@ -734,7 +748,11 @@ fn parse_gemini_models(body: &str) -> anyhow::Result<Vec<ModelInfo>> {
 /// Streaming-state accumulator for a single Gemini response.
 #[derive(Default)]
 pub(crate) struct GeminiStreamState {
-    /// Final usageMetadata, if any chunk emitted one.
+    /// Total effective prompt size reported by Gemini. This includes cached
+    /// content and is retained separately so usage fields can arrive in either
+    /// order across SSE chunks.
+    prompt_tokens_total: u64,
+    /// Canonical uncached input tokens (total prompt minus cached content).
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -756,8 +774,6 @@ pub(crate) async fn process_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = GeminiStreamState::default();
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
@@ -769,7 +785,12 @@ pub(crate) async fn process_sse_stream(
     // a stream that closes with neither was truncated.
     let mut error_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);
@@ -902,10 +923,13 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
         }
     };
 
-    // Usage metadata may appear on any chunk; latest wins.
+    // Usage metadata may appear on any chunk. Retain the raw total and cached
+    // counters independently, then normalize after every update so split SSE
+    // fields are order-independent. Gemini documents promptTokenCount as the
+    // total effective prompt size, including cachedContentTokenCount.
     if let Some(usage) = json.get("usageMetadata") {
         if let Some(v) = usage.get("promptTokenCount").and_then(Value::as_u64) {
-            state.input_tokens = v;
+            state.prompt_tokens_total = v;
         }
         if let Some(v) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
             state.output_tokens = v;
@@ -915,6 +939,9 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
         if let Some(v) = usage.get("cachedContentTokenCount").and_then(Value::as_u64) {
             state.cache_read_tokens = v;
         }
+        state.input_tokens = state
+            .prompt_tokens_total
+            .saturating_sub(state.cache_read_tokens);
     }
 
     let Some(candidate) = json["candidates"].as_array().and_then(|c| c.first()) else {
@@ -1092,12 +1119,51 @@ mod tests {
                 },
             ],
         )];
-        let (_sys, contents) = build_contents(&messages, &compat());
+        // Phase 27: the inline part is gated on the compatibility record, so
+        // the vision-capable case states that it is. Every assertion below is
+        // unchanged.
+        let vision = ProviderCompat {
+            supports_vision: Some(true),
+            ..compat()
+        };
+        let (_sys, contents) = build_contents(&messages, &vision);
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["text"], "Hi");
         // Gemini native inline image shape.
         assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[1]["inlineData"]["data"], "QUJD");
+    }
+
+    /// F27-01 regression guard. Measured on `hetzner-dsm`: the shipped binary
+    /// emitted a byte-identical outbound request with `supports_vision = false`
+    /// and `= true`, so this gate did not exist at the message builder.
+    #[test]
+    fn build_contents_substitutes_when_the_model_is_not_vision_capable() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text { text: "Hi".into() },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        )];
+        let no_vision = ProviderCompat {
+            supports_vision: Some(false),
+            ..compat()
+        };
+        let (_sys, contents) = build_contents(&messages, &no_vision);
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(
+            parts[1]["text"],
+            crate::anthropic_shared::VISION_OMITTED_PLACEHOLDER
+        );
+        assert!(parts[1].get("inlineData").is_none());
+        assert!(
+            !serde_json::to_string(&contents).unwrap().contains("QUJD"),
+            "the image payload must not reach a model that cannot read it"
+        );
     }
 
     #[test]
@@ -1557,6 +1623,53 @@ mod tests {
         assert_eq!(state.final_finish_reason.as_deref(), Some("STOP"));
         assert_eq!(state.input_tokens, 12);
         assert_eq!(state.output_tokens, 3);
+    }
+
+    #[test]
+    fn parse_sse_chunk_normalizes_cached_usage_independent_of_field_order() {
+        let prompt = r#"{"usageMetadata":{"promptTokenCount":100}}"#;
+        let cached = r#"{"usageMetadata":{"cachedContentTokenCount":80}}"#;
+
+        for frames in [[prompt, cached], [cached, prompt]] {
+            let mut state = GeminiStreamState::default();
+            for frame in frames {
+                parse_sse_chunk(frame, &mut state);
+            }
+
+            assert_eq!(state.prompt_tokens_total, 100);
+            assert_eq!(
+                state.input_tokens, 20,
+                "only cache misses are canonical input"
+            );
+            assert_eq!(state.cache_read_tokens, 80);
+        }
+    }
+
+    #[test]
+    fn gemini_sse_done_keeps_cached_usage_disjoint_in_either_chunk_order() {
+        let prompt_first = "data: {\"usageMetadata\":{\"promptTokenCount\":100}}\r\n\r\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"cachedContentTokenCount\":80,\"candidatesTokenCount\":3}}\r\n\r\n";
+        let cache_first = "data: {\"usageMetadata\":{\"cachedContentTokenCount\":80}}\r\n\r\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":3}}\r\n\r\n";
+
+        for fixture in [prompt_first, cache_first] {
+            let (_, terminal) = drive_stream(fixture.as_bytes(), 7);
+            let usage = match terminal {
+                Ok(Some(LlmEvent::Done { usage, .. })) => usage,
+                other => panic!("expected a terminal Done event, got {other:?}"),
+            };
+            assert_eq!(usage.input_tokens, 20);
+            assert_eq!(usage.cache_read_tokens, 80);
+            assert_eq!(usage.output_tokens, 3);
+        }
+    }
+
+    #[test]
+    fn parse_sse_chunk_saturates_malformed_cached_count_above_prompt_total() {
+        let mut state = GeminiStreamState::default();
+        let data = r#"{"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":12}}"#;
+        parse_sse_chunk(data, &mut state);
+
+        assert_eq!(state.input_tokens, 0);
+        assert_eq!(state.cache_read_tokens, 12);
     }
 
     // --- map_gemini_finish_reason ---

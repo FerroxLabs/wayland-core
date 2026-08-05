@@ -1,0 +1,38 @@
+# The peer bar for what a backup tells an operator about secrets it cannot carry
+
+Taken from two REAL peer checkouts present on this host:
+  /Users/seandonahoe/dev/resources/openclaw/docs/cli/backup.md
+  /Users/seandonahoe/dev/resources/hermes-agent/hermes_cli/backup.py
+
+## OpenClaw (docs/cli/backup.md)
+OpenClaw INCLUDES credentials in the archive by default -- 'auth profiles,
+channel/provider credentials' are named as backed-up content, and the resolved
+credentials/ directory is a top-level backup source when it lives outside the
+state directory. It canonicalizes paths so a credentials directory already
+inside the state directory is not duplicated. It documents which live-mutation
+and rebuildable roots are EXCLUDED, and tells the operator what to do about
+them after restore ('reinstall or update the corresponding runtime or plugin
+after restore'). So the peer bar is: name what is not carried, and state the
+operator's next action.
+Verbatim, line 83:
+- The resolved `credentials/` directory when it exists outside the state directory
+Verbatim, line 110 (the exclusion + next-action pattern):
+Installer-managed and rebuildable runtime roots under the state directory are also skipped: `dev/`, `git/`, `npm/`, legacy `npm-runtime/`, and `tools/`. These contain managed checkouts, package trees, and downloaded runtimes rather than authoritative user state; reinstall or update the corresponding runtime or plugin after restore. An explicitly configured config file, credentials directory, or workspace inside one of these roots remains included.
+
+## Hermes (hermes_cli/backup.py)
+Hermes classifies secret-bearing files by NAME and by SUFFIX and treats them
+as a distinct class rather than as ordinary payload.
+Verbatim, line 125:
+_SECRET_FILE_NAMES = {".env", "auth.json", "state.db"}
+Verbatim, lines 612-613 (external provider configs commonly hold credentials):
+                    # External provider configs commonly hold credentials.
+                    if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
+
+## What Core is judged against
+Neither peer faces Core's hardest case: a backend whose secrets are in the OS
+keyring and therefore NOT in the filesystem at all, and a backend whose secrets
+sit at absolute paths that are meaningless on the restoring machine. The bar
+Core must clear is the peers' own stated pattern applied to that harder case:
+name the backend, name how many credential sources will be absent, and state
+the operator's next action -- and never emit a restored config pointing at a
+secret that is not there.

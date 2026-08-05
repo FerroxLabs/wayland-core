@@ -12,7 +12,9 @@
 //! `docs/json-stream-protocol.md` documentation.
 
 use serde_json::{Value, json};
-use wcore_protocol::events::{Capabilities, ErrorInfo, FinishReason, ProtocolEvent, Usage};
+use wcore_protocol::events::{
+    Capabilities, ErrorInfo, FinishReason, ProtocolEvent, SessionPersistence, Usage,
+};
 
 fn serialize(event: &ProtocolEvent) -> Value {
     serde_json::to_value(event).expect("event must serialize")
@@ -23,6 +25,7 @@ fn golden_ready_v0_1_21() {
     let event = ProtocolEvent::Ready {
         version: "0.1.21".into(),
         session_id: Some("sess-001".into()),
+        session_persistence: SessionPersistence::Durable,
         capabilities: Capabilities {
             tool_approval: true,
             thinking: true,
@@ -30,12 +33,15 @@ fn golden_ready_v0_1_21() {
             mcp: true,
             ..Default::default()
         },
+        contract: None,
+        execution_policy: None,
     };
     let got = serialize(&event);
     let want = json!({
         "type": "ready",
         "version": "0.1.21",
         "session_id": "sess-001",
+        "session_persistence": "durable",
         "capabilities": {
             "tool_approval": true,
             "thinking": true,
@@ -448,7 +454,10 @@ fn golden_each_w0_capability_flag_locks_its_documented_name() {
         let event = ProtocolEvent::Ready {
             version: "0.1.21".into(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: caps,
+            contract: None,
+            execution_policy: None,
         };
         let got = serialize(&event);
         let caps_obj = got["capabilities"]
@@ -499,12 +508,14 @@ fn golden_session_cost_v_w6() {
                 model: "claude-opus-4-7".into(),
                 provider: "anthropic".into(),
                 cost_usd: 0.05,
+                priced: true,
             },
             TurnCost {
                 turn: 1,
                 model: "claude-opus-4-7".into(),
                 provider: "anthropic".into(),
                 cost_usd: 0.073456,
+                priced: true,
             },
         ],
     };
@@ -518,13 +529,15 @@ fn golden_session_cost_v_w6() {
                 "turn": 0,
                 "model": "claude-opus-4-7",
                 "provider": "anthropic",
-                "cost_usd": 0.05
+                "cost_usd": 0.05,
+                "priced": true
             },
             {
                 "turn": 1,
                 "model": "claude-opus-4-7",
                 "provider": "anthropic",
-                "cost_usd": 0.073456
+                "cost_usd": 0.073456,
+                "priced": true
             }
         ]
     });
@@ -555,11 +568,14 @@ fn golden_ready_with_cost_attribution_advertised() {
     let event = ProtocolEvent::Ready {
         version: "0.1.21".into(),
         session_id: Some("sess-cost".into()),
+        session_persistence: SessionPersistence::Durable,
         capabilities: Capabilities {
             tool_approval: true,
             cost_attribution: true,
             ..Default::default()
         },
+        contract: None,
+        execution_policy: None,
     };
     let got = serialize(&event);
     let caps = got

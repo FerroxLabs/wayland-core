@@ -1,0 +1,65 @@
+[
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "007a407c5e6a93ecb97783e7b604a27bd463a75993737bcbdbf6b3d446851d33",
+    "body": {
+      "state": "packaging",
+      "ordinal": 0,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": null,
+      "evidence": [
+        {
+          "name": "build-log",
+          "sha256": "10737b7a4c189d39b8fbdc0acf07898dfe35fff5d71279ce63434ddca36cbaf9"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "packaging-key",
+      "signature_base64": "0rW3TmtnoIkz+DJR2jb129DZJRdh8L+SK067nCE4g/Sk8PbFNNLe4p1XDmO9GptDyg821Q/hriKzxdzUUjwaBg=="
+    }
+  },
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "bbb6512407e9d7159e6f78604fc31666251970a7b4c6e0c70de304f3e75c5f5c",
+    "body": {
+      "state": "deployment_preparation",
+      "ordinal": 1,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": "007a407c5e6a93ecb97783e7b604a27bd463a75993737bcbdbf6b3d446851d33",
+      "evidence": [
+        {
+          "name": "staging-log",
+          "sha256": "27cce9189920aa048ab5c878c1932ee62769d81ce2dc4a7fecb469eea9316a71"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "deployment-preparation-key",
+      "signature_base64": "Cb/FQxO3cQ5/j45jfuUieg4hzIITIyWRNCnrQmS2wfvMZtEV4DB2Uv2r9ZmP/NpUDx95895WFXM3y/SEhlN4CA=="
+    }
+  },
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "8bf387b3eee748a1a2a9d8d955c5e766eafa9fc3fb8df0a4ac3ab7157bcd1018",
+    "body": {
+      "state": "rollback_rehearsal",
+      "ordinal": 2,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": "bbb6512407e9d7159e6f78604fc31666251970a7b4c6e0c70de304f3e75c5f5c",
+      "evidence": [
+        {
+          "name": "rollback-log",
+          "sha256": "6006145c2ff175a9773071edf05ca806ced2409b522fa83703afd78d73f78622"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "rollback-rehearsal-key",
+      "signature_base64": "9NSY0V1FUTJ0KHtGyyBz4vdjygHcXGbc+apY/Jmmir+dXyGmv8SVfGTPqC3MOsVzVe4eaEF4u3o+837A5XdTBg=="
+    }
+  }
+]

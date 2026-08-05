@@ -1,0 +1,17 @@
+=== RUN A-1 — ALL FOUR ROLE KEYS HELD, through the shipped tool ONLY ===
+This is the honest shipped-tooling measurement. Holding every key is not
+sufficient: acceptance has a SECOND, independent gate.
+[A1 append packaging] rc=0
+    STATE APPENDED state=packaging body_sha256=f9452fdf0ca22c58eb291b62e18b57da3311984c8a727777c3efb192bed645e9
+[A1 append deployment_preparation] rc=0
+    STATE APPENDED state=deployment_preparation body_sha256=2d0451fd564b99e39383adb7509eac6fbe2dfca6aad26dede6c05c8c42905c9d
+[A1 append rollback_rehearsal] rc=0
+    STATE APPENDED state=rollback_rehearsal body_sha256=b0c38f2e2fc7447760c329c46be8b43823fb35a7d01f2dae9b28a2b2596d2ab1
+[A1 append release_acceptance] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=8c35ac4bfeaed12bc93df4beba52b095dd4762417661f34f9e9249337c2afdab
+[A1 state-verify] rc=1
+    wayland-release: release acceptance requires an observed certification binding
+A1_VERIFY_RC=1
+=> The acceptance RECORD was minted (append rc=0). The chain still refuses to
+   be accepted. Possession of the acceptance key is not authority.
+

@@ -1,0 +1,101 @@
+# Gate transcript — lane/28-drift — 2026-07-28T19:49:18Z
+# Exit codes captured WITHOUT a pipeline (PIPESTATUS returns empty in this shell).
+# HEAD: 72523ee12637a04b07c76c5e3b5363526f113457
+
+## HARNESS SELF-TEST — a known-good gate must return 0 here, or every rc below is noise.
+f28-ledger.py --self-test                                  rc=0  bytes=395
+
+## f28-ledger.py — the adjudicated ledger, now 65 rows
+--validate (strict, allow_open=False)                      rc=0  bytes=59
+    --validate: 65 finding(s), allow_open=False
+    --validate: OK
+--check-a2                                                 rc=0  bytes=41
+--check-downgrades                                         rc=0  bytes=57
+    --check-downgrades: 65 finding(s)
+    --check-downgrades: OK
+--check-backlog-ids                                        rc=0  bytes=77
+    --check-backlog-ids: 46 accepted/deferred finding(s)
+    --check-backlog-ids: OK
+
+## PROOF THE LEDGER GATE STILL BITES — four tampers on F-28-ADJ-001, the row this lane added
+  tamper F-28-ADJ-001:open  rc=1  codes=[F28L-002 ]
+  tamper F-28-ADJ-001:noexec  rc=1  codes=[F28L-008 ]
+  tamper F-28-ADJ-001:accept  rc=1  codes=[F28L-004 F28L-005 F28L-007 ]
+  tamper F-28-ADJ-001:badsev  rc=1  codes=[F28L-011 ]
+  pristine control                rc=0
+  LEDGER_TAMPER_RESULT=PASS
+
+## f28-verify-bindings.py — three receipts, four modes each
+--self-test                                                rc=0  bytes=331
+  --- 28-04-CERTIFICATION-RECEIPT.json
+    --verify                                               rc=1  bytes=945
+    --verify: recomputed bindings for 28-04-CERTIFICATION-RECEIPT.json against the raw evidence under /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-drift/.planning/phases/28-native-cross-platform-certification
+    --verify: REJECTED (4)
+      F28V-ARTIFACT  artifacts[evidence/28-04/findings.tsv].sha256: receipt claims 511e19dd1954630eb533446f33f84880e6d80b79523d6cd6fa00f863b3547a03, recomputed 51f945e98aefd2fb0cfb68d3523dd03cb7503b913b0162fd6f6e748b81600711
+      F28V-ARTIFACT  artifacts[evidence/28-04/findings.tsv].bytes: receipt claims 55568, recomputed 63508
+      F28V-CLAIM  body.claims.zero_undispositioned_findings: receipt asserts False, recomputed True from the raw ledger and cell list
+      F28V-CLAIM  body.claims.zero_unresolved_critical_or_high: receipt asserts False, recomputed True from the raw ledger and cell list
+    --check-enumeration                                    rc=1  bytes=277
+    --check-enumeration: REJECTED (3)
+      F28V-ENUM  F-28-02-002.disposition: receipt says 'OPEN', ledger says 'FIXED'
+      F28V-ENUM  F-28-ADJ-001: FIXED in the ledger and ABSENT from the signed receipt
+      F28V-ENUM  F-28-ADJ-002: FIXED in the ledger and ABSENT from the signed receipt
+    --check-tamper-detection                               rc=0  bytes=29
+    --check-tamper-detection: OK
+    --check-claim-limit                                    rc=0  bytes=24
+    --check-claim-limit: OK
+  --- 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json
+    --verify                                               rc=1  bytes=698
+    --verify: recomputed bindings for 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json against the raw evidence under /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-drift/.planning/phases/28-native-cross-platform-certification
+    --verify: REJECTED (2)
+      F28V-ARTIFACT  artifacts[evidence/28-04/findings.tsv].sha256: receipt claims 51ddac033dc99a4b1b4d06d3b247b2a4287362b2aae12a9fb83f9513a243e75a, recomputed 51f945e98aefd2fb0cfb68d3523dd03cb7503b913b0162fd6f6e748b81600711
+      F28V-ARTIFACT  artifacts[evidence/28-04/findings.tsv].bytes: receipt claims 58035, recomputed 63508
+    --check-enumeration                                    rc=1  bytes=198
+    --check-enumeration: REJECTED (2)
+      F28V-ENUM  F-28-ADJ-001: FIXED in the ledger and ABSENT from the signed receipt
+      F28V-ENUM  F-28-ADJ-002: FIXED in the ledger and ABSENT from the signed receipt
+    --check-tamper-detection                               rc=0  bytes=29
+    --check-tamper-detection: OK
+    --check-claim-limit                                    rc=0  bytes=24
+    --check-claim-limit: OK
+  --- 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json
+    --verify                                               rc=0  bytes=365
+    --verify: recomputed bindings for 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json against the raw evidence under /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-drift/.planning/phases/28-native-cross-platform-certification
+    --verify: OK
+    --check-enumeration                                    rc=0  bytes=24
+    --check-enumeration: OK
+    --check-tamper-detection                               rc=0  bytes=29
+    --check-tamper-detection: OK
+    --check-claim-limit                                    rc=0  bytes=24
+    --check-claim-limit: OK
+--check-requirements                                       rc=0  bytes=25
+    --check-requirements: OK
+
+## f28-check-drift.py — the instrument this lane added
+--self-test                                                rc=0  bytes=161
+    --self-test: 3 assertions, 0 failure(s) (known-negative / known-positive / old-instrument-missed-it); fixture = 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json
+  --receipt 28-04-CERTIFICATION-RECEIPT.json --ref HEAD    rc=1  bytes=788
+    --check-drift: DRIFT (2) against HEAD
+      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 195 commit(s) behind HEAD under crates/ (461 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 148 commit(s) behind HEAD under crates/ (378 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+  --receipt 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json --ref HEAD rc=1  bytes=788
+    --check-drift: DRIFT (2) against HEAD
+      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 195 commit(s) behind HEAD under crates/ (461 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 148 commit(s) behind HEAD under crates/ (378 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+  --receipt 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-002.json --ref HEAD rc=1  bytes=788
+    --check-drift: DRIFT (2) against HEAD
+      F28D-003  candidate[matrix-linux-windows]: certified commit 32e2f57d is 195 commit(s) behind HEAD under crates/ (461 overall), across 199 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+      F28D-003  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is 148 commit(s) behind HEAD under crates/ (378 overall), across 149 changed file(s). The certification is VALID for that commit and STALE for this ref; both are true and neither cancels the other.
+
+## PROOF EVERY F28D CODE CAN FIRE
+non-ancestor ref used for F28D-002: refs/heads/f20-win-diag-daf27337 37f698bd
+PROBE want=F28D-001 rc=1 got=[F28D-001 ] bytes=     682
+PROBE want=F28D-002 rc=1 got=[F28D-002 ] bytes=     644
+PROBE want=F28D-004 rc=1 got=[F28D-004 ] bytes=     104
+PROBE want=F28D-000 rc=1 got=[F28D-000 ] bytes=     144
+CONTROL (ref = the certified commit itself) rc=1 bytes=     515
+  matrix-linux-windows: CURRENT commit=32e2f57d scoped_behind=0 total_behind=0 files_changed=?
+  matrix-macos-rerun-and-soak: DIVERGED commit=e4a3f5fc scoped_behind=? total_behind=? files_changed=?
+--check-drift: DRIFT (1) against 32e2f57d09fe4b287e513081862217dc9daa5901
+  F28D-002  candidate[matrix-macos-rerun-and-soak]: certified commit e4a3f5fc is NOT an ancestor of 32e2f57d09fe4b287e513081862217dc9daa5901 (32e2f57d); the certified code DIVERGED rather than merely aged, so no commit count describes the gap
+PROBE_RESULT=PASS

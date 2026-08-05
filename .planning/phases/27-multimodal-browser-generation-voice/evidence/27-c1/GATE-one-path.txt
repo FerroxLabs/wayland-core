@@ -1,0 +1,73 @@
+########## f27-c1 ONE-PATH GATE — non-vacuity proof ##########
+The gate must FAIL at base and PASS at HEAD. Both runs below, same script.
+
+########## BASE 5457710e (expected FAIL) ##########
+### f27-c1 one-path gate — repo: /root/wayland-27c1-base
+### HEAD: 5457710e
+
+instrument check: 'fn ' in crates/wcore-tools/src/media_intake.rs -> 23 (must be > 0)
+
+--- CHECK 1: no media surface opens a file outside the chokepoint
+  FAIL crates/wcore-tools/src/vision_tools.rs
+        207:        let mut parent = File::open("/")
+        219:            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        258:        let file = OpenOptions::new()
+        277:        OpenOptions::new()
+  FAIL crates/wcore-tools/src/transcription_tools.rs
+        369:                let meta = std::fs::metadata(path)
+        384:                std::fs::read(path).map_err(|e| format!("Failed to read audio file: {e}"))?
+  ok   crates/wcore-tools/src/pdf_tool.rs
+  FAIL crates/wcore-tools/src/doc_tool.rs
+        385:    let mut file = File::open(path).map_err(|e| e.to_string())?;
+  ok   crates/wcore-cli/src/attachments.rs
+  ok   crates/wcore-agent/src/channel_media.rs
+
+--- CHECK 2: every media surface reaches the chokepoint
+  FAIL crates/wcore-tools/src/vision_tools.rs does not reference media_intake
+  FAIL crates/wcore-tools/src/transcription_tools.rs does not reference media_intake
+  ok   crates/wcore-tools/src/pdf_tool.rs
+  FAIL crates/wcore-tools/src/doc_tool.rs does not reference media_intake
+  FAIL crates/wcore-cli/src/attachments.rs does not reference media_intake
+  FAIL crates/wcore-agent/src/channel_media.rs does not reference media_intake
+
+--- CHECK 3: the open primitive is private (compiler-enforced, not convention)
+  FAIL open_once not found in crates/wcore-tools/src/media_intake.rs
+
+--- CHECK 4: exactly one magic-byte table
+  production files carrying a PNG signature: 2 -> crates/wcore-tools/src/media_intake.rs crates/wcore-tools/src/vision_tools.rs
+  FAIL more than one magic-byte table, or it is not the chokepoint's
+
+GATE: FAIL
+BASE_RC=1
+
+########## HEAD lane/27-c1-intake (expected PASS) ##########
+### f27-c1 one-path gate — repo: .
+### HEAD: 6a5d5e3b
+
+instrument check: 'fn ' in crates/wcore-tools/src/media_intake.rs -> 37 (must be > 0)
+
+--- CHECK 1: no media surface opens a file outside the chokepoint
+  ok   crates/wcore-tools/src/vision_tools.rs
+  ok   crates/wcore-tools/src/transcription_tools.rs
+  ok   crates/wcore-tools/src/pdf_tool.rs
+  ok   crates/wcore-tools/src/doc_tool.rs
+  ok   crates/wcore-cli/src/attachments.rs
+  ok   crates/wcore-agent/src/channel_media.rs
+
+--- CHECK 2: every media surface reaches the chokepoint
+  ok   crates/wcore-tools/src/vision_tools.rs
+  ok   crates/wcore-tools/src/transcription_tools.rs
+  ok   crates/wcore-tools/src/pdf_tool.rs
+  ok   crates/wcore-tools/src/doc_tool.rs
+  ok   crates/wcore-cli/src/attachments.rs
+  ok   crates/wcore-agent/src/channel_media.rs
+
+--- CHECK 3: the open primitive is private (compiler-enforced, not convention)
+  ok   open_once is private in crates/wcore-tools/src/media_intake.rs
+
+--- CHECK 4: exactly one magic-byte table
+  production files carrying a PNG signature:        1 -> crates/wcore-tools/src/media_intake.rs
+  ok   the only table is the chokepoint's
+
+GATE: PASS
+HEAD_RC=0

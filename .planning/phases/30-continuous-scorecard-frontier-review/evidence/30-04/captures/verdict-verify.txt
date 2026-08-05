@@ -1,0 +1,3 @@
+RUN_SHA=32cc7ac8f64d43d9c7d937c105013c13e9bbce95
+    Finished `release` profile [optimized] target(s) in 0.25s
+SCORECARD_VERIFY=OK criteria=4 surfaces=0 source_sha=b8556eb7c2190754595637ea10c1120c3d8dc339

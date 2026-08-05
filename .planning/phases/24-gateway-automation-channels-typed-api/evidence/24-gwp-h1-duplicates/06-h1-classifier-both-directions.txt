@@ -1,0 +1,27 @@
+SOURCE: .planning/phases/24-gateway-automation-channels-typed-api/evidence/24-gateway-platforms/windows-arrivals.jsonl  (the sink's own journal, NOT the receipt headline)
+delivery arrivals: 24
+
+--- what the OLD body-only tally reported ---
+arrived=24  unique(text)=12  duplicates=arrived-unique=12
+
+--- what the repaired classifier reports (same data) ---
+{
+  "replays": 0,
+  "recurrences": 4,
+  "indeterminate": 8,
+  "unidentified": 16,
+  "unidentified_endpoints": [
+    "twilio.messages",
+    "whatsapp.messages"
+  ]
+}
+VERDICT: NOT PROVEN — zero replays observed, but repeats arrived with no delivery identity, so exactly-once cannot be established for those adapters. This is a gap in outbound idempotency, NOT evidence of a duplicate.
+
+--- BOTH DIRECTIONS: plant a true replay (same identity twice) ---
+planted identity: cron:2b1290cb-e26e-4024-9acb-4649166d47a9:1785377817818
+replays=1  recurrences=4  indeterminate=8
+VERDICT: EXACTLY-ONCE VIOLATED — a delivery identity arrived more than once.
+
+--- plant REMOVED ---
+replays=0
+VERDICT: NOT PROVEN — zero replays observed, but repeats arrived with no delivery identity, so exactly-once cannot be established for those adapters. This is a gap in outbound idempotency, NOT evidence of a duplicate.

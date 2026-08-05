@@ -1,0 +1,40 @@
+F22-06-VERDICT: COMPATIBLE-AT-V5 platform=linux evidence=22-01-EVIDENCE/linux/reduction-postchange.summary.txt
+F22-06-LEG-LINUX: RAN evidence=22-01-EVIDENCE/linux/session-journal.bin
+F22-06-LEG-WINDOWS: RAN 2026-07-31 on SeanDesktop at the same commit 2ecdfdf5 - M0 through M5 all taken, plus a negative control and a cross-platform reduction check evidence=22-01-EVIDENCE/windows/GATE-RESULTS-WINDOWS.txt
+
+# Task 1 live exercise, Linux
+LINUX-JOURNAL: 22-01-EVIDENCE/linux/session-journal.bin 84327 bytes magic=WJ01 session=9aa64ad04744
+LINUX-JOURNAL-COMPANIONS: 22-01-EVIDENCE/linux/session-journal.snapshot 22-01-EVIDENCE/linux/session-journal.authority
+LINUX-PRODUCT-STDOUT: 22-01-EVIDENCE/linux/product-stdout.txt 0 bytes - RED, the run ended at an HTTP 401 from the provisioned key and its output went to stderr
+LINUX-PRODUCT-STDERR: 22-01-EVIDENCE/linux/product-stderr.txt
+LINUX-EVENT-TYPES: 9 distinct real durable types, tool_execution_* NOT among them - RED, no tool frame was reachable without a working credential
+
+# Task 1 single-variable measurements, Linux
+M0-EXHAUSTIVE-REDUCER: a new SessionEvent variant does not compile until an explicit apply_event arm exists (reducer.rs:1656, no wildcard)
+M1-ENUM-GREW-NOTHING-WRITTEN: IDENTICAL sha256=ff13b6eca8314114b5d96ced5c5142c512a0295113499f5824a25a34002faf56 evidence=22-01-EVIDENCE/linux/reduction-postchange.txt
+M2-WROTE-ONE-PROBE-FRAME: prefix IDENTICAL, only last_seq 12->13 and last_checksum moved evidence=22-01-EVIDENCE/linux/reduction-postchange-with-probe.txt
+M3-OLD-BINARY-ON-NEW-JOURNAL: FAILS CLOSED exit=3 stdout_lines=0 evidence=22-01-EVIDENCE/linux/reduction-prechange-on-probe.err
+M4-SNAPSHOT-AUTHORITY-BINDING: pre-change snapshot accepted by post-change binary, reduction identical evidence=22-01-EVIDENCE/linux/reduction-postchange-pristine.txt
+M5-WRITER-LEASE-ACROSS-RESTART-LINUX: released on drop, two sequential opens succeeded evidence=22-01-EVIDENCE/linux/lease-restart-2.txt
+
+# Task 1 live exercise, Windows
+WINDOWS-JOURNAL: 22-01-EVIDENCE/windows/session-journal.bin 81093 bytes magic=WJ01 session=ee110c384533
+WINDOWS-BINARY: C:\p22-target\release\wayland-core.exe 87730176 bytes, built from detached worktree C:\p22 at 2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+WINDOWS-PRODUCT-STDOUT: 22-01-EVIDENCE/windows/product-stdout.txt 0 bytes - RED, same 401 class as Linux
+WINDOWS-WRITER-LOCK: ee110c384533.journal.writer.lock present, 0 bytes, taken and left behind by the run
+WINDOWS-SECOND-RUN: a second product invocation against the same session directory succeeded in opening a NEW durable session (3bfbd515ba33.journal, 80778 bytes), which shows the process did not wedge the directory but does NOT prove the lease on the FIRST journal was released - CLOSED by M5a/M5c below, which take and release the lease on one named journal across separate processes
+
+# Task 1 single-variable measurements, Windows (taken 2026-07-31, SeanDesktop, commit 2ecdfdf5)
+M0-EXHAUSTIVE-REDUCER-WINDOWS: same E0004 on Windows - a new SessionEvent variant does not compile until an explicit apply_event arm exists; cargo exit 101
+M1-ENUM-GREW-NOTHING-WRITTEN-WINDOWS: IDENTICAL sha256=e95de5c14923e4efb6112186b6e233a918967e18352d7ba03e173d8ac7afa2ef evidence=22-01-EVIDENCE/windows/reduction-postchange.txt.gz
+M2-WROTE-ONE-PROBE-FRAME-WINDOWS: prefix IDENTICAL, only last_seq 13->14 and last_checksum moved evidence=22-01-EVIDENCE/windows/reduction-postchange-with-probe.txt.gz
+M3-OLD-BINARY-ON-NEW-JOURNAL-WINDOWS: FAILS CLOSED exit=3 stdout_lines=0 unknown variant `p22_probe` evidence=22-01-EVIDENCE/windows/reduction-prechange-on-probe.err
+M4-SNAPSHOT-AUTHORITY-BINDING-WINDOWS: pre-change .snapshot/.authority accepted by post-change binary, and the snapshot+suffix reduction equals the full-log replay byte for byte
+M5-WRITER-LEASE-ACROSS-RESTART-WINDOWS: RAN - sequential opens both succeeded (seq 14 then 15) and the lease is released on process exit evidence=22-01-EVIDENCE/windows/lease-restart-2.txt
+M5B-CONCURRENT-CONTENTION-WINDOWS: a second writer against a held lease is REFUSED exit=5 "writer lease is already held" evidence=22-01-EVIDENCE/windows/lease-contention.err
+M5B-READER-WHILE-LOCKED-WINDOWS: the product's own read path still reduces the journal WHILE the authority lock is held - the sentinel-byte LockFileEx range at u64::MAX-1 avoids the mandatory-lock read starvation that threat T-22-06 anticipated
+NC1-NEGATIVE-CONTROL-WINDOWS: a single flipped byte in the journal is REFUSED exit=3 "frame 8 digest mismatch" - the reduce gate can fail, so its passes are not vacuous evidence=22-01-EVIDENCE/windows/nc1-corrupt.err
+XP-LINUX-CORPUS-ON-WINDOWS: the Linux-written journal reduces to the SAME ReducedSessionState on Windows; canonical sha256 4f5713e2a625ee050cc36d7f86fb42fbe1183705f58676186bcb9cff9392f6e2 on both platforms evidence=22-01-EVIDENCE/windows/reduction-linux-corpus-on-windows.txt.gz
+
+# Task 2 decision
+F22-06-PANEL-UNANIMOUS: 4 of 4 additive-at-current-version, 0 unsound verdict votes evidence=22-01-EVIDENCE/decision/decision-ledger.txt

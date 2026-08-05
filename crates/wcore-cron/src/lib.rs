@@ -20,15 +20,29 @@
 //! `EngineJobHandler` after the engine is built. Drop on `AgentEngine`
 //! cancels the runner via its shutdown watch channel.
 
+pub mod events;
+pub mod history;
 pub mod job;
+pub mod lease;
+pub mod retry;
 pub mod runner;
 pub mod schedule;
 pub mod store;
+pub mod trigger;
 
-pub use job::{CronFireOutcome, CronFireRecord, CronJob, Target};
-pub use runner::{CronRunner, JobHandler, tick_once, tick_once_with_history};
+pub use events::{PublishedEvent, events_dir, publish as publish_event};
+pub use job::{CronFireOutcome, CronFireRecord, CronJob, Target, render_trigger};
+pub use lease::{
+    LeaseAttempt, LeaseError, LeaseHandle, LeaseRecord, LeaseRole, ScheduleLease, default_lease_dir,
+};
+pub use retry::{RetryDecision, RetryPolicy, RetryState};
+pub use runner::{
+    Clock, CronRunner, FireContext, JobHandler, SystemClock, TestClock, tick_once, tick_once_at,
+    tick_once_with_history,
+};
 pub use schedule::{next_fire_after, parse_expression};
 pub use store::{CronStore, FileCronStore, default_history_path, default_store_path};
+pub use trigger::{HeartbeatState, Trigger, TriggerBound, heartbeat_state};
 
 use thiserror::Error;
 

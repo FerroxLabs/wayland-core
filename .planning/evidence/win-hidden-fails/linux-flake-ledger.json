@@ -1,0 +1,213 @@
+{
+  "host": "Ubuntu-2404-noble-amd64-base",
+  "os": "Linux",
+  "release": "6.8.0-101-generic",
+  "cpus": 96,
+  "profile": "ci",
+  "runs": 10,
+  "retries": 0,
+  "load_workers": 96,
+  "rows": [
+    {
+      "package": "wcore-cli",
+      "binary": "deterministic_openai_loop",
+      "test": "packaged_core_recovers_after_two_503_responses",
+      "conditions": {
+        "isolated": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "batch": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "loaded": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        }
+      }
+    },
+    {
+      "package": "wcore-swarm",
+      "binary": "dispatch_smoke",
+      "test": "required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state",
+      "conditions": {
+        "isolated": {
+          "runs": 10,
+          "passes": 0,
+          "failures": 0,
+          "other": 10,
+          "verdict": "NOTRUN",
+          "details": [
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform"
+          ]
+        },
+        "batch": {
+          "runs": 10,
+          "passes": 0,
+          "failures": 0,
+          "other": 10,
+          "verdict": "NOTRUN",
+          "details": [
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform"
+          ]
+        },
+        "loaded": {
+          "runs": 10,
+          "passes": 0,
+          "failures": 0,
+          "other": 10,
+          "verdict": "NOTRUN",
+          "details": [
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform",
+            "filter selected 0 tests on this platform"
+          ]
+        }
+      }
+    },
+    {
+      "package": "wcore-swarm",
+      "binary": "dispatch_smoke",
+      "test": "malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic",
+      "conditions": {
+        "isolated": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "batch": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "loaded": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        }
+      }
+    },
+    {
+      "package": "wcore-swarm",
+      "binary": "dispatch_smoke",
+      "test": "public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state",
+      "conditions": {
+        "isolated": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "batch": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "loaded": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        }
+      }
+    },
+    {
+      "package": "wcore-swarm",
+      "binary": "dispatch_smoke",
+      "test": "dispatches_4_noop_workers_in_parallel",
+      "conditions": {
+        "isolated": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "batch": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "loaded": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        }
+      }
+    },
+    {
+      "package": "wcore-swarm",
+      "binary": "worker_runtime_limits",
+      "test": "multi_worker_output_exhaustion_fails_without_retaining_buffers",
+      "conditions": {
+        "isolated": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "batch": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        },
+        "loaded": {
+          "runs": 10,
+          "passes": 10,
+          "failures": 0,
+          "other": 0,
+          "verdict": "GREEN",
+          "details": []
+        }
+      }
+    }
+  ]
+}

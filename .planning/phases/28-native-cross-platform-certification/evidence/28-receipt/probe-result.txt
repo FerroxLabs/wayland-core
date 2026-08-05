@@ -1,0 +1,15 @@
+== PROBE: can the supersession binding reject? ==
+phase dir: /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-receipt/.planning/phases/28-native-cross-platform-certification
+
+0 CONTROL untampered (must PASS)               rc=0   ok
+        --verify: OK
+1 posture supersession sha altered             rc=1   ok
+          F28V-DIGEST  body_sha256: the receipt as written does NOT match its own body digest
+2 bound superseded-receipt sha altered         rc=1   ok
+          F28V-ARTIFACT  artifacts[28-04-CERTIFICATION-RECEIPT.json].sha256: receipt claims 0000000000000000000000000000000000000000000000000000000000000000, recomputed c4ab82aeb110d61499c99483635aa14e0b82d2ba44939aabe6f2076297c82c3c
+3 claim flipped vs raw ledger                  rc=1   ok
+          F28V-CLAIM  body.claims.zero_unresolved_critical_or_high: receipt asserts False, recomputed True from the raw ledger and cell list
+4 the SUPERSEDED receipt itself edited         rc=1   ok
+          F28V-ARTIFACT  artifacts[28-04-CERTIFICATION-RECEIPT.json].sha256: receipt claims c4ab82aeb110d61499c99483635aa14e0b82d2ba44939aabe6f2076297c82c3c, recomputed f8b4564c481b98cf4f37b27fbf865758ec6d4556c41b71f94e277b978e07ff97
+
+PROBE RESULT: PASS -- 4 tampers rejected, 1 pristine control accepted

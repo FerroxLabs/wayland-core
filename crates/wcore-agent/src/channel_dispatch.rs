@@ -52,10 +52,12 @@ use tokio::sync::Mutex;
 use wcore_channels::ChannelToolPosture;
 use wcore_config::config::Config;
 use wcore_providers::LlmProvider;
+use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
 
 use crate::bootstrap::AgentBootstrap;
 use crate::channel_inbound::TurnDispatcher;
 use crate::channel_media::ChannelMediaEnricher;
+use crate::channel_policy::ChannelPolicyRegistry;
 use crate::channel_tools::ChannelToolScope;
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
@@ -67,11 +69,19 @@ pub struct ChannelTurnDispatcher {
     config: Config,
     cwd: String,
     provider: Arc<dyn LlmProvider>,
-    /// Per-channel tool posture, keyed by `channel_name`. A channel absent
-    /// from this map falls back to the safe `Conversational` posture rooted
-    /// at `cwd` — so an unconfigured channel can never accidentally get host
-    /// filesystem/shell access.
-    postures: HashMap<String, ChannelToolScope>,
+    /// Per-channel tool posture, read through the registry shared with the
+    /// subscriber. A channel absent from it falls back to the safe
+    /// `Conversational` posture rooted at `cwd` — so an unconfigured channel
+    /// can never accidentally get host filesystem/shell access.
+    ///
+    /// F24-C3-H5, facet 2. This used to be an owned `HashMap` moved in at
+    /// construction, exactly like the subscriber's policy map, and it went
+    /// stale by the same code path. Refreshing only the policies would have
+    /// made a reloaded channel start receiving while running under this
+    /// fallback rather than its configured posture — a green test over the
+    /// wrong permissions, which is worse than the fail-closed bug it replaced.
+    /// The two now move together because they are one object.
+    policies: Arc<ChannelPolicyRegistry>,
     /// Pool keyed by the HASHED session id (not the raw kernel session key,
     /// which contains colons the `SessionManager` rejects). Each value is an
     /// `Arc<Mutex<AgentEngine>>` so concurrent turns for the SAME session
@@ -84,6 +94,12 @@ pub struct ChannelTurnDispatcher {
     media: Option<Arc<ChannelMediaEnricher>>,
 }
 
+fn remote_channel_config(mut config: Config) -> Config {
+    config.tools.auto_approve = false;
+    config.retain_default_tool_allow_list();
+    config
+}
+
 impl ChannelTurnDispatcher {
     /// Build a dispatcher over a resolved [`Config`], the working directory
     /// new sessions run in, the shared provider, and the per-channel tool
@@ -94,14 +110,14 @@ impl ChannelTurnDispatcher {
         config: Config,
         cwd: String,
         provider: Arc<dyn LlmProvider>,
-        postures: HashMap<String, ChannelToolScope>,
+        policies: Arc<ChannelPolicyRegistry>,
         media: Option<Arc<ChannelMediaEnricher>>,
     ) -> Self {
         Self {
             config,
             cwd,
             provider,
-            postures,
+            policies,
             engines: Arc::new(Mutex::new(HashMap::new())),
             media,
         }
@@ -129,9 +145,8 @@ impl ChannelTurnDispatcher {
     /// Resolve the tool scope for `channel_name`, defaulting to the safe
     /// `Conversational` posture rooted at `cwd` for an unconfigured channel.
     fn scope_for(&self, channel_name: &str) -> ChannelToolScope {
-        self.postures
-            .get(channel_name)
-            .cloned()
+        self.policies
+            .scope_for(channel_name)
             .unwrap_or_else(|| ChannelToolScope {
                 posture: ChannelToolPosture::Conversational,
                 workspace_root: std::path::PathBuf::from(&self.cwd),
@@ -186,18 +201,17 @@ impl ChannelTurnDispatcher {
         // `.expect()`s a protocol writer (engine.rs `approval_channel`
         // builder), which channel turns deliberately lack — installing a
         // manager without a writer would panic every turn. Instead we drive
-        // the engine through its default `ToolConfirmer` path with
-        // `tools.auto_approve` FORCED OFF in the per-session config clone
-        // below. With auto-approve off, read-only tools (Read/Grep/Glob, which
-        // are on the default allow_list) still run, while mutating tools fall
-        // through to confirmation. There is no interactive approver on a
-        // channel, so a mutating tool gate-then-denies (or, if stdin is a TTY,
-        // would block waiting for input it never gets) — both outcomes are the
-        // intended safe behaviour for v1: a channel user cannot silently run a
-        // shell or write files. Operators who set `--auto-approve` for their
-        // local CLI do NOT thereby grant it to channel senders.
-        let mut config = self.config.clone();
-        config.tools.auto_approve = false;
+        // the engine through its default `ToolConfirmer` path. Remote channel
+        // turns are always typed Smart/Prompt below. Clear the
+        // legacy boolean here as defense in depth; the typed builder also
+        // normalizes both compatibility fields before any skill checker,
+        // spawner, or engine is built. Read-only tools on the default
+        // allow-list still run, while mutating tools fail closed because a
+        // channel has no interactive terminal approver.
+        // A local convenience allow-list is not remote authority. Channel
+        // sessions have no interactive approver, so inheriting Bash/Write/MCP
+        // entries would silently bypass the explicit Prompt posture.
+        let config = remote_channel_config(self.config.clone());
 
         // Load-or-create the session for this id. `init_session` CREATES a
         // session and hard-errors ("Session ID '…' already exists") if the id
@@ -210,10 +224,14 @@ impl ChannelTurnDispatcher {
             PathBuf::from(&self.config.session.directory),
             self.config.session.max_sessions,
         );
-        let existing = session_mgr.load(hashed_id).ok();
+        let existing = session_mgr.load_for_run_if_exists(hashed_id)?;
         let is_new = existing.is_none();
 
+        let execution_policy = config
+            .execution_policy
+            .with_requested_approvals(ApprovalPolicy::Prompt, PolicySource::Protocol);
         let mut bootstrap = AgentBootstrap::new(config, self.cwd.clone(), output)
+            .with_execution_policy(execution_policy)
             .provider(self.provider.clone())
             // MANDATORY: stop the per-session engine from re-registering
             // channels / spawning pollers / spawning another subscriber.
@@ -320,6 +338,110 @@ impl TurnDispatcher for ChannelTurnDispatcher {
 mod tests {
     use super::*;
 
+    // --- F24-C3-H5 facet 2: the tool posture must not go stale either. ---
+
+    struct NoopProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for NoopProvider {
+        async fn stream(
+            &self,
+            _request: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+    }
+
+    fn dispatcher_over(policies: Arc<ChannelPolicyRegistry>) -> ChannelTurnDispatcher {
+        ChannelTurnDispatcher::new(
+            Config::default(),
+            "/fallback-cwd".to_string(),
+            Arc::new(NoopProvider),
+            policies,
+            None,
+        )
+    }
+
+    fn scope(posture: ChannelToolPosture, root: &str) -> ChannelToolScope {
+        ChannelToolScope {
+            posture,
+            workspace_root: std::path::PathBuf::from(root),
+        }
+    }
+
+    /// The dispatcher must read the posture through the SHARED registry on
+    /// every turn, not out of a map copied at construction.
+    ///
+    /// This is the assertion a policy-only repair fails. Under that repair the
+    /// reloaded channel starts receiving — so an arrivals-only test goes green
+    /// — while running here under `Conversational` rooted at the process cwd
+    /// instead of the `Workspace` jail its config asked for. That is not
+    /// fail-closed and it is worse than the bug it replaced, which is exactly
+    /// why the swap moves both maps at once.
+    #[test]
+    fn a_posture_added_after_construction_is_visible_to_the_dispatcher() {
+        let registry = Arc::new(ChannelPolicyRegistry::default());
+        let dispatcher = dispatcher_over(Arc::clone(&registry));
+
+        // KNOWN-NEGATIVE. Before the swap the channel is unknown, so it gets
+        // the safe fallback. If this ever passes trivially, the test below
+        // proves nothing.
+        let before = dispatcher.scope_for("added");
+        assert_eq!(before.posture, ChannelToolPosture::Conversational);
+        assert_eq!(
+            before.workspace_root,
+            std::path::PathBuf::from("/fallback-cwd"),
+            "pre-swap the dispatcher must fall back to its own cwd"
+        );
+
+        registry.replace(crate::channel_policy::ChannelPolicySnapshot {
+            policies: HashMap::new(),
+            postures: HashMap::from([(
+                "added".to_string(),
+                scope(ChannelToolPosture::Workspace, "/jail"),
+            )]),
+            generation: 0,
+        });
+
+        // THE REPAIR. Same dispatcher instance, no reconstruction.
+        let after = dispatcher.scope_for("added");
+        assert_eq!(
+            after.posture,
+            ChannelToolPosture::Workspace,
+            "the dispatcher must resolve the reloaded channel's configured posture"
+        );
+        assert_eq!(after.workspace_root, std::path::PathBuf::from("/jail"));
+    }
+
+    /// A channel whose posture is REMOVED must fall back to the safe floor,
+    /// not keep the elevated one. Otherwise a reload could grant `Full` and
+    /// never take it away without a restart.
+    #[test]
+    fn a_removed_posture_falls_back_to_the_safe_floor() {
+        let registry = Arc::new(ChannelPolicyRegistry::from_parts(
+            HashMap::new(),
+            HashMap::from([("elevated".to_string(), scope(ChannelToolPosture::Full, "/"))]),
+        ));
+        let dispatcher = dispatcher_over(Arc::clone(&registry));
+        assert_eq!(
+            dispatcher.scope_for("elevated").posture,
+            ChannelToolPosture::Full,
+            "positive control: the elevated posture is in effect before the swap"
+        );
+
+        registry.replace(crate::channel_policy::ChannelPolicySnapshot::default());
+
+        assert_eq!(
+            dispatcher.scope_for("elevated").posture,
+            ChannelToolPosture::Conversational,
+            "a posture removed from disk must revert to the safe floor on reload"
+        );
+    }
+
     #[test]
     fn turn_prompt_is_text_only_without_attachments() {
         let msg = wcore_channels::IncomingMessage::new("m1", "c1", "alice", "hello", 0);
@@ -405,5 +527,17 @@ mod tests {
     fn hashed_session_id_is_forty_hex_chars() {
         let id = ChannelTurnDispatcher::hashed_session_id("anything");
         assert_eq!(id.len(), 40, "first-40-hex-chars of the SHA-256 digest");
+    }
+
+    #[test]
+    fn remote_sessions_drop_local_tool_grants() {
+        let mut config = Config::default();
+        config.tools.auto_approve = true;
+        config.tools.allow_list = vec!["Read".into(), "Bash".into(), "Grep".into(), "Write".into()];
+
+        let remote = remote_channel_config(config);
+
+        assert!(!remote.tools.auto_approve);
+        assert_eq!(remote.tools.allow_list, vec!["Read", "Grep"]);
     }
 }

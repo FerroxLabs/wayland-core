@@ -1,0 +1,108 @@
+=== F25C1 CLOUD CANCELLATION — PHASE TRAIN ===
+2026-07-29T13:29:54Z
+controller:   Ubuntu-2404-noble-amd64-base
+tree:         /root/wayland-25c1
+tree HEAD:    05a493a2de45d003d99aecbecdff8cc9458fb678
+binary sha:   b61916e19cd299c548248603680cede6e5d3ad3b83d06bcf8bb54f0b2b5d0a5d
+credential:   sourced from /root/.wayland-f25-cloud.env (values never printed)
+cloud cancel-receipt arm compiled into this binary (1 = present):
+  fixed-arm literal      : 1
+  known-positive literal : 1 (in every build)
+  the OLD dud needle     : 0 (0 in every build — that was the defect)
+
+--- 0. is the credential live? Read the answer back from the PRODUCT.
+  backend:       cloud
+  available:     true
+  probe basis:   VendorApiCall
+  probe detail:  vendor API answered 200 for app wayland-f25-test machine listing
+  healthy:       true
+  live tasks:    0
+  health detail: vendor API answered 200 for app wayland-f25-test machine listing
+  probe basis read back from the product: VendorApiCall (a real authenticated call, not an env guess)
+
+--- 1. census BEFORE, both instruments
+  product : cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  vendor  : count=0 
+
+--- 2. the task
+{
+  "task_id": "f25c1cancel",
+  "nonce": "f25c1cancel",
+  "workspace": [{"path": "README.txt", "bytes": "ZjI1YzEgY2FuY2VsCg=="}],
+  "input": "d2F5bGFuZC1mMjUtYzEtY2xvdWQtY2FuY2VsLWlucHV0Cg==",
+  "argv": ["sleep", "120"],
+  "artifact_name": "stdout.bin",
+  "resources": {"cpu_millis": 30000, "memory_bytes": 268435456, "wall_time_ms": 60000, "output_bytes": 1048576}
+}
+
+--- 3. start it through the shipped binary, in the background
+run pid: 4086565
+
+--- 4. watch the vendor's own machine state, and cancel only AFTER a resume
+  t+2s  
+  t+4s  [{"id":"822e99a7e333e8" "state":"created" "events":[{"id":"01KYQ12KQP87HSS0RQ313Y6A3Y" {"id":"01KYQ12KKBA7DFJQYT67WJEEVV" 
+  t+6s  [{"id":"822e99a7e333e8" "state":"suspended" "events":[{"id":"01KYQ12QEK1ZM7KQNR13BG77FC" {"id":"01KYQ12PPDERBWM217TMVB6ZZ8" {"id":"01KYQ12NRQHKGY5JYQXDCTGNFF" {"id":"01KYQ12KQP87HSS0RQ313Y6A3Y" {"id":"01KYQ12KKBA7DFJQYT67WJEEVV" 
+  t+8s  [{"id":"822e99a7e333e8" "state":"started" "events":[{"id":"01KYQ12S83K4BRK60K6VCWEG4Y" {"id":"01KYQ12RYZSXSAEJX5XCCTBDBG" {"id":"01KYQ12QEK1ZM7KQNR13BG77FC" {"id":"01KYQ12PPDERBWM217TMVB6ZZ8" {"id":"01KYQ12NRQHKGY5JYQXDCTGNFF" 
+  -> machine has been SUSPENDED and then STARTED again; letting the task settle into the exec, then cancelling
+F25C1-MACHINE-OBSERVED-TRAIN: seen=1 suspended=1 resumed=1
+
+--- 5. census WHILE THE TASK IS LIVE — this is the census instruments' known-positive
+  product : cloud      enumerated=true  found=1 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  vendor  : count=1
+F25C1-CENSUS-ALIVE-TRAIN: vendor_count_while_running=1 (0 here would mean both later zeros prove nothing)
+  the machine's own event types, read from the vendor BEFORE the cancel destroys the record:
+    "type":"start"
+    "type":"start"
+    "type":"suspension"
+    "type":"suspension"
+    "type":"start"
+  full record saved to /root/f25c1-evidence/vendor-machine-record-TRAIN.json
+
+--- 6. CANCEL, from a SECOND process
+  backend:  cloud
+  task:     f25c1cancel
+  method:   machine destroy, then the vendor's own nonce-filtered machine listing re-read
+  residual: none — the cleanup was verified by re-enumeration
+CANCEL_EXIT=0
+
+--- 7. what the run process did
+  run exited after ~3s of waiting
+RUN_AFTER_CANCEL_EXIT=0
+  --- run output ---
+  task:        f25c1cancel
+  backend:     cloud
+  transport:   Cloud via 822e99a7e333e8
+  terminal:    Cancelled { reason: "operator cancelled" }
+  input sha:   7a9788cb9b71a6121c9771a3e4cef75e35deff5c60ded25e4202029c3c6274b9
+  workspace:   abada7bc0fd25803d51b2fd720d1db5e3f0daad1b9c3fe9bca5f3e4e568f940f
+  hibernation: NotObserved { reason: "the run was cancelled before it could report a hibernation observation; this receipt does not claim one" }
+  wall ms:     15747
+  receipt:     /root/f25c1-evidence/receipt-cloud-cancel-TRAIN.json
+
+--- 8. did a RECEIPT survive the cancellation?
+  receipt:   /root/f25c1-evidence/receipt-cloud-cancel-TRAIN.json
+  schema:    wayland.execution-backend-receipt v1
+  backend:   cloud
+  key id:    7828c85769674de0328a6f3f17d723fe948591c5422a179701bdb6969299ae16
+  terminal:  Cancelled { reason: "operator cancelled" }
+  INTEGRITY: OK — body digest, event ordering, single terminal event and internal consistency all hold.
+  IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+F25C1-CLOUD-CANCEL-RECEIPT-TRAIN: WRITTEN
+
+--- 9. census AFTER, both instruments
+  product : cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  vendor  : count=0 
+
+    backend    cloud
+    mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+    method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+    count      0 (MEASURED)
+    rows       (none)
+SCAN_EXIT=0
+
+=== F25C1-CLOUD-SUMMARY-TRAIN ===
+F25C1-TRAIN-MACHINE-SEEN: 1   SUSPENDED: 1   RESUMED: 1
+F25C1-TRAIN-VENDOR-COUNT-WHILE-RUNNING: 1
+F25C1-TRAIN-VENDOR-COUNT-AFTER-CANCEL: 0
+F25C1-TRAIN-PRODUCT-ROW-AFTER-CANCEL: cloud      enumerated=true  found=0 via GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+2026-07-29T13:30:19Z

@@ -24,10 +24,19 @@ pub const EMERGENCY_USER_MESSAGE: &str =
 /// This check is independent of `CompactConfig.enabled`; the emergency
 /// safety net is always active.
 pub fn is_at_emergency_limit(last_input_tokens: u64, config: &CompactConfig) -> bool {
-    let limit = config
+    last_input_tokens as usize >= emergency_limit(config)
+}
+
+/// The emergency hard-stop limit in tokens: `context_window - emergency_buffer`.
+///
+/// F23-04 exposes this so the cache/compaction ledger can report token pressure
+/// as a distance from a real boundary rather than as a bare token count. It is
+/// the SAME arithmetic [`is_at_emergency_limit`] tests against — extracted, not
+/// re-derived, so the reported limit can never drift from the enforced one.
+pub fn emergency_limit(config: &CompactConfig) -> usize {
+    config
         .context_window
-        .saturating_sub(config.emergency_buffer);
-    last_input_tokens as usize >= limit
+        .saturating_sub(config.emergency_buffer)
 }
 
 #[cfg(test)]

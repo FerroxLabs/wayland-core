@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/govern_catalog_enforcement.rs (target/debug/deps/govern_catalog_enforcement-4b0b6acb6e0ac262)
+
+running 5 tests
+test a_revoked_skill_leaves_the_catalog_while_its_neighbour_stays ... ok
+test a_revoked_skill_stays_out_even_if_the_files_come_back ... ok
+test revocation_withdraws_the_promotion_grant ... ok
+test promotion_lifts_quarantine_and_an_edit_puts_it_back ... ok
+test rollback_returns_the_skill_to_the_catalog_quarantined ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

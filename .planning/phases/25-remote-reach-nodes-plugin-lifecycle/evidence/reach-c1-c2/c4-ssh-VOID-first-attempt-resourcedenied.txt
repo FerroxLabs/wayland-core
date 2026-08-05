@@ -1,0 +1,27 @@
+=== C4 SSH ORPHAN SURFACE @ 0d48b5515b816e8930456fcda7c91c0ec9a46ebd ===
+nonce generated on the controller (0 occurrences in any caller argv)
+
+--- DIRECTION A (known-negative): a nonce nothing carries -> must MEASURE zero
+TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+NEG_EXIT=0
+
+--- build a long task and let the PRODUCT leak it: kill the controller -9 mid-run
+controller pid 1842430 alive? no
+controller killed -9 (the setsid remote child is now genuinely orphaned, not planted)
+
+--- INDEPENDENT enumeration on the far end, outside the product
+INDEP_RC=1
+
+--- DIRECTION B (known-positive): the product scan must find the orphan it leaked
+  rows       (none)
+  rows       (none)
+  rows       (none)
+  rows       (none)
+TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+POS_EXIT=0
+
+--- reap, then re-measure the SAME nonce -> must return to zero
+TOTAL: 0 orphan(s) measured across 4 backend(s); 1 surface(s) NOT measured
+AFTER_REAP_EXIT=0
+0
+C4SSHDONE

@@ -1,0 +1,109 @@
+=== F25-05 WINDOWS LEG - SeanDesktop - 2026-07-27T19:21:45.0439665+07:00 ===
+commit: f0778ba1df825c07af27f5f358ebcae2503675c5
+build exit: 0
+
+### produce a genuine receipt
+$ wayland-core.exe backend run --backend local --receipt-out C:\f25-04-receipt.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     31
+receipt:     C:\f25-04-receipt.json
+[exit=0]
+
+### verify the intact receipt (must PASS or the cases are vacuous)
+$ wayland-core.exe backend receipt verify C:\f25-04-receipt.json
+receipt:   C:\f25-04-receipt.json
+schema:    wayland.execution-backend-receipt v1
+backend:   local
+key id:    a7d24ef5c040026e02dbc91e1ba70bd798462014081a2d681c95164eba6c952c
+terminal:  Success
+INTEGRITY: OK GÇö body digest, event ordering, single terminal event and internal consistency all hold.
+IDENTITY:  NOT ESTABLISHED by this command. A receipt cannot authenticate itself: verifying identity requires a verifying key the caller already pinned, which a receipt file does not carry. Use the conformance harness or a caller holding the pinned key.
+[exit=0]
+STATE: baseline verify exit=0
+
+### TAMPERED receipt
+$ wayland-core.exe backend receipt verify C:\f25-04-tampered.json
+wayland-core.exe : wayland-core backend: receipt is invalid: task_accepted does not agree with 
+the receipt's own task evidence
+At C:\f25-04-live.ps1:27 char:10
++   $out = & $BIN @CliArgs 2>&1 | Out-String
++          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...n task evidence:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+
+### ATTESTATION mismatch
+$ wayland-core.exe backend receipt verify C:\f25-04-attest.json
+wayland-core.exe : wayland-core backend: receipt is invalid: task_accepted names a different 
+backend than the receipt
+At C:\f25-04-live.ps1:27 char:10
++   $out = & $BIN @CliArgs 2>&1 | Out-String
++          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...han the receipt:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+
+### DENIED SECRET (cloud backend, no credential)
+$ wayland-core.exe backend run --backend cloud --receipt-out C:\f25-04-cloud.json
+wayland-core.exe : wayland-core backend: backend 'cloud' is unavailable and this command does NOT 
+fall back: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT 
+falling back (probe CredentialAbsent)
+At C:\f25-04-live.ps1:27 char:10
++   $out = & $BIN @CliArgs 2>&1 | Out-String
++          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...edentialAbsent):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+
+### DENIED EGRESS (probe the credentialed surface)
+$ wayland-core.exe backend probe cloud
+backend:       cloud
+available:     false
+probe basis:   CredentialAbsent
+probe detail:  backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+healthy:       false
+live tasks:    0
+health detail: backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+[exit=0]
+
+### run under the ROTATED key
+$ wayland-core.exe backend run --backend local --receipt-out C:\f25-04-postrot.json
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     11
+receipt:     C:\f25-04-postrot.json
+[exit=0]
+STATE: pre-rotation key a7d24ef5c040026e02dbc91e1ba70bd798462014081a2d681c95164eba6c952c
+STATE: post-rotation key 139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070
+
+### ROTATED KEY: present the pre-rotation signature under the new key id
+$ wayland-core.exe backend receipt verify C:\f25-04-rotatedout.json
+wayland-core.exe : wayland-core backend: receipt is invalid: receipt body digest mismatch
+At C:\f25-04-live.ps1:27 char:10
++   $out = & $BIN @CliArgs 2>&1 | Out-String
++          ~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wayland-core ba...digest mismatch:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+[exit=1]
+STATE: nonce f25-04-win-orphan-40608
+STATE: independent Win32_Process enumeration with an orphan planted: 1 row(s)
+STATE: scanner while planted: 1
+STATE: independent enumeration after the reap: 0 row(s)
+STATE: scanner after the reap: 0

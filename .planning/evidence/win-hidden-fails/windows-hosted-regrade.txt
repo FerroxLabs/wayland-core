@@ -1,0 +1,33 @@
+test                                                           cond      runs pass fail  verdict
+dispatches_4_noop_workers_in_parallel                          isolated    10    0   10  CONSISTENTLY FAILING
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel
+dispatches_4_noop_workers_in_parallel                          batch       10    0   10  CONSISTENTLY FAILING
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers;public_dispatch_owns_git_authority_and_preserves_
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers
+dispatches_4_noop_workers_in_parallel                          loaded      10    0   10  CONSISTENTLY FAILING
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic;multi_worker_output_exhaustion_fails_without_r
+malformed_heartbeat_fails_closed_and_preserves_bounded_diagn   isolated    10    7    3  FLAKY (p7/f3/s0)
+                                                                              failed-names: malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+malformed_heartbeat_fails_closed_and_preserves_bounded_diagn   batch       10    9    1  FLAKY (p9/f1/s0)
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic;multi_worker_output_exhaustion_fails_without_r
+malformed_heartbeat_fails_closed_and_preserves_bounded_diagn   loaded      10    5    5  FLAKY (p5/f5/s0)
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic;multi_worker_output_exhaustion_fails_without_r
+multi_worker_output_exhaustion_fails_without_retaining_buffe   isolated    10    0   10  CONSISTENTLY FAILING
+                                                                              failed-names: multi_worker_output_exhaustion_fails_without_retaining_buffers
+multi_worker_output_exhaustion_fails_without_retaining_buffe   batch       10    0   10  CONSISTENTLY FAILING
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers;public_dispatch_owns_git_authority_and_preserves_
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers
+multi_worker_output_exhaustion_fails_without_retaining_buffe   loaded      10    0   10  CONSISTENTLY FAILING
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic;multi_worker_output_exhaustion_fails_without_r
+packaged_core_recovers_after_two_503_responses                 isolated    10   10    0  GREEN
+packaged_core_recovers_after_two_503_responses                 batch       10   10    0  GREEN
+packaged_core_recovers_after_two_503_responses                 loaded      10   10    0  GREEN
+public_dispatch_owns_git_authority_and_preserves_parent_and_   isolated    10   10    0  GREEN
+public_dispatch_owns_git_authority_and_preserves_parent_and_   batch       10    8    2  FLAKY (p8/f2/s0)
+                                                                              failed-names: dispatches_4_noop_workers_in_parallel;multi_worker_output_exhaustion_fails_without_retaining_buffers;public_dispatch_owns_git_authority_and_preserves_
+public_dispatch_owns_git_authority_and_preserves_parent_and_   loaded      10   10    0  GREEN
+required_live_windows_public_dispatch_refuses_bash_worker_an   isolated    10   10    0  GREEN
+required_live_windows_public_dispatch_refuses_bash_worker_an   batch       10   10    0  GREEN
+required_live_windows_public_dispatch_refuses_bash_worker_an   loaded      10   10    0  GREEN

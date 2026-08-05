@@ -1,0 +1,30 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/matrix_live_room.rs (target/debug/deps/matrix_live_room-a0df2add8deff3eb)
+
+running 1 test
+test matrix_edit_and_delete_against_a_real_room ... MLR_ROOM=!REDACTED-MATRIX-ROOM:matrix.org
+MLR_NONCE=mlact-1785383837
+MLR_DECLARED_IDEMPOTENT=true
+MLR_DECLARED_ACTIONS edit=implemented delete=implemented react=implemented typing=implemented
+MLR_SENT_EDIT_TARGET=$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA
+MLR_SENT_DELETE_TARGET=$I38AFNsJlOe4v_iTWs-ENM1s9_M_-ev0h57B3PvRYB0
+MLR_EDIT_REPLACEMENT=$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4
+MLR_DELETED=$I38AFNsJlOe4v_iTWs-ENM1s9_M_-ev0h57B3PvRYB0
+MLR_CONTROL_EDIT_BOGUS_ok=false MLR_CONTROL_EDIT_BOGUS_err=transport: HTTP error 400: {"errcode":"M_UNKNOWN","error":"Can't send relation to unknown event"}
+MLR_CONTROL_DELETE_BOGUS_ok=true
+
+thread 'matrix_edit_and_delete_against_a_real_room' (2783931) panicked at crates/wcore-channels-registry/tests/matrix_live_room.rs:357:5:
+redacting an event id that does not exist must be an ERROR. A silent Ok here means the delete leg's positive result proves nothing, because the call succeeds regardless of whether anything was redacted.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    matrix_edit_and_delete_against_a_real_room
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.43s
+
+error: test failed, to rerun pass `-p wcore-channels-registry --test matrix_live_room`

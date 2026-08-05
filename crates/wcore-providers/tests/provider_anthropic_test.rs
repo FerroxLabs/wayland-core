@@ -796,6 +796,57 @@ async fn test_anthropic_region_failover_retries_alternate_host_on_401() {
     );
 }
 
+#[tokio::test]
+async fn scoped_zero_suppresses_anthropic_auth_host_fallback_send() {
+    let primary = MockServer::start().await;
+    let fallback = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("denied"))
+        .mount(&primary)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&fallback)
+        .await;
+
+    let mut compat = ProviderCompat::anthropic_defaults();
+    compat.auth_fallback_base_url = Some(fallback.uri());
+    let provider = AnthropicProvider::new(
+        "region-locked-key",
+        &primary.uri(),
+        compat,
+        DebugConfig::default(),
+    )
+    .with_cache(false);
+
+    let result =
+        wcore_providers::retry::scope_max_retries(0, provider.stream(&minimal_request())).await;
+
+    assert!(matches!(
+        result,
+        Err(ProviderError::Api { status: 401, .. })
+    ));
+    assert_eq!(
+        primary
+            .received_requests()
+            .await
+            .expect("primary requests")
+            .len(),
+        1
+    );
+    assert!(
+        fallback
+            .received_requests()
+            .await
+            .expect("fallback requests")
+            .is_empty(),
+        "zero-retry scope must not send to the fallback host"
+    );
+}
+
 /// Once the fallback authenticates it is PINNED: a second request goes straight
 /// to the fallback and does not re-pay the primary's certain 401.
 #[tokio::test]

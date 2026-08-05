@@ -1,0 +1,6 @@
+configured: 1   registered: 1
+f24h6 (slack)
+  state:      Disconnected
+  reason:     start() failed: auth failed: no value for credential handle "slack.f24h6.bot_token"
+  errors:     0
+  reconnects: 0

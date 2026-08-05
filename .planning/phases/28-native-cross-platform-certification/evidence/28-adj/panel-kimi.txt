@@ -1,0 +1,13 @@
+• This is a reasoning-only adjudication. Answer FIXED. The finding F-28-02-002 is about the persistent DoS; the disclosure defect is a separate issue that doesn't block disposition. The DoS repair is verified merged, mutant-tested, hardware-reproduced.
+
+• PANEL_POSITION=FIXED
+
+  Reasoning:
+  - F-28-02-002 names a specific defect: the unrecoverable lease wedge causing persistent denial of service. The merged repair removes that root cause — quarantine-and-continue gated on `owner_is_live()==false` — and you verified it end to end: merged via merge-base, dominant guard proven by mutation, allow-list necessity proven by mutation, before/after reproduced on real hardware.
+  - The fails-closed property holds: the quarantine allow-list is narrow (real directory only, symlink/file hard-errors) and nothing reads back out, so the repair adds no writable surface.
+  - The disclosure defect is a different vulnerability class (operator misinformation about un-revokable ACL grants), not the wedge DoS. The finding's claim — "permanently refuses all sandboxed execution" — is false after the repair, with or without disclosure.
+  - The counter-argument seals it: even zero disclosure strictly dominates the old state, which disclosed nothing AND denied service. The disclosure gap cannot make the system worse than the pre-repair baseline this finding describes.
+  - Disposition should track the finding's stated defect, not adjacent weaknesses. A finding is not a blanket hold on everything touched by its repair.
+  - The dead test `reclamation_reports_grants_it_could_not_revoke` plus the mutant-green disclosure branch is a real HIGH-adjacent issue — file it as a new finding rather than laundering it through F-28-02-002.
+
+To resume this session: kimi -r session_99042f69-628a-480f-acb8-0e8ce0bb487d

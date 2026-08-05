@@ -1,0 +1,31 @@
+=== SHAPE A / built-in generator, WITH a cleared Flux credential ===
+BINARY=wayland-core 0.12.25
+WAYLAND_HOME=/root/f27credA-dCOODO
+
+--- A1: default arm (no --model), the product's DEFAULT_IMAGE_MODEL ---
+WLRC_A1=1
+A1_STDOUT_BYTES=0
+A1_STDERR_BYTES=97
+A1_STDERR:
+wayland-core image: image generation failed: API error 401: {"error":{"message":"unauthorized"}}
+A1_ARTIFACT_BYTES=ABSENT
+
+--- A2: explicit --model flux-image (the arm this key is entitled to) ---
+WLRC_A2=0
+A2_STDERR:
+wrote /root/f27credA-dCOODO/a-flux.png (46216 bytes)
+A2_ARTIFACT_BYTES=46216
+A2_FILETYPE=JPEG image data, JFIF standard 1.01, aspect ratio, density 1x1, segment length 16, baseline, precision 8, 1024x1024, components 3
+
+--- ACCOUNTING SWEEP: anything cost-shaped anywhere in WAYLAND_HOME ---
+HOME_TREE:
+<HOME>/a2.out
+<HOME>/a-flux.png
+<HOME>/a1.out
+<HOME>/a2.err
+<HOME>/a1.err
+COST_GREP_STDOUT_STDERR:
+COST_GREP_RC=0
+COST_GREP_HOME (excluding image binaries):
+
+WLDONE_SHAPE_A

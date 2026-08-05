@@ -1,0 +1,172 @@
+### DISTILLED CAPTURE — deny-base.txt
+# Source: /root/deny-base.txt on hetzner-dsm (full capture retained there).
+# Full capture size: 20862 lines / 1351920 bytes. ~95% of it is warning[duplicate]
+# inverse-dependency trees (multiple-versions = warn), which carry no verdict.
+# Distilled with: grep -n '^error\[' -A 60 ; plus all warning[] headers and the final line.
+###
+
+--- counts (from the FULL capture) ---
+error[] blocks : 4
+warning[] blocks: 62
+  60 warning[duplicate]
+   1 warning[no-license-field]
+   1 warning[unlicensed]
+
+--- every error block, verbatim ---
+6208:error[unlicensed]: wcore-fixture-harness = 0.1.0 is unlicensed
+6209- ├ wcore-fixture-harness v0.1.0 (*)
+6210-
+6211-warning[duplicate]: found 2 duplicate entries for crate 'linux-raw-sys'
+6212-    ┌─ /root/wayland-29-deny/Cargo.lock:326:1
+6213-    │  
+6214-326 │ ╭ linux-raw-sys 0.4.15 registry+https://github.com/rust-lang/crates.io-index
+6215-327 │ │ linux-raw-sys 0.12.1 registry+https://github.com/rust-lang/crates.io-index
+6216-    │ ╰──────────────────────────────────────────────────────────────────────────┘ lock entries
+6217-    │  
+6218-    ├ linux-raw-sys v0.4.15
+6219-      └── rustix v0.38.44
+6220-          ├── system-interface v0.27.3
+6221-          │   └── wasmtime-wasi v36.0.12
+6222-          │       └── wcore-plugin-wasm v0.12.25
+6223-          │           └── wcore-agent v0.12.25
+6224-          │               ├── (dev) wcore-agent v0.12.25 (*)
+6225-          │               └── wcore-cli v0.12.25
+6226-          └── which v6.0.3
+6227-              ├── wcore-browser v0.12.25
+6228-              │   └── wcore-agent v0.12.25 (*)
+6229-              └── wcore-sandbox v0.12.25
+6230-                  ├── wcore-agent v0.12.25 (*)
+6231-                  ├── wcore-browser v0.12.25 (*)
+6232-                  ├── wcore-cli v0.12.25 (*)
+6233-                  ├── wcore-exec-backend v0.12.25
+6234-                  │   └── wcore-cli v0.12.25 (*)
+6235-                  ├── wcore-plugin-api v0.12.25
+6236-                  │   ├── wayland-browser v0.12.25
+6237-                  │   │   └── wcore-cli v0.12.25 (*)
+6238-                  │   ├── wayland-cua v0.12.25
+6239-                  │   │   └── wcore-cli v0.12.25 (*)
+6240-                  │   ├── wayland-honcho v0.12.25
+6241-                  │   │   ├── wcore-agent v0.12.25 (*)
+6242-                  │   │   ├── wcore-cli v0.12.25 (*)
+6243-                  │   │   └── wcore-honcho-adapter v0.12.25
+6244-                  │   │       └── wcore-agent v0.12.25 (*)
+6245-                  │   ├── wayland-ijfw v0.12.25
+6246-                  │   │   └── (dev) wcore-agent v0.12.25 (*)
+6247-                  │   ├── wayland-ollama v0.12.25
+6248-                  │   │   ├── (dev) wcore-agent v0.12.25 (*)
+6249-                  │   │   └── wcore-cli v0.12.25 (*)
+6250-                  │   ├── wcore-agent v0.12.25 (*)
+6251-                  │   ├── wcore-agents-pack v0.12.25
+6252-                  │   │   ├── wcore-agent v0.12.25 (*)
+6253-                  │   │   ├── wcore-cli v0.12.25 (*)
+6254-                  │   │   └── wcore-dispatch v0.12.25
+6255-                  │   │       ├── wcore-agent v0.12.25 (*)
+6256-                  │   │       └── wcore-skills v0.12.25
+6257-                  │   │           ├── wcore-agent v0.12.25 (*)
+6258-                  │   │           ├── wcore-cli v0.12.25 (*)
+6259-                  │   │           ├── wcore-eval v0.12.25
+6260-                  │   │           │   └── (dev) wcore-evolve v0.12.25
+6261-                  │   │           │       └── wcore-agent v0.12.25 (*)
+6262-                  │   │           └── wcore-evolve v0.12.25 (*)
+6263-                  │   ├── wcore-cli v0.12.25 (*)
+6264-                  │   ├── wcore-cua v0.12.25
+6265-                  │   │   └── wcore-agent v0.12.25 (*)
+6266-                  │   ├── wcore-plugin-subprocess v0.12.25
+6267-                  │   │   └── wcore-agent v0.12.25 (*)
+6268-                  │   ├── wcore-plugin-wasm v0.12.25 (*)
+--
+20771:error[unmaintained]: Bincode is unmaintained
+20772-   ┌─ /root/wayland-29-deny/Cargo.lock:58:1
+20773-   │
+20774-58 │ bincode 1.3.3 registry+https://github.com/rust-lang/crates.io-index
+20775-   │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ unmaintained advisory detected
+20776-   │
+20777-   ├ ID: RUSTSEC-2025-0141
+20778-   ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2025-0141
+20779-   ├ Due to a doxxing and harassment incident, the bincode team has taken the decision to cease development permanently.
+20780-     
+20781-     The team considers version 1.3.3 a complete version of bincode that is not in need of any updates.
+20782-     
+20783-     ## Alternatives to consider
+20784-     
+20785-     * [wincode](https://crates.io/crates/wincode)
+20786-     * [postcard](https://crates.io/crates/postcard)
+20787-     * [bitcode](https://crates.io/crates/bitcode)
+20788-     * [rkyv](https://crates.io/crates/rkyv)
+20789-   ├ Announcement: https://git.sr.ht/~stygianentity/bincode/tree/v3.0/item/README.md
+20790-   ├ Solution: No safe upgrade is available!
+20791-   ├ bincode v1.3.3
+20792-     └── syntect v5.3.0
+20793-         └── wcore-cli v0.12.25
+20794-
+20795:error[unmaintained]: proc-macro-error is unmaintained
+20796-    ┌─ /root/wayland-29-deny/Cargo.lock:429:1
+20797-    │
+20798-429 │ proc-macro-error 1.0.4 registry+https://github.com/rust-lang/crates.io-index
+20799-    │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ unmaintained advisory detected
+20800-    │
+20801-    ├ ID: RUSTSEC-2024-0370
+20802-    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2024-0370
+20803-    ├ proc-macro-error's maintainer seems to be unreachable, with no commits for 2 years, no releases pushed for 4 years, and no activity on the GitLab repo or response to email.
+20804-      
+20805-      proc-macro-error also depends on `syn 1.x`, which may be bringing duplicate dependencies into dependant build trees.
+20806-      
+20807-      ## Possible Alternative(s)
+20808-      
+20809-      - [manyhow](https://crates.io/crates/manyhow)
+20810-      - [proc-macro2-diagnostics](https://github.com/SergioBenitez/proc-macro2-diagnostics)
+20811-    ├ Announcement: https://gitlab.com/CreepySkeleton/proc-macro-error/-/issues/20
+20812-    ├ Solution: No safe upgrade is available!
+20813-    ├ proc-macro-error v1.0.4
+20814-      └── utoipa-gen v4.3.1
+20815-          └── utoipa v4.2.3
+20816-              └── wcore-acp v0.12.25
+20817-                  └── wcore-cli v0.12.25
+20818-
+20819:error[unmaintained]: `ttf-parser` is unmaintained
+20820-    ┌─ /root/wayland-29-deny/Cargo.lock:598:1
+20821-    │
+20822-598 │ ttf-parser 0.25.1 registry+https://github.com/rust-lang/crates.io-index
+20823-    │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ unmaintained advisory detected
+20824-    │
+20825-    ├ ID: RUSTSEC-2026-0192
+20826-    ├ Advisory: https://rustsec.org/advisories/RUSTSEC-2026-0192
+20827-    ├ The author of `ttf-parser` has stated that the crate is unmaintained and will not receive further fixes (see the referenced issue).
+20828-      
+20829-      ## Alternative(s)
+20830-      
+20831-      - [`skrifa`](https://crates.io/crates/skrifa), an actively maintained TrueType and OpenType font parsing crate, part of the Google Fonts "oxidize" (`fontations`) project.
+20832-    ├ Announcement: https://github.com/harfbuzz/ttf-parser/issues/217
+20833-    ├ Solution: No safe upgrade is available!
+20834-    ├ ttf-parser v0.25.1
+20835-      └── lopdf v0.42.0
+20836-          └── pdf-extract v0.12.0
+20837-              └── wcore-tools v0.12.25
+20838-                  ├── wcore-agent v0.12.25
+20839-                  │   ├── (dev) wcore-agent v0.12.25 (*)
+20840-                  │   └── wcore-cli v0.12.25
+20841-                  ├── wcore-browser v0.12.25
+20842-                  │   └── wcore-agent v0.12.25 (*)
+20843-                  ├── wcore-cli v0.12.25 (*)
+20844-                  ├── wcore-cua v0.12.25
+20845-                  │   └── wcore-agent v0.12.25 (*)
+20846-                  └── wcore-mcp v0.12.25
+20847-                      ├── wcore-agent v0.12.25 (*)
+20848-                      ├── wcore-cli v0.12.25 (*)
+20849-                      ├── (dev) wcore-eval-scenarios v0.12.25
+20850-                      │   └── (dev) wcore-cli v0.12.25 (*)
+20851-                      ├── (dev) wcore-mcp v0.12.25 (*)
+20852-                      ├── wcore-plugin-subprocess v0.12.25
+20853-                      │   └── wcore-agent v0.12.25 (*)
+20854-                      └── wcore-skills v0.12.25
+20855-                          ├── wcore-agent v0.12.25 (*)
+20856-                          ├── wcore-cli v0.12.25 (*)
+20857-                          ├── wcore-eval v0.12.25
+20858-                          │   └── (dev) wcore-evolve v0.12.25
+20859-                          │       └── wcore-agent v0.12.25 (*)
+20860-                          └── wcore-evolve v0.12.25 (*)
+20861-
+20862-advisories FAILED, bans ok, licenses FAILED, sources ok
+
+--- final verdict line ---
+advisories FAILED, bans ok, licenses FAILED, sources ok

@@ -1,0 +1,11 @@
+=== ToolUseId decl area ===
+no struct decl
+
+=== example constructions in agent src/tests ===
+  crates/wcore-agent/tests/engine_compact_test.rs:1031 ContentBlock::ToolUse { id: "big".to_string(), name: "mock_tool".to_string(), input: serde_json::json!({}), extra: None, }], ), Message::new( 
+  crates/wcore-agent/tests/policy_gate_test.rs:25 ContentBlock::ToolUse { id: id.into(), name: name.into(), input: json!({}), extra: None, } } fn registry_with_echo() -> ToolRegistry { let mut r = ToolRegistry::new(); r.register(Box::new(MockToo
+  crates/wcore-agent/tests/orchestration_test.rs:17 ContentBlock::ToolUse { id: id.to_string(), name: name.to_string(), input: json!({}), extra: None, } } fn make_pre_hook(name: &str, tool_match: &str, command: &str) -> HookDef { HookDef { nam
+  crates/wcore-agent/tests/orchestration_test.rs:540 ContentBlock::ToolUse { id: "call-modify".into(), name: "echo_input".into(), input: json!({"original": "yes"}), extra: None, }]; let confirmer = auto_approve_confirmer(); let results = execute_to
+  crates/wcore-agent/tests/output_compaction_test.rs:39 ContentBlock::ToolUse { id: id.to_string(), name: name.to_string(), input: json!({}), extra: None, } } fn extract_tool_result_content(blocks: &[ContentBlock]) -> &str { for block in blocks { 
+  crates/wcore-agent/tests/plan_e2e_test.rs:195 ContentBlock::ToolUse { id: id.clone(), name: "Read".to_string(), input: json!({}), extra: None, }], )); messages.push(Message::new( Rol
+  crates/wcore-agent/tests/tool_chunk_streaming.rs:61 ContentBlock::ToolUse { id: id.into(), name: "Bash".into(), input: json!({"command": command}), extra: None, } } #[tokio::test] async fn bash_emits_tool_chunks_when_streaming_advertised() { let regis

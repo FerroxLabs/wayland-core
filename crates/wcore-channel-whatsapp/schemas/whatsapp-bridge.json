@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsappBridgeChannelConfig",
+  "description": "TOML config for one wcore-channel-whatsapp instance driven through the Wayland Desktop WhatsApp bridge (Node subprocess, JSON-RPC 2.0 over stdio). OPT-IN: a channel with no `backend` key, or `backend = \"meta-business\"`, uses the native Cloud API adapter and needs no Node. Carries no secrets — the bridged backends authenticate by QR pairing and persist their own session material under session_dir.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "backend",
+    "bridge_path"
+  ],
+  "properties": {
+    "backend": {
+      "type": "string",
+      "enum": ["baileys", "whatsapp-web"],
+      "description": "Which bridged backend to drive. Both are UNOFFICIAL WhatsApp Web clients: Meta does not support them and bans accounts for automated use — see docs/whatsapp-bridge.md. `meta-business` is deliberately absent from this enum: it is served by the native Cloud API adapter (WhatsappChannelConfig), not through the bridge."
+    },
+    "bridge_path": {
+      "type": "string",
+      "description": "Absolute path to the operator's bridge.js. wayland-core does not ship, download or install the bridge; this path must name an existing file whose Node dependencies are already installed."
+    },
+    "node_path": {
+      "type": "string",
+      "description": "Explicit Node interpreter to run the bridge with. When unset, `node` is resolved from PATH (PATHEXT is honoured on Windows). When neither resolves, the channel fails closed naming node_runtime and never reports healthy."
+    },
+    "session_dir": {
+      "type": "string",
+      "description": "Directory the bridge persists pairing and session material under, passed as --session. When unset, the bridge chooses its own default beneath the user's home directory."
+    },
+    "workspace_name": {
+      "type": "string",
+      "description": "Human-readable label. Used for logging only.",
+      "default": ""
+    },
+    "default_recipient": {
+      "type": "string",
+      "description": "Fallback WhatsApp chat id used when an OutgoingMessage arrives with an empty conversation_id. For the bridged backends this is a JID (e.g. 15555550100@s.whatsapp.net), not an E.164 number.",
+      "default": ""
+    },
+    "handshake_timeout_secs": {
+      "type": "integer",
+      "description": "Seconds to wait for the `health` handshake that confirms which backend the bridge actually loaded. Node cold start on a loaded host is not fast.",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 300
+    },
+    "rpc_timeout_secs": {
+      "type": "integer",
+      "description": "Seconds to wait for any other RPC reply before giving up on it.",
+      "default": 60,
+      "minimum": 1,
+      "maximum": 600
+    }
+  }
+}

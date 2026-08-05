@@ -1,0 +1,24 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/f14_sigkill_recovery.rs (target/debug/deps/f14_sigkill_recovery-0c2c7646b8296b33)
+
+running 1 test
+
+thread 'isolated_profile_without_secure_store_fails_before_turn_or_provider_intent' (2143080) panicked at crates/wcore-cli/tests/f14_sigkill_recovery.rs:204:9:
+assertion `left == right` failed: packaged Core opened a different session: {"capabilities":{"cost_attribution":true,"current_mode":"default","effort":false,"effort_levels":[],"mcp":false,"memory_enabled":true,"modes":["default","auto_edit","force"],"plugins":true,"sub_agent_traces":true,"thinking":false,"tool_approval":true,"user_model_backend":"local"},"contract":{"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","durable_goals_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"},"fixture_digest":"sha256:eb3f72074f894226c2f6874f88558a0a61ddb9dc146c737786667a2607c123e2","generator":"wcore-desktop-contract-gen/11","major":1,"minor":10,"name":"wayland-desktop-core","schema_digest":"sha256:217c15c13a057c53c8c077854c0948877ed0f890eb9c3d6e113ad43a6b23a1c4","source_inputs_digest":"sha256:da3aa11425a938cef30c97d1eb9ed240286ee63dff7579d54e6eb30bdb5d413c"},"execution_policy":{"contract_version":"1.0","critical":true,"effective_at_unix_ms":1785426275718,"policy":{"approvals":"prompt","managed_floor_active":false,"posture":"smart","sandbox":"required","source":"desktop_local_launch"},"reason":"launch","revision":0},"type":"ready","version":"0.12.25"}
+  left: None
+ right: Some("f1400000000000000000000000000000")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test isolated_profile_without_secure_store_fails_before_turn_or_provider_intent ... FAILED
+
+failures:
+
+failures:
+    isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.32s
+
+error: test failed, to rerun pass `-p wcore-cli --test f14_sigkill_recovery`
+WLRC=101
+WLDONE

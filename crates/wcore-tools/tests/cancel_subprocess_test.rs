@@ -31,25 +31,25 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use wcore_config::shell::{shell_command_argv, shell_command_builder};
+use wcore_sandbox::SandboxRegistry;
+use wcore_sandbox::backends::no_sandbox::NoSandboxBackend;
 use wcore_tools::bash::BashTool;
 use wcore_tools::context::ToolContext;
 use wcore_tools::vfs::RealFs;
 use wcore_tools::{NullToolOutputSink, Tool};
 
-/// kill(pid, 0) is the canonical "does this process exist?" probe.
-/// Returns true iff the PID still exists (alive OR zombie).
+/// Is `pid` still RUNNING?
+///
+/// The previous implementation was `kill(pid, 0)`, and its own doc comment
+/// said it returned true for "alive OR zombie" — the defect was known here and
+/// written down rather than fixed. A cancellation test whose liveness probe
+/// counts a corpse as a survivor cannot tell a cancel that worked from one
+/// that did not. Now delegates to the one zombie-aware probe;
+/// `Indeterminate` (EPERM) still counts as alive, which preserves the
+/// conservative behaviour the old EPERM branch was written for.
+/// See `.planning/ZOMBIE-PROBE.md`.
 fn pid_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) has no side effects — it tests permission +
-    // existence only. Pid is non-zero so we won't accidentally target a
-    // process group.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if rc == 0 {
-        return true;
-    }
-    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    // ESRCH = gone. Everything else (EPERM is the common case) means
-    // the pid exists but we lack signal permission.
-    errno != libc::ESRCH
+    wcore_types::process_liveness::process_is_alive(pid)
 }
 
 async fn wait_for_pid_gone(pid: u32, deadline: Duration) -> bool {
@@ -152,16 +152,10 @@ async fn unkilled_command_survives_drop_negative_control() {
 /// `tokio::select!` race + helper-applied kill_on_drop reaping the
 /// child as the execute future drops.
 #[tokio::test]
-#[serial_test::serial]
 async fn bash_tool_returns_promptly_when_cancelled_mid_sleep() {
-    // Exercise the cancel path through a real exec, not the sandbox's
-    // fail-closed refusal (bwrap can't spawn in an unprivileged CI
-    // container). Opt into the documented no-sandbox degraded mode.
-    // SAFETY: test-only env mutation; `#[serial]` prevents env races.
-    unsafe {
-        std::env::set_var("WAYLAND_SANDBOX", "none");
-        std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
-    }
+    // Inject the exact backend under test. ToolContext defaults fail closed,
+    // so process-global environment toggles cannot prove this execution path.
+    let sandbox = Arc::new(SandboxRegistry::new(Arc::new(NoSandboxBackend::new())));
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
@@ -174,7 +168,8 @@ async fn bash_tool_returns_promptly_when_cancelled_mid_sleep() {
         Arc::new(RealFs),
         None,
         Arc::new(NullToolOutputSink),
-    );
+    )
+    .with_sandbox(sandbox);
 
     let start = Instant::now();
     let result = BashTool

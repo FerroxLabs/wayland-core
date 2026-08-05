@@ -357,6 +357,7 @@ impl<'a> PluginLoader<'a> {
                 let record = self
                     .dispatch_one_on_disk(
                         &manifest_path,
+                        &root,
                         &allowed_roots,
                         trust_unsigned,
                         &union_keys,
@@ -389,6 +390,7 @@ impl<'a> PluginLoader<'a> {
     async fn dispatch_one_on_disk(
         &self,
         manifest_path: &Path,
+        plugins_root: &Path,
         allowed_roots: &[PathBuf],
         trust_unsigned: bool,
         union_keys: &[(VerifyingKey, KeySource)],
@@ -505,6 +507,33 @@ impl<'a> PluginLoader<'a> {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+
+        // F25-04 — the approval gate. Deliberately placed BEFORE any runtime
+        // dispatch: an unapproved plugin must never reach a spawn, a wasm
+        // compile, or a hook registration. The verdict is computed by
+        // `wcore_config::plugin_governance`, the SAME code `wayland-core plugin
+        // approve` writes against, so there is exactly one answer to "is this
+        // plugin approved?" rather than one per crate.
+        match wcore_config::plugin_governance::evaluate(plugins_root, &plugin_name, &plugin_dir) {
+            wcore_config::plugin_governance::GateVerdict::NotGoverned => {}
+            wcore_config::plugin_governance::GateVerdict::Approved { digest } => {
+                tracing::debug!(
+                    plugin = %plugin_name,
+                    digest = %wcore_config::plugin_governance::short(&digest),
+                    "plugin approval verified"
+                );
+            }
+            wcore_config::plugin_governance::GateVerdict::Refused { reason } => {
+                return OnDiskDispatchRecord {
+                    manifest_path: manifest_path.to_path_buf(),
+                    plugin_name,
+                    tool_namespace,
+                    dispatch,
+                    load_result: Err(reason),
+                    handle: LoadedRuntimeHandle::None,
+                };
+            }
+        }
         // v0.6.5 Task 6B.4 — gather the raw declared relative path so we can
         // run the path-traversal check before resolving to an absolute path
         // and before signature verification.

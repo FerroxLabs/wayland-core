@@ -29,6 +29,16 @@ use wcore_config::credentials::CredentialsStore;
 
 pub use wcore_channels::auto_register::{ChannelFactory as Factory, ChannelLoadError as LoadError};
 
+/// The channel runtime this registry loads into, re-exported.
+///
+/// F24-03. `wayland-core channel` and `gateway run` need the manager, the
+/// health projection and the probe report, and they already depend on this
+/// crate to construct adapters at all. Re-exporting is how they reach those
+/// types WITHOUT `wcore-cli` growing a second direct edge to `wcore-channels`
+/// — a new dependency edge rewrites `Cargo.lock`, which is a Phase-24 shared
+/// seam that concurrent lanes conflict on deterministically.
+pub use wcore_channels;
+
 /// Look up the constructor for a given platform string. Returns `None`
 /// for any platform the registry doesn't know about — callers should
 /// log + skip rather than crash so a single rogue config can't take
@@ -42,7 +52,7 @@ pub fn channel_factory_for(platform: &str) -> Option<ChannelFactory> {
         "sms" => Some(make_sms),
         "whatsapp" => Some(make_whatsapp),
         "signal" => Some(make_signal),
-        // F-045 (W7-M): new channel adapters ported from desktop OpenClaw fork.
+        // F-045 (W7-M): channel adapters matching the desktop app's set.
         "matrix" => Some(make_matrix),
         "msteams" => Some(make_msteams),
         // iMessage is macOS-only; return None on other platforms so the
@@ -131,11 +141,39 @@ fn make_sms(
     )))
 }
 
+/// WhatsApp has two transports behind one platform string.
+///
+/// The `backend` key selects. Absent or `meta-business` → the native Cloud API
+/// adapter over HTTPS, which is the default and needs no Node. `baileys` or
+/// `whatsapp-web` → the OPT-IN Node bridge subprocess. Anything else is
+/// REJECTED here rather than defaulted: `bridge.js` itself falls back to
+/// `baileys` on an unrecognised `--backend`, so a typo that reached the
+/// subprocess would put an operator's personal WhatsApp number on the wire.
 fn make_whatsapp(
     name: String,
     options: &toml::Table,
     credentials: Arc<dyn CredentialsStore>,
 ) -> Result<Box<dyn Channel>, ChannelLoadError> {
+    use std::str::FromStr;
+    use wcore_channel_whatsapp::WhatsappBackend;
+
+    let backend = match options.get("backend") {
+        Some(v) => {
+            let raw = v.as_str().ok_or_else(|| {
+                ChannelLoadError::Config("whatsapp `backend` must be a string".to_string())
+            })?;
+            WhatsappBackend::from_str(raw).map_err(|e| ChannelLoadError::Config(e.to_string()))?
+        }
+        None => WhatsappBackend::default(),
+    };
+
+    if backend.is_bridged() {
+        let cfg: wcore_channel_whatsapp::WhatsappBridgeConfig = parse_options(options)?;
+        return Ok(Box::new(
+            wcore_channel_whatsapp::WhatsappBridgeChannel::new(name, cfg),
+        ));
+    }
+
     let cfg: wcore_channel_whatsapp::WhatsappConfig = parse_options(options)?;
     Ok(Box::new(wcore_channel_whatsapp::WhatsappChannel::new(
         name,
@@ -284,7 +322,13 @@ pub async fn auto_register_from_dir(
                 continue;
             }
         };
-        let cfg: ChannelConfig = match toml::from_str(&body) {
+        // Through the shared parser, not `toml::from_str`, so the removed
+        // `[secrets]` table produces its named migration here as well.
+        // This is the load path `gateway run` and `channel probe` use, so it
+        // is the one that matters most; a first pass wired only
+        // `scan_channel_summaries` (i.e. `channel list`) and a live run caught
+        // probe still emitting serde's generic `unknown field \`secrets\``.
+        let cfg: ChannelConfig = match wcore_channels::parse_channel_config(&name, &body) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -368,8 +412,16 @@ pub struct ChannelSummary {
     pub known_platform: bool,
     /// The configured `[options]` key names (no values).
     pub option_keys: Vec<String>,
-    /// The referenced `[secrets]` key names (no values).
-    pub secret_keys: Vec<String>,
+    /// Every credentials-store handle this config refers to, as
+    /// `(dotted option path, handle)` — e.g.
+    /// `("credential_handle_bot_token", "slack.acme.bot_token")`.
+    ///
+    /// Replaces the removed `secret_keys`, which summarised the inert
+    /// `[secrets]` table. A handle is **not** a secret — it is the lookup
+    /// key, and the adapters already print it in their own "not found at
+    /// credential_handle …" errors — so listing it here leaks nothing and
+    /// is what tells an operator which credentials they still owe.
+    pub credential_handles: Vec<(String, String)>,
     /// `Some(message)` if the file could not be read/parsed — surfaced so a
     /// broken config is visible rather than silently absent.
     pub parse_error: Option<String>,
@@ -404,7 +456,7 @@ pub fn scan_channel_summaries(dir: &Path) -> Vec<ChannelSummary> {
             enabled: false,
             known_platform: false,
             option_keys: Vec::new(),
-            secret_keys: Vec::new(),
+            credential_handles: Vec::new(),
             parse_error: Some(msg),
         };
         let body = match std::fs::read_to_string(&path) {
@@ -414,19 +466,22 @@ pub fn scan_channel_summaries(dir: &Path) -> Vec<ChannelSummary> {
                 continue;
             }
         };
-        match toml::from_str::<ChannelConfig>(&body) {
+        // Routed through the shared parser so a legacy `[secrets]` table
+        // surfaces its named migration message here too — `channel list` is
+        // where an operator looks first when a channel will not load, and
+        // the generic serde line is what sent the UAT round-tripping.
+        match wcore_channels::parse_channel_config(&stem, &body) {
             Ok(cfg) => {
                 let mut option_keys: Vec<String> = cfg.options.keys().cloned().collect();
                 option_keys.sort();
-                let mut secret_keys: Vec<String> = cfg.secrets.keys().cloned().collect();
-                secret_keys.sort();
+                let credential_handles = wcore_channels::credential_handles(&cfg.options);
                 out.push(ChannelSummary {
                     known_platform: channel_factory_for(&cfg.platform).is_some(),
                     name: cfg.name,
                     platform: cfg.platform,
                     enabled: cfg.enabled,
                     option_keys,
-                    secret_keys,
+                    credential_handles,
                     parse_error: None,
                 });
             }
@@ -486,12 +541,15 @@ mod tests {
     #[test]
     fn scan_summaries_reports_status_and_never_leaks_secret_values() {
         let dir = TempDir::new().unwrap();
-        // Known platform, enabled, with options + a secret reference.
+        // Known platform, enabled, with options + a credential handle.
+        // `SECRETVALUE` is the *handle*, not the secret: the assertion at the
+        // end of this test is that no VALUE leaks, and the store is never
+        // opened here, so nothing in this scan can carry one.
         std::fs::write(
             dir.path().join("myslack.toml"),
             "name = \"myslack\"\nplatform = \"slack\"\nenabled = true\n\
              [options]\nchannel = \"#general\"\n\
-             [secrets]\nbot_token = \"keychain:slack:SECRETVALUE\"\n",
+             credential_handle_bot_token = \"slack.myslack.bot_token\"\n",
         )
         .unwrap();
         // Known platform but disabled.
@@ -508,6 +566,17 @@ mod tests {
         .unwrap();
         // Unparseable file — must surface as a parse_error, not vanish.
         std::fs::write(dir.path().join("broken.toml"), "name = = not valid").unwrap();
+        // A config still carrying the REMOVED `[secrets]` table. Two jobs: it
+        // is the known-positive that keeps the leak assertion below alive
+        // (`SECRETVALUE` genuinely appears on disk, so a dump that contained
+        // it would really be a leak), and it proves the named migration
+        // message reaches `channel list` rather than only the loader.
+        std::fs::write(
+            dir.path().join("legacy.toml"),
+            "name = \"legacy\"\nplatform = \"slack\"\n\
+             [secrets]\nbot_token = \"keychain:slack:SECRETVALUE\"\n",
+        )
+        .unwrap();
 
         let summaries = scan_channel_summaries(dir.path());
         let by = |n: &str| {
@@ -521,7 +590,14 @@ mod tests {
         assert_eq!(slack.platform, "slack");
         assert!(slack.known_platform && slack.enabled);
         assert!(slack.option_keys.contains(&"channel".to_string()));
-        assert!(slack.secret_keys.contains(&"bot_token".to_string()));
+        assert_eq!(
+            slack.credential_handles,
+            vec![(
+                "credential_handle_bot_token".to_string(),
+                "slack.myslack.bot_token".to_string()
+            )],
+            "the handle a config expects is what tells an operator what to store"
+        );
 
         assert!(!by("mytg").enabled, "disabled channel must read disabled");
         assert!(
@@ -533,8 +609,25 @@ mod tests {
             "the broken file must surface a parse_error"
         );
 
-        // The secret VALUE must never appear anywhere in the summaries — only
-        // the key NAME (`bot_token`) is surfaced.
+        // The removed `[secrets]` table must reach `channel list` as the named
+        // migration, not as serde's generic `unknown field` line.
+        let legacy = by("legacy")
+            .parse_error
+            .clone()
+            .expect("a [secrets] config must surface a parse_error");
+        assert!(
+            legacy.contains("[secrets]") && legacy.contains("channel credential set"),
+            "the migration must be named and actionable, got: {legacy}"
+        );
+        assert!(
+            !legacy.contains("unknown field"),
+            "the named error must win over deny_unknown_fields, got: {legacy}"
+        );
+
+        // The secret VALUE must never appear anywhere in the summaries. This
+        // is only meaningful because `legacy.toml` above really does contain
+        // `SECRETVALUE` on disk — without that known-positive the assertion
+        // would pass on an empty scan.
         let dump = format!("{summaries:?}");
         assert!(
             !dump.contains("SECRETVALUE"),
@@ -551,6 +644,124 @@ mod tests {
                 channel_factory_for(platform).is_some(),
                 "missing factory for {platform}"
             );
+        }
+    }
+
+    /// Build the options table a whatsapp channel is constructed from.
+    /// `backend` is inserted only when `Some`, so the absent case is testable.
+    fn whatsapp_options(backend: Option<&str>) -> toml::Table {
+        let mut t = toml::Table::new();
+        if let Some(b) = backend {
+            t.insert("backend".into(), toml::Value::String(b.into()));
+        }
+        match backend {
+            Some("baileys") | Some("whatsapp-web") => {
+                t.insert(
+                    "bridge_path".into(),
+                    toml::Value::String("/definitely/not/here/bridge.js".into()),
+                );
+            }
+            _ => {
+                t.insert("workspace_name".into(), toml::Value::String("acme".into()));
+                t.insert("phone_number_id".into(), toml::Value::String("1".into()));
+                t.insert(
+                    "credential_handle_access_token".into(),
+                    toml::Value::String("k1".into()),
+                );
+                t.insert(
+                    "credential_handle_app_secret".into(),
+                    toml::Value::String("k2".into()),
+                );
+            }
+        }
+        t
+    }
+
+    /// The whatsapp backend selector must actually SELECT — three positive
+    /// cases and one rejection, so neither direction is assumed.
+    #[test]
+    fn whatsapp_backend_selector_routes_and_rejects() {
+        let factory = channel_factory_for("whatsapp").expect("whatsapp factory");
+        let creds = creds();
+
+        // Absent `backend` → the Cloud API adapter. This is the opt-in
+        // guarantee: every config written before the bridge existed keeps
+        // working with no Node installed.
+        let ch = factory(
+            "wa-cloud".into(),
+            &whatsapp_options(None),
+            Arc::clone(&creds),
+        )
+        .expect("a backend-less whatsapp config must still construct");
+        assert_eq!(ch.platform(), "whatsapp");
+
+        // Explicit `meta-business` → the same adapter.
+        factory(
+            "wa-cloud2".into(),
+            &whatsapp_options(Some("meta-business")),
+            Arc::clone(&creds),
+        )
+        .expect("meta-business must construct the Cloud API adapter");
+
+        // `baileys` → the bridge adapter. Construction must SUCCEED even
+        // though the bridge is absent: the failure belongs at start()/probe(),
+        // named, not at boot.
+        factory(
+            "wa-personal".into(),
+            &whatsapp_options(Some("baileys")),
+            Arc::clone(&creds),
+        )
+        .expect("baileys must construct even with no bridge on disk");
+
+        // An unknown backend is REJECTED, not defaulted.
+        // `Box<dyn Channel>` is not `Debug`, so unwrap the error by hand.
+        let err = expect_construct_err(
+            factory(
+                "wa-typo".into(),
+                &whatsapp_options(Some("baileyz")),
+                Arc::clone(&creds),
+            ),
+            "an unknown backend must be rejected, never defaulted",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("baileyz"),
+            "the rejection must echo the typo: {msg}"
+        );
+        assert!(
+            msg.contains("meta-business"),
+            "the rejection must name the valid options: {msg}"
+        );
+    }
+
+    /// A bridged whatsapp config missing its required key must fail to
+    /// construct — the control proving the bridge arm parses its own schema
+    /// rather than accepting anything.
+    #[test]
+    fn whatsapp_bridge_config_requires_a_bridge_path() {
+        let factory = channel_factory_for("whatsapp").expect("whatsapp factory");
+        let mut opts = toml::Table::new();
+        opts.insert("backend".into(), toml::Value::String("baileys".into()));
+        let err = expect_construct_err(
+            factory("wa".into(), &opts, creds()),
+            "bridge_path is required",
+        );
+        assert!(
+            err.to_string().contains("bridge_path"),
+            "the error must name the missing key: {err}"
+        );
+    }
+
+    /// `Box<dyn Channel>` is not `Debug`, so `Result::expect_err` is
+    /// unavailable on a factory result. Unwrap the error by hand, and panic
+    /// loudly if a construction that must fail instead succeeded.
+    fn expect_construct_err(
+        result: Result<Box<dyn Channel>, ChannelLoadError>,
+        msg: &str,
+    ) -> ChannelLoadError {
+        match result {
+            Ok(ch) => panic!("{msg} — but it constructed a {:?} channel", ch.platform()),
+            Err(e) => e,
         }
     }
 

@@ -1,0 +1,161 @@
+{
+  "run_id": "551b4439",
+  "started_at": "2026-07-28T20:55:37.831Z",
+  "legs": [
+    {
+      "leg": "A",
+      "verdict": "SERVICE WINS FROM BEHIND",
+      "session_pid": 3337956,
+      "gateway_pid": 3350595,
+      "session_owned_first": true,
+      "window_session_alone": {
+        "label": "legA/W1 session alone",
+        "start": "2026-07-28T20:56:22.973Z",
+        "end": "2026-07-28T20:56:32.158Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3337956
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3337956"
+        }
+      },
+      "window_gateway_owns": {
+        "label": "legA/W2 gateway owns",
+        "start": "2026-07-28T20:56:48.704Z",
+        "end": "2026-07-28T20:56:57.895Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3350595
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3350595"
+        }
+      },
+      "session_emitted_yield_token": true,
+      "gateway_emitted_acquire_token": true,
+      "delivered_while_session_owned": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 12
+      },
+      "delivered_after_handover": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 34
+      },
+      "session_still_alive_at_measurement": true,
+      "gateway_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legA session": 21424,
+        "legA gateway": 9697
+      }
+    },
+    {
+      "leg": "B",
+      "verdict": "SERVICE KEEPS IT",
+      "gateway_pid": 3356349,
+      "session_pid": 3358778,
+      "gateway_owned_first": true,
+      "window_gateway_alone": {
+        "label": "legB/W1 gateway alone",
+        "start": "2026-07-28T20:56:58.202Z",
+        "end": "2026-07-28T20:57:07.386Z",
+        "maxOpen": 1,
+        "polls": 7,
+        "pids": [
+          3356349
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3356349"
+        }
+      },
+      "window_both_alive": {
+        "label": "legB/W2 both alive",
+        "start": "2026-07-28T20:57:55.791Z",
+        "end": "2026-07-28T20:58:04.975Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3356349
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3356349"
+        }
+      },
+      "session_emitted_observer_token": true,
+      "gateway_yielded_wrongly": false,
+      "session_acquired_wrongly": false,
+      "delivered_to_gateway": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 98
+      },
+      "session_still_alive_at_measurement": true,
+      "gateway_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legB gateway": 8425,
+        "legB session": 13959
+      }
+    },
+    {
+      "leg": "D",
+      "verdict": "LIVE OBSERVER TOOK OVER",
+      "gateway_pid": 3372003,
+      "session_pid": 3372116,
+      "gateway_owned_first": true,
+      "session_was_a_live_observer_before_the_kill": true,
+      "killed_at": "2026-07-28T20:58:43.336Z",
+      "session_emitted_acquire_token": true,
+      "session_alive_after_the_kill": true,
+      "nothing_was_started_after_the_kill": true,
+      "window_after_takeover": {
+        "label": "legD/W after takeover",
+        "start": "2026-07-28T20:58:48.076Z",
+        "end": "2026-07-28T20:58:57.260Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3372116
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3372116"
+        }
+      },
+      "delivered_after_takeover": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 144
+      },
+      "log_bytes": {
+        "legD gateway": 5119,
+        "legD session": 14860
+      }
+    },
+    {
+      "leg": "C",
+      "verdict": "NOTHING LOST",
+      "submitted_total": 4,
+      "delivered_total": 4,
+      "never_delivered": [],
+      "served_more_than_once": [],
+      "still_pending_at_end": []
+    }
+  ],
+  "instrument": {
+    "fault": false,
+    "reasons": []
+  },
+  "llm_stub_hits": 3,
+  "poll_total": 144,
+  "conn_samples": 184,
+  "ss_available": true,
+  "finished_at": "2026-07-28T20:58:57.420Z"
+}

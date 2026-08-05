@@ -1,0 +1,53 @@
+  · fixture up on http://127.0.0.1:43265 (ephemeral port — no cross-lane collision)
+  · IDENTIFYed after ~750ms (tcp=5 live=1)
+  · sent f24rc-0c425c-before-1 (phase=before expect=reply) -> 1 socket(s)
+  · sent f24rc-0c425c-before-2 (phase=before expect=reply) -> 1 socket(s)
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  awaiting pre-drop control: 0/2
+  · pre-drop control: 0/2 replied — BUDGET EXPIRED after 60000ms
+FAIL pre-drop-control — 0/2 replied; each dispatch reached 1/1 socket(s). KNOWN-POSITIVE: if this is not full, no zero anywhere else in this run is readable.
+PASS upstream-drop-really-happened — destroyed 1 socket(s) with no WS close frame; live_gateway_connections 1 -> 0. Confirmed from the fixture journal, not assumed — a probe that grades a disconnect it cannot confirm grades an event that may never have occurred.
+  · sent f24rc-0c425c-during-3 (phase=during expect=reply) -> 0 socket(s)
+  · sent f24rc-0c425c-during-4 (phase=during expect=reply) -> 0 socket(s)
+  · sent f24rc-0c425c-during-decoy-5 (phase=during-decoy expect=silence) -> 0 socket(s)
+PASS adapter-reconnected — back after ~750ms via RESUME (+1); total gateway connections 1 -> 2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  awaiting gap messages: 0/2
+  · gap messages: 0/2 replied — BUDGET EXPIRED after 60000ms
+  · sent f24rc-0c425c-after-6 (phase=after expect=reply) -> 1 socket(s)
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  awaiting post-reconnect control: 0/1
+  · post-reconnect control: 0/1 replied — BUDGET EXPIRED after 60000ms
+FAIL post-reconnect-control — 0/1 replied. KNOWN-POSITIVE #2: proves the adapter is ALIVE after the drop, so a zero on the gap messages cannot be explained by a dead adapter.
+FAIL gap-messages-survive-the-upstream-drop — 0/2 of the messages delivered DURING the disconnect window produced a turn. Each reached 0/0 live socket(s) at dispatch time (0 = there really was no connection). fixture replayed 3 message(s) on RESUME. lost=[f24rc-0c425c-before-1,f24rc-0c425c-before-2,f24rc-0c425c-during-3,f24rc-0c425c-during-4,f24rc-0c425c-after-6]
+PASS no-duplicate-turns-around-the-window — duplicated=[] over 5 expected-reply tokens. Fixture-side raw deliveries 6 vs 6 dispatches (a raw duplicate the product deduped is visible here even when the turn count is 1).
+PASS decoy-and-phantom-score-zero — decoy (non-allowlisted sender, dispatched INSIDE the window) and phantom (never dispatched) both scored zero: leaked=[]. This is what makes the zeros above measurements rather than free.
+
+F24RECONNECT FAIL legs=4/7 lost=5 duplicated=0 leaked=0 mode=measurement

@@ -1,0 +1,20 @@
+EVIDENCE ID : F05-NEG-PERSISTS@2ecdfdf5
+LEDGER ROW  : 12
+ARTIFACT    : `phases/27-multimodal-browser-generation-voice/evidence/27-01/OBS-RAW.log` — the shipped binary's own capability-activation stream at SHA `2ecdfdf5`, host `Ubuntu-2404-noble-amd64-base`, version `wayland-core 0.12.25`. **18 observations of `{"capability":"delegate_isolation","stage":"unavailable","reason":"isolation_not_enforced"}`.** Corroborated on Windows at `phases/25-remote-reach-nodes-plugin-lifecycle/evidence/25-02-win-pos-approved.txt:107` and `25-02-win-neg-unapproved.txt:98` (2026-07-27; that artifact does not assert its own SHA)
+
+== PATH RESOLUTION ==
+[OK]   stat phases/27-multimodal-browser-generation-voice/evidence/27-01/OBS-RAW.log
+       -> .planning/phases/27-multimodal-browser-generation-voice/evidence/27-01/OBS-RAW.log  size=350805
+       head:
+F27 INTAKE OBSERVATIONS
+BIN: /root/wayland-p27/target/release/wayland-core
+SHA: 2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+HOST: Ubuntu-2404-noble-amd64-base
+VERSION: wayland-core 0.12.25
+
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 2ecdfdf5 -> commit
+       git log -1 2ecdfdf5 -> 2ecdfdf54ff7fda920eec7d068337006e5da4ee4 2026-07-26 docs(d1): re-pin section 3 as an explicit contract bump
+
+== VERDICT == CONFIRMED

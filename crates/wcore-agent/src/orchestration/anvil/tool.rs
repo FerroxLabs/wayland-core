@@ -14,37 +14,28 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use wcore_config::anvil::AnvilConfig;
 use wcore_config::config::Config;
-use wcore_protocol::events::{ProtocolEvent, ToolCategory};
-use wcore_protocol::writer::ProtocolEmitter;
+use wcore_protocol::events::ToolCategory;
+use wcore_sandbox::SandboxRegistry;
 use wcore_tools::Tool;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_tools::context::ToolContext;
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
+use super::engine::LandingReport;
 use super::forge::drive_climb_full;
-
-/// Captures the climb's protocol events (the `AnvilReceipt`) so the receipt
-/// can ride back inside the tool result instead of being written to stdout —
-/// a raw JSON line on stdout would corrupt the interactive TUI. Host-stream
-/// re-emission of captured receipts is a documented follow-up.
-struct CapturedEmitter(Mutex<Vec<String>>);
-
-impl ProtocolEmitter for CapturedEmitter {
-    fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
-        if let Ok(line) = serde_json::to_string(event) {
-            self.0.lock().push(line);
-        }
-        Ok(())
-    }
-}
+use crate::output::OutputSink;
+use crate::spawner::AgentSpawner;
 
 /// The session-level gated-forge tool.
 pub struct ForgeTool {
     anvil: AnvilConfig,
     session_cfg: Config,
+    egress_policy: wcore_egress::SharedPolicy,
+    session_spawner: Arc<AgentSpawner>,
+    output: Arc<dyn OutputSink>,
 }
 
 impl ForgeTool {
@@ -52,8 +43,187 @@ impl ForgeTool {
     /// config (used to materialize the driver seat lazily, per call — key
     /// state is read when the forge actually runs, not at registration).
     #[must_use]
-    pub fn new(anvil: AnvilConfig, session_cfg: Config) -> Self {
-        Self { anvil, session_cfg }
+    pub fn new(
+        anvil: AnvilConfig,
+        session_cfg: Config,
+        egress_policy: wcore_egress::SharedPolicy,
+        session_spawner: Arc<AgentSpawner>,
+        output: Arc<dyn OutputSink>,
+    ) -> Self {
+        Self {
+            anvil,
+            session_cfg,
+            egress_policy,
+            session_spawner,
+            output,
+        }
+    }
+
+    async fn execute_with_sandbox(
+        &self,
+        input: Value,
+        sandbox: Arc<SandboxRegistry>,
+        task_id: String,
+    ) -> ToolResult {
+        let Some(task) = input.get("task").and_then(Value::as_str) else {
+            return ToolResult {
+                content: "Forge requires a `task` string.".into(),
+                is_error: true,
+            };
+        };
+
+        // Materialize the driver seat lazily — key state as of NOW.
+        let seat = match super::seat::materialize_driver_seat(
+            &self.anvil,
+            &self.session_cfg,
+            Arc::clone(&self.egress_policy),
+            &self.session_spawner,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Forge could not build a driver seat: {e}"),
+                    is_error: true,
+                };
+            }
+        };
+
+        let workspace = match std::env::current_dir() {
+            Ok(w) => w,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Forge could not resolve the workspace: {e}"),
+                    is_error: true,
+                };
+            }
+        };
+
+        // Valve seat (spec §6.4): the session/frontier model, read-only, one
+        // diagnostic turn on a stall. Best-effort — a forge without a valve
+        // is still a forge.
+        let valve_seat = super::seat::materialize_valve_seat(
+            &self.session_cfg,
+            Arc::clone(&self.egress_policy),
+            &self.session_spawner,
+        )
+        .await
+        .ok();
+        let valve_spawner = valve_seat
+            .as_ref()
+            .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
+
+        let session_id = match self.output.current_session_id() {
+            Some(session_id) => session_id,
+            None => match self.session_spawner.durable_session_id() {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    return ToolResult {
+                        content: format!("Forge has no canonical session authority: {error}"),
+                        is_error: true,
+                    };
+                }
+            },
+        };
+        let run_id = uuid::Uuid::new_v4().to_string();
+
+        match drive_climb_full(
+            task,
+            &self.anvil,
+            &workspace,
+            &seat.spawner,
+            valve_spawner,
+            &self.output,
+            &session_id,
+            &run_id,
+            &task_id,
+            sandbox,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let worktree = outcome
+                    .best_worktree
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "(none kept)".to_string());
+                let notes = if seat.notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nnotes: {}", seat.notes.join("; "))
+                };
+                // Surface the ACTUAL parent-owned landing outcome (not a pre-written
+                // "retained for landing" placeholder): the winner was already driven
+                // through the landing lifecycle inside the climb. The user's working
+                // tree is never touched; a landed candidate waits on the
+                // Wayland-owned integration clone for a Desktop-mediated accept.
+                let landing_line = match &outcome.landing {
+                    Some(LandingReport::Landed {
+                        landed_commit,
+                        target_ref,
+                        integration_checkout,
+                    }) => {
+                        let short = landed_commit.get(..12).unwrap_or(landed_commit.as_str());
+                        format!(
+                            "Landed {short} onto {target_ref} in the Wayland-owned integration \
+                             clone at {}; accept it from Wayland Desktop to fast-forward your \
+                             branch. Your working tree was not modified.",
+                            integration_checkout.display()
+                        )
+                    }
+                    Some(LandingReport::Conflict { detail }) => format!(
+                        "Landing conflict — nothing was landed; your tree was not modified: {detail}"
+                    ),
+                    Some(LandingReport::Incomplete { detail }) => format!(
+                        "Landing incomplete — the integration ref advanced but projection did not \
+                         complete; recovery may be required: {detail}"
+                    ),
+                    Some(LandingReport::RolledBack { detail }) => format!(
+                        "Landing was rolled back — no change remains on the integration branch: \
+                         {detail}"
+                    ),
+                    Some(LandingReport::RecoveryRequired { detail }) => format!(
+                        "Landing needs explicit recovery before it can complete; your tree was not \
+                         modified: {detail}"
+                    ),
+                    Some(LandingReport::Failed { detail }) => format!(
+                        "Landing did not run to completion (the climb result stands); your tree was \
+                         not modified: {detail}"
+                    ),
+                    None => "No candidate was landable.".to_string(),
+                };
+                ToolResult {
+                    content: format!(
+                        "Forged: {stamp} · {passed}/{total} checks · {iters} iteration(s) · \
+                         {fires} valve fire(s) · driver seat {seat_label}\nterminal: \
+                         {terminal:?}\ncandidate worktree: {worktree}\nreceipt: emitted as an \
+                         authoritative top-level Core event; this summary is inert{notes}\n\n\
+                         {landing_line}",
+                        stamp = outcome.stamp,
+                        passed = outcome.checks_passed,
+                        total = outcome.checks_total,
+                        iters = outcome.iterations,
+                        fires = outcome.valve_fires,
+                        seat_label = seat.label,
+                        terminal = outcome.terminal,
+                    ),
+                    is_error: false,
+                }
+            }
+            Err(e) => ToolResult {
+                content: format!(
+                    "Forge refused or failed: {e}\n(seat: {}{})",
+                    seat.label,
+                    if seat.notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; {}", seat.notes.join("; "))
+                    }
+                ),
+                is_error: true,
+            },
+        }
     }
 }
 
@@ -110,99 +280,32 @@ impl Tool for ForgeTool {
         false // one climb per workspace (the lease enforces it anyway)
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Forge spans child agents, processes, and repository state without reconciliation.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(task) = input.get("task").and_then(Value::as_str) else {
-            return ToolResult {
-                content: "Forge requires a `task` string.".into(),
-                is_error: true,
-            };
-        };
-
-        // Materialize the driver seat lazily — key state as of NOW.
-        let seat = match super::seat::materialize_driver_seat(&self.anvil, &self.session_cfg) {
-            Ok(s) => s,
+        let sandbox = match SandboxRegistry::required_for_session(None) {
+            Ok(runtime) => Arc::new(runtime),
             Err(e) => {
                 return ToolResult {
-                    content: format!("Forge could not build a driver seat: {e}"),
+                    content: format!("Forge refused: invalid sandbox selection: {e}"),
                     is_error: true,
                 };
             }
         };
+        self.execute_with_sandbox(input, sandbox, uuid::Uuid::new_v4().to_string())
+            .await
+    }
 
-        let workspace = match std::env::current_dir() {
-            Ok(w) => w,
-            Err(e) => {
-                return ToolResult {
-                    content: format!("Forge could not resolve the workspace: {e}"),
-                    is_error: true,
-                };
-            }
+    async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let task_id = if ctx.call_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            ctx.call_id.clone()
         };
-
-        // Valve seat (spec §6.4): the session/frontier model, read-only, one
-        // diagnostic turn on a stall. Best-effort — a forge without a valve
-        // is still a forge.
-        let valve_seat = super::seat::materialize_valve_seat(&self.session_cfg).ok();
-        let valve_spawner = valve_seat
-            .as_ref()
-            .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
-
-        let captured = Arc::new(CapturedEmitter(Mutex::new(Vec::new())));
-        let emitter: Arc<dyn ProtocolEmitter> = captured.clone();
-
-        match drive_climb_full(
-            task,
-            &self.anvil,
-            &workspace,
-            &seat.spawner,
-            valve_spawner,
-            &emitter,
-            None,
-        )
-        .await
-        {
-            Ok(outcome) => {
-                let receipts = captured.0.lock().join("\n");
-                let worktree = outcome
-                    .best_worktree
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "(none kept)".to_string());
-                let notes = if seat.notes.is_empty() {
-                    String::new()
-                } else {
-                    format!("\nnotes: {}", seat.notes.join("; "))
-                };
-                ToolResult {
-                    content: format!(
-                        "Forged: {stamp} · {passed}/{total} checks · {iters} iteration(s) · \
-                         {fires} valve fire(s) · driver seat {seat_label}\nterminal: \
-                         {terminal:?}\ncandidate worktree: {worktree}\nreceipt: \
-                         {receipts}{notes}\n\nIf verified, review the candidate worktree and \
-                         merge/cherry-pick its branch; the user's tree was not modified.",
-                        stamp = outcome.stamp,
-                        passed = outcome.checks_passed,
-                        total = outcome.checks_total,
-                        iters = outcome.iterations,
-                        fires = outcome.valve_fires,
-                        seat_label = seat.label,
-                        terminal = outcome.terminal,
-                    ),
-                    is_error: false,
-                }
-            }
-            Err(e) => ToolResult {
-                content: format!(
-                    "Forge refused or failed: {e}\n(seat: {}{})",
-                    seat.label,
-                    if seat.notes.is_empty() {
-                        String::new()
-                    } else {
-                        format!("; {}", seat.notes.join("; "))
-                    }
-                ),
-                is_error: true,
-            },
-        }
+        self.execute_with_sandbox(input, Arc::clone(&ctx.sandbox), task_id)
+            .await
     }
 }

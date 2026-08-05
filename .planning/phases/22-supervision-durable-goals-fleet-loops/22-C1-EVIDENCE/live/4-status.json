@@ -1,0 +1,87 @@
+{
+  "goal_id": "g-22c1-1785289395-14405",
+  "objective": "prove goals reach the protocol (22c1-1785289395-14405)",
+  "authority": {
+    "effective_limits": {
+      "max_tokens": 5000
+    },
+    "strategy": "fleet",
+    "loop_policy": {
+      "kind": "fixed",
+      "iterations": 4
+    },
+    "parent_envelope_digest": "wayland-core-goal-fleet/v1",
+    "snapshot_digest": "1a2cd609f414b542d846a1008781ce0f5de182ffdf604f208cdc587e67d9934f"
+  },
+  "lifecycle": {
+    "state": "terminated",
+    "terminal": {
+      "state": "partially_completed",
+      "completed": 2,
+      "failed": 0
+    }
+  },
+  "iterations_started": 2,
+  "resume_count": 1,
+  "opened_at_unix_ms": 1785289398008,
+  "last_transition_seq": 17,
+  "last_transition_checksum": "b7a2317e93d4a306cdb8a68e85f0eba71c6d87c9f6be6616d594b2a82e02f857",
+  "tasks": {
+    "build": {
+      "task_id": "build",
+      "idempotency_key": "idem-build",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "session-3742757-w0",
+          "budget_reservation_id": "goalfleet-session-3742757-build-0",
+          "lease_expires_unix_ms": 1785289458221,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-build",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 10,
+      "last_transition_checksum": "8a32a05defb03ee1805a6ecb6b053539b63f22d004a56d919f5da609388fb028"
+    },
+    "publish": {
+      "task_id": "publish",
+      "depends_on": [
+        "build"
+      ],
+      "idempotency_key": "idem-publish",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "session-3742757-w0",
+          "budget_reservation_id": "goalfleet-session-3742757-publish-1",
+          "lease_expires_unix_ms": 1785289458326,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-publish",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 16,
+      "last_transition_checksum": "9a60d0f817e35b0560ebf62fcf99a5f9d5a042099bd7fdc449e0febaccb6fb5b"
+    }
+  },
+  "loop_owner_epochs": 1
+}

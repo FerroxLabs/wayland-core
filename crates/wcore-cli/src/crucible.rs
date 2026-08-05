@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use wcore_agent::goal::{CouncilRunOutcome, StrategyTermination};
 use wcore_agent::orchestration::council::{
     AssemblyPlan, COUNCIL_PROPOSER_SYSTEM_PROMPT, CouncilApprover, CouncilDecision, CouncilOutcome,
     CouncilOverrides, CouncilProviderResolver, CouncilRunResult, DEFAULT_PROPOSER_MAX_TOKENS,
@@ -25,7 +26,18 @@ use wcore_agent::orchestration::council::{
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
+use wcore_providers::LlmProvider;
 use wcore_types::crucible::CrucibleDecision;
+
+fn governed_crucible_spawner(
+    provider: Arc<dyn LlmProvider>,
+    config: &Config,
+) -> anyhow::Result<AgentSpawner> {
+    wcore_agent::bootstrap::govern_standalone_spawner(
+        AgentSpawner::new(provider, config.clone()),
+        config,
+    )
+}
 
 /// A cap-less per-user/day spend accumulator for council charging, built when the
 /// council has a daily or per-run cap configured. The daily bound is enforced by
@@ -148,6 +160,10 @@ async fn run_advisor_loop(
     }
 
     let config = session_cfg.clone();
+    let execution_policy = config.execution_policy.with_requested_approvals(
+        config.smart_approval_policy(),
+        wcore_types::execution_policy::PolicySource::LocalCliLaunch,
+    );
     wcore_agent::egress::install_egress_policy(&config);
 
     let cwd = std::env::current_dir()
@@ -157,6 +173,7 @@ async fn run_advisor_loop(
         Arc::new(wcore_agent::output::terminal::TerminalSink::new(false));
 
     let result = wcore_agent::bootstrap::AgentBootstrap::new(config, &cwd, output.clone())
+        .with_execution_policy(execution_policy)
         .build()
         .await?;
     let mut engine = result.engine;
@@ -349,7 +366,7 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
 
     let resolver = CouncilProviderResolver::new(base.clone(), cf.providers.clone());
     let mut spawner =
-        AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
+        governed_crucible_spawner(provider, &base)?.with_provider_resolver(Arc::new(resolver));
     if let Some(tracker) = council_budget_tracker(&cf) {
         let (sess, user) = cli_budget_identity();
         spawner = spawner
@@ -374,9 +391,57 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
             .unwrap_or_default()
     );
 
-    let outcome = run_council(&args.task, &roster, &spawner, &base)
-        .await
-        .map_err(|e| anyhow::anyhow!("council failed: {e}"))?;
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // The MANUAL council path. This is a SECOND route to a council inside the
+    // same verb — `run_crucible_auto` reaches `drive_council`, this reaches
+    // `run_council` — and it is the one a plain `[crucible] proposers = [...]`
+    // config takes, i.e. the DEFAULT. Attaching only the auto path would have
+    // left the default route terminating nothing while the flag appeared to
+    // work; that is precisely the advertised-but-dead defect this criterion
+    // exists to close, and it was caught by reading the transition line rather
+    // than the exit status.
+    let attachment = crate::goal_cmd::GoalAttachArgs::default().resolve()?;
+    let outcome = match attachment {
+        Some((driver, goal_id)) => {
+            let carried: std::cell::RefCell<Option<CouncilOutcome>> = std::cell::RefCell::new(None);
+            let cursor = driver
+                .run_council(&goal_id, |owner| async {
+                    match run_council(&args.task, &roster, &spawner, &base).await {
+                        Ok(outcome) => {
+                            // `RanManual`, not `Ran`: this path has no
+                            // `AssemblyPlan` — the operator's configured roster
+                            // IS the plan — and fabricating an empty one to
+                            // reach the other variant would invent a decision
+                            // the assembler never made.
+                            let termination = StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::RanManual(&outcome),
+                            );
+                            *carried.borrow_mut() = Some(outcome);
+                            termination
+                        }
+                        Err(error) => {
+                            eprintln!("crucible: council failed: {error}");
+                            StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::Failed(&error),
+                            )
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+            crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "council", &cursor);
+            match carried.into_inner() {
+                Some(outcome) => outcome,
+                None => return Ok(()),
+            }
+        }
+        None => run_council(&args.task, &roster, &spawner, &base)
+            .await
+            .map_err(|e| anyhow::anyhow!("council failed: {e}"))?,
+    };
 
     eprint!("{}", render_provenance(&outcome));
     consume_outcome(mode, &session_cfg, &args.task, &outcome.final_text).await
@@ -413,7 +478,7 @@ async fn run_crucible_auto(
         );
     }
     let mut spawner =
-        AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
+        governed_crucible_spawner(provider, &base)?.with_provider_resolver(Arc::new(resolver));
     if let Some(tracker) = council_budget_tracker(cf) {
         let (sess, user) = cli_budget_identity();
         spawner = spawner
@@ -440,20 +505,82 @@ async fn run_crucible_auto(
         }
     };
 
-    match drive_council(
-        &args.task,
-        runnable,
-        &base,
-        &cf.crucible,
-        &ov,
-        &spawner,
-        &TtyApprover {
-            auto_spend: cf.crucible.crucible_auto_spend,
-        },
-        &refilter,
-    )
-    .await?
-    {
+    let approver = TtyApprover {
+        auto_spend: cf.crucible.crucible_auto_spend,
+    };
+
+    // ONE production invocation, called from exactly one of the two branches
+    // below. Written as a closure rather than duplicated so the Goal-attached
+    // path cannot drift from the unattached one: same task, roster, config,
+    // overrides, spawner, approver and refilter, by construction.
+    let drive_once = || {
+        drive_council(
+            &args.task,
+            runnable,
+            &base,
+            &cf.crucible,
+            &ov,
+            &spawner,
+            &approver,
+            &refilter,
+        )
+    };
+
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // Attachment is by environment (`WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL`)
+    // rather than by flag, because `CrucibleArgs` is assembled field-by-field in
+    // `main.rs` and a flag pair would mean two edits to the shared fence. The
+    // env route is the one this codebase already uses to hand a Goal's identity
+    // to a child process, so it is the existing mechanism, not a new one.
+    let attachment = crate::goal_cmd::GoalAttachArgs::default().resolve()?;
+    let result = match attachment {
+        Some((driver, goal_id)) => {
+            // The council's own result is carried back out of the closure so the
+            // advisor follow-on below runs identically under a Goal. The closure
+            // itself must return a `StrategyTermination` and nothing else, which
+            // is what makes the canonical transition unavoidable.
+            let carried: std::cell::RefCell<Option<CouncilRunResult>> =
+                std::cell::RefCell::new(None);
+            let cursor = driver
+                .run_council(&goal_id, |owner| async {
+                    match drive_once().await {
+                        Ok(result) => {
+                            let termination = StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::Ran(&result),
+                            );
+                            *carried.borrow_mut() = Some(result);
+                            termination
+                        }
+                        // Carried into the terminal transition as the real
+                        // error, never swallowed into a clean terminal.
+                        // `from_anyhow` downcasts, so a wrapped `CouncilError`
+                        // still lands on its exact category rather than being
+                        // flattened into `Blocked`.
+                        Err(error) => {
+                            eprintln!("crucible: {error}");
+                            StrategyTermination::from_council(
+                                owner,
+                                CouncilRunOutcome::from_anyhow(&error),
+                            )
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+            crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "council", &cursor);
+            match carried.into_inner() {
+                Some(result) => result,
+                // The council failed; it has been reported and the Goal has
+                // already terminated through the canonical transition.
+                None => return Ok(()),
+            }
+        }
+        None => drive_once().await?,
+    };
+
+    match result {
         CouncilRunResult::Direct { spec, text } => {
             eprintln!("crucible: direct answer via {spec}");
             // `base` is the SESSION DEFAULT config (auto premise: no roster pinned),
@@ -613,10 +740,152 @@ fn direct_subagent_config(task: &str, roster: &Roster, first: &ProposerSpec) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wcore_agent::orchestration::council::{
         CouncilSpend, Proposal, ProviderSpend, SkippedProposer,
     };
+    use wcore_providers::ProviderError;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::TokenUsage;
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    struct HungProvider;
+
+    #[async_trait]
+    impl LlmProvider for HungProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let _held_sender = tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Connection("test provider called".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn crucible_spawner_stops_before_provider_call_at_tiny_cap() {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            budget: wcore_budget::BudgetConfig {
+                max_tokens_in: Some(0),
+                max_tokens_out: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = governed_crucible_spawner(provider.clone(), &config)
+            .expect("bind standalone crucible session authority");
+
+        let result = spawner
+            .spawn_one(SubAgentConfig {
+                name: "tiny-cap-proposer".into(),
+                prompt: "propose an answer".into(),
+                max_turns: 1,
+                max_tokens: 16,
+                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.into()),
+                provider: None,
+                model: None,
+                temperature: None,
+            })
+            .await;
+
+        assert!(result.is_error, "zero-token envelope must stop proposer");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn crucible_spawner_cancels_a_hung_provider_at_the_wall_cap() {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            session_cap: Some(wcore_budget::BudgetConfig {
+                max_wall_time_secs: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let spawner = governed_crucible_spawner(Arc::new(HungProvider), &config)
+            .expect("bind standalone crucible session authority");
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            spawner.spawn_one(SubAgentConfig {
+                name: "hung-proposer".into(),
+                prompt: "propose an answer".into(),
+                max_turns: 1,
+                max_tokens: 16,
+                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.into()),
+                provider: None,
+                model: None,
+                temperature: None,
+            }),
+        )
+        .await
+        .expect("standalone crucible must not outlive its wall-time envelope");
+
+        assert!(
+            result.is_error,
+            "budget cancellation must fail the proposer"
+        );
+    }
+
+    #[tokio::test]
+    async fn crucible_spawner_binds_authority_and_cannot_downgrade_mutation() {
+        use wcore_types::spawner::{ForkOverrides, RequestedChildWorkspace};
+        // The CLI constructs the crucible spawner through the same workspace-aware
+        // production path (`govern_standalone_spawner`), so it carries bound
+        // durable-session AND parent-workspace authority before any child runs.
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = governed_crucible_spawner(provider.clone(), &config)
+            .expect("bind standalone crucible session authority");
+        assert!(
+            !spawner
+                .durable_session_id()
+                .expect("session authority is bound")
+                .is_empty()
+        );
+        // Authority binding runs no child.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        // A mutating (Write/Edit) child request classifies as isolated — CLI
+        // construction cannot downgrade mutating work to shared parent access.
+        let mutating = ForkOverrides {
+            allowed_tools: vec!["Write".into(), "Edit".into()],
+            budget: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            mutating.requested_workspace(),
+            RequestedChildWorkspace::IsolatedMutation
+        );
+    }
 
     fn proposal(provider: &str, model: Option<&str>) -> Proposal {
         Proposal {

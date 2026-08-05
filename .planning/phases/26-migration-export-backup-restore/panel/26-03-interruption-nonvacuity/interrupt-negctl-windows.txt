@@ -1,0 +1,18 @@
+
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: TerminateProcess CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 2
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=40 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: 771ba432e80b6ade3c453140819eb14c31159f2966fab67957024efa7d5895f1
+DIGEST-EQUAL: no
+NEGATIVE-CONTROL: late-kill-detected
+NEGCTL-EXIT: 9
+PROOF-FAIL: the operation completed before the kill landed, so this run proves nothing about
+rollback
+
+

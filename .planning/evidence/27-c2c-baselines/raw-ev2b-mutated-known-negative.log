@@ -1,0 +1,25 @@
+   Compiling wcore-cua v0.12.25 (/root/wayland-27c2c/crates/wcore-cua)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running tests/approval_gate_baseline_test.rs (target/debug/deps/approval_gate_baseline_test-1c4dec644a397f7c)
+
+running 2 tests
+test baseline_approval_gate_blocks_dispatch ... 
+thread 'baseline_approval_gate_blocks_dispatch' (4129992) panicked at crates/wcore-cua/tests/approval_gate_baseline_test.rs:115:5:
+WITHHELD: expected PolicySuspended, got Ok(Ok)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test baseline_approval_gate_observed_on_real_x11 ... EV2B: step=1-instrument-liveness requested=(100,100) delivered_events=1 motion_at_target=true PASS
+
+thread 'baseline_approval_gate_observed_on_real_x11' (4129993) panicked at crates/wcore-cua/tests/approval_gate_baseline_test.rs:382:5:
+STEP 2: expected PolicySuspended, got Ok(Ok)
+FAILED
+
+failures:
+
+failures:
+    baseline_approval_gate_blocks_dispatch
+    baseline_approval_gate_observed_on_real_x11
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+error: test failed, to rerun pass `-p wcore-cua --test approval_gate_baseline_test`

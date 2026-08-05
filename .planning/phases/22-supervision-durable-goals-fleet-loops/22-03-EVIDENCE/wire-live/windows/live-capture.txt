@@ -1,0 +1,400 @@
+COMMIT=37ad94a7a8e48edfa849e672ac1f5bd724139bdc
+BINARY:
+wayland-core 0.12.25
+===== run1.out =====
+GOAL: run pid=43880 goal=g-live
+GOAL: recovery=resumed iterations=0 resume_count=1 resumable=true revoked=0 drained=0 needs_resolution=0
+GOAL-EXEC: task=t01 key=idem-t01 produced=yes
+GOAL-EXEC: task=t00 key=idem-t00 produced=yes
+GOAL-EXEC: task=t03 key=idem-t03 produced=yes
+GOAL-EXEC: task=t02 key=idem-t02 produced=yes
+===== status.json =====
+{
+  "goal_id": "g-live",
+  "objective": "prove the wire survives a kill",
+  "authority": {
+    "effective_limits": {
+      "max_tokens": 10000
+    },
+    "strategy": "fleet",
+    "loop_policy": {
+      "kind": "fixed",
+      "iterations": 8
+    },
+    "parent_envelope_digest": "wayland-core-goal-fleet/v1",
+    "snapshot_digest": "7c64f91ef439c08cb75114860504da407b4f781f5035cd3c8fbe4d00779c9951"
+  },
+  "lifecycle": {
+    "state": "running"
+  },
+  "iterations_started": 3,
+  "resume_count": 2,
+  "opened_at_unix_ms": 1785159006844,
+  "last_transition_seq": 75,
+  "last_transition_checksum": "de798b47f468b3eada12314ae619347ff142c2337dbae340cafa3e84f0644e3d",
+  "tasks": {
+    "t00": {
+      "task_id": "t00",
+      "idempotency_key": "idem-t00",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-43880-w0",
+          "budget_reservation_id": "goalfleet-fleet-43880-t00-0",
+          "lease_expires_unix_ms": 1785159012417,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t00",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 40,
+      "last_transition_checksum": "13327458de33a5f2597d744e788d51df2f66978b867eb7ec1ce3b646f5bd05f8"
+    },
+    "t01": {
+      "task_id": "t01",
+      "idempotency_key": "idem-t01",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-43880-w1",
+          "budget_reservation_id": "goalfleet-fleet-43880-t01-1",
+          "lease_expires_unix_ms": 1785159012417,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t01",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 41,
+      "last_transition_checksum": "1f95e4ec7a5427514d112fd9dc11fdb6416f7689620330a373a5daa37eb690bf"
+    },
+    "t010": {
+      "task_id": "t010",
+      "depends_on": [
+        "t04"
+      ],
+      "idempotency_key": "idem-t010",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-41004-w0",
+          "budget_reservation_id": "goalfleet-fleet-41004-t010-6",
+          "lease_expires_unix_ms": 1785159120079,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t010",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 84,
+      "last_transition_checksum": "6773aa84913437327b34b0b18184c421ebc867e84039cb01bef29304dbbdfc19"
+    },
+    "t011": {
+      "task_id": "t011",
+      "depends_on": [
+        "t05"
+      ],
+      "idempotency_key": "idem-t011",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-41004-w1",
+          "budget_reservation_id": "goalfleet-fleet-41004-t011-7",
+          "lease_expires_unix_ms": 1785159120079,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t011",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 85,
+      "last_transition_checksum": "ddddd0fe35c6c1608133cc2116aaf1fe7c6389cf715ab7ca7d091318da0f00c0"
+    },
+    "t02": {
+      "task_id": "t02",
+      "idempotency_key": "idem-t02",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-43880-w2",
+          "budget_reservation_id": "goalfleet-fleet-43880-t02-2",
+          "lease_expires_unix_ms": 1785159012417,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t02",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 42,
+      "last_transition_checksum": "2eb7fb69255a2146a7f802bf97b1b35e2f66f690ccf6cd40d1de0fc551340fdf"
+    },
+    "t03": {
+      "task_id": "t03",
+      "idempotency_key": "idem-t03",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-43880-w3",
+          "budget_reservation_id": "goalfleet-fleet-43880-t03-3",
+          "lease_expires_unix_ms": 1785159012417,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t03",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 43,
+      "last_transition_checksum": "93b02b58c8c9aa134017ecb935cf49f55328d936cdf6237569866b0c819d8125"
+    },
+    "t04": {
+      "task_id": "t04",
+      "idempotency_key": "idem-t04",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-43880-w4",
+          "budget_reservation_id": "goalfleet-fleet-43880-t04-4",
+          "lease_expires_unix_ms": 1785159012417,
+          "status": {
+            "status": "revoked",
+            "reason": "lease expired at 1785159012417 (now 1785159019416)"
+          }
+        },
+        {
+          "epoch": 2,
+          "worker_id": "fleet-41004-w0",
+          "budget_reservation_id": "goalfleet-fleet-41004-t04-0",
+          "lease_expires_unix_ms": 1785159079469,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 2,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t04",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 69,
+      "last_transition_checksum": "3cfd5a877d3556596de5a0a6e7bc30fe6be998fbea0d4d09591e9a30014eee7f"
+    },
+    "t05": {
+      "task_id": "t05",
+      "idempotency_key": "idem-t05",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-43880-w5",
+          "budget_reservation_id": "goalfleet-fleet-43880-t05-5",
+          "lease_expires_unix_ms": 1785159012417,
+          "status": {
+            "status": "revoked",
+            "reason": "lease expired at 1785159012417 (now 1785159019416)"
+          }
+        },
+        {
+          "epoch": 2,
+          "worker_id": "fleet-41004-w1",
+          "budget_reservation_id": "goalfleet-fleet-41004-t05-1",
+          "lease_expires_unix_ms": 1785159079469,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 2,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t05",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 70,
+      "last_transition_checksum": "d1c0a222eeb5d86075cc3524aa4be5f610630bbff19d1a9e2dd286f55ccf3b3f"
+    },
+    "t06": {
+      "task_id": "t06",
+      "depends_on": [
+        "t00"
+      ],
+      "idempotency_key": "idem-t06",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-41004-w2",
+          "budget_reservation_id": "goalfleet-fleet-41004-t06-2",
+          "lease_expires_unix_ms": 1785159079469,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t06",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 71,
+      "last_transition_checksum": "bb998782765ad0d61049eea7a82104df4e9d31dcb18a72aec0aca13a2237d2aa"
+    },
+    "t07": {
+      "task_id": "t07",
+      "depends_on": [
+        "t01"
+      ],
+      "idempotency_key": "idem-t07",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-41004-w3",
+          "budget_reservation_id": "goalfleet-fleet-41004-t07-3",
+          "lease_expires_unix_ms": 1785159079469,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t07",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 72,
+      "last_transition_checksum": "6039054140e34197a7cf30a6f76bf44e8b16f35a4cbd321d96618347493c1946"
+    },
+    "t08": {
+      "task_id": "t08",
+      "depends_on": [
+        "t02"
+      ],
+      "idempotency_key": "idem-t08",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-41004-w4",
+          "budget_reservation_id": "goalfleet-fleet-41004-t08-4",
+          "lease_expires_unix_ms": 1785159079469,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t08",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 73,
+      "last_transition_checksum": "145a02823286716d40a1e914ed65030fd4a0e3d06798327258d85117d7ae9732"
+    },
+    "t09": {
+      "task_id": "t09",
+      "depends_on": [
+        "t03"
+      ],
+      "idempotency_key": "idem-t09",
+      "attempts": [
+        {
+          "epoch": 1,
+          "worker_id": "fleet-41004-w5",
+          "budget_reservation_id": "goalfleet-fleet-41004-t09-5",
+          "lease_expires_unix_ms": 1785159079469,
+          "status": {
+            "status": "completed"
+          }
+        }
+      ],
+      "completion": {
+        "epoch": 1,
+        "outcome": {
+          "state": "self_checked"
+        },
+        "effect_digest": "idem-t09",
+        "delivered": true
+      },
+      "dependency_releases": 1,
+      "last_transition_seq": 74,
+      "last_transition_checksum": "86056abd90d81d5dc86a54943aa3faf6ea6a552deb297dd6f9417a73840af487"
+    }
+  }
+}
+===== effects =====
+idem-t00: t00
+idem-t01: t01
+idem-t010: t010
+idem-t011: t011
+idem-t02: t02
+idem-t03: t03
+idem-t04: t04
+idem-t05: t05
+idem-t06: t06
+idem-t07: t07
+idem-t08: t08
+idem-t09: t09

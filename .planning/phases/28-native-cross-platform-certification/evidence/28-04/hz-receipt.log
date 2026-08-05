@@ -1,0 +1,57 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-p28-04/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+────────────
+ Nextest run ID 072c17ce-d4c0-4759-83d4-bf0909a4d44e with nextest profile: default
+    Starting 49 tests across 2 binaries
+        PASS [   0.005s] ( 1/49) wcore-eval-scenarios::f28_receipt_contract a_claim_asserted_true_is_recomputed_against_the_ledger_and_rejected_if_it_disagrees
+        PASS [   0.005s] ( 2/49) wcore-eval-scenarios::f28_receipt_contract a_receipt_asserting_zero_known_defects_or_zero_findings_is_rejected_under_a3
+        PASS [   0.005s] ( 3/49) wcore-eval-scenarios::f28_receipt_contract a1_requires_the_inherited_severity_as_provenance_and_the_p28_score_as_the_operative_value
+        PASS [   0.005s] ( 4/49) wcore-eval-scenarios::f28_receipt_contract a_skip_class_outside_the_four_is_rejected_and_each_of_the_four_is_accepted
+        PASS [   0.006s] ( 5/49) wcore-eval-scenarios::f28_receipt_contract accept_and_defer_are_unreachable_at_critical_and_high
+        PASS [   0.008s] ( 6/49) wcore-eval-scenarios::f28_receipt_contract a2_closes_the_paper_path_on_a_contradicted_criterion_at_any_recorded_severity
+        PASS [   0.008s] ( 7/49) wcore-eval-scenarios::receipt_contract scenario_receipt_normalizes_only_the_owned_workspace
+        PASS [   0.008s] ( 8/49) wcore-eval-scenarios::receipt_contract workspace_token_cannot_collide_with_literal_or_sibling_paths
+        PASS [   0.009s] ( 9/49) wcore-eval-scenarios::f28_receipt_contract an_empty_contradicted_criterion_is_rejected_so_an_omission_cannot_read_as_a_none
+        PASS [   0.011s] (10/49) wcore-eval-scenarios::f28_receipt_contract a_skipped_critical_case_is_rejected_two_ways_because_criterion_1_forbids_one
+        PASS [   0.016s] (11/49) wcore-eval-scenarios::receipt_contract trace_evidence_rejects_an_unsafe_workspace_root
+        PASS [   0.016s] (12/49) wcore-eval-scenarios::f28_receipt_contract the_paper_path_requires_an_owner_and_a_backlog_id_and_the_repair_path_requires_evidence
+        PASS [   0.017s] (13/49) wcore-eval-scenarios::f28_receipt_contract platform_cell_counts_must_sum_so_a_red_cannot_be_dropped_from_the_arithmetic
+        PASS [   0.017s] (14/49) wcore-eval-scenarios::receipt_contract projection_secret_scan_fails_before_any_report_is_returned
+        PASS [   0.017s] (15/49) wcore-eval-scenarios::f28_receipt_contract each_missing_binding_is_rejected_with_its_own_code
+        PASS [   0.017s] (16/49) wcore-eval-scenarios::receipt_contract incomplete_and_internally_inconsistent_receipts_are_rejected
+        PASS [   0.017s] (17/49) wcore-eval-scenarios::receipt_contract critical_usability_finding_is_a_receipt_gate_failure
+        PASS [   0.018s] (18/49) wcore-eval-scenarios::f28_receipt_contract an_unrecognised_disposition_is_rejected_and_all_five_recognised_ones_are_accepted
+        PASS [   0.018s] (19/49) wcore-eval-scenarios::f28_receipt_contract all_three_permitted_claims_must_be_stated_and_exactly_three_exist
+        PASS [   0.021s] (20/49) wcore-eval-scenarios::f28_receipt_contract a_skipped_cell_with_no_required_evidence_is_rejected
+        PASS [   0.026s] (21/49) wcore-eval-scenarios::f28_receipt_contract the_produced_receipt_rejects_a_single_flipped_byte
+        PASS [   0.027s] (22/49) wcore-eval-scenarios::f28_receipt_contract an_unsigned_receipt_is_structurally_valid_but_carries_no_authority
+        PASS [   0.022s] (23/49) wcore-eval-scenarios::receipt_contract filesystem_evidence_is_observed_only_after_capture_completes
+        PASS [   0.023s] (24/49) wcore-eval-scenarios::receipt_contract behavior_digest_excludes_volatile_execution_identity
+        PASS [   0.023s] (25/49) wcore-eval-scenarios::receipt_contract local_receipt_is_valid_but_never_authoritative
+        PASS [   0.023s] (26/49) wcore-eval-scenarios::receipt_contract golden_redacted_projection_digests_are_stable
+        PASS [   0.023s] (27/49) wcore-eval-scenarios::receipt_contract all_projections_share_the_receipt_and_exact_failure_identity
+        PASS [   0.023s] (28/49) wcore-eval-scenarios::receipt_contract managed_http_egress_must_be_a_valid_complete_partition
+        PASS [   0.023s] (29/49) wcore-eval-scenarios::receipt_contract unsupported_schema_major_is_rejected
+        PASS [   0.024s] (30/49) wcore-eval-scenarios::receipt_contract parser_accepts_additive_v1_fields_and_rejects_ambiguous_json
+        PASS [   0.024s] (31/49) wcore-eval-scenarios::receipt_contract behavior_digest_binds_fixture_tool_and_result_semantics
+        PASS [   0.025s] (32/49) wcore-eval-scenarios::receipt_contract body_mutation_is_rejected_as_corruption
+        PASS [   0.025s] (33/49) wcore-eval-scenarios::receipt_contract explicit_unavailable_measurements_cannot_satisfy_the_milestone_gate
+        PASS [   0.037s] (34/49) wcore-eval-scenarios::f28_receipt_contract an_unknown_schema_or_version_fails_closed_rather_than_ignoring_the_new_sections
+        PASS [   0.040s] (35/49) wcore-eval-scenarios::f28_receipt_contract a_recorded_public_half_that_disagrees_with_its_fingerprint_is_rejected
+        PASS [   0.032s] (36/49) wcore-eval-scenarios::receipt_contract claimed_ci_authority_cannot_be_unsigned
+        PASS [   0.047s] (37/49) wcore-eval-scenarios::f28_receipt_contract a_signature_over_a_different_body_does_not_verify
+        PASS [   0.036s] (38/49) wcore-eval-scenarios::receipt_contract unsigned_or_mismatched_ci_provenance_is_rejected
+        PASS [   0.051s] (39/49) wcore-eval-scenarios::f28_receipt_contract an_unknown_field_anywhere_in_the_body_is_rejected_rather_than_silently_dropped
+        PASS [   0.040s] (40/49) wcore-eval-scenarios::f28_receipt_contract the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier
+        PASS [   0.058s] (41/49) wcore-eval-scenarios::f28_receipt_contract an_open_finding_is_recordable_and_forces_the_receipt_to_report_its_gate_as_not_passed
+        PASS [   0.050s] (42/49) wcore-eval-scenarios::receipt_contract authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts
+        PASS [   0.054s] (43/49) wcore-eval-scenarios::receipt_contract ci_authority_requires_an_external_trust_anchor
+        PASS [   0.071s] (44/49) wcore-eval-scenarios::f28_receipt_contract authority_is_derived_from_an_externally_configured_key_not_from_the_body
+        PASS [   0.063s] (45/49) wcore-eval-scenarios::f28_receipt_contract known_good_receipt_is_accepted_and_verifies_under_a_trusted_phase_key
+        PASS [   0.063s] (46/49) wcore-eval-scenarios::f28_receipt_contract the_recorded_public_half_is_really_the_key_that_is_checked
+        PASS [   0.077s] (47/49) wcore-eval-scenarios::receipt_contract receipt_cli_builds_external_policy_and_signs_only_through_stdin
+        PASS [   0.079s] (48/49) wcore-eval-scenarios::f28_receipt_contract flipping_any_byte_of_the_body_breaks_verification
+        PASS [   0.108s] (49/49) wcore-eval-scenarios::receipt_contract authoritative_workflow_requires_external_key_and_complete_exact_policy
+────────────
+     Summary [   0.120s] 49 tests run: 49 passed, 0 skipped

@@ -17,6 +17,10 @@ pub(crate) mod memory;
 pub(crate) mod plugin;
 pub(crate) mod skill;
 mod style;
+/// 23B-C3 — `/usermodel`. Registered only when a real correction store was
+/// opened (see `Dispatcher::with_runtime`), so there is no stub variant
+/// advertising a control that stores nothing.
+pub mod usermodel;
 
 use std::collections::HashMap;
 use std::sync::Arc;

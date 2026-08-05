@@ -1,0 +1,54 @@
+REMAP-BACKEND: auto
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `auto` — 2 credential source(s) will NOT be present after restore.
+absent: auto-stored secrets (OS keychain), credentials.toml
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+REMAP-BACKEND: plaintext
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `plaintext` — 1 credential source(s) will NOT be present after restore.
+absent: credentials.toml
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+REMAP-BACKEND: keyring
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `keyring` — 2 credential source(s) will NOT be present after restore.
+absent: credentials.toml, keyring-stored secrets (OS keychain)
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+REMAP-BACKEND: encrypted-file
+REMAP-EXIT: 1
+REMAP-DISPOSITION: refused
+REMAP-TARGET-WRITTEN: no
+REMAP-MESSAGE-BEGIN
+wayland-core backup: credential remap: backend `encrypted_file` — 3 credential source(s) will NOT be present after restore.
+absent: cipher_path (credentials.enc), credentials.toml, key_params_path (credentials.kdf.json)
+action: re-add these credentials on this machine (`wayland-core auth add <provider>`) after the restore, or re-run with --accept-missing-secrets to proceed knowing the restored install starts without them.
+REMAP-MESSAGE-END
+REMAP-NAMES-BACKEND: yes
+REMAP-NAMES-COUNT: yes
+REMAP-NAMES-ACTION: yes
+REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no
+
+REMAP-CAPTURE-OK: 4 backend records written to /tmp/26-04-replay-remap-F26-04/remap-records.txt

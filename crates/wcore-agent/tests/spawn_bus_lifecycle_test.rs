@@ -15,7 +15,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{MockLlmProvider, test_config};
+use common::{MockLlmProvider, bound_test_spawner, test_config};
 use wcore_agent::agents::bus::{AgentBus, AgentMessage};
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_types::llm::LlmEvent;
@@ -88,6 +88,7 @@ async fn spawn_one_emits_spawned_first_message_and_completed() {
 
     let provider = Arc::new(MockLlmProvider::with_text_response("done"));
     let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) = bound_test_spawner(spawner);
 
     let result = spawner
         .spawn_one(sub_config("alpha", "find all the foos"))
@@ -158,6 +159,7 @@ async fn spawn_one_emits_errored_on_provider_failure() {
         vec![LlmEvent::Error("provider blew up".to_string())],
     ]));
     let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) = bound_test_spawner(spawner);
 
     let result = spawner.spawn_one(sub_config("beta", "go boom")).await;
     assert!(result.is_error, "expected is_error, got {}", result.text);
@@ -183,6 +185,7 @@ async fn spawn_one_without_bus_does_not_panic() {
     let provider = Arc::new(MockLlmProvider::with_text_response("ok"));
     // Note: no .with_bus(...) — bus is None.
     let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(spawner);
 
     let result = spawner.spawn_one(sub_config("no-bus", "ignored")).await;
     assert!(!result.is_error);
@@ -200,6 +203,7 @@ async fn spawn_parallel_emits_lifecycle_for_each_child() {
         ok_turn("c"),
     ]));
     let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) = bound_test_spawner(spawner);
 
     let results = spawner
         .spawn_parallel(vec![
@@ -254,6 +258,7 @@ async fn spawn_fork_emits_lifecycle() {
 
     let provider = Arc::new(MockLlmProvider::with_text_response("forked"));
     let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) = bound_test_spawner(spawner);
 
     let result = spawner
         .spawn_fork(sub_config("forky", "forky task"), ForkOverrides::default())
@@ -276,6 +281,7 @@ async fn first_message_preview_is_char_safe() {
 
     let provider = Arc::new(MockLlmProvider::with_text_response("ok"));
     let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) = bound_test_spawner(spawner);
 
     // 300 emoji = ~1200 bytes — well past the 200-char preview cap.
     let prompt = "🦀".repeat(300);

@@ -1,0 +1,126 @@
+﻿FINAL_START 2026-07-28T19:04:13.3264907+07:00
+HEAD=888230522f6affb2a4abc87cde7984e34fcc1b82
+cargo.exe : warning: unused import: `std::process::Command`
+At C:\wl-kr01\out\Final.ps1:10 char:1
++ & $cargo test -p wcore-sandbox --test hard_process_containment_window ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...ocess::Command`:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:34:5
+   |
+34 | use std::process::Command;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `SandboxCommand` and `SandboxManifest`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:39:21
+   |
+39 | use wcore_sandbox::{SandboxCommand, SandboxManifest};
+   |                     ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `hold_iterations`, `live_descendant_pids`, and `resolve_anchor_pid`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:43:65
+   |
+43 |     capture_alive_descendant_pids, cmd_script, descendant_hold, hold_iterations, inline_hold,
+   |                                                                 ^^^^^^^^^^^^^^^
+44 |     live_descendant_count, live_descendant_pids, manifest, reap_stray_descendants,
+   |                            ^^^^^^^^^^^^^^^^^^^^
+45 |     require_live_windows, resolve_anchor_pid, surviving_captured_descendant_pids, wait_until,
+   |                           ^^^^^^^^^^^^^^^^^^
+
+warning: `wcore-sandbox` (test "hard_process_containment_windows") generated 3 warnings (run 
+`cargo fix --test "hard_process_containment_windows" -p wcore-sandbox` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+  Executable tests\hard_process_containment_windows.rs 
+(target\debug\deps\hard_process_containment_windows-577f80c7bb508abb.exe)
+===== WITNESS RUN 1 (busy=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+At C:\wl-kr01\out\Final.ps1:13 char:3
++   & $cargo test -p wcore-sandbox --test live_integrity live_future_dr ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.20s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 1 test
+test live_future_drop_reaps_descendant_job_tree ... KR01_WITNESS_DESCENDANTS_ALIVE_BEFORE_DROP=[31360]
+KR01_WITNESS_SURVIVORS_AFTER_DROP=0 of 1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.96s
+
+WITNESS_RUN_1_RC=0
+===== WITNESS RUN 2 (busy=0) =====
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+At C:\wl-kr01\out\Final.ps1:13 char:3
++   & $cargo test -p wcore-sandbox --test live_integrity live_future_dr ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.21s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running tests\live_integrity.rs (target\debug\deps\live_integrity-61efd851c9b7daad.exe)
+
+running 1 test
+test live_future_drop_reaps_descendant_job_tree ... KR01_WITNESS_DESCENDANTS_ALIVE_BEFORE_DROP=[21664]
+KR01_WITNESS_SURVIVORS_AFTER_DROP=0 of 1
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.12s
+
+WITNESS_RUN_2_RC=0
+===== REFACTOR REGRESSION: hard_process_containment_windows =====
+cargo.exe : warning: unused import: `std::process::Command`
+At C:\wl-kr01\out\Final.ps1:17 char:1
++ & $cargo test -p wcore-sandbox --test hard_process_containment_window ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused...ocess::Command`:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:34:5
+   |
+34 | use std::process::Command;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `SandboxCommand` and `SandboxManifest`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:39:21
+   |
+39 | use wcore_sandbox::{SandboxCommand, SandboxManifest};
+   |                     ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `hold_iterations`, `live_descendant_pids`, and `resolve_anchor_pid`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:43:65
+   |
+43 |     capture_alive_descendant_pids, cmd_script, descendant_hold, hold_iterations, inline_hold,
+   |                                                                 ^^^^^^^^^^^^^^^
+44 |     live_descendant_count, live_descendant_pids, manifest, reap_stray_descendants,
+   |                            ^^^^^^^^^^^^^^^^^^^^
+45 |     require_live_windows, resolve_anchor_pid, surviving_captured_descendant_pids, wait_until,
+   |                           ^^^^^^^^^^^^^^^^^^
+
+warning: `wcore-sandbox` (test "hard_process_containment_windows") generated 3 warnings (run 
+`cargo fix --test "hard_process_containment_windows" -p wcore-sandbox` to apply 3 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running tests\hard_process_containment_windows.rs 
+(target\debug\deps\hard_process_containment_windows-577f80c7bb508abb.exe)
+
+running 6 tests
+test active_process_cap_is_enforced ... ok
+test breakaway_is_denied ... ok
+test contained_detached_child_exit ... ok
+test job_close_reaps_detached_descendant_with_no_residue ... ok
+test native_containment_gate_marker ... ok
+test qualified_hard_containment_backend_preflight ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.78s
+
+CONTAINMENT_RC=0
+FINAL_END 2026-07-28T19:04:33.5413694+07:00

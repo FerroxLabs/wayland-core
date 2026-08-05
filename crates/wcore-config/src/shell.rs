@@ -18,10 +18,21 @@
 //!
 //! See `AGENTS.md` "Shell Execution" for the policy and migration guidance.
 
+mod executable_readiness;
+mod mcp_stdio_launch_context;
+
 use std::process::Output;
 use std::sync::OnceLock;
 
 use tokio::process::Command;
+
+pub use executable_readiness::{
+    ExecutableEnvironmentVariable, ExecutableReadinessError, ExecutableReadinessLimit,
+    ResolvedExecutable, resolve_mcp_stdio_executable,
+};
+pub use mcp_stdio_launch_context::{
+    LaunchValueSource, McpStdioLaunchContext, McpStdioLaunchContextError,
+};
 
 /// Process-global Bash-tool shell override, sourced from `[tools] windows_shell`
 /// in config and set once at boot by the host via [`set_bash_shell_config`].
@@ -139,9 +150,46 @@ fn normalize_win_shell(s: &str) -> String {
 pub fn shell_command_builder(command_str: &str) -> Command {
     let info = shell_info();
     let mut cmd = Command::new(info.program);
-    cmd.arg(info.flag).arg(command_str);
+    cmd.arg(info.flag);
+    push_shell_command_line(&mut cmd, command_str);
     cmd.kill_on_drop(true);
     cmd
+}
+
+/// Append a shell **command line** (not an argv entry) to an already-built
+/// `sh -c` / `cmd /C` invocation.
+///
+/// On Unix this is `Command::arg`: `sh -c` takes the whole line as a single
+/// argv entry and no re-quoting happens.
+///
+/// On Windows it MUST be `raw_arg`. `cmd.exe` does not parse its `/C` tail
+/// with `CommandLineToArgvW` — that is cmd's documented contract — but
+/// `Command::arg` escapes for `CommandLineToArgvW` anyway, wrapping any line
+/// containing whitespace in `"…"` and rewriting every embedded quote as `\"`.
+/// cmd has no backslash escape, so it strips the outer pair and hands the
+/// remaining literal `\"` to the parser. A hook or skill directive that quotes
+/// a path — `type nul > "C:\dir\f"`, the everyday case as soon as a path has a
+/// space in it — therefore reached cmd as `type nul > \"C:\dir\f\"` and failed
+/// with *"The filename, directory name, or volume label syntax is incorrect"*.
+/// Since a failing PreToolUse hook BLOCKS the call, that error surfaced to the
+/// operator as every tool call in the session being refused (hosted-Windows
+/// run 30727017681).
+///
+/// This is the same defect [`mcp_stdio_command_builder`] closed for the MCP
+/// transport in #262/#263; it was never a transport-specific problem, so the
+/// `raw_arg` call now lives here and every shell-string builder shares it.
+///
+/// `raw_arg` is `cfg(windows)`-gated in tokio, so the branch must be a
+/// compile-time `#[cfg]`, not a runtime `cfg!(windows)`.
+fn push_shell_command_line(cmd: &mut Command, command_line: &str) {
+    #[cfg(windows)]
+    {
+        cmd.raw_arg(command_line);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.arg(command_line);
+    }
 }
 
 /// Shell-string mode one-shot: builds via [`shell_command_builder`] and
@@ -164,14 +212,15 @@ pub async fn shell_command(command_str: &str) -> std::io::Result<Output> {
 pub fn hook_shell_command_builder(command_str: &str) -> Command {
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
-        c.arg("/V:ON").arg("/C").arg(command_str);
+        c.arg("/V:ON").arg("/C");
         c
     } else {
         let info = shell_info();
         let mut c = Command::new(info.program);
-        c.arg(info.flag).arg(command_str);
+        c.arg(info.flag);
         c
     };
+    push_shell_command_line(&mut cmd, command_str);
     cmd.kill_on_drop(true);
     cmd
 }
@@ -185,33 +234,23 @@ pub fn hook_shell_command_builder(command_str: &str) -> Command {
 /// The MCP stdio transport is the ONLY sanctioned caller — do not reuse this
 /// for un-escaped input.
 ///
-/// Differs from [`shell_command_builder`] in exactly one Windows-only way: it
-/// appends `command_line` via `raw_arg` instead of `Command::arg`.
-/// `Command::arg` would apply std's `CommandLineToArgvW` quoting ON TOP of the
-/// caller's cmd.exe escaping — a second, incompatible layer that wraps the
-/// spaced line in an outer `"..."` where cmd.exe ignores the caret/`\"`
-/// escaping, breaking quote parity so the child receives a split fragment
-/// (`"C:\Program` for a spaced program path; `pkg^"` for an npx/uvx arg) —
-/// issues #262 and #263. `raw_arg` hands the pre-escaped line to cmd.exe
-/// verbatim, which is cmd's documented non-`CommandLineToArgvW` contract for
-/// `/C`. On Unix the behaviour is byte-identical to [`shell_command_builder`]:
-/// `sh -c` takes the command line as one argument with no second re-quote.
+/// It is otherwise the same construction as [`shell_command_builder`] — both
+/// append the command line through [`push_shell_command_line`], which is
+/// `raw_arg` on Windows. That was originally a transport-local workaround for
+/// issues #262 and #263 (std's `CommandLineToArgvW` quoting layered ON TOP of
+/// the caller's cmd.exe escaping wraps the spaced line in an outer `"..."`
+/// where cmd ignores the caret/`\"` escaping, so the child receives a split
+/// fragment: `"C:\Program` for a spaced program path, `pkg^"` for an npx/uvx
+/// arg). The same layering broke every quoting hook and skill directive, so
+/// the fix now lives in one place; what remains specific to this builder is
+/// the PRECONDITION above, not the spawn mechanics.
 pub fn mcp_stdio_command_builder(command_line: &str) -> Command {
     let info = shell_info();
     let mut cmd = Command::new(info.program);
     cmd.arg(info.flag);
     // Append the pre-escaped line LITERALLY so std's CommandLineToArgvW quoting
     // is not layered on top of the caller's caret/quote escaping (#262/#263).
-    // `raw_arg` is cfg(windows)-gated in tokio, so the call must be compile-time
-    // gated, not a runtime `cfg!(windows)` branch.
-    #[cfg(windows)]
-    {
-        cmd.raw_arg(command_line);
-    }
-    #[cfg(not(windows))]
-    {
-        cmd.arg(command_line);
-    }
+    push_shell_command_line(&mut cmd, command_line);
     cmd.kill_on_drop(true);
     cmd
 }
@@ -379,6 +418,83 @@ mod tests {
             .expect("builder failed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("test_value"));
+    }
+
+    /// Shell-string mode must hand the interpreter the command line the
+    /// caller wrote, **quotes intact**.
+    ///
+    /// On Windows `Command::arg` applies std's `CommandLineToArgvW` quoting,
+    /// which is the wrong escaping for `cmd /C`: cmd has no backslash escape,
+    /// so `type nul > "C:\dir\f"` reaches it as `type nul > \"C:\dir\f\"` and
+    /// the redirect target becomes an invalid filename — cmd answers "The
+    /// filename, directory name, or volume label syntax is incorrect." That
+    /// broke every hook command and every skill `` !`…` `` directive that
+    /// quotes a path, and because a failing PreToolUse hook BLOCKS the call,
+    /// the blast radius was every tool call in the session. Same defect class
+    /// as #262/#263, which [`mcp_stdio_command_builder`] closed with
+    /// `raw_arg`.
+    ///
+    /// On Unix `sh -c` receives the line as one argv entry either way, so
+    /// this case is a standing guard there and the real assertion on Windows.
+    #[tokio::test]
+    async fn shell_string_mode_preserves_a_quoted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // A space in the directory name is the everyday Windows case -- a
+        // user profile directory named for a person with a given name and a
+        // surname -- and is exactly what forces a caller to quote in the
+        // first place.
+        let sub = dir.path().join("a dir");
+        std::fs::create_dir(&sub).unwrap();
+        let target = sub.join("written.txt");
+        let command = if cfg!(windows) {
+            format!("type nul > \"{}\"", target.display())
+        } else {
+            format!("touch '{}'", target.display())
+        };
+
+        let output = shell_command(&command).await.expect("spawn failed");
+
+        assert!(
+            target.exists(),
+            "shell-string mode did not create {} — the command line was mangled \
+             before the interpreter saw it. status={:?} stdout={:?} stderr={:?}",
+            target.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// The same guarantee for the hook builder (`cmd /V:ON /C` on Windows),
+    /// which is a separate construction site and the one the PreToolUse /
+    /// PostToolUse runner actually uses.
+    #[tokio::test]
+    async fn hook_shell_mode_preserves_a_quoted_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("a dir");
+        std::fs::create_dir(&sub).unwrap();
+        let target = sub.join("hook-fired");
+        let command = if cfg!(windows) {
+            format!("type nul > \"{}\"", target.display())
+        } else {
+            format!("touch '{}'", target.display())
+        };
+
+        let output = hook_shell_command_builder(&command)
+            .output()
+            .await
+            .expect("spawn failed");
+
+        assert!(
+            target.exists(),
+            "the hook shell did not create {} — a hook that quotes a path is \
+             mangled, and a failed hook blocks the tool call. status={:?} \
+             stdout={:?} stderr={:?}",
+            target.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     /// Argv mode: shell metacharacters in args are passed literally to the

@@ -559,6 +559,83 @@ pub(crate) enum ReconnectReason {
     InvalidSessionFatal,
 }
 
+/// Discord's gateway close code for a rejected bot token.
+///
+/// <https://discord.com/developers/docs/topics/opcodes-and-status-codes>
+/// documents 4004 as "Authentication failed — the account token sent with your
+/// identify payload is incorrect", and marks it explicitly **not**
+/// reconnectable.
+pub(crate) const CLOSE_AUTHENTICATION_FAILED: u16 = 4004;
+
+/// Discord's gateway close code for an intent value the API does not know.
+///
+/// Documented as "Invalid intent(s) — you sent an invalid intent for a Gateway
+/// Intent. You may have incorrectly calculated the bitwise value", and marked
+/// **not** reconnectable.
+pub(crate) const CLOSE_INVALID_INTENTS: u16 = 4013;
+
+/// Discord's gateway close code for an intent this bot is not approved for.
+///
+/// Documented as "Disallowed intent(s) — you sent a disallowed intent for a
+/// Gateway Intent. You may have tried to specify an intent that you have not
+/// enabled or are not approved for", and marked **not** reconnectable.
+pub(crate) const CLOSE_DISALLOWED_INTENTS: u16 = 4014;
+
+/// Classify a gateway close code as a credential rejection.
+///
+/// `Some(label)` means the platform refused this bot's identity or the scope it
+/// asked for, so reconnecting can only re-send the same refused handshake.
+/// Everything else — including a close frame with NO code — stays `None` and
+/// takes the ordinary resumable reconnect path, because "the socket shut" and
+/// "the token is wrong" are different operator actions and only one of them is
+/// fixed by waiting.
+///
+/// # Why 4013 and 4014 are in here alongside 4004
+///
+/// All three are marked non-reconnectable by Discord, and all three are fixed
+/// by an operator editing the bot's identity — rotating the token (4004) or
+/// changing the intents on the same credential in the Developer Portal
+/// (4013/4014). Leaving 4013/4014 on the `None` arm meant the gateway
+/// re-IDENTIFYed forever against a handshake the platform will refuse every
+/// time, with the surface reporting a transport fault ("wait") for a condition
+/// waiting cannot clear.
+///
+/// `HealthState` draws no line between "unauthenticated" and "unauthorized", so
+/// all three land on `Unauthenticated`. That label is coarse for an intents
+/// failure; the terminality and the reason string are the load-bearing parts,
+/// and both are correct. 4010 / 4011 / 4012 (invalid shard, sharding required,
+/// invalid API version) are ALSO non-reconnectable but are client bugs rather
+/// than operator-fixable credential state, so they deliberately stay on the
+/// reconnect path — see the lane summary.
+pub(crate) fn auth_rejection_for_close_code(code: Option<u16>) -> Option<String> {
+    match code {
+        Some(CLOSE_AUTHENTICATION_FAILED) => Some(
+            "discord gateway closed with 4004 (authentication failed): the bot token was \
+             rejected at IDENTIFY"
+                .to_string(),
+        ),
+        Some(CLOSE_INVALID_INTENTS) => Some(
+            "discord gateway closed with 4013 (invalid intents): the intents bitfield sent at \
+             IDENTIFY is not a value Discord recognises — fix `intents` in the channel config"
+                .to_string(),
+        ),
+        Some(CLOSE_DISALLOWED_INTENTS) => Some(
+            "discord gateway closed with 4014 (disallowed intents): this bot is not approved for \
+             a privileged intent it requested — enable it in the Discord Developer Portal or \
+             drop it from `intents` in the channel config"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Read the numeric close code out of a close frame, if the peer sent one.
+fn close_code_of(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> Option<u16> {
+    frame.map(|f| u16::from(f.code))
+}
+
 /// Decide the next handshake given the carried session state and why the
 /// last session ended. Pure so the policy is unit-testable in isolation
 /// from the socket.
@@ -601,11 +678,50 @@ pub(crate) struct GatewayArgs {
 /// Append `?v=10&encoding=json` to a bare gateway host if it lacks a
 /// query string. Idempotent — a URL that already carries query params is
 /// returned untouched.
+/// Append the gateway query string, ensuring the URL carries a PATH.
+///
+/// F24-C3-DISCORD. This used to be `format!("{base}?v=10&encoding=json")`,
+/// which for the default base produced
+/// `wss://gateway.discord.gg?v=10&encoding=json` — no path at all. The module
+/// docs above have always said the connect URL is
+/// `wss://gateway.discord.gg/?v=10&encoding=json`, WITH the slash; the code
+/// disagreed with its own documentation.
+///
+/// It matters because `tokio_tungstenite::connect_async` turns the string into
+/// an `http::Uri`, and unlike the `url` crate, `http::Uri` does NOT normalise an
+/// empty path to `/`. The handshake request-target therefore came out as
+/// `GET ?v=10&encoding=json HTTP/1.1`, which is not a valid request-target: a
+/// strict HTTP server rejects it outright. Measured against the Phase 24
+/// fixture, every single connect attempt failed with `400 Bad Request` and the
+/// server-side parser reported `HPE_INVALID_URL`.
+///
+/// This was invisible for the whole of Phase 24 because Discord inbound had
+/// never once been driven end to end.
 fn with_gateway_query(base: &str) -> String {
+    let base = ensure_path(base);
     if base.contains('?') {
-        base.to_string()
+        base
     } else {
         format!("{base}?v=10&encoding=json")
+    }
+}
+
+/// Ensure a `ws://host[:port]` style URL has at least a `/` path, so the
+/// resulting request-target is valid. Leaves an existing path untouched.
+fn ensure_path(url: &str) -> String {
+    // Only the authority section matters: find the end of `scheme://`.
+    let Some(after_scheme) = url.find("://").map(|i| i + 3) else {
+        return url.to_string();
+    };
+    let rest = &url[after_scheme..];
+    // The authority ends at the first '/', '?' or '#'.
+    match rest.find(['/', '?', '#']) {
+        // Already has a path.
+        Some(i) if rest.as_bytes()[i] == b'/' => url.to_string(),
+        // Has a query/fragment but NO path — insert the missing '/'.
+        Some(i) => format!("{}/{}", &url[..after_scheme + i], &rest[i..]),
+        // Bare authority — append the path.
+        None => format!("{url}/"),
     }
 }
 
@@ -672,6 +788,25 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
         .await
         {
             Ok(SessionExit::Shutdown) => break,
+            Ok(SessionExit::AuthRejected { reason }) => {
+                // Publish the terminal event BEFORE leaving the loop. The
+                // manager drains the inbox before it judges this task dead
+                // (wcore-channels manager.rs), so the event queued here is what
+                // turns a dead gateway task into `HealthState::Unauthenticated`
+                // ("rotate the token") instead of a generic transport fault
+                // ("wait"). Exiting without queueing it would strand the one
+                // fact that explains why the gateway stopped.
+                tracing::error!(
+                    target: "wcore_channel_discord::gateway",
+                    reason = %reason,
+                    "discord rejected the bot token; stopping the gateway loop"
+                );
+                inbox
+                    .lock()
+                    .await
+                    .push_back(ChannelEvent::AuthExpired { reason });
+                break;
+            }
             Ok(SessionExit::Reconnect(next_reason)) => {
                 // Surface Reconnecting so the manager/UI sees the gap.
                 inbox
@@ -743,16 +878,87 @@ fn invalid_session_backoff() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Announce that Discord ACCEPTED this handshake.
+///
+/// One function with one call shape so the READY arm and the RESUMED arm can
+/// never drift apart: the whole defect this replaced was one publish site
+/// standing in for two different platform verdicts.
+///
+/// It is logged at `info` deliberately. `Connected` is the event that decides
+/// whether `channel health` reads Healthy, and until this line existed there was
+/// no way to tell from OUTSIDE the process whether a Healthy reading came from
+/// the adapter's own verdict or from somewhere else in the manager — which is
+/// exactly the ambiguity that made the first measurement of this lane
+/// unfalsifiable, because `record_health` blanks the `reason` field for
+/// `Healthy` (wcore-channels/src/manager.rs:59) and the published health file
+/// therefore attributes nothing.
+async fn publish_connected(inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>) {
+    tracing::info!(
+        target: "wcore_channel_discord::gateway",
+        "published Connected (discord accepted the handshake)"
+    );
+    inbox
+        .lock()
+        .await
+        .push_back(ChannelEvent::ConnectionStateChanged {
+            state: ConnectionState::Connected,
+        });
+}
+
 enum SessionExit {
     /// `shutdown` watch flipped — exit the outer loop.
     Shutdown,
     /// Reconnect requested. The carried reason tells the outer loop
     /// whether to RESUME or fall back to a fresh IDENTIFY.
     Reconnect(ReconnectReason),
+    /// Discord rejected the bot token (gateway close 4004). TERMINAL: the
+    /// outer loop publishes `AuthExpired` and stops, because every reconnect
+    /// would re-IDENTIFY with the same rejected token.
+    AuthRejected { reason: String },
 }
 
 // One Gateway session carries many independent connection parameters;
 // grouping them into a struct would add indirection without clarity.
+/// Install a process-level rustls [`CryptoProvider`] if nothing has installed
+/// one yet.
+///
+/// # F24-C3-D2 — the reason the Discord inbound path had never been proven
+///
+/// `rustls` 0.23 refuses to guess a provider when BOTH the `aws-lc-rs` and
+/// `ring` backends are linked, and in this workspace both are (`Cargo.lock`
+/// carries one of each). With no process default installed,
+/// `tokio_tungstenite::connect_async` **panics** the moment it builds a TLS
+/// client:
+///
+/// ```text
+/// Could not automatically determine the process-level CryptoProvider from
+/// Rustls crate features.
+/// ```
+///
+/// Measured live on 2026-07-30 against the real Discord gateway: **84 panics
+/// in ~120 seconds** of one `wayland-core gateway run`, each caught by the
+/// supervisor, which then logged `channel reconnected; resuming polling` —
+/// 84 false recoveries over a socket that never opened once. Outbound REST
+/// worked throughout the same process (reqwest configures its own backend),
+/// which is the discriminating control proving this is the WebSocket TLS
+/// stack and not the network, the token, or the host.
+///
+/// `install_default` is called through a [`Once`] and its `Err` is ignored on
+/// purpose: `Err` means somebody else — an embedding host, or another adapter
+/// that got here first — already chose a provider, and silently keeping THEIR
+/// choice is correct. This function must never clobber an existing selection.
+///
+/// `ring` is the backend chosen because the workspace already selects it
+/// explicitly elsewhere (`wcore-agent/src/tool_backends/postgres_schema.rs`),
+/// so this adds no new cryptographic dependency and keeps one backend in use.
+fn ensure_crypto_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_one_session(
     url: &str,
@@ -769,6 +975,7 @@ async fn run_one_session(
     // function returns via Err (dropped socket).
     resume: &mut Option<ResumeState>,
 ) -> Result<SessionExit, String> {
+    ensure_crypto_provider();
     let (ws, _) = tokio_tungstenite::connect_async(url)
         .await
         .map_err(|e| format!("connect: {e}"))?;
@@ -789,7 +996,13 @@ async fn run_one_session(
         let text = match frame {
             WsMessage::Text(t) => t,
             WsMessage::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
-            WsMessage::Close(_) => return Err("close frame before HELLO".to_string()),
+            WsMessage::Close(frame) => {
+                let code = close_code_of(frame.as_ref());
+                if let Some(reason) = auth_rejection_for_close_code(code) {
+                    return Ok(SessionExit::AuthRejected { reason });
+                }
+                return Err(format!("close frame before HELLO (code {code:?})"));
+            }
             _ => continue,
         };
         let Some(payload) = parse_payload(&text) else {
@@ -840,14 +1053,60 @@ async fn run_one_session(
         }
     }
 
-    // Push Connected once we've handed the handshake off; READY / RESUMED
-    // landing is the formal "live" moment but for routing it's close
-    // enough — the manager dedupes state-changes anyway.
+    // The handshake is IN FLIGHT, not accepted. Publish `Connecting`
+    // (→ `HealthState::Degraded`), never `Connected`. `Connected` is published
+    // when Discord ACCEPTS — on READY (fresh IDENTIFY) or RESUMED (replay) — in
+    // the OP_DISPATCH arm below.
+    //
+    // # Why this is not "close enough"
+    //
+    // This arm used to push `ConnectionState::Connected` here, which
+    // `HealthState::from_connection_state` maps straight to `Healthy`. At this
+    // point we have written IDENTIFY (or RESUME) to the socket and read nothing
+    // back — Discord has not accepted anything. Every failed handshake
+    // therefore reported `Healthy` on its way down: with a rejected token the
+    // observable sequence was `Connected` → close 4004 → `AuthExpired`, so a
+    // health poll landing in that window saw a channel that was already dead
+    // report itself live.
+    //
+    // Two independent live measurements against REAL Discord on 2026-07-31, both
+    // through `gateway run` and the shipped `channel health` verb:
+    //
+    //   * rejected token, 45 samples over 90s -> healthy 2/45.
+    //   * VALID token with an undefined intent bit, so Discord answers close
+    //     4013, 46 samples over 92s -> **healthy 13/46, flapping
+    //     healthy<->degraded 40 times, permanently**. A non-4004 close was not
+    //     classified as terminal, so the outer loop reconnected forever and
+    //     every lap re-announced Connected between the IDENTIFY and the close.
+    //     An operator saw a healthy Discord about a third of the time on a
+    //     channel that had never once completed a handshake. (4013 and 4014 are
+    //     now terminal — see `auth_rejection_for_close_code` — so that storm no
+    //     longer happens either; the 13/46 is what the publish alone was worth.)
+    //
+    // The acceptance half follows the Slack adapter's `start()`
+    // (`wcore-channel-slack/src/lib.rs`): put the credential in front of the
+    // PLATFORM and publish `Connected` only on the platform's acceptance,
+    // publishing `AuthExpired` and no `Connected` on its rejection. Slack took
+    // that shape for UAT-C2, the same defect on a different transport.
+    //
+    // `Connecting` is required rather than merely tidier: the manager stamps
+    // `HealthState::Healthy` unconditionally the moment `start()` returns Ok
+    // (`wcore-channels/src/manager.rs:215`), so simply DELETING the push would
+    // have left the same false `Healthy` standing, sourced from the manager
+    // instead of from here. The adapter has to say `Degraded` out loud to
+    // displace it. That was measured too: on a build carrying ONLY the
+    // READY/RESUMED move, a 50ms watcher still saw a ~1s `healthy` window at
+    // process start with zero `Connected` published by the adapter.
+    //
+    // HEARTBEATS ARE UNAFFECTED. Discord requires heartbeating from HELLO, which
+    // arrives BEFORE READY, and the timer below is keyed off `interval_ms` — read
+    // from the HELLO payload above — not off any published state. Nothing in the
+    // heartbeat path ever consulted the publish, so moving it cannot starve it.
     inbox
         .lock()
         .await
         .push_back(ChannelEvent::ConnectionStateChanged {
-            state: ConnectionState::Connected,
+            state: ConnectionState::Connecting,
         });
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_millis(interval_ms));
@@ -892,7 +1151,18 @@ async fn run_one_session(
                         let _ = sink.send(WsMessage::Pong(p)).await;
                         continue;
                     }
-                    WsMessage::Close(_) => return Err("close frame".to_string()),
+                    WsMessage::Close(frame) => {
+                        // The close CODE is the whole signal here. Discarding it
+                        // (as this arm used to) turns a 4004 credential
+                        // rejection into a generic transport fault, which the
+                        // outer loop then retries forever against a token the
+                        // platform has already refused.
+                        let code = close_code_of(frame.as_ref());
+                        if let Some(reason) = auth_rejection_for_close_code(code) {
+                            return Ok(SessionExit::AuthRejected { reason });
+                        }
+                        return Err(format!("close frame (code {code:?})"));
+                    }
                     _ => continue,
                 };
 
@@ -948,17 +1218,51 @@ async fn run_one_session(
                                 resume_gateway_url: ready.resume_gateway_url,
                                 seq: last_seq.unwrap_or(0),
                             });
+                            // READY is Discord ACCEPTING the IDENTIFY. This —
+                            // not the send — is the first moment the channel is
+                            // entitled to report Healthy.
                             tracing::debug!(
                                 target: "wcore_channel_discord::gateway",
                                 "READY received; session captured for resume"
                             );
+                            publish_connected(inbox).await;
                         } else if is_resumed(&payload) {
                             // RESUME succeeded: buffered events follow as
                             // normal MESSAGE_CREATE dispatches through the
-                            // mapping below — nothing else to do here.
+                            // mapping below.
                             tracing::debug!(
                                 target: "wcore_channel_discord::gateway",
                                 "RESUMED received; replayed events will flow as dispatches"
+                            );
+                            // RESUMED is an acceptance exactly as much as READY
+                            // is, and it is reached by a DIFFERENT arm: an
+                            // INVALID_SESSION that Discord marks resumable, or a
+                            // dropped socket, both send RESUME rather than
+                            // IDENTIFY. Publishing only on READY would leave a
+                            // perfectly recovered channel stuck in
+                            // `Connecting`/Degraded for the rest of the
+                            // process's life while working fine.
+                            publish_connected(inbox).await;
+                        }
+                        // F24-C3: observability for the inbound half.
+                        //
+                        // Until this existed there was NO way to tell, from
+                        // outside the process, whether a MESSAGE_CREATE had
+                        // reached us at all — so "inbound does not work" and
+                        // "inbound works and the mapper dropped it" produced
+                        // identical output (nothing), and six lanes could not
+                        // distinguish them. `content_len` rather than
+                        // `content`: whether the privileged MESSAGE_CONTENT
+                        // intent is actually delivering bodies is a length
+                        // question, and logging the body would put message
+                        // text in an operator's log file.
+                        if let Some(mc) = parse_message_create(&payload) {
+                            tracing::debug!(
+                                target: "wcore_channel_discord::gateway",
+                                channel_id = %mc.channel_id,
+                                author_is_bot = mc.author.as_ref().is_some_and(|a| a.bot),
+                                content_len = mc.content.len(),
+                                "MESSAGE_CREATE received from the Discord gateway"
                             );
                         }
                         if let Some(mc) = parse_message_create(&payload)
@@ -1199,6 +1503,77 @@ mod tests {
     }
 
     #[test]
+    fn close_4004_is_classified_as_a_credential_rejection() {
+        let reason = auth_rejection_for_close_code(Some(CLOSE_AUTHENTICATION_FAILED))
+            .expect("4004 is Discord's authentication-failed code and must be recognised");
+        assert!(
+            reason.contains("4004"),
+            "the reason an operator reads must name the code: {reason}"
+        );
+    }
+
+    #[test]
+    fn intent_close_codes_are_classified_as_credential_rejections() {
+        // 4013/4014 are marked non-reconnectable by Discord, so the `None` arm
+        // (ordinary resumable reconnect) made the gateway re-IDENTIFY forever
+        // against a handshake the platform refuses deterministically. Both must
+        // be terminal, and both must name their code and the operator's fix —
+        // "authentication failed" would be the wrong instruction for an intents
+        // problem even though the health label is the same.
+        let invalid = auth_rejection_for_close_code(Some(CLOSE_INVALID_INTENTS))
+            .expect("4013 is Discord's invalid-intents code and must be terminal");
+        assert!(
+            invalid.contains("4013") && invalid.contains("intents"),
+            "the reason must name the code and the surface at fault: {invalid}"
+        );
+        let disallowed = auth_rejection_for_close_code(Some(CLOSE_DISALLOWED_INTENTS))
+            .expect("4014 is Discord's disallowed-intents code and must be terminal");
+        assert!(
+            disallowed.contains("4014") && disallowed.contains("Developer Portal"),
+            "4014 is fixed in the Developer Portal, not by rotating a token: {disallowed}"
+        );
+        assert_ne!(
+            invalid, disallowed,
+            "4013 and 4014 have different operator fixes and must not share one message"
+        );
+        // 4012 is ALSO non-reconnectable but is a client bug, not operator
+        // credential state — it is deliberately left resumable, and this pins
+        // that decision so a later widening has to be deliberate.
+        assert!(
+            auth_rejection_for_close_code(Some(4012)).is_none(),
+            "4012 (invalid API version) is a client bug and is intentionally not classified \
+             as a credential rejection"
+        );
+    }
+
+    #[test]
+    fn ordinary_close_codes_are_not_credential_rejections() {
+        // The known-negative half. If this ever starts returning Some, every
+        // dropped socket becomes a permanent Unauthenticated and the channel
+        // stops reconnecting for a fault that waiting would have fixed.
+        //
+        // 4000 unknown error, 4008 rate limited and 4009 session timed out are
+        // all RESUMABLE; 1000/1006 are ordinary socket closes; `None` is a
+        // close frame carrying no code at all.
+        for code in [
+            None,
+            Some(1000),
+            Some(1006),
+            Some(4000),
+            Some(4008),
+            Some(4009),
+        ] {
+            assert!(
+                auth_rejection_for_close_code(code).is_none(),
+                "close code {code:?} is not a credential rejection and must stay resumable"
+            );
+        }
+        // Positive control in the same test, so a classifier that returned
+        // None for EVERYTHING could not pass this assertion set.
+        assert!(auth_rejection_for_close_code(Some(4004)).is_some());
+    }
+
+    #[test]
     fn decide_handshake_resumes_when_session_and_reason_allow() {
         // op 7 / dropped socket with a live session → RESUME.
         assert_eq!(
@@ -1279,14 +1654,53 @@ mod tests {
 
     #[test]
     fn with_gateway_query_is_idempotent() {
+        // The path is REQUIRED. `http::Uri` does not normalise an empty path,
+        // so a pathless URL yields the invalid request-target
+        // `GET ?v=10&encoding=json HTTP/1.1` and the handshake 400s.
         assert_eq!(
             with_gateway_query("wss://gateway.discord.gg"),
-            "wss://gateway.discord.gg?v=10&encoding=json"
+            "wss://gateway.discord.gg/?v=10&encoding=json"
         );
-        // Already carries query params → untouched.
+        // Already carries query params → query untouched, path still ensured.
         assert_eq!(
-            with_gateway_query("wss://resume.gg?v=10&encoding=json"),
-            "wss://resume.gg?v=10&encoding=json"
+            with_gateway_query("wss://resume.gg/?v=10&encoding=json"),
+            "wss://resume.gg/?v=10&encoding=json"
         );
+    }
+
+    /// F24-C3-DISCORD regression. Measured against the Phase 24 fixture: every
+    /// connect attempt failed `400 Bad Request` / `HPE_INVALID_URL` because the
+    /// generated URL had a query but no path.
+    #[test]
+    fn gateway_url_always_carries_a_path() {
+        for base in [
+            "wss://gateway.discord.gg",
+            "ws://127.0.0.1:41533",
+            "wss://resume.example.gg",
+        ] {
+            let got = with_gateway_query(base);
+            let after_scheme = got.find("://").unwrap() + 3;
+            let rest = &got[after_scheme..];
+            let idx = rest.find(['/', '?']).expect("must have a path or query");
+            assert_eq!(
+                rest.as_bytes()[idx],
+                b'/',
+                "the authority must be followed by a PATH, not a bare query: {got}"
+            );
+            assert!(got.contains("/?v=10&encoding=json"), "got {got}");
+        }
+    }
+
+    #[test]
+    fn ensure_path_leaves_an_existing_path_alone() {
+        assert_eq!(ensure_path("wss://a.gg/socket"), "wss://a.gg/socket");
+        assert_eq!(
+            ensure_path("wss://a.gg/socket?x=1"),
+            "wss://a.gg/socket?x=1"
+        );
+        assert_eq!(ensure_path("ws://127.0.0.1:9/"), "ws://127.0.0.1:9/");
+        // The two shapes that were broken.
+        assert_eq!(ensure_path("wss://a.gg"), "wss://a.gg/");
+        assert_eq!(ensure_path("wss://a.gg?x=1"), "wss://a.gg/?x=1");
     }
 }

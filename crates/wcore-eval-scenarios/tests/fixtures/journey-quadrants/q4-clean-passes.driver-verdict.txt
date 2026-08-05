@@ -1,0 +1,7 @@
+verdict=NO-REPEATS no repeats
+  submitted=12 arrived=12 unique=12 duplicates=0 losses=0
+  replays=0 (same delivery identity twice — a real exactly-once violation)
+  recurrences=0 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=0 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=0 at endpoint(s) (none)
+step-13 reconcile had read arrived=12 duplicates=0; 0 arrival(s) landed after it.

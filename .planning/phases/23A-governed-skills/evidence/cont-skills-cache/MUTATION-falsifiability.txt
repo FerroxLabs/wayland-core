@@ -1,0 +1,34 @@
+############ BASELINE (all three must pass) ############
+test resilient_reporter::tests::cooldown_occurrence_fires_on_open_and_on_nothing_else ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+test resilient_reporter::tests::the_open_occurrence_names_only_the_cooldown_tracker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+test bootstrap::fallback_pricing_identity_tests::pricing_refresher_construction_is_recorded_in_both_directions ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+
+############ MUTATION 1: drop the Open guard (emit on every transition) ############
+1
+test resilient_reporter::tests::cooldown_occurrence_fires_on_open_and_on_nothing_else ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+restored: 1 guard(s) back
+
+############ MUTATION 2: name the wrong capability ############
+1
+test resilient_reporter::tests::the_open_occurrence_names_only_the_cooldown_tracker ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+restored: 1 cooldown ref(s) back
+
+############ MUTATION 3: claim construction on the early-return path ############
+2
+test bootstrap::fallback_pricing_identity_tests::pricing_refresher_construction_is_recorded_in_both_directions ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+restored
+
+############ POST-RESTORE (all three must pass again) ############
+test resilient_reporter::tests::cooldown_occurrence_fires_on_open_and_on_nothing_else ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+test resilient_reporter::tests::the_open_occurrence_names_only_the_cooldown_tracker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+test bootstrap::fallback_pricing_identity_tests::pricing_refresher_construction_is_recorded_in_both_directions ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2239 filtered out; finished in 0.00s
+=== END ===

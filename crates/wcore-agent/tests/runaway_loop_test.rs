@@ -7,17 +7,53 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde_json::json;
-use wcore_agent::engine::AgentEngine;
+use wcore_agent::engine::{AgentEngine, AgentError};
 use wcore_agent::output::OutputSink;
 use wcore_agent::test_utils::TestSink;
+use wcore_providers::{LlmProvider, ProviderError};
+use wcore_tools::Tool;
 use wcore_tools::registry::ToolRegistry;
-use wcore_types::llm::LlmEvent;
+use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+use wcore_types::tool::ToolResult;
 
 use common::{MockLlmProvider, MockTool, test_config};
+
+fn assert_midflight_monitor_observed(events: &[serde_json::Value]) {
+    assert_midflight_monitor_occurrences(events, 1);
+}
+
+fn assert_midflight_monitor_occurrences(events: &[serde_json::Value], count: usize) {
+    let stages: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["type"].as_str() == Some("capability_activation")
+                && event["capability"].as_str() == Some("mid_flight_monitor")
+        })
+        .filter_map(|event| event["stage"].as_str())
+        .collect();
+    let expected = ["reached", "outcome_changed", "observed"].repeat(count);
+    assert_eq!(
+        stages, expected,
+        "a monitor-owned outcome must emit complete runtime proof; construction is emitted \
+         once by production bootstrap: {events:?}"
+    );
+}
+
+fn assert_monitor_decision(events: &[serde_json::Value], directive: &str, reason: &str) {
+    assert!(
+        events.iter().any(|event| {
+            event["type"].as_str() == Some("mid_flight_monitor_decision")
+                && event["directive"].as_str() == Some(directive)
+                && event["reason"].as_str() == Some(reason)
+        }),
+        "missing monitor decision {directive}/{reason}: {events:?}"
+    );
+}
 
 /// One turn that asks for the same tool with the same args. The id varies per
 /// turn (so per-turn history is well-formed); the breaker keys on
@@ -41,6 +77,168 @@ fn loop_turn(i: usize) -> Vec<LlmEvent> {
             },
         },
     ]
+}
+
+struct RecordingProvider {
+    turns: Mutex<Vec<Vec<LlmEvent>>>,
+    requests: Arc<Mutex<Vec<LlmRequest>>>,
+}
+
+struct BlockingProvider {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl LlmProvider for BlockingProvider {
+    async fn stream(
+        &self,
+        _request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
+impl RecordingProvider {
+    fn new(turns: Vec<Vec<LlmEvent>>) -> Self {
+        Self {
+            turns: Mutex::new(turns),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Arc<Mutex<Vec<LlmRequest>>> {
+        Arc::clone(&self.requests)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RecordingProvider {
+    async fn stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        let events = self.turns.lock().unwrap().remove(0);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            for event in events {
+                let _ = tx.send(event).await;
+            }
+        });
+        Ok(rx)
+    }
+}
+
+struct SequencedErrorTool {
+    name: &'static str,
+    errors: Mutex<Vec<String>>,
+}
+
+struct VolatileSuccessTool {
+    name: &'static str,
+    calls: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait]
+impl Tool for VolatileSuccessTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Returns the same outcome with a volatile counter"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ToolResult {
+            content: format!("unchanged request_id {call}"),
+            is_error: false,
+        }
+    }
+}
+
+struct ImprovingTool {
+    name: &'static str,
+    remaining: Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[async_trait]
+impl Tool for ImprovingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Returns a meaningfully improving numeric outcome"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        let remaining = self
+            .remaining
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        ToolResult {
+            content: format!("{remaining} tests failed"),
+            is_error: false,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SequencedErrorTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Returns one root error with volatile details"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        ToolResult {
+            content: self.errors.lock().unwrap().remove(0),
+            is_error: true,
+        }
+    }
 }
 
 #[tokio::test]
@@ -90,6 +288,294 @@ async fn repeated_identical_successful_tool_call_converges_via_loopguard() {
     assert!(
         saw_loop_error,
         "expected a visible no-progress-loop error event; got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn repeated_root_error_injects_a_changed_strategy_directive() {
+    let mut turns: Vec<Vec<LlmEvent>> = (0..3)
+        .map(|i| {
+            vec![
+                LlmEvent::ToolUse {
+                    id: format!("unstable-{i}"),
+                    name: "unstable_tool".to_string(),
+                    input: json!({ "attempt": i }),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                    usage: TokenUsage {
+                        input_tokens: 20,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                },
+            ]
+        })
+        .collect();
+    turns.push(vec![
+        LlmEvent::TextDelta("changed approach".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage {
+                input_tokens: 20,
+                output_tokens: 5,
+                ..Default::default()
+            },
+        },
+    ]);
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(SequencedErrorTool {
+        name: "unstable_tool",
+        errors: Mutex::new(vec![
+            "permission denied at /tmp/a/work.dat line 1".to_string(),
+            "permission denied at /tmp/b/work.dat line 2".to_string(),
+            "permission denied at /tmp/c/work.dat line 3".to_string(),
+        ]),
+    }));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut engine = AgentEngine::new_with_provider(provider, test_config(), registry, output);
+    let result = engine
+        .run("recover from the tool error", "")
+        .await
+        .expect("the monitor replans instead of terminating the run");
+    assert_eq!(result.text, "changed approach");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let final_request = serde_json::to_string(&requests[3].messages).unwrap();
+    assert!(
+        final_request.contains("Mid-flight monitor directive"),
+        "the turn after the third normalized root error must carry changed-strategy guidance: {final_request}"
+    );
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_error");
+    assert_midflight_monitor_observed(&events);
+}
+
+#[tokio::test]
+async fn varied_bash_failures_remain_bounded_without_a_turn_cap() {
+    let turns = (0..20)
+        .map(|attempt| {
+            vec![
+                LlmEvent::ToolUse {
+                    id: format!("bash-{attempt}"),
+                    name: "Bash".to_string(),
+                    input: json!({ "command": format!("build target-{attempt}") }),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                    usage: TokenUsage::default(),
+                },
+            ]
+        })
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(SequencedErrorTool {
+        name: "Bash",
+        errors: Mutex::new(
+            ["a", "b", "c", "d", "e", "f"]
+                .into_iter()
+                .enumerate()
+                .map(|(attempt, directory)| {
+                    format!(
+                        "compiler missing at /tmp/{directory}/work.dat line {}",
+                        attempt + 1
+                    )
+                })
+                .collect(),
+        ),
+    }));
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = None;
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("keep changing the build command", "")
+        .await
+        .expect("the monitor must stop repeated Bash root failures cleanly");
+
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    let request_count = requests.lock().unwrap().len();
+    assert!(
+        request_count < 20,
+        "the repeated-error monitor must bound Bash even after its tool circuit opens; requests={request_count}"
+    );
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_error");
+    assert_monitor_decision(&events, "stop", "repeated_error");
+    assert_midflight_monitor_occurrences(&events, 3); // root failure replan, circuit-open replan, circuit-open stop
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.to_string().contains("times in a row")),
+        "Bash remains outside FailureGuard; the monitor must own this stop: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn normalized_alternating_route_replans_once_then_stops_if_ignored() {
+    let turns = (0..12)
+        .map(|index| named_turn(index, if index % 2 == 0 { "route_a" } else { "route_b" }))
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(VolatileSuccessTool {
+        name: "route_a",
+        calls: std::sync::atomic::AtomicU32::new(0),
+    }));
+    registry.register(Box::new(VolatileSuccessTool {
+        name: "route_b",
+        calls: std::sync::atomic::AtomicU32::new(0),
+    }));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("repeat the alternating route", "")
+        .await
+        .expect("the monitor stops an ignored route loop cleanly");
+
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        12,
+        "three A/B cycles trigger one replan; three more trigger a bounded stop"
+    );
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_tool_route");
+    assert_monitor_decision(&events, "stop", "repeated_tool_route");
+    assert_midflight_monitor_occurrences(&events, 2);
+}
+
+#[tokio::test]
+async fn one_step_volatile_route_replans_once_then_stops_if_ignored() {
+    let turns = (0..6)
+        .map(|index| named_turn(index, "route_single"))
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(VolatileSuccessTool {
+        name: "route_single",
+        calls: std::sync::atomic::AtomicU32::new(1000),
+    }));
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("repeat one volatile route", "")
+        .await
+        .expect("the monitor stops an ignored one-step route cleanly");
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    assert_eq!(requests.lock().unwrap().len(), 6);
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_tool_route");
+    assert_monitor_decision(&events, "stop", "repeated_tool_route");
+    assert_midflight_monitor_occurrences(&events, 2);
+}
+
+#[tokio::test]
+async fn improving_numeric_outcomes_do_not_trip_route_monitor() {
+    let turns = (0..10)
+        .map(|index| named_turn(index, if index % 2 == 0 { "test_a" } else { "test_b" }))
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let remaining = Arc::new(std::sync::atomic::AtomicU32::new(10));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ImprovingTool {
+        name: "test_a",
+        remaining: Arc::clone(&remaining),
+    }));
+    registry.register(Box::new(ImprovingTool {
+        name: "test_b",
+        remaining,
+    }));
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(10);
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("iterate until the tests pass", "")
+        .await
+        .expect("meaningful numeric progress must reach the normal turn cap");
+    assert_eq!(result.turns, 10);
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    assert!(
+        handle
+            .snapshot()
+            .iter()
+            .all(|event| event["type"].as_str() != Some("mid_flight_monitor_decision")),
+        "meaningful numeric progress must not be classified as a route loop"
+    );
+}
+
+#[tokio::test]
+async fn host_cancel_interrupts_a_provider_that_never_opens_a_stream() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BlockingProvider {
+        entered: Arc::clone(&entered),
+    });
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut engine =
+        AgentEngine::new_with_provider(provider, test_config(), ToolRegistry::new(), output);
+    let cancel = engine.cancel_token();
+
+    let run = tokio::spawn(async move { engine.run("wait forever", "").await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+        .await
+        .expect("provider call must begin");
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+        .await
+        .expect("host cancellation must bound provider wait")
+        .expect("run task must join");
+    assert!(matches!(result, Err(AgentError::UserAborted)));
+
+    let monitor_stages: Vec<_> = handle
+        .snapshot()
+        .into_iter()
+        .filter(|event| {
+            event["type"].as_str() == Some("capability_activation")
+                && event["capability"].as_str() == Some("mid_flight_monitor")
+        })
+        .filter_map(|event| event["stage"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        monitor_stages.is_empty(),
+        "cancellation alone must not claim a monitor occurrence; the one-time \
+         construction chain belongs to production bootstrap"
     );
 }
 

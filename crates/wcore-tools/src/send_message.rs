@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 
@@ -316,6 +316,11 @@ impl Tool for SendMessageTool {
         ToolCategory::Exec
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // External delivery cannot be proven or deduplicated after interruption.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let target_str = match input.get("target").and_then(Value::as_str) {
             Some(s) if !s.trim().is_empty() => s,
@@ -371,6 +376,17 @@ impl Tool for SendMessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wcore_types::tool::ToolEffectKind;
+
+    #[test]
+    fn effect_contract_remains_opaque() {
+        let contract = SendMessageTool::default().effect_contract(&json!({
+            "target": "slack:C012ABCDE",
+            "message": "hello"
+        }));
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
 
     fn must_send(t: &SendMessageTool, target: &str, msg: &str) -> ToolResult {
         let fut = t.execute(json!({ "target": target, "message": msg }));

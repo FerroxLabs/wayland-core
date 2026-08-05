@@ -1,0 +1,10 @@
+LEDGER-LIVE: recovery=Resumed { snapshot: GoalAuthoritySnapshot { effective_limits: {"max_tokens": 1000}, strategy: Fleet, loop_policy: Fixed { iterations: 8 }, parent_envelope_digest: "parent-v1" }, iterations_started: 0, resume_count: 1 }
+LEDGER-LIVE: revoked task=t05
+LEDGER-LIVE: revoked task=t06
+LEDGER-LIVE: worker_effect key=idem-t05 label=t05 produced=no reason=idempotency-key-present
+LEDGER-LIVE: worker_effect key=idem-t06 label=t06 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t07 label=t07 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t08 label=t08 produced=yes
+LEDGER-LIVE: worker_effect key=idem-t09 label=t09 produced=yes
+LEDGER-LIVE: drained_outbox count=6
+LEDGER-LIVE: REPORT tasks=10 completed=10 delivered=10 dependency_releases=10 attempts=12 unresolved=0

@@ -21,6 +21,8 @@
 //!   `execute()` if the daemon is down despite the socket existing.
 
 use super::SandboxBackend;
+#[cfg(feature = "live-docker")]
+use crate::RetainedWorkspaceAuthority;
 use crate::error::{Result, SandboxError};
 use crate::manifest::SandboxManifest;
 use crate::{SandboxCommand, SandboxOutput};
@@ -32,6 +34,112 @@ use crate::ResourceLimitEnforcement;
 use crate::manifest::NetworkPolicy;
 #[cfg(feature = "live-docker")]
 use tokio::sync::OnceCell;
+
+#[cfg(feature = "live-docker")]
+const DOCKER_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(feature = "live-docker")]
+struct ContainerCleanup {
+    client: bollard::Docker,
+    id: Option<String>,
+}
+
+#[cfg(feature = "live-docker")]
+impl ContainerCleanup {
+    fn new(client: bollard::Docker, id: String) -> Self {
+        Self {
+            client,
+            id: Some(id),
+        }
+    }
+
+    async fn remove(&mut self) -> Result<()> {
+        use bollard::container::RemoveContainerOptions;
+
+        let Some(id) = self.id.as_ref().cloned() else {
+            return Ok(());
+        };
+        let removal = self.client.remove_container(
+            &id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        );
+        require_container_removal(&id, DOCKER_CLEANUP_TIMEOUT, removal).await?;
+        // Disarm only after Docker confirms force-removal. If this future is
+        // cancelled, errors, or times out, Drop retains the id and schedules
+        // a detached retry.
+        self.id = None;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "live-docker")]
+async fn require_container_removal<E, F>(
+    id: &str,
+    timeout: std::time::Duration,
+    removal: F,
+) -> Result<()>
+where
+    E: std::fmt::Display,
+    F: std::future::Future<Output = std::result::Result<(), E>>,
+{
+    match tokio::time::timeout(timeout, removal).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(SandboxError::DockerIo(format!(
+            "force-removal of Docker sandbox {id} failed: {error}"
+        ))),
+        Err(_) => Err(SandboxError::DockerIo(format!(
+            "force-removal of Docker sandbox {id} was not confirmed before timeout"
+        ))),
+    }
+}
+
+#[cfg(feature = "live-docker")]
+impl Drop for ContainerCleanup {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        // `execute` is async, so a Tokio handle is normally present. The
+        // detached cleanup is the cancellation path: dropping the backend
+        // future must still force-remove the already-created container.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                use bollard::container::RemoveContainerOptions;
+                let removal = client.remove_container(
+                    &id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                );
+                match tokio::time::timeout(DOCKER_CLEANUP_TIMEOUT, removal).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::error!(
+                        target: "wcore_sandbox",
+                        container = %id,
+                        %error,
+                        "Docker sandbox detached force-removal failed"
+                    ),
+                    Err(_) => tracing::error!(
+                        target: "wcore_sandbox",
+                        container = %id,
+                        "Docker sandbox detached force-removal timed out"
+                    ),
+                }
+            });
+        } else {
+            tracing::error!(
+                target: "wcore_sandbox",
+                container = %id,
+                "Docker sandbox cleanup lost its Tokio runtime; force-remove this container manually"
+            );
+        }
+    }
+}
 
 pub struct DockerBackend {
     #[cfg(feature = "live-docker")]
@@ -55,8 +163,14 @@ impl DockerBackend {
     #[cfg(feature = "live-docker")]
     pub async fn connect() -> Result<Self> {
         let backend = Self::new();
-        // Force initialisation; surface the connection error to the caller.
-        backend.client_ref().await?;
+        // Force initialisation and a real daemon round-trip. A socket pathname
+        // alone is not runtime availability (Docker Desktop commonly leaves a
+        // stale socket or has not started its VM yet).
+        let client = backend.client_ref().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.ping())
+            .await
+            .map_err(|_| SandboxError::DockerIo("Docker daemon ping timed out".to_owned()))?
+            .map_err(|error| SandboxError::DockerIo(error.to_string()))?;
         Ok(backend)
     }
 
@@ -69,8 +183,7 @@ impl DockerBackend {
     async fn client_ref(&self) -> Result<&bollard::Docker> {
         self.client
             .get_or_try_init(|| async {
-                bollard::Docker::connect_with_local_defaults()
-                    .map_err(|e| SandboxError::DockerIo(e.to_string()))
+                configured_docker_client().map_err(|e| SandboxError::DockerIo(e.to_string()))
             })
             .await
     }
@@ -82,26 +195,46 @@ impl Default for DockerBackend {
     }
 }
 
-/// Cheap, cached probe for the local Docker control socket / named pipe.
-/// We do NOT issue a daemon ping here — `default_for_platform()` must be
-/// sync and `is_available()` is called by ordinary trait dispatch.
+/// Build a client from the user's configured Docker endpoint. Docker Desktop
+/// on macOS may expose only `$HOME/.docker/run/docker.sock`, while remote and
+/// alternate contexts arrive through `DOCKER_HOST`.
+#[cfg(feature = "live-docker")]
+fn configured_docker_client() -> std::result::Result<bollard::Docker, bollard::errors::Error> {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("DOCKER_HOST").is_none()
+        && let Some(socket) = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|home| home.join(".docker/run/docker.sock"))
+            .filter(|path| path.exists())
+    {
+        return bollard::Docker::connect_with_socket(
+            &socket.to_string_lossy(),
+            // bollard's own DEFAULT_TIMEOUT (120s) is a private const with no
+            // public re-export in 0.17.1; inline the same value.
+            120,
+            bollard::API_DEFAULT_VERSION,
+        );
+    }
+    bollard::Docker::connect_with_defaults()
+}
+
+/// Cheap endpoint-presence hint for synchronous generic registry selection.
+/// Security-sensitive delegated dispatch uses `connect()` and its daemon ping.
 #[cfg(feature = "live-docker")]
 fn docker_socket_present() -> bool {
-    static PROBED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PROBED.get_or_init(|| {
-        #[cfg(unix)]
-        {
-            std::path::Path::new("/var/run/docker.sock").exists()
-        }
-        #[cfg(windows)]
-        {
-            std::path::Path::new(r"\\.\pipe\docker_engine").exists()
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            false
-        }
-    })
+    if std::env::var_os("DOCKER_HOST").is_some() {
+        return true;
+    }
+    #[cfg(unix)]
+    return std::path::Path::new("/var/run/docker.sock").exists()
+        || cfg!(target_os = "macos")
+            && std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .is_some_and(|home| home.join(".docker/run/docker.sock").exists());
+    #[cfg(windows)]
+    return std::path::Path::new(r"\\.\pipe\docker_engine").exists();
+    #[cfg(not(any(unix, windows)))]
+    false
 }
 
 #[async_trait]
@@ -123,6 +256,75 @@ impl SandboxBackend for DockerBackend {
     #[cfg(feature = "live-docker")]
     fn enforces_read_deny(&self) -> bool {
         true
+    }
+
+    #[cfg(feature = "live-docker")]
+    fn owns_descendants_hard(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "live-docker")]
+    fn binds_workspace_authority(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "live-docker")]
+    fn hard_containment_identity(&self) -> Option<super::HardContainmentIdentity> {
+        // Only a reachable Docker endpoint qualifies. Without a socket / host
+        // this is `None`, so the backend is structurally non-qualifying.
+        if !docker_socket_present() {
+            return None;
+        }
+        let endpoint =
+            std::env::var("DOCKER_HOST").unwrap_or_else(|_| "unix:///var/run/docker.sock".into());
+        Some(super::HardContainmentIdentity {
+            mechanism: super::HardContainmentMechanism::DockerContainer,
+            executable_identity: format!("docker-image:{}", crate::manifest::default_image()),
+            runtime_identity: format!("docker-daemon:{endpoint}"),
+            process_tree_mechanism: super::process_tree::ProcessTreeMechanism::DockerContainerReap,
+        })
+    }
+
+    #[cfg(feature = "live-docker")]
+    async fn probe_hard_containment(
+        &self,
+        fs: &crate::manifest::HardContainmentFilesystem,
+    ) -> Result<super::HardContainmentProbe> {
+        // Structural gate: no reachable daemon → cannot establish containment.
+        let identity = self.hard_containment_identity().ok_or_else(|| {
+            SandboxError::PolicyNotSupported("docker is unavailable for hard containment".into())
+        })?;
+
+        // Semantic live probe: create + run + FORCE-REMOVE a benign container
+        // under the normalized `network=Deny` policy. `execute` owns the
+        // container via `ContainerCleanup`, which force-removes it (and its
+        // process tree) on success, error, timeout, or cancellation — so a
+        // probe failure at any stage fails closed. The candidate / private-root
+        // BINDS are intentionally omitted from this benign probe (the roots may
+        // not exist at admission and Docker rejects missing bind sources); the
+        // read-only-candidate / private-writable-root policy is bound into the
+        // authority's policy identity and enforced at the real spawn. The probe
+        // argv is the benign `true` — never candidate-controlled.
+        let mut manifest = fs.to_manifest();
+        manifest.fs_read_allow.clear();
+        manifest.fs_write_allow.clear();
+        let out = self
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                },
+            )
+            .await?;
+        if out.exit_code != 0 {
+            return Err(SandboxError::ExecFailed(format!(
+                "docker hard-containment probe exited {}; stderr={}",
+                out.exit_code,
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(super::HardContainmentProbe { identity })
     }
 
     #[cfg(not(feature = "live-docker"))]
@@ -153,8 +355,8 @@ impl SandboxBackend for DockerBackend {
         cmd: SandboxCommand,
     ) -> Result<SandboxOutput> {
         use bollard::container::{
-            Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-            StartContainerOptions, WaitContainerOptions,
+            Config, CreateContainerOptions, LogOutput, LogsOptions, StartContainerOptions,
+            WaitContainerOptions,
         };
         use bollard::models::HostConfig;
         use futures::stream::StreamExt;
@@ -204,7 +406,7 @@ impl SandboxBackend for DockerBackend {
         let empty_dir = if manifest
             .fs_read_deny
             .iter()
-            .any(|p| std::fs::symlink_metadata(p).map_or(false, |m| m.is_dir()))
+            .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
         {
             Some(
                 tempfile::TempDir::new()
@@ -298,43 +500,240 @@ impl SandboxBackend for DockerBackend {
             .await
             .map_err(|e| SandboxError::DockerIo(e.to_string()))?;
         let id = created.id;
+        let mut cleanup = ContainerCleanup::new(client.clone(), id.clone());
         client
             .start_container(&id, None::<StartContainerOptions<String>>)
             .await
             .map_err(|e| SandboxError::DockerIo(e.to_string()))?;
         let mut wait = client.wait_container(&id, None::<WaitContainerOptions<String>>);
-        let exit_code: i32 = match wait.next().await {
-            Some(Ok(resp)) => resp.status_code as i32,
-            Some(Err(e)) => return Err(SandboxError::DockerIo(e.to_string())),
-            None => -1,
-        };
         let mut logs = client.logs(
             &id,
             Some(LogsOptions::<String> {
+                follow: true,
                 stdout: true,
                 stderr: true,
                 ..Default::default()
             }),
         );
-        let mut stdout: Vec<u8> = Vec::new();
-        let mut stderr: Vec<u8> = Vec::new();
-        while let Some(chunk) = logs.next().await {
-            match chunk {
-                Ok(LogOutput::StdOut { message }) => stdout.extend_from_slice(&message),
-                Ok(LogOutput::StdErr { message }) => stderr.extend_from_slice(&message),
-                Ok(_) => {}
-                Err(e) => return Err(SandboxError::DockerIo(e.to_string())),
+        let timeout = manifest
+            .timeout
+            .unwrap_or_else(|| std::time::Duration::from_secs(60));
+        let execution = async {
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let mut exit_code = None;
+            let mut logs_done = false;
+
+            while exit_code.is_none() || !logs_done {
+                tokio::select! {
+                    waited = wait.next(), if exit_code.is_none() => {
+                        exit_code = Some(match waited {
+                            Some(Ok(response)) => response.status_code as i32,
+                            Some(Err(error)) => {
+                                return Err(SandboxError::DockerIo(error.to_string()));
+                            }
+                            None => -1,
+                        });
+                    }
+                    chunk = logs.next(), if !logs_done => {
+                        match chunk {
+                            Some(Ok(LogOutput::StdOut { message })) => {
+                                reserve_docker_output(&stdout, &stderr, message.len())?;
+                                stdout.extend_from_slice(&message);
+                            }
+                            Some(Ok(LogOutput::StdErr { message })) => {
+                                reserve_docker_output(&stdout, &stderr, message.len())?;
+                                stderr.extend_from_slice(&message);
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                return Err(SandboxError::DockerIo(error.to_string()));
+                            }
+                            None => logs_done = true,
+                        }
+                    }
+                }
             }
+
+            Ok((exit_code.unwrap_or(-1), stdout, stderr))
+        };
+        let result = tokio::time::timeout(timeout, execution)
+            .await
+            .map_err(|_| SandboxError::Timeout);
+        cleanup.remove().await?;
+        let (exit_code, stdout, stderr) = result??;
+        Ok(SandboxOutput {
+            exit_code,
+            stdout,
+            stderr,
+            resource_limits: ResourceLimitEnforcement::Enforced,
+        })
+    }
+
+    #[cfg(feature = "live-docker")]
+    async fn execute_with_workspace_authority(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        workspace: RetainedWorkspaceAuthority,
+        max_workspace_bytes: u64,
+        reauthorize: &(dyn Fn() -> Result<()> + Send + Sync),
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<SandboxOutput> {
+        use bollard::container::{
+            Config, CreateContainerOptions, DownloadFromContainerOptions, LogOutput, LogsOptions,
+            StartContainerOptions, UploadToContainerOptions, WaitContainerOptions,
+        };
+        use bollard::models::HostConfig;
+        use futures::stream::StreamExt;
+        use std::collections::HashMap;
+
+        let limits = crate::directory_authority::archive::DirectoryArchiveLimits {
+            max_entries: 100_000,
+            max_bytes: max_workspace_bytes,
+            max_depth: 128,
+        };
+        if cancel.is_cancelled() {
+            return Err(SandboxError::ExecFailed(
+                "Docker workspace execution cancelled".into(),
+            ));
         }
-        let _ = client
-            .remove_container(
+        workspace.recover_pending_import(limits)?;
+        let plan = retained_container_plan(manifest, cmd, &workspace)?;
+        let source = workspace.export_tar_bounded("workspace", &plan.denied, limits)?;
+        let network_mode = match &manifest.network {
+            NetworkPolicy::Inherit => None,
+            NetworkPolicy::Deny => Some("none".to_owned()),
+            NetworkPolicy::AllowHosts(_) => {
+                return Err(SandboxError::PolicyNotSupported(
+                    "Docker backend has no DNS gate for AllowHosts".to_owned(),
+                ));
+            }
+        };
+        let mut tmpfs = HashMap::new();
+        tmpfs.insert(
+            "/scratch".to_owned(),
+            format!("rw,nosuid,nodev,size={max_workspace_bytes}"),
+        );
+        let config = Config {
+            image: Some(manifest.image.clone()),
+            cmd: Some(plan.argv),
+            env: (!plan.env.is_empty()).then_some(plan.env),
+            working_dir: Some("/workspace".to_owned()),
+            host_config: Some(HostConfig {
+                binds: None,
+                tmpfs: Some(tmpfs),
+                network_mode,
+                memory: manifest.max_memory_bytes.map(|bytes| bytes as i64),
+                nano_cpus: manifest
+                    .max_cpu_secs
+                    .map(|seconds| (seconds as i64) * 1_000_000_000),
+                ..Default::default()
+            }),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        let client = self.client_ref().await?;
+        let created = client
+            .create_container(None::<CreateContainerOptions<String>>, config)
+            .await
+            .map_err(|error| SandboxError::DockerIo(error.to_string()))?;
+        let id = created.id;
+        let mut cleanup = ContainerCleanup::new(client.clone(), id.clone());
+        let timeout = manifest
+            .timeout
+            .unwrap_or_else(|| std::time::Duration::from_secs(60));
+        let execution = async {
+            client
+                .upload_to_container(
+                    &id,
+                    Some(UploadToContainerOptions {
+                        path: "/",
+                        no_overwrite_dir_non_dir: "true",
+                    }),
+                    source.into(),
+                )
+                .await
+                .map_err(|error| SandboxError::DockerIo(error.to_string()))?;
+            client
+                .start_container(&id, None::<StartContainerOptions<String>>)
+                .await
+                .map_err(|error| SandboxError::DockerIo(error.to_string()))?;
+            let mut wait = client.wait_container(&id, None::<WaitContainerOptions<String>>);
+            let mut logs = client.logs(
                 &id,
-                Some(RemoveContainerOptions {
-                    force: true,
+                Some(LogsOptions::<String> {
+                    follow: true,
+                    stdout: true,
+                    stderr: true,
                     ..Default::default()
                 }),
-            )
-            .await;
+            );
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut exit_code = None;
+            let mut logs_done = false;
+            while exit_code.is_none() || !logs_done {
+                tokio::select! {
+                    waited = wait.next(), if exit_code.is_none() => {
+                        exit_code = Some(match waited {
+                            Some(Ok(response)) => response.status_code as i32,
+                            Some(Err(error)) => return Err(SandboxError::DockerIo(error.to_string())),
+                            None => -1,
+                        });
+                    }
+                    chunk = logs.next(), if !logs_done => match chunk {
+                        Some(Ok(LogOutput::StdOut { message })) => {
+                            reserve_docker_output(&stdout, &stderr, message.len())?;
+                            stdout.extend_from_slice(&message);
+                        }
+                        Some(Ok(LogOutput::StdErr { message })) => {
+                            reserve_docker_output(&stdout, &stderr, message.len())?;
+                            stderr.extend_from_slice(&message);
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => return Err(SandboxError::DockerIo(error.to_string())),
+                        None => logs_done = true,
+                    }
+                }
+            }
+            let mut downloaded = Vec::new();
+            let mut stream = client.download_from_container(
+                &id,
+                Some(DownloadFromContainerOptions { path: "/workspace" }),
+            );
+            let encoded_limit = limits.encoded_limit()?;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| SandboxError::DockerIo(error.to_string()))?;
+                let next = downloaded.len().checked_add(chunk.len()).ok_or_else(|| {
+                    SandboxError::PathDenied("Docker archive length overflowed".to_owned())
+                })?;
+                if next as u64 > encoded_limit {
+                    return Err(SandboxError::PathDenied(format!(
+                        "Docker workspace result exceeds {encoded_limit} encoded bytes"
+                    )));
+                }
+                downloaded.extend_from_slice(&chunk);
+            }
+            Ok((exit_code.unwrap_or(-1), stdout, stderr, downloaded))
+        };
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(SandboxError::ExecFailed(
+                "Docker workspace execution cancelled".to_owned()
+            )),
+            result = tokio::time::timeout(timeout, execution) => {
+                result.map_err(|_| SandboxError::Timeout)
+            }
+        };
+        cleanup.remove().await?;
+        let (exit_code, stdout, stderr, downloaded) = result??;
+        reauthorize()?;
+        workspace.validate()?;
+        workspace.replace_from_tar_bounded(&downloaded, "workspace", limits)?;
+        reauthorize()?;
+        workspace.validate()?;
         Ok(SandboxOutput {
             exit_code,
             stdout,
@@ -353,122 +752,119 @@ impl SandboxBackend for DockerBackend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backend_name_is_stable() {
-        assert_eq!(DockerBackend::new().name(), "docker");
-    }
-
-    /// sandbox-4: with the `live-docker` feature OFF a docker backend can
-    /// never be available and execution is refused with `DockerDisabled`
-    /// rather than silently degrading. (The loud warning is emitted via
-    /// `is_available`; we assert the security-relevant outcomes here.)
-    #[cfg(not(feature = "live-docker"))]
-    #[tokio::test]
-    async fn docker_disabled_is_unavailable_and_refuses() {
-        let backend = DockerBackend::new();
-        assert!(
-            !backend.is_available(),
-            "without live-docker the backend must be unavailable"
-        );
-        let err = backend
-            .execute(
-                &SandboxManifest::default(),
-                SandboxCommand {
-                    argv: vec!["/bin/echo".into()],
-                    cwd: None,
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(err, SandboxError::DockerDisabled),
-            "execute must refuse with DockerDisabled, got {err:?}"
-        );
-    }
-
-    /// Task 5: without the `live-docker` feature the backend enforces nothing
-    /// and must keep the trait default `false` so the exec-time capability
-    /// gate remains truthful.
-    #[cfg(not(feature = "live-docker"))]
-    #[test]
-    fn enforces_read_deny_is_false_without_live_docker() {
-        assert!(
-            !DockerBackend::new().enforces_read_deny(),
-            "non-live-docker build must not claim to enforce read-deny"
-        );
-    }
-
-    /// Task 5 (live): with the `live-docker` feature ON the backend declares
-    /// it enforces `fs_read_deny`. This is a capability claim without needing
-    /// a running daemon — the implementation is in `execute` and CI exercises
-    /// it end-to-end.
-    #[cfg(feature = "live-docker")]
-    #[test]
-    fn enforces_read_deny_is_true_with_live_docker() {
-        assert!(
-            DockerBackend::new().enforces_read_deny(),
-            "live-docker build must claim to enforce read-deny"
-        );
-    }
-
-    /// Task 5 (live integration): a file that is read-allowed under a mounted
-    /// root but also listed in `fs_read_deny` must read as empty inside the
-    /// container (the `/dev/null` bind shadows it).
-    ///
-    /// Skips when the Docker daemon is unavailable — this is a live-only test.
-    #[cfg(feature = "live-docker")]
-    #[tokio::test]
-    async fn docker_denies_read_of_secret_under_allowed_root() {
-        let backend = match DockerBackend::connect().await {
-            Ok(b) => b,
-            Err(_) => {
-                eprintln!("skip: docker daemon unavailable");
-                return;
-            }
-        };
-
-        // Create a temporary directory on the host containing a "secret" file.
-        let workspace = tempfile::TempDir::new().expect("tempdir");
-        let secret = workspace.path().join(".env");
-        std::fs::write(&secret, b"SECRET=hunter2").expect("write secret");
-
-        let manifest = SandboxManifest {
-            // Allow the workspace root (so the container can see the dir).
-            fs_read_allow: vec![workspace.path().to_path_buf()],
-            // Deny the specific secret file inside the allowed root.
-            fs_read_deny: vec![secret.clone()],
-            network: NetworkPolicy::Deny,
-            image: "alpine:3.19".into(),
-            ..Default::default()
-        };
-
-        let out = match backend
-            .execute(
-                &manifest,
-                SandboxCommand {
-                    argv: vec!["cat".into(), secret.to_string_lossy().into_owned()],
-                    cwd: None,
-                },
-            )
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("skip: docker execute failed ({e:?})");
-                return;
-            }
-        };
-
-        // The deny bind shadows .env with /dev/null — `cat /dev/null` exits 0
-        // and produces empty output. Assert that secret bytes are absent.
-        let output = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            !output.contains("SECRET"),
-            "secret bytes must not be readable under Docker read-deny; got: {output:?}"
-        );
-    }
+#[cfg(feature = "live-docker")]
+#[derive(Debug)]
+pub(super) struct RetainedContainerPlan {
+    pub(super) argv: Vec<String>,
+    pub(super) env: Vec<String>,
+    pub(super) denied: Vec<std::path::PathBuf>,
 }
+
+#[cfg(feature = "live-docker")]
+pub(super) fn retained_container_plan(
+    manifest: &SandboxManifest,
+    cmd: SandboxCommand,
+    authority: &RetainedWorkspaceAuthority,
+) -> Result<RetainedContainerPlan> {
+    let workspace = authority.workspace().display_path();
+    if cmd.cwd.as_deref() != Some(workspace) {
+        return Err(SandboxError::PathDenied(
+            "Docker command cwd does not match retained workspace".to_owned(),
+        ));
+    }
+    let scratch = manifest
+        .fs_write_allow
+        .iter()
+        .find(|path| path.as_path() != workspace)
+        .cloned();
+    for allowed in manifest
+        .fs_read_allow
+        .iter()
+        .chain(&manifest.fs_write_allow)
+    {
+        if allowed.as_path() != workspace && Some(allowed) != scratch.as_ref() {
+            return Err(SandboxError::PathDenied(format!(
+                "Docker retained transport refuses ambient host grant: {}",
+                allowed.display()
+            )));
+        }
+    }
+    let mut denied = Vec::new();
+    for path in &manifest.fs_read_deny {
+        if path.as_path() == workspace {
+            return Err(SandboxError::PathDenied(
+                "Docker retained transport cannot deny its workspace root".to_owned(),
+            ));
+        }
+        if let Ok(relative) = path.strip_prefix(workspace) {
+            if relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                denied.push(relative.to_path_buf());
+            } else {
+                return Err(SandboxError::PathDenied(format!(
+                    "Docker deny path is not canonical: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    let rewrite = |value: String, program: bool| -> Result<String> {
+        let path = std::path::Path::new(&value);
+        if let Ok(relative) = path.strip_prefix(workspace) {
+            if relative.as_os_str().is_empty() {
+                return Ok("/workspace".to_owned());
+            }
+            return Ok(std::path::Path::new("/workspace")
+                .join(relative)
+                .to_string_lossy()
+                .into_owned());
+        }
+        if let Some(root) = scratch.as_deref()
+            && let Ok(relative) = path.strip_prefix(root)
+        {
+            if relative.as_os_str().is_empty() {
+                return Ok("/scratch".to_owned());
+            }
+            return Ok(std::path::Path::new("/scratch")
+                .join(relative)
+                .to_string_lossy()
+                .into_owned());
+        }
+        if program && path.is_absolute() {
+            return Err(SandboxError::PathDenied(
+                "Docker retained worker executable must be supplied by the image or workspace"
+                    .to_owned(),
+            ));
+        }
+        Ok(value)
+    };
+    let mut argv = Vec::with_capacity(cmd.argv.len());
+    for (index, value) in cmd.argv.into_iter().enumerate() {
+        argv.push(rewrite(value, index == 0)?);
+    }
+    let mut env = Vec::with_capacity(manifest.env.len());
+    for (name, value) in &manifest.env {
+        env.push(format!("{name}={}", rewrite(value.clone(), false)?));
+    }
+    Ok(RetainedContainerPlan { argv, env, denied })
+}
+
+#[cfg(feature = "live-docker")]
+fn reserve_docker_output(stdout: &[u8], stderr: &[u8], amount: usize) -> Result<()> {
+    let next = stdout
+        .len()
+        .checked_add(stderr.len())
+        .and_then(|bytes| bytes.checked_add(amount));
+    if next.is_none_or(|bytes| bytes > super::BUFFERED_OUTPUT_LIMIT_BYTES) {
+        return Err(SandboxError::OutputLimitExceeded {
+            limit_bytes: super::BUFFERED_OUTPUT_LIMIT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "docker_tests.rs"]
+mod tests;

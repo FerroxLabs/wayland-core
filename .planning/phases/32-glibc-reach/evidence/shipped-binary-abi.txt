@@ -1,0 +1,59 @@
+BINARY=/root/wayland/target/release/wayland-core
+MTIME=2026-07-30 02:58:30.085202608 +0000
+=== ldd (dynamic deps) ===
+	linux-vdso.so.1 (0x00007ffe379f5000)
+	libssl.so.3 => /lib/x86_64-linux-gnu/libssl.so.3 (0x00007854c4487000)
+	libcrypto.so.3 => /lib/x86_64-linux-gnu/libcrypto.so.3 (0x00007854bee00000)
+	libseccomp.so.2 => /lib/x86_64-linux-gnu/libseccomp.so.2 (0x00007854bf3e0000)
+	libdbus-1.so.3 => /lib/x86_64-linux-gnu/libdbus-1.so.3 (0x00007854bf391000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007854bf363000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007854bed17000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007854bea00000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007854c4542000)
+	libsystemd.so.0 => /lib/x86_64-linux-gnu/libsystemd.so.0 (0x00007854bec37000)
+	libcap.so.2 => /lib/x86_64-linux-gnu/libcap.so.2 (0x00007854c4478000)
+	libgcrypt.so.20 => /lib/x86_64-linux-gnu/libgcrypt.so.20 (0x00007854be8b8000)
+	liblz4.so.1 => /lib/x86_64-linux-gnu/liblz4.so.1 (0x00007854bf341000)
+	liblzma.so.5 => /lib/x86_64-linux-gnu/liblzma.so.5 (0x00007854be886000)
+	libzstd.so.1 => /lib/x86_64-linux-gnu/libzstd.so.1 (0x00007854be7cc000)
+	libgpg-error.so.0 => /lib/x86_64-linux-gnu/libgpg-error.so.0 (0x00007854bf31c000)
+=== NEEDED entries ===
+ 0x0000000000000001 (NEEDED)             Shared library: [libssl.so.3]
+ 0x0000000000000001 (NEEDED)             Shared library: [libcrypto.so.3]
+ 0x0000000000000001 (NEEDED)             Shared library: [libseccomp.so.2]
+ 0x0000000000000001 (NEEDED)             Shared library: [libdbus-1.so.3]
+ 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-x86-64.so.2]
+=== GLIBC version refs (sorted) ===
+GLIBC_2.2.5
+GLIBC_2.3
+GLIBC_2.3.2
+GLIBC_2.3.4
+GLIBC_2.4
+GLIBC_2.5
+GLIBC_2.6
+GLIBC_2.7
+GLIBC_2.9
+GLIBC_2.10
+GLIBC_2.14
+GLIBC_2.15
+GLIBC_2.16
+GLIBC_2.17
+GLIBC_2.18
+GLIBC_2.25
+GLIBC_2.27
+GLIBC_2.28
+GLIBC_2.29
+GLIBC_2.30
+GLIBC_2.32
+GLIBC_2.33
+GLIBC_2.34
+GLIBC_2.38
+GLIBC_2.39
+=== KNOWN-POSITIVE control: GLIBC_2.2.5 must appear (every x86_64 ELF has it) ===
+62
+=== KNOWN-NEGATIVE control: a version that cannot exist ===
+0
+0 (correct: absent)

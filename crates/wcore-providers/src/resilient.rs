@@ -27,17 +27,21 @@ use wcore_config::circuit_breaker::{
 };
 use wcore_types::llm::{LlmEvent, LlmRequest};
 
-use crate::cooldown::CooldownClass;
-use crate::{LlmProvider, ModelInfo, ProviderError, classify_failover};
+use crate::cooldown::{CooldownClass, CooldownPermit, CooldownState, CooldownTracker};
+use crate::failover_policy::{
+    CandidateCapabilities, CandidateReceipt, CandidateRejection, FailoverCandidateMetadata,
+    FailoverReceipt, FailoverRoutingPolicy, PricingEvidence, RequestRequirements,
+    evaluate_candidate,
+};
+use crate::{FailoverReason, LlmProvider, ModelInfo, ProviderError, classify_failover};
 
 /// Classify a retryable `ProviderError` and decide whether it should count
 /// against the circuit breaker.
 ///
-/// Semantic failures (`ContextOverflow`, `Format`, `ModelNotFound`) are NOT
-/// the provider's fault and a retry on the *same* provider will fail
-/// identically — counting them toward the breaker would open the circuit on
-/// a wedged *input*, not a wedged provider. Only transient and permanent
-/// provider-side reasons trip the breaker.
+/// Request-semantic format and context-overflow failures are NOT the provider's
+/// fault and do not poison candidate health. A missing model cools only that
+/// provider/model candidate permanently; each fallback has an independent
+/// tracker, so it cannot disable other models/providers.
 fn should_trip_breaker(err: &ProviderError) -> bool {
     let status = match err {
         ProviderError::Api { status, .. } => Some(*status),
@@ -51,20 +55,37 @@ fn should_trip_breaker(err: &ProviderError) -> bool {
 /// identically on EVERY provider in the chain, so trying a fallback is
 /// pointless and the chain must abort immediately.
 ///
-/// This is the abort set: `PromptTooLong` and the request-shape `Api` errors
-/// (413 payload/context too large, 400 malformed request). These are properties
-/// of the request itself, not of any one provider.
+/// A malformed request (HTTP 400) is provider-independent and aborts. Context
+/// overflow is deliberately excluded: candidate admission knows each model's
+/// context window and may safely select a larger compatible target.
 ///
 /// Deliberately EXCLUDED (these are provider/model-specific — a different
 /// fallback may succeed, so the chain must CONTINUE): 401/403 (bad credential
 /// for this provider), 404 (`ModelNotFound` on this provider), and
 /// `MissingApiKey`. A misconfigured first fallback must not abort the chain.
 fn is_request_fatal(err: &ProviderError) -> bool {
+    matches!(err, ProviderError::Api { status: 400, .. })
+}
+
+fn classify_error(err: &ProviderError) -> FailoverReason {
+    let status = match err {
+        ProviderError::Api { status, .. } => Some(*status),
+        _ => None,
+    };
+    classify_failover(err, status, None, None)
+}
+
+fn retry_after(err: &ProviderError) -> Option<std::time::Duration> {
     match err {
-        ProviderError::PromptTooLong(_) => true,
-        ProviderError::Api { status, .. } => *status == 400 || *status == 413,
-        _ => false,
+        ProviderError::RateLimited { retry_after_ms } => {
+            Some(std::time::Duration::from_millis(*retry_after_ms))
+        }
+        _ => None,
     }
+}
+
+fn duration_millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Alias for the shared `CircuitBreakerConfig`; keeps callers in `wcore-agent` stable.
@@ -81,6 +102,8 @@ pub trait CircuitReporter: Send + Sync {
         state: CircuitState,
         error: Option<&str>,
     );
+
+    fn report_failover(&self, _receipt: &FailoverReceipt) {}
 }
 
 #[derive(Default)]
@@ -137,13 +160,21 @@ impl CircuitBreaker {
 pub struct ResilientProvider {
     primary: Arc<dyn LlmProvider>,
     primary_name: String,
-    fallbacks: Vec<(String, Arc<dyn LlmProvider>)>,
-    // F32: `Arc` so the stream-terminal forwarder task can record the breaker
-    // verdict (success on `Done`, failure on a terminal mid-stream `Error`)
-    // after `stream()` has already returned the channel.
-    breaker: Arc<CircuitBreaker>,
+    fallbacks: Vec<ResilientFallback>,
+    health: Arc<CooldownTracker>,
     reporter: Arc<dyn CircuitReporter>,
+    policy: FailoverRoutingPolicy,
 }
+
+struct ResilientFallback {
+    label: String,
+    pricing_provider: String,
+    model: String,
+    provider: Arc<dyn LlmProvider>,
+    metadata: FailoverCandidateMetadata,
+    health: Arc<CooldownTracker>,
+}
+
 impl ResilientProvider {
     pub fn new(
         primary_name: impl Into<String>,
@@ -152,13 +183,101 @@ impl ResilientProvider {
         cfg: CircuitConfig,
         reporter: Arc<dyn CircuitReporter>,
     ) -> Self {
+        let fallbacks = fallbacks
+            .into_iter()
+            .map(|(label, provider)| (label.clone(), label.clone(), label, provider))
+            .collect();
+        Self::new_with_fallback_identities(primary_name, primary, fallbacks, cfg, reporter)
+    }
+
+    pub fn new_with_fallback_identities(
+        primary_name: impl Into<String>,
+        primary: Arc<dyn LlmProvider>,
+        fallbacks: Vec<(String, String, String, Arc<dyn LlmProvider>)>,
+        cfg: CircuitConfig,
+        reporter: Arc<dyn CircuitReporter>,
+    ) -> Self {
+        let candidates = fallbacks
+            .into_iter()
+            .map(|(label, pricing_provider, model, provider)| {
+                let context_window =
+                    wcore_config::limits::model_output_ceiling(&pricing_provider, &model)
+                        .map(|(_, window)| u64::from(window));
+                let metadata = FailoverCandidateMetadata {
+                    label,
+                    provider: pricing_provider,
+                    model,
+                    organization: None,
+                    region: None,
+                    // Compatibility was not expressible in the legacy tuple.
+                    // Preserve its behavior; production bootstrap uses the
+                    // typed constructor below with fail-closed metadata.
+                    capabilities: CandidateCapabilities {
+                        tools: true,
+                        vision: true,
+                        structured_output: true,
+                        context_window,
+                    },
+                    pricing: PricingEvidence::default(),
+                };
+                (metadata, provider)
+            })
+            .collect();
+        Self::new_with_policy(
+            primary_name,
+            primary,
+            candidates,
+            cfg,
+            reporter,
+            FailoverRoutingPolicy::default(),
+        )
+    }
+
+    pub fn new_with_policy(
+        primary_name: impl Into<String>,
+        primary: Arc<dyn LlmProvider>,
+        fallbacks: Vec<(FailoverCandidateMetadata, Arc<dyn LlmProvider>)>,
+        cfg: CircuitConfig,
+        reporter: Arc<dyn CircuitReporter>,
+        policy: FailoverRoutingPolicy,
+    ) -> Self {
+        let threshold = u32::try_from(cfg.fail_threshold).unwrap_or(u32::MAX);
+        let transient_base = cfg.cooldown;
         Self {
             primary_name: primary_name.into(),
             primary,
-            fallbacks,
-            breaker: Arc::new(CircuitBreaker::new(cfg)),
+            fallbacks: fallbacks
+                .into_iter()
+                .map(|(metadata, provider)| ResilientFallback {
+                    label: metadata.label.clone(),
+                    pricing_provider: metadata.provider.clone(),
+                    model: metadata.model.clone(),
+                    provider,
+                    metadata,
+                    health: Arc::new(CooldownTracker::with_failure_threshold_and_base(
+                        threshold,
+                        transient_base,
+                    )),
+                })
+                .collect(),
+            health: Arc::new(CooldownTracker::with_failure_threshold_and_base(
+                threshold,
+                transient_base,
+            )),
             reporter,
+            policy,
         }
+    }
+
+    /// How many `CooldownTracker`s this provider actually constructed: one for
+    /// the primary plus one per admitted fallback candidate.
+    ///
+    /// Exists so the F05 capability report (`F05-TRUTH-3`) can state a measured
+    /// fact about the object that was built instead of asserting a literal at
+    /// the report site. A reader that wants "is the cooldown tracker
+    /// constructed" asks the thing that would own it.
+    pub fn cooldown_tracker_count(&self) -> usize {
+        1 + self.fallbacks.len()
     }
 
     /// F32: forward every event from the primary's stream onto a fresh channel,
@@ -167,14 +286,15 @@ impl ResilientProvider {
     /// channel closing with no `Done`) → failure. This prevents a provider that
     /// always accepts headers then dies mid-body from looking permanently
     /// healthy. Events are passed through unmodified.
-    fn spawn_breaker_forwarder(
-        &self,
+    fn spawn_health_forwarder(
         mut rx: mpsc::Receiver<LlmEvent>,
+        health: Arc<CooldownTracker>,
+        reporter: Arc<dyn CircuitReporter>,
+        primary_name: String,
+        fallback: Option<String>,
+        was_probe: bool,
     ) -> mpsc::Receiver<LlmEvent> {
         let (tx, out_rx) = mpsc::channel(32);
-        let breaker = Arc::clone(&self.breaker);
-        let reporter = Arc::clone(&self.reporter);
-        let primary_name = self.primary_name.clone();
         tokio::spawn(async move {
             // `saw_done` distinguishes a clean completion from a stream that
             // closed without a terminal Done (treated as a mid-stream failure).
@@ -194,15 +314,21 @@ impl ResilientProvider {
                 }
             }
             if saw_done && !saw_error {
-                if let Some(new) = breaker.on_success() {
-                    reporter.report(&primary_name, None, new, None);
+                health.record_success();
+                if was_probe {
+                    reporter.report(
+                        &primary_name,
+                        fallback.as_deref(),
+                        CircuitState::Closed,
+                        None,
+                    );
                 }
-            } else if let Some(new) = breaker.on_failure() {
-                // Mid-stream death (terminal Error or channel closed without Done).
+            } else {
+                health.record_failure(FailoverReason::Unknown, None);
                 reporter.report(
                     &primary_name,
-                    None,
-                    new,
+                    fallback.as_deref(),
+                    CircuitState::Open,
                     Some("stream terminated without success"),
                 );
             }
@@ -232,84 +358,216 @@ impl LlmProvider for ResilientProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        if self.breaker.before_call().is_some() {
-            match self.primary.stream(request).await {
+        let requirements = RequestRequirements::from_request(request);
+        let mut previous_provider = self.primary_name.as_str();
+        let mut previous_attempted = false;
+        let mut last_error = None;
+        let mut receipt;
+
+        let primary_state = self.health.state();
+        if let Some(permit) = self.health.try_acquire() {
+            match crate::attempt_lifecycle::scope_provider_attempt_identity(
+                self.primary_name.clone(),
+                request.model.clone(),
+                self.primary.stream(request),
+            )
+            .await
+            {
                 Ok(rx) => {
-                    // F32: header acceptance is NOT yet a success. stream() returns
-                    // Ok(rx) once headers arrive, but the request can still die
-                    // mid-body (surfaced as a terminal LlmEvent::Error on the
-                    // channel, never as Err here). Recording success now would keep
-                    // a provider that always dies mid-stream looking "healthy".
-                    // Instead, defer the breaker verdict to the stream's terminal
-                    // event by forwarding through a wrapper channel: Done → success,
-                    // terminal Error → failure.
-                    return Ok(self.spawn_breaker_forwarder(rx));
+                    return Ok(Self::spawn_health_forwarder(
+                        rx,
+                        Arc::clone(&self.health),
+                        Arc::clone(&self.reporter),
+                        self.primary_name.clone(),
+                        None,
+                        permit == CooldownPermit::HalfOpen,
+                    ));
                 }
-                Err(e) if e.is_retryable() => {
-                    // Only count provider-side (transient/permanent) failures
-                    // against the breaker — a semantic error (bad input,
-                    // context overflow) would reopen on the next identical
-                    // request and is not the provider's health signal.
-                    if should_trip_breaker(&e)
-                        && let Some(new) = self.breaker.on_failure()
-                    {
-                        self.reporter
-                            .report(&self.primary_name, None, new, Some(&e.to_string()));
-                    }
-                    if self.fallbacks.is_empty() {
-                        // No fallback to try — surface the primary's error
-                        // rather than the generic "all providers failed".
-                        return Err(e);
-                    }
-                    // fall through to fallbacks
-                }
-                // F20: a NON-retryable primary error must distinguish
-                // request-semantic faults (abort — they would fail on every
-                // provider) from provider/model-specific ones (401/403/404/
-                // MissingApiKey — a misconfigured primary). The latter must
-                // fall through to the fallback chain rather than abort before
-                // it is ever tried; otherwise fallbacks never run for the most
-                // common misconfiguration, defeating their entire purpose
-                // (same policy the fallback loop below applies).
                 Err(e) if is_request_fatal(&e) => return Err(e),
                 Err(e) => {
+                    let reason = classify_error(&e);
+                    if should_trip_breaker(&e) {
+                        self.health.record_failure(reason, retry_after(&e));
+                        if matches!(self.health.state(), CooldownState::Cooling { .. }) {
+                            self.reporter.report(
+                                &self.primary_name,
+                                None,
+                                CircuitState::Open,
+                                Some(&e.to_string()),
+                            );
+                        }
+                    } else {
+                        self.health.record_failure(reason, None);
+                    }
+                    previous_attempted = e.is_retryable()
+                        || crate::retry::configured_fallback_previous_attempted(&e);
+                    receipt = FailoverReceipt::new(
+                        reason,
+                        self.primary_name.clone(),
+                        request.model.clone(),
+                    );
                     if self.fallbacks.is_empty() {
                         return Err(e);
                     }
-                    // fall through to fallbacks
+                    last_error = Some(e);
                 }
             }
         } else {
-            // Circuit open + cooldown not elapsed → skip primary, log the skip.
             self.reporter.report(
                 &self.primary_name,
-                self.fallbacks.first().map(|(n, _)| n.as_str()),
+                self.fallbacks
+                    .first()
+                    .map(|fallback| fallback.label.as_str()),
                 CircuitState::Open,
                 Some("circuit open; skipping primary"),
             );
-        }
-        // Try each fallback in order.
-        for (name, fb) in &self.fallbacks {
-            match fb.stream(request).await {
-                Ok(rx) => {
-                    self.reporter
-                        .report(&self.primary_name, Some(name), CircuitState::Open, None);
-                    return Ok(rx);
+            if self.fallbacks.is_empty() {
+                return Err(ProviderError::NotAttempted {
+                    reason: "primary circuit is open and no fallback is configured".into(),
+                });
+            }
+            let reason = match primary_state {
+                CooldownState::Cooling { reason, .. } | CooldownState::HalfOpen { reason } => {
+                    reason
                 }
-                // Retryable failures move on to the next fallback.
-                Err(e) if e.is_retryable() => continue,
-                // F20: only REQUEST-SEMANTIC errors (would fail on every
-                // provider too) abort the chain. A provider/model-specific
-                // non-retryable error (401/403/404/MissingApiKey — e.g. a
-                // misconfigured first fallback) must NOT abort: continue to the
-                // next fallback. The last entry's error surfaces below.
-                Err(e) if is_request_fatal(&e) => return Err(e),
-                Err(_) => continue,
+                CooldownState::Ready => FailoverReason::Unknown,
+            };
+            receipt =
+                FailoverReceipt::new(reason, self.primary_name.clone(), request.model.clone());
+        }
+
+        for fallback in &self.fallbacks {
+            let policy_disposition =
+                evaluate_candidate(&fallback.metadata, requirements, &self.policy);
+            if let Err(rejection) = policy_disposition {
+                receipt.candidates.push(CandidateReceipt {
+                    provider: fallback.pricing_provider.clone(),
+                    model: fallback.model.clone(),
+                    region: fallback.metadata.region.clone(),
+                    disposition: Err(rejection),
+                    failure_reason: None,
+                    cooldown_reason: None,
+                    retry_after_ms: None,
+                    pricing: fallback.metadata.pricing.clone(),
+                });
+                continue;
+            }
+
+            let fallback_state = fallback.health.state();
+            let Some(permit) = fallback.health.try_acquire() else {
+                let cooldown_reason = match fallback_state {
+                    CooldownState::Cooling { reason, .. } | CooldownState::HalfOpen { reason } => {
+                        Some(reason)
+                    }
+                    CooldownState::Ready => None,
+                };
+                receipt.candidates.push(CandidateReceipt {
+                    provider: fallback.pricing_provider.clone(),
+                    model: fallback.model.clone(),
+                    region: fallback.metadata.region.clone(),
+                    disposition: Err(CandidateRejection::CooldownActive),
+                    failure_reason: None,
+                    cooldown_reason,
+                    retry_after_ms: fallback.health.retry_after().map(duration_millis),
+                    pricing: fallback.metadata.pricing.clone(),
+                });
+                continue;
+            };
+
+            let admission = match crate::retry::admit_configured_fallback(
+                previous_provider,
+                &fallback.label,
+                &fallback.pricing_provider,
+                &fallback.model,
+                previous_attempted,
+            ) {
+                Ok(admission) => admission,
+                Err(error) => {
+                    receipt.candidates.push(CandidateReceipt {
+                        provider: fallback.pricing_provider.clone(),
+                        model: fallback.model.clone(),
+                        region: fallback.metadata.region.clone(),
+                        disposition: Err(CandidateRejection::BudgetDenied),
+                        failure_reason: None,
+                        cooldown_reason: None,
+                        retry_after_ms: None,
+                        pricing: fallback.metadata.pricing.clone(),
+                    });
+                    self.reporter.report_failover(&receipt);
+                    return Err(error);
+                }
+            };
+            let mut pricing = fallback.metadata.pricing.clone();
+            if admission.estimated_microcents.is_some() {
+                pricing.estimated_microcents = admission.estimated_microcents;
+            }
+
+            let mut fallback_request = request.clone();
+            fallback_request.model.clone_from(&fallback.model);
+            match crate::attempt_lifecycle::scope_provider_attempt_identity(
+                fallback.pricing_provider.clone(),
+                fallback.model.clone(),
+                fallback.provider.stream(&fallback_request),
+            )
+            .await
+            {
+                Ok(rx) => {
+                    receipt.candidates.push(CandidateReceipt {
+                        provider: fallback.pricing_provider.clone(),
+                        model: fallback.model.clone(),
+                        region: fallback.metadata.region.clone(),
+                        disposition: Ok(()),
+                        failure_reason: None,
+                        cooldown_reason: None,
+                        retry_after_ms: None,
+                        pricing,
+                    });
+                    receipt.selected_provider = Some(fallback.pricing_provider.clone());
+                    receipt.selected_model = Some(fallback.model.clone());
+                    self.reporter.report_failover(&receipt);
+                    self.reporter.report(
+                        &self.primary_name,
+                        Some(&fallback.label),
+                        CircuitState::Open,
+                        None,
+                    );
+                    return Ok(Self::spawn_health_forwarder(
+                        rx,
+                        Arc::clone(&fallback.health),
+                        Arc::clone(&self.reporter),
+                        self.primary_name.clone(),
+                        Some(fallback.label.clone()),
+                        permit == CooldownPermit::HalfOpen,
+                    ));
+                }
+                Err(e) => {
+                    let reason = classify_error(&e);
+                    fallback.health.record_failure(reason, retry_after(&e));
+                    receipt.candidates.push(CandidateReceipt {
+                        provider: fallback.pricing_provider.clone(),
+                        model: fallback.model.clone(),
+                        region: fallback.metadata.region.clone(),
+                        disposition: Ok(()),
+                        failure_reason: Some(reason),
+                        cooldown_reason: None,
+                        retry_after_ms: fallback.health.retry_after().map(duration_millis),
+                        pricing,
+                    });
+                    if is_request_fatal(&e) {
+                        self.reporter.report_failover(&receipt);
+                        return Err(e);
+                    }
+                    previous_provider = &fallback.label;
+                    previous_attempted = e.is_retryable()
+                        || crate::retry::configured_fallback_previous_attempted(&e);
+                    last_error = Some(e);
+                }
             }
         }
-        Err(ProviderError::Connection(
-            "all providers in chain failed".into(),
-        ))
+        self.reporter.report_failover(&receipt);
+        Err(last_error.unwrap_or_else(|| ProviderError::NotAttempted {
+            reason: "no configured fallback candidate passed routing policy".into(),
+        }))
     }
 }
 
@@ -380,6 +638,45 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ReceiptReporter {
+        receipts: Mutex<Vec<FailoverReceipt>>,
+    }
+    impl CircuitReporter for ReceiptReporter {
+        fn report(&self, _: &str, _: Option<&str>, _: CircuitState, _: Option<&str>) {}
+
+        fn report_failover(&self, receipt: &FailoverReceipt) {
+            self.receipts.lock().push(receipt.clone());
+        }
+    }
+
+    fn candidate(
+        label: &str,
+        tools: bool,
+        context_window: Option<u64>,
+    ) -> FailoverCandidateMetadata {
+        FailoverCandidateMetadata {
+            label: label.into(),
+            provider: label.into(),
+            model: label.into(),
+            organization: None,
+            region: None,
+            capabilities: CandidateCapabilities {
+                tools,
+                vision: true,
+                structured_output: true,
+                context_window,
+            },
+            pricing: PricingEvidence {
+                source: "test".into(),
+                age_seconds: Some(0),
+                stale: false,
+                priced: true,
+                estimated_microcents: Some(1),
+            },
+        }
+    }
+
     fn dummy_request() -> LlmRequest {
         LlmRequest {
             model: "test".into(),
@@ -447,6 +744,157 @@ mod tests {
         let _ = resilient.stream(&dummy_request()).await.unwrap();
         // No transitions emitted (start Closed → still Closed).
         assert!(rep.events.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn incompatible_candidate_is_never_called_and_receipt_selects_next() {
+        struct CountOk(AtomicUsize);
+        #[async_trait]
+        impl LlmProvider for CountOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let incompatible = Arc::new(CountOk(AtomicUsize::new(0)));
+        let compatible = Arc::new(CountOk(AtomicUsize::new(0)));
+        let reporter = Arc::new(ReceiptReporter::default());
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![
+                (
+                    candidate("no-tools", false, Some(100_000)),
+                    incompatible.clone(),
+                ),
+                (candidate("tools", true, Some(100_000)), compatible.clone()),
+            ],
+            CircuitConfig::default(),
+            reporter.clone(),
+            FailoverRoutingPolicy::default(),
+        );
+        let mut request = dummy_request();
+        request.tools.push(wcore_types::tool::ToolDef {
+            name: "read".into(),
+            ..Default::default()
+        });
+
+        let admitter: crate::retry::ConfiguredFallbackAdmitter = Arc::new(|_, _, _, _, _| {
+            Ok(crate::retry::ConfiguredFallbackAdmission {
+                estimated_microcents: Some(77),
+            })
+        });
+        crate::retry::scope_configured_fallback_admitter(admitter, resilient.stream(&request))
+            .await
+            .unwrap();
+
+        assert_eq!(incompatible.0.load(Ordering::SeqCst), 0);
+        assert_eq!(compatible.0.load(Ordering::SeqCst), 1);
+        let receipts = reporter.receipts.lock();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts[0].candidates[0].disposition,
+            Err(CandidateRejection::ToolsUnsupported)
+        );
+        assert_eq!(receipts[0].selected_provider.as_deref(), Some("tools"));
+        assert_eq!(receipts[0].selected_model.as_deref(), Some("tools"));
+        assert_eq!(
+            receipts[0].candidates[1].pricing.estimated_microcents,
+            Some(77)
+        );
+    }
+
+    #[tokio::test]
+    async fn context_overflow_routes_only_to_a_proven_larger_window() {
+        struct Overflow;
+        #[async_trait]
+        impl LlmProvider for Overflow {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::PromptTooLong("too large".into()))
+            }
+        }
+        struct CountOk(AtomicUsize);
+        #[async_trait]
+        impl LlmProvider for CountOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let small = Arc::new(CountOk(AtomicUsize::new(0)));
+        let large = Arc::new(CountOk(AtomicUsize::new(0)));
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(Overflow),
+            vec![
+                (candidate("small", true, Some(10_000)), small.clone()),
+                (candidate("large", true, Some(100_000)), large.clone()),
+            ],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+            FailoverRoutingPolicy::default(),
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(50_000);
+
+        resilient.stream(&request).await.unwrap();
+
+        assert_eq!(small.0.load(Ordering::SeqCst), 0);
+        assert_eq!(large.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn permanent_candidate_cooldown_is_named_and_never_dispatched() {
+        struct CountOk(AtomicUsize);
+        #[async_trait]
+        impl LlmProvider for CountOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let fallback = Arc::new(CountOk(AtomicUsize::new(0)));
+        let reporter = Arc::new(ReceiptReporter::default());
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![(candidate("fallback", true, Some(100_000)), fallback.clone())],
+            CircuitConfig::default(),
+            reporter.clone(),
+            FailoverRoutingPolicy::default(),
+        );
+        resilient.fallbacks[0]
+            .health
+            .record_failure(FailoverReason::AuthPermanent, None);
+
+        resilient.stream(&dummy_request()).await.unwrap_err();
+
+        assert_eq!(fallback.0.load(Ordering::SeqCst), 0);
+        let receipts = reporter.receipts.lock();
+        assert_eq!(
+            receipts[0].candidates[0].disposition,
+            Err(CandidateRejection::CooldownActive)
+        );
+        assert_eq!(
+            receipts[0].candidates[0].cooldown_reason,
+            Some(FailoverReason::AuthPermanent)
+        );
+        assert_eq!(receipts[0].candidates[0].retry_after_ms, None);
     }
 
     /// F32: a provider that accepts headers (returns `Ok(rx)`) but then dies
@@ -521,6 +969,131 @@ mod tests {
         );
         let err = resilient.stream(&dummy_request()).await.unwrap_err();
         assert!(matches!(err, ProviderError::Connection(_)));
+    }
+
+    #[tokio::test]
+    async fn scoped_zero_preserves_configured_resilient_fallback() {
+        struct CountingFail {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for CountingFail {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Connection("primary down".into()))
+            }
+        }
+
+        struct CountingOk {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for CountingOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let primary = Arc::new(CountingFail {
+            calls: AtomicUsize::new(0),
+        });
+        let fallback = Arc::new(CountingOk {
+            calls: AtomicUsize::new(0),
+        });
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let resilient = ResilientProvider::new(
+            "primary",
+            primary.clone(),
+            vec![("fallback".into(), fallback.clone())],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("primary", "fallback"));
+                assert!(previous_attempted);
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Default::default())
+            });
+        let result = crate::retry::scope_configured_fallback_admitter(
+            admitter,
+            crate::retry::scope_max_retries(0, resilient.stream(&dummy_request())),
+        )
+        .await;
+
+        result.expect("configured fallback must remain available when nested retries are disabled");
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fallback.calls.load(Ordering::SeqCst),
+            1,
+            "zero-retry scope limits each provider send, not configured fallback order"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_admission_uses_authoritative_pricing_identity() {
+        struct ModelCapture {
+            seen_models: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl LlmProvider for ModelCapture {
+            async fn stream(
+                &self,
+                request: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.seen_models.lock().push(request.model.clone());
+                Ok(ok_done_channel())
+            }
+        }
+
+        let seen_models = Arc::new(Mutex::new(Vec::new()));
+        let resilient = ResilientProvider::new_with_fallback_identities(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![(
+                "haiku".into(),
+                "anthropic".into(),
+                "claude-haiku-4-5".into(),
+                Arc::new(ModelCapture {
+                    seen_models: Arc::clone(&seen_models),
+                }) as Arc<dyn LlmProvider>,
+            )],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter = Arc::new(
+            move |previous, label, pricing_provider, model, previous_attempted| {
+                assert_eq!(previous, "primary");
+                assert_eq!(label, "haiku");
+                assert_eq!(pricing_provider, "anthropic");
+                assert_eq!(model, "claude-haiku-4-5");
+                assert!(previous_attempted);
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Default::default())
+            },
+        );
+
+        let mut request = dummy_request();
+        request.model = "claude-opus-4-6".into();
+        let result =
+            crate::retry::scope_configured_fallback_admitter(admitter, resilient.stream(&request))
+                .await;
+
+        result.expect("fallback must receive its canonical pricing identity");
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(seen_models.lock().as_slice(), ["claude-haiku-4-5"]);
     }
 
     #[test]
@@ -604,6 +1177,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn open_circuit_without_fallback_reports_that_no_request_was_attempted() {
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::Connection(_))
+        ));
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::NotAttempted { .. })
+        ));
+    }
+
     /// Rank 20: once the primary's circuit is Open, a configured fallback must
     /// actually serve the request — the primary is skipped and the fallback's
     /// `Ok` is returned. This proves the failover chain is reachable (a
@@ -651,12 +1248,30 @@ mod tests {
             );
         }
         let calls_after_open = primary.calls.load(Ordering::SeqCst);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("primary", "fb"));
+                assert!(
+                    !previous_attempted,
+                    "an open circuit skipped the primary without a paid send"
+                );
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Default::default())
+            });
         // A subsequent call with the circuit Open must skip the primary
         // entirely and still succeed via the fallback.
         assert!(
-            resilient.stream(&dummy_request()).await.is_ok(),
+            crate::retry::scope_configured_fallback_admitter(
+                admitter,
+                resilient.stream(&dummy_request()),
+            )
+            .await
+            .is_ok(),
             "fallback must serve the request once the primary circuit is open"
         );
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
         assert_eq!(
             primary.calls.load(Ordering::SeqCst),
             calls_after_open,
@@ -718,6 +1333,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn final_fallback_preserves_typed_no_send_error() {
+        struct MissingKey;
+        #[async_trait]
+        impl LlmProvider for MissingKey {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![(
+                "no-key".into(),
+                Arc::new(MissingKey) as Arc<dyn LlmProvider>,
+            )],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::MissingApiKey)
+        ));
+    }
+
     /// F20 (primary boundary): a NON-retryable provider/model-specific error
     /// from the PRIMARY (here MissingApiKey — a misconfigured primary) must fall
     /// through to the fallback chain, not abort before any fallback runs. Before
@@ -742,16 +1387,34 @@ mod tests {
             CircuitConfig::default(),
             Arc::new(NoOpCircuitReporter),
         );
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("primary", "good"));
+                assert!(
+                    !previous_attempted,
+                    "MissingApiKey proves the primary never sent a paid request"
+                );
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(Default::default())
+            });
         assert!(
-            resilient.stream(&dummy_request()).await.is_ok(),
+            crate::retry::scope_configured_fallback_admitter(
+                admitter,
+                resilient.stream(&dummy_request()),
+            )
+            .await
+            .is_ok(),
             "a non-retryable primary (MissingApiKey) must fall through to the \
              working fallback, not abort before the chain is tried"
         );
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
     }
 
-    /// F20: a REQUEST-SEMANTIC error (413/400/PromptTooLong) from a fallback
-    /// WOULD fail on every provider, so the chain aborts immediately rather
-    /// than wasting calls on the remaining fallbacks.
+    /// F20/F15: a malformed HTTP 400 request would fail on every provider, so
+    /// the chain aborts immediately. Context overflow is no longer in this
+    /// class: F15 can admit a later model with a proven larger window.
     #[tokio::test]
     async fn request_fatal_error_in_fallback_aborts_chain() {
         struct TooLarge {
@@ -765,8 +1428,8 @@ mod tests {
             ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Err(ProviderError::Api {
-                    status: 413,
-                    message: "context length exceeded".into(),
+                    status: 400,
+                    message: "malformed request".into(),
                 })
             }
         }
@@ -790,8 +1453,8 @@ mod tests {
         );
         let err = resilient.stream(&dummy_request()).await.unwrap_err();
         assert!(
-            matches!(err, ProviderError::Api { status: 413, .. }),
-            "the request-fatal 413 must surface and abort the chain"
+            matches!(err, ProviderError::Api { status: 400, .. }),
+            "the request-fatal 400 must surface and abort the chain"
         );
         assert_eq!(
             never.calls.load(Ordering::SeqCst),
@@ -841,6 +1504,11 @@ mod tests {
                 .iter()
                 .any(|(_, _, s)| *s == CircuitState::Open),
             "semantic errors must not trip the breaker"
+        );
+        assert_eq!(
+            resilient.health.state(),
+            CooldownState::Ready,
+            "semantic errors must not make the primary unavailable"
         );
     }
 

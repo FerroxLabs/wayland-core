@@ -10,8 +10,8 @@
 //!   2. agents — the plugin agent is resolvable from the returned registry.
 //!   3. hooks  — the plugin hook flows out in `plugin_hooks` for the engine
 //!      setter.
-//!   4. skills — the plugin skill flows out in `plugin_skills` for the
-//!      `register_bundled_skill` pre-`load_catalog` pass.
+//!   4. skills — the plugin skill flows out in `plugin_skills` for insertion
+//!      into one bootstrap-local catalog before loading refs.
 //!   5. rules  — the plugin rule flows out in `plugin_rules` for
 //!      `build_system_prompt`.
 //!   6. mcp    — the plugin MCP server flows out in `plugin_mcp_servers` for
@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use wcore_agent::plugins::runner::PluginHook;
-use wcore_agent::plugins::skill_delivery::spec_to_static_definition;
+use wcore_agent::plugins::skill_delivery::spec_to_bundled_entry;
 use wcore_agent::plugins::{CapturedPluginTool, InitializeOutcome, apply_initialize_outcome};
 use wcore_plugin_api::registry::hooks::HookPhase;
 use wcore_plugin_api::tool::{PluginTool, PluginToolInvocation};
@@ -31,7 +31,8 @@ use wcore_plugin_api::{
     AgentManifest, BundledSkillSpec, McpServerSpec, McpTransport, RuleScope, RuleSpec,
 };
 use wcore_protocol::events::ToolCategory;
-use wcore_skills::bundled::{get_bundled_skills, register_bundled_skill};
+use wcore_skills::bundled::BundledSkillCatalog;
+use wcore_skills::refs::SkillCatalog;
 use wcore_tools::registry::ToolRegistry;
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -79,6 +80,36 @@ fn agent(name: &str) -> AgentManifest {
         allowed_tools: vec![],
         max_turns: None,
     }
+}
+
+fn plugin_skill(name: &str, content: &str) -> BundledSkillSpec {
+    BundledSkillSpec {
+        name: name.into(),
+        description: format!("{name} skill"),
+        when_to_use: None,
+        argument_hint: None,
+        allowed_tools: vec![],
+        model: None,
+        disable_model_invocation: false,
+        user_invocable: true,
+        context: None,
+        agent: None,
+        files: vec![],
+        content: content.into(),
+    }
+}
+
+fn plugin_skill_with_file(
+    name: &str,
+    content: &str,
+    file_path: &str,
+    file_content: &str,
+) -> BundledSkillSpec {
+    let mut skill = plugin_skill(name, content);
+    skill
+        .files
+        .push((file_path.to_owned(), file_content.to_owned()));
+    skill
 }
 
 // ── 1. tools → ToolRegistry ──────────────────────────────────────────────────
@@ -215,27 +246,16 @@ fn plugin_hook_flows_out_in_applied_plugin_hooks() {
     ));
 }
 
-// ── 4. skills → plugin_skills (and round-trip via register_bundled_skill) ─────
+// ── 4. skills → plugin_skills → session-local catalog ────────────────────────
 
 #[test]
-fn plugin_skill_flows_out_and_reaches_get_bundled_skills() {
+fn plugin_skill_flows_out_and_reaches_session_catalog() {
     const SKILL_NAME: &str = "tc-1-7-bootstrap-wiring-unique-fixture-skill";
 
     let mut outcome = InitializeOutcome::default();
-    outcome.skills.push(BundledSkillSpec {
-        name: SKILL_NAME.into(),
-        description: "Task 1.7 wiring skill".into(),
-        when_to_use: None,
-        argument_hint: None,
-        allowed_tools: vec![],
-        model: None,
-        disable_model_invocation: false,
-        user_invocable: true,
-        context: None,
-        agent: None,
-        files: vec![],
-        content: "do the wiring".into(),
-    });
+    outcome
+        .skills
+        .push(plugin_skill(SKILL_NAME, "do the wiring"));
 
     let mut registry = ToolRegistry::new();
     let applied = apply_initialize_outcome(
@@ -249,16 +269,145 @@ fn plugin_skill_flows_out_and_reaches_get_bundled_skills() {
     assert_eq!(applied.plugin_skills.len(), 1);
     assert_eq!(applied.plugin_skills[0].name, SKILL_NAME);
 
-    // …and bootstrap's pre-`load_catalog` pass (leak + register) makes it
-    // visible to `get_bundled_skills()` — the same path bootstrap.rs runs.
+    // …and bootstrap's pre-load pass moves it into the current catalog.
+    let mut catalog = BundledSkillCatalog::new();
     for spec in applied.plugin_skills {
-        register_bundled_skill(spec_to_static_definition(spec));
+        catalog.register(spec_to_bundled_entry(spec));
     }
-    let skills = get_bundled_skills();
+    let skills = catalog.get_bundled_skills();
     assert!(
         skills.iter().any(|s| s.name == SKILL_NAME),
-        "plugin skill must reach the bundled-skill registry"
+        "plugin skill must reach the session-local catalog"
     );
+}
+
+async fn load_plugin_catalog(specs: Vec<BundledSkillSpec>) -> SkillCatalog {
+    let mut bundled = BundledSkillCatalog::embedded();
+    for spec in specs {
+        bundled.register(spec_to_bundled_entry(spec));
+    }
+    let workspace = tempfile::tempdir().expect("session workspace");
+    let refs = wcore_skills::loader::load_catalog_with_bundled(
+        workspace.path(),
+        &[],
+        true,
+        None,
+        &bundled,
+    )
+    .await;
+    SkillCatalog::from_refs(refs)
+}
+
+async fn resolve_plugin_fixture(
+    catalog: &SkillCatalog,
+    name: &str,
+    file_name: &str,
+) -> (String, std::path::PathBuf, String) {
+    let skill = catalog.resolve(name).await.expect("fixture skill resolves");
+    let root = skill
+        .skill_root
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .expect("fixture reference root survives resolve");
+    let file = tokio::fs::read_to_string(root.join(file_name))
+        .await
+        .expect("fixture reference is readable");
+    (skill.content.clone(), root, file)
+}
+
+#[tokio::test]
+async fn fresh_catalogs_are_isolated_across_a_then_b_then_a() {
+    const NAME: &str = "same-name-session-skill";
+    const FILE_NAME: &str = "references/session.txt";
+
+    let a1 = load_plugin_catalog(vec![
+        plugin_skill_with_file(NAME, "session A content", FILE_NAME, "session A reference"),
+        plugin_skill("session-a-only", "A sentinel"),
+    ])
+    .await;
+    assert!(a1.resolve("session-a-only").await.is_ok());
+    assert!(matches!(
+        a1.resolve("session-b-only").await,
+        Err(wcore_skills::refs::ResolveError::NotFound(_))
+    ));
+    let a1_result = resolve_plugin_fixture(&a1, NAME, FILE_NAME).await;
+
+    let b = load_plugin_catalog(vec![
+        plugin_skill_with_file(NAME, "session B content", FILE_NAME, "session B reference"),
+        plugin_skill("session-b-only", "B sentinel"),
+    ])
+    .await;
+    assert!(b.resolve("session-b-only").await.is_ok());
+    assert!(matches!(
+        b.resolve("session-a-only").await,
+        Err(wcore_skills::refs::ResolveError::NotFound(_))
+    ));
+    let b_result = resolve_plugin_fixture(&b, NAME, FILE_NAME).await;
+
+    let a2 = load_plugin_catalog(vec![
+        plugin_skill_with_file(NAME, "session A content", FILE_NAME, "session A reference"),
+        plugin_skill("session-a-only", "A sentinel"),
+    ])
+    .await;
+    assert!(a2.resolve("session-a-only").await.is_ok());
+    assert!(matches!(
+        a2.resolve("session-b-only").await,
+        Err(wcore_skills::refs::ResolveError::NotFound(_))
+    ));
+    let a2_result = resolve_plugin_fixture(&a2, NAME, FILE_NAME).await;
+
+    assert_eq!(a1_result.0, "session A content");
+    assert_eq!(a1_result.2, "session A reference");
+    assert_eq!(b_result.0, "session B content");
+    assert_eq!(b_result.2, "session B reference");
+    assert_eq!(a2_result.0, a1_result.0);
+    assert_eq!(a2_result.2, a1_result.2);
+    assert_ne!(a1_result.1, b_result.1);
+    assert_ne!(a1_result.1, a2_result.1, "A2 must be a fresh catalog");
+    assert_ne!(b_result.1, a2_result.1);
+}
+
+#[tokio::test]
+async fn parallel_same_name_catalog_extraction_keeps_reference_bytes_isolated() {
+    const NAME: &str = "parallel-same-name-skill";
+    const FILE_NAME: &str = "guide.md";
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let session = |content: &'static str, file: &'static str| {
+        let barrier = barrier.clone();
+        async move {
+            let mut bundled = BundledSkillCatalog::embedded();
+            bundled.register(spec_to_bundled_entry(plugin_skill_with_file(
+                NAME, content, FILE_NAME, file,
+            )));
+            let workspace = tempfile::tempdir().expect("parallel workspace");
+            barrier.wait().await;
+            let refs = wcore_skills::loader::load_catalog_with_bundled(
+                workspace.path(),
+                &[],
+                true,
+                None,
+                &bundled,
+            )
+            .await;
+            let catalog = SkillCatalog::from_refs(refs);
+            resolve_plugin_fixture(&catalog, NAME, FILE_NAME).await
+        }
+    };
+
+    let (a, b) = tokio::join!(
+        session("parallel A content", "parallel A bytes"),
+        session("parallel B content", "parallel B bytes")
+    );
+    assert_eq!(
+        (a.0.as_str(), a.2.as_str()),
+        ("parallel A content", "parallel A bytes")
+    );
+    assert_eq!(
+        (b.0.as_str(), b.2.as_str()),
+        ("parallel B content", "parallel B bytes")
+    );
+    assert_ne!(a.1, b.1, "parallel catalogs must use distinct roots");
 }
 
 // ── 5. rules → plugin_rules ──────────────────────────────────────────────────

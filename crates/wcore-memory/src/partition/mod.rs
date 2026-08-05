@@ -72,6 +72,16 @@ pub struct PartitionDispatcher {
     /// construction sites that don't care about traces stay free of an
     /// explicit `Arc::new(NullSink)` wrapping.
     pub trace_sink: Option<Arc<dyn MemoryTraceSink>>,
+    /// 23B-C3 — the per-session proactive-nudge bound, shared with every
+    /// clone of this dispatcher so the cap is per session and not per handle.
+    /// Reaching it through `MemoryApi::nudge_budget` is what makes the bound
+    /// a control a user can see rather than a constant in a struct.
+    pub nudges: Arc<crate::provenance::NudgeBudget>,
+    /// 23B-C3 — what durable memory was injected into the prompt on the last
+    /// turn, plus the user's on/off switch for that injection. Shared with
+    /// every clone so the engine's write and `/memory activation`'s read see
+    /// the same record.
+    pub activation: Arc<crate::activation::ActivationLog>,
 }
 
 impl PartitionDispatcher {
@@ -106,6 +116,11 @@ impl PartitionDispatcher {
             procedural,
             core,
             trace_sink: None,
+            nudges: Arc::new(crate::provenance::NudgeBudget::new(
+                crate::provenance::DEFAULT_NUDGE_CAP,
+                true,
+            )),
+            activation: Arc::new(crate::activation::ActivationLog::new()),
         }
     }
 
@@ -273,6 +288,13 @@ impl MemoryApi for PartitionDispatcher {
                 .check_read(&tok, Partition::Semantic, tier)
                 .is_ok()
             {
+                // 23B-C3: `facts_search` now delegates to
+                // `facts_search_with_provenance`, so this pass honours the
+                // Semantic privacy scope and retention bound. Before that it
+                // read the `facts` table with no such predicate, which meant
+                // the ONLY partition the engine auto-injects into the outbound
+                // provider request body was the one partition no control
+                // reached.
                 let facts =
                     crate::retrieve::facts_search(&self.db, self.embedder.as_ref(), &q).await?;
                 hits.extend(facts);
@@ -282,6 +304,116 @@ impl MemoryApi for PartitionDispatcher {
         .await;
         self.emit_trace(
             "search",
+            partition.as_str(),
+            tier.as_str(),
+            start.elapsed().as_millis() as u64,
+            result.is_ok(),
+        );
+        result
+    }
+
+    /// 23B-C3 — the production correction path, and the only one with an
+    /// embedder.
+    ///
+    /// Episode first (unchanged for every id that already resolved), then the
+    /// fact store. Correcting a fact re-embeds the corrected triple in the
+    /// same UPDATE as the text, so the vector `facts_cosine_pass` ranks on can
+    /// never describe the pre-correction claim. The triple to embed is read
+    /// back from the row rather than reconstructed, so we embed exactly the
+    /// string a later recall will show as the preview.
+    async fn correct_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        corrected: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::CorrectionReceipt> {
+        let controls = self
+            .controls()
+            .expect("PartitionDispatcher always exposes controls");
+        match controls.correct_episode(&tok, tier, id, corrected, actor) {
+            Err(MemoryError::NotFound { .. }) => {
+                let triple = controls.fact_triple_after_correction(tier, id, corrected)?;
+                let embedding = self.embedder.embed(&triple).await?;
+                controls.correct_fact(&tok, tier, id, corrected, &embedding, actor)
+            }
+            other => other,
+        }
+    }
+
+    fn nudge_budget(&self) -> Option<Arc<crate::provenance::NudgeBudget>> {
+        Some(self.nudges.clone())
+    }
+
+    fn activation_log(&self) -> Option<Arc<crate::activation::ActivationLog>> {
+        Some(self.activation.clone())
+    }
+
+    fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        // The dispatcher already owns exactly what a control needs: the same
+        // gate every read and write goes through, the same store, and the same
+        // changelog. Handing those three over means an operator control cannot
+        // reach a cell the ordinary paths cannot reach.
+        Some(crate::provenance::MemoryControls::new(
+            self.db.clone(),
+            self.gate.clone(),
+            (*self.cdc).clone(),
+        ))
+    }
+
+    async fn search_with_provenance(
+        &self,
+        q: Query,
+        tok: AccessToken,
+    ) -> Result<(Vec<Hit>, crate::provenance::RecallReport)> {
+        // The episodic fusion, PLUS the semantic-fact pass that `search`
+        // appends.
+        //
+        // 23B-C3 fixes what this method used to do. Its previous comment read:
+        // "claiming a fused provenance for [semantic] hits would be a
+        // fabrication; those hits are deliberately not reported here rather
+        // than reported wrongly." The scruple was right and the conclusion was
+        // wrong. `AgentEngine::recall_relevant_facts` keeps ONLY
+        // `Partition::Semantic` hits when it builds the `<system-reminder>` it
+        // injects into the outbound provider request, so omitting them made
+        // `/memory why` silent about the entire body of content that actually
+        // reaches the prompt — the exact question the command exists to
+        // answer. The fabrication is avoided instead by
+        // `facts_search_with_provenance` reporting one honest contributing
+        // modality (`Vector`, the cosine pass that really ran) rather than an
+        // invented fusion.
+        let partition = q.partition.unwrap_or(Partition::Episodic);
+        let tier = q.tier;
+        let start = std::time::Instant::now();
+        let result = async {
+            self.gate.check_read(&tok, partition, tier)?;
+            let (mut hits, mut report) =
+                crate::retrieve::search_basic_with_provenance(&self.db, self.embedder.as_ref(), &q)
+                    .await?;
+            // Gated separately, exactly as in `search`: a sub-agent without
+            // Semantic read scope still sees only episodes, and a denied check
+            // skips the fact pass instead of failing the whole recall.
+            if self
+                .gate
+                .check_read(&tok, Partition::Semantic, tier)
+                .is_ok()
+            {
+                let (fact_hits, fact_report) = crate::retrieve::facts_search_with_provenance(
+                    &self.db,
+                    self.embedder.as_ref(),
+                    &q,
+                )
+                .await?;
+                hits.extend(fact_hits);
+                report.provenance.extend(fact_report.provenance);
+                report.exclusions.extend(fact_report.exclusions);
+            }
+            Ok((hits, report))
+        }
+        .await;
+        self.emit_trace(
+            "search_with_provenance",
             partition.as_str(),
             tier.as_str(),
             start.elapsed().as_millis() as u64,

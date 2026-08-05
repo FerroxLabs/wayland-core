@@ -1,0 +1,52 @@
+## known-NEGATIVE probes (fields the formatters read, in the tools that should emit them)
+NEG github_tool.rs  needle="repo"  count=14
+NEG github_tool.rs  needle="action"  count=0
+ERR
+NEG discord_tool.rs  needle=channel_name  count=0
+ERR
+NEG discord_tool.rs  needle="chars"  count=0
+ERR
+NEG homeassistant_tool.rs  needle=affected_entities  count=2
+NEG tts_tool.rs  needle="chars"  count=0
+ERR
+NEG tts_tool.rs  needle="path"  count=0
+ERR
+NEG image_generation_tool.rs  needle="url"  count=0
+ERR
+NEG image_generation_tool.rs  needle="provider"  count=0
+ERR
+NEG vision_tools.rs  needle="width"  count=0
+ERR
+NEG transcription_tools.rs  needle="seconds"  count=0
+ERR
+NEG transcription_tools.rs  needle="text"  count=2
+NEG web_fetch.rs  needle="bytes"  count=0
+ERR
+NEG web_fetch.rs  needle=readability_score  count=0
+ERR
+NEG web_tools.rs  needle="snippet"  count=0
+ERR
+NEG bash.rs  needle="exit_code"  count=0
+ERR
+NEG read.rs  needle="lines"  count=0
+ERR
+NEG write.rs  needle="bytes"  count=0
+ERR
+NEG edit.rs  needle="added"  count=0
+ERR
+
+## known-POSITIVE controls (strings certainly present in the same files)
+POS github_tool.rs  needle=html_url  count=0
+ERR
+POS discord_tool.rs  needle=channel_id  count=20
+POS homeassistant_tool.rs  needle=entity_id  count=48
+POS tts_tool.rs  needle=file_path  count=5
+POS image_generation_tool.rs  needle=usedProvider  count=3
+POS vision_tools.rs  needle=analysis  count=8
+POS transcription_tools.rs  needle=transcript  count=19
+POS web_fetch.rs  needle=content_type  count=7
+POS web_tools.rs  needle=results  count=20
+POS bash.rs  needle=Exit code  count=3
+POS read.rs  needle=file_path  count=68
+POS write.rs  needle=line_count  count=4
+POS edit.rs  needle=match_count  count=18

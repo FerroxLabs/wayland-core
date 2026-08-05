@@ -172,6 +172,34 @@ pub(crate) fn imap_poll_blocking(args: ImapPollArgs) {
     }
 }
 
+/// The UIDs a poll should fetch, in ascending order, given the watermark the
+/// poll started from.
+///
+/// Extracted so the invariant is testable without a live IMAP session, because
+/// getting it wrong destroys mail silently.
+///
+/// F24-C3 (email steady state). The previous form of this filter compared each
+/// candidate against a `high_water` that it MUTATED inside the same loop, while
+/// iterating the `HashSet<Uid>` that `Session::uid_search` returns. A HashSet
+/// has arbitrary iteration order, re-randomised per process, so whenever a poll
+/// found more than one new message the largest UID could be visited first —
+/// after which `uid <= high_water` was true for every remaining new message and
+/// they were all skipped. The watermark was then persisted at that maximum, so
+/// the skipped mail could never be searched for again.
+///
+/// Measured on hetzner: six messages delivered back-to-back, one `UID SEARCH
+/// 1005:*` correctly answered `[1005,1006,1007,1008,1009,1010]`, exactly ONE
+/// fetch (`uid 1010`) followed, and the next search was `1011:*`. Five inbound
+/// messages destroyed, with a single poller and no error logged anywhere.
+///
+/// Sorting also fixes a second, milder defect the same HashSet caused: inbound
+/// messages reached the engine in arbitrary order rather than arrival order.
+fn new_uids(uids: std::collections::HashSet<u32>, seen_through: u32) -> Vec<u32> {
+    let mut out: Vec<u32> = uids.into_iter().filter(|u| *u > seen_through).collect();
+    out.sort_unstable();
+    out
+}
+
 // imap poll loop accepts host/port/user/pass/mailbox/inbox/uid/runtime;
 // refactoring into a struct is needless ceremony for a sub-driver helper.
 #[allow(clippy::too_many_arguments)]
@@ -240,10 +268,18 @@ fn poll_once(
         .map_err(|e| EmailError::Imap(format!("uid_search {query}: {e}")))?;
 
     let mut new_events: Vec<ChannelEvent> = Vec::new();
-    let mut high_water = *last_seen_uid.lock().unwrap();
+    // The watermark AS IT WAS when this poll began. Frozen deliberately: it is
+    // the thing "already seen" means, and it must not move while the batch is
+    // being filtered against it.
+    let seen_through = *last_seen_uid.lock().unwrap();
+    let mut high_water = seen_through;
+
+    // `Session::uid_search` returns a `HashSet<Uid>`, whose iteration order is
+    // arbitrary and re-randomised per process. Sort ascending before fetching.
+    let uids = new_uids(uids, seen_through);
 
     for uid in uids {
-        if uid <= high_water {
+        if uid <= seen_through {
             // `UID N:*` returns at least one result even when nothing
             // new — server semantics. Skip anything we've already seen.
             continue;
@@ -580,7 +616,11 @@ const MAX_MIME_DEPTH: usize = 20;
 /// Email images/audio are typically well under this; larger parts stay
 /// metadata-only (fetch_media returns Rejected and the enricher falls back to
 /// the bare summary), keeping the inbound event bounded with no temp files.
-const MAX_INLINE_ATTACHMENT_BYTES: usize = 2 * 1024 * 1024;
+///
+/// Derived from the adapter's DECLARED bound rather than being a second
+/// hardcoded number, so `media_bounds()` cannot advertise one figure while this
+/// path enforces another — which it did, advertising 10 MiB against this 2 MiB.
+const MAX_INLINE_ATTACHMENT_BYTES: usize = crate::MEDIA_BOUNDS.max_bytes as usize;
 
 fn walk_mime(headers: &[String], body: &str, depth: usize) -> MimeResult {
     let ct = parse_content_type(headers);
@@ -1172,6 +1212,77 @@ fn parse_rfc2822_to_epoch(s: String) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- F24-C3: steady-state UID selection -----
+    //
+    // These four are the regression guard for a measured silent-loss defect:
+    // six messages arrived between polls, `UID SEARCH` returned all six, and
+    // exactly one was fetched because the filter's watermark moved underneath
+    // it while it walked an unordered `HashSet`.
+
+    /// The pre-fix filter, kept executable so the tests below can prove the
+    /// repair changes an outcome rather than merely restating the new one.
+    /// A self-test that only asserts the fixed behaviour passes on code that
+    /// was never broken.
+    fn legacy_selection(uids: &[u32], seen_through: u32) -> Vec<u32> {
+        let mut taken = Vec::new();
+        let mut high_water = seen_through;
+        for &uid in uids {
+            if uid <= high_water {
+                continue;
+            }
+            taken.push(uid);
+            high_water = high_water.max(uid);
+        }
+        taken
+    }
+
+    #[test]
+    fn every_new_uid_is_selected_regardless_of_set_iteration_order() {
+        let uids: std::collections::HashSet<u32> = (1005..=1010).collect();
+        let got = new_uids(uids, 1004);
+        assert_eq!(
+            got,
+            vec![1005, 1006, 1007, 1008, 1009, 1010],
+            "a poll that finds six new messages must fetch all six"
+        );
+    }
+
+    #[test]
+    fn the_old_filter_loses_five_of_six_when_the_largest_uid_comes_first() {
+        // The exact order that produced the measured loss on hetzner: the
+        // HashSet happened to yield 1010 first.
+        let hostile = [1010, 1005, 1006, 1007, 1008, 1009];
+        assert_eq!(
+            legacy_selection(&hostile, 1004),
+            vec![1010],
+            "this is the defect: five inbound messages silently discarded"
+        );
+        // And the repaired filter does not care what order they arrive in.
+        let got = new_uids(hostile.iter().copied().collect(), 1004);
+        assert_eq!(
+            got.len(),
+            6,
+            "the repair must take all six from the same input"
+        );
+    }
+
+    #[test]
+    fn already_seen_uids_are_still_skipped() {
+        // The guard the original comment describes must survive the repair:
+        // `UID N:*` returns at least one result even when nothing is new.
+        let uids: std::collections::HashSet<u32> = [1004].into_iter().collect();
+        assert!(
+            new_uids(uids, 1004).is_empty(),
+            "the server echoing the last-seen UID must not re-deliver it"
+        );
+    }
+
+    #[test]
+    fn selection_is_ascending_so_mail_reaches_the_engine_in_arrival_order() {
+        let uids: std::collections::HashSet<u32> = [1009, 1005, 1007].into_iter().collect();
+        assert_eq!(new_uids(uids, 0), vec![1005, 1007, 1009]);
+    }
 
     // ----- wayland#547 loop guard: mark_self_inbound -----
 

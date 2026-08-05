@@ -1,0 +1,40 @@
+WLRC=101
+WLDONE
+test a_skip_class_outside_the_four_is_rejected_and_each_of_the_four_is_accepted ... ok
+test a_skipped_critical_case_is_rejected_two_ways_because_criterion_1_forbids_one ... ok
+test an_empty_contradicted_criterion_is_rejected_so_an_omission_cannot_read_as_a_none ... ok
+test all_three_permitted_claims_must_be_stated_and_exactly_three_exist ... ok
+test the_paper_path_requires_an_owner_and_a_backlog_id_and_the_repair_path_requires_evidence ... ok
+test accept_and_defer_are_unreachable_at_critical_and_high ... ok
+supersession chain: 2 link(s)
+test platform_cell_counts_must_sum_so_a_red_cannot_be_dropped_from_the_arithmetic ... ok
+test an_unrecognised_disposition_is_rejected_and_all_five_recognised_ones_are_accepted ... ok
+test each_missing_binding_is_rejected_with_its_own_code ... ok
+test the_produced_receipt_rejects_a_single_flipped_byte ... ok
+test an_unsigned_receipt_is_structurally_valid_but_carries_no_authority ... ok
+verified 63 findings, gate_passed=false, unresolved CRITICAL/HIGH = ["F-28-02-002"]
+test the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier ... ok
+test the_superseding_receipt_rejects_a_single_flipped_byte ... ok
+test an_unknown_schema_or_version_fails_closed_rather_than_ignoring_the_new_sections ... ok
+test an_unknown_field_anywhere_in_the_body_is_rejected_rather_than_silently_dropped ... ok
+superseding receipt verified: 28-04-CERTIFICATION-RECEIPT-SUPERSEDING-001.json (63 findings, gate_passed=true) supersedes 28-04-CERTIFICATION-RECEIPT.json (2037352cff1c2f2c8f8b35e59289ba73b514cd56977c8e22d599ed45e49e0fbb) under phase-28-certification-2026-07-28
+test a_recorded_public_half_that_disagrees_with_its_fingerprint_is_rejected ... ok
+test known_good_receipt_is_accepted_and_verifies_under_a_trusted_phase_key ... ok
+test an_open_finding_is_recordable_and_forces_the_receipt_to_report_its_gate_as_not_passed ... ok
+test a_signature_over_a_different_body_does_not_verify ... ok
+test the_recorded_public_half_is_really_the_key_that_is_checked ... ok
+test authority_is_derived_from_an_externally_configured_key_not_from_the_body ... ok
+
+thread 'the_superseding_receipt_verifies_and_names_what_it_supersedes' (1823090) panicked at crates/wcore-eval-scenarios/tests/f28_receipt_contract.rs:1071:9:
+a receipt asserting all three claims true must disclose known findings that are outside its ledger, or three trues read as 'zero known defects'
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test the_superseding_receipt_verifies_and_names_what_it_supersedes ... FAILED
+test flipping_any_byte_of_the_body_breaks_verification ... ok
+
+failures:
+
+failures:
+    the_superseding_receipt_verifies_and_names_what_it_supersedes
+
+test result: FAILED. 27 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

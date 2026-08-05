@@ -1,0 +1,15 @@
+warning: /tmp/jsr-postfix/D_PARSE/home/config.toml has permissions 0o644; tightening to 0o600 on next write
+Error: failed to parse /tmp/jsr-postfix/D_PARSE/home/config.toml: TOML parse error at line 1, column 9
+  |
+1 | [default
+  |         ^
+unclosed table, expected `]`
+
+
+Caused by:
+    TOML parse error at line 1, column 9
+      |
+    1 | [default
+      |         ^
+    unclosed table, expected `]`
+    

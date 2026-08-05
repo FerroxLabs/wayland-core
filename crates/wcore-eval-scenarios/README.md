@@ -6,11 +6,11 @@ Plan: [`.blackboard/EVAL-HARNESS-PLAN-2026-05-23.md`](../../.blackboard/EVAL-HAR
 
 ## Status
 
-This is the **T1 + T2 scaffold**. The crate compiles, ships the runner core, and is wired into the workspace. The 35 scenarios + assertion firing + provider matrix + CLI report land in T3-T8.
+The crate ships the runner core, 36 standard single-session scenarios, and a canonical deterministic catalog. `wayland-eval --list`, exact `--scenario`, and substring `--filter` selection are live; scenario execution and complete reporting remain fail-closed until the later F01 slices.
 
-What ships in T1 + T2:
+What ships now:
 
-- **Crate scaffold** — public API types (`Scenario`, `Turn`, `Assertion`, `TraceAssertion`, `ScenarioResult`, `Failure`, `ProviderChoice`, `Category`), workspace wiring, `[profile.eval]` nextest profile, `wayland-eval` bin stub.
+- **Crate and catalog** — public API types (`Scenario`, `Turn`, `Assertion`, `TraceAssertion`, `ScenarioResult`, `Failure`, `ProviderChoice`, `Category`), workspace wiring, `[profile.eval]` nextest profile, and deterministic CLI catalog selection.
 - **Runner core** — spawn `wayland-core --json-stream`, drive per-turn via `message` / `stream_end` events, capture stderr to a 50-line ring buffer, parse `session_cost` for USD totals, enforce wall-time with `kill_on_drop(true)` + explicit `start_kill()` on `Elapsed` (per cross-audit M-1).
 - **`tempenv`** — hermetic per-scenario `TempDir` + seeded `<tempdir>/.wayland-core/config.toml` with an **absolute** `[session].directory` (per C-3 — relative defaults leak into cwd) and the per-provider API key.
 - **`stderr_capture`** — ring-buffered stderr drain for failure dumps (per M-9 — D1 panic regressions need stderr or root cause is lost).
@@ -22,8 +22,8 @@ gate in `lib.rs` stays green and rules out silent-pass regressions):
 
 - **T3** — `assertions.rs` + `trace.rs` (`Assertion::check` / `TraceAssertion::check` / `ToolTrace::parse_session`).
 - **T4** — `providers::resolve(ProviderChoice)` matrix + strict-mode SKIP/FAIL.
-- **T5** — `report::render_console / render_markdown / render_json` + the real `wayland-eval` CLI.
-- **T6-T8** — the 35 scenarios + fixtures + PTY harness reuse.
+- **F01/F03** — real scenario execution plus complete console, Markdown, and versioned machine-readable reports.
+- **F04** — deterministic provider/MCP fixtures and PTY harness reuse.
 
 ## Quickstart (T2-era — runner is callable; assertions don't fire yet)
 
@@ -50,9 +50,9 @@ Per the plan §4.2 (audit H-9 refresh):
 
 | Mode | Scope | Estimate |
 |---|---|---|
-| `just eval-fast` | 35 scenarios × DeepSeek only | ~$0.30 |
-| `just eval` | 35 scenarios × current default | ~$0.30 (DS) or ~$8 (Claude) |
-| `just eval-matrix` | 35 × 3 providers × `--strict` | ~$25-40 |
+| `just eval-fast` | 36 scenarios × DeepSeek only | ~$0.30 |
+| `just eval` | 36 scenarios × current default | ~$0.30 (DS) or ~$8 (Claude) |
+| `just eval-matrix` | 36 × 3 providers × `--strict` | ~$25-40 |
 
 Per-scenario hard ceiling enforced by the engine's `[budget] max_cost_usd` block (seeded into the per-run `config.toml` by `tempenv`).
 

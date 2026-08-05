@@ -1,0 +1,18 @@
+=========== FOUR-QUADRANT MATRIX (final SHA 551d9001 for post-fix rows) ===========
+run                    vault  WLRC   notice   turn_ok   old_err    sess_files
+q2-prefix-novault      no     1      0        0         1          0
+q3-prefix-vault        yes    0      0        1         0          2
+f1-final-novault       no     0      1        1         0          0
+f3-final-vault         yes    0      0        1         0          2
+
+=== build identity of each row ===
+q2-prefix-novault: source bc90ee1c1f08b76e6682b4beab2386fc7216a52e
+q3-prefix-vault: source bc90ee1c1f08b76e6682b4beab2386fc7216a52e
+f1-final-novault: source 551d900127c03989061b44f170674c12419f6971
+f3-final-vault: source 551d900127c03989061b44f170674c12419f6971
+
+=== INSTRUMENT CONTROLS (same greps, same files) ===
+q2-prefix-novault known_positive=2 known_negative=0
+q3-prefix-vault known_positive=2 known_negative=0
+f1-final-novault known_positive=2 known_negative=0
+f3-final-vault known_positive=2 known_negative=0

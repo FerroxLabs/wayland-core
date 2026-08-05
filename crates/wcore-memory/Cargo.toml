@@ -8,7 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-wcore-config.workspace = true
+wcore-config = { workspace = true, features = ["sqlite"] }
 wcore-observability.workspace = true
 
 serde.workspace      = true

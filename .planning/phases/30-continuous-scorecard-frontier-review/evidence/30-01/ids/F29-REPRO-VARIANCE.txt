@@ -1,0 +1,22 @@
+EVIDENCE ID : F29-REPRO-VARIANCE
+LEDGER ROW  : 40
+ARTIFACT    : `phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md` — `F29-REPRO::DOCUMENTED-VARIANCE::a=ca35c34f…::b=8272fae8…`, class **`path_prefix`**, mechanism located to seven `OUT_DIR` paths from `cranelift-codegen`'s build script reaching the binary through `file!()`. **The shipped release is reproducible only accidentally**, because GitHub runners always check out at the same absolute path
+
+== PATH RESOLUTION ==
+[OK]   stat phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+       -> .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md  size=14897
+       head:
+# 29-02 — Clean-Room Results
+
+**Measured at** `148330ae` / `2c89b141` (branch `lane/29-02`, merge-base
+`2fd771d2cd69e13f5c686f859547ab46ebddd41f`).
+**Host:** Hetzner Linux `6.8.0-101-generic x86_64`, rustc `1.95.0` (the pin in `rust-toolchain.toml`).
+**Captured evidence:** `evidence/29-02/` — machine index `evidence/29-02/CLAUSE-LEDGER.tsv`.
+
+== GIT OBJECT RESOLUTION ==
+[OK]   DIGEST ca35c34f found 2x in .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+       cmd: /usr/bin/grep -c -F ca35c34f .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+[OK]   DIGEST 8272fae8 found 2x in .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+       cmd: /usr/bin/grep -c -F 8272fae8 .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+
+== VERDICT == CONFIRMED

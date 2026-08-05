@@ -1,0 +1,149 @@
+{
+  "schema": "wayland.journey.receipt/1",
+  "platform": "linux",
+  "service_family": "systemd",
+  "candidate_commit": "7c61079842346988f6d19d399b7d92b672dec680",
+  "binary_version": "wayland-core 0.12.25",
+  "binary_sha256": "b3190b19ff6012cf6c68dca298753b021d02b4bc2dd6670135a93fc482a62385",
+  "driver_commit": "13361302e6ebc32e90f2c503dcd0630e498e6211",
+  "started_at": "2026-07-30T02:25:44.016Z",
+  "finished_at": "2026-07-30T02:26:57.536Z",
+  "arrival_source": "independent-sink",
+  "counts": {
+    "submitted": 12,
+    "arrived": 12,
+    "unique": 12,
+    "duplicates": 0,
+    "losses": 0
+  },
+  "adapter_coverage": {
+    "registered_total": 10,
+    "exercised": [
+      {
+        "adapter": "slack",
+        "endpoint": "chat.postMessage",
+        "submitted": 4,
+        "arrived": 4,
+        "unique": 4
+      },
+      {
+        "adapter": "whatsapp",
+        "endpoint": "whatsapp.messages",
+        "submitted": 4,
+        "arrived": 4,
+        "unique": 4
+      },
+      {
+        "adapter": "sms",
+        "endpoint": "twilio.messages",
+        "submitted": 4,
+        "arrived": 4,
+        "unique": 4
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "preflight-clean",
+      "command": "systemctl --user list-unit-files wayland-core-gateway-f24j.service",
+      "output": "residual_query_status=1\nUNIT FILE STATE PRESET\n\n0 unit files listed.\n\ngateway_state=\"uninstalled\"",
+      "ok": true
+    },
+    {
+      "name": "binary-identity",
+      "command": "/root/lane-gwplat-core --build-info",
+      "output": "wayland-core 0.12.25 (source 7c61079842346988f6d19d399b7d92b672dec680)\nsha256=b3190b19ff6012cf6c68dca298753b021d02b4bc2dd6670135a93fc482a62385\npath=/root/lane-gwplat-core",
+      "ok": true
+    },
+    {
+      "name": "profile-setup",
+      "command": "write /tmp/lane-gateway-platforms-run/linux2/linux-home/credentials.toml + channels/f24jsink.toml (synthetic credentials)",
+      "output": "home=/tmp/lane-gateway-platforms-run/linux2/linux-home\nprofile=f24j\ncredentials_mode=0600\ncanary_bytes=49\nseeded_bot_token=xoxb-f24j-WLJ-CANARY-linux-4ff0ab90dbdc552f0aab05a6e7eff611",
+      "ok": true
+    },
+    {
+      "name": "sink-start",
+      "command": "/usr/local/bin/node scripts/f24-sink.mjs --journal /tmp/lane-gateway-platforms-run/linux2/linux-arrivals.jsonl",
+      "output": "SINK_READY url=http://127.0.0.1:34031 journal=/tmp/lane-gateway-platforms-run/linux2/linux-arrivals.jsonl\nsink_pid=1119053\nhealth={\"ok\":true,\"arrivals\":0}",
+      "ok": true
+    },
+    {
+      "name": "gateway-install",
+      "command": "/root/lane-gwplat-core gateway install --profile f24j",
+      "output": "wrote unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway installed (systemd): wayland-core-gateway-f24j\n  home:    /tmp/lane-gateway-platforms-run/linux2/linux-home\n  binary:  /root/lane-gwplat-core\n$ systemctl --user daemon-reload\nstatus=0\n\n$ systemctl --user list-unit-files wayland-core-gateway-f24j.service\nregistration_status=0\nUNIT FILE                         STATE   PRESET\nwayland-core-gateway-f24j.service enabled enabled\n\n1 unit files listed.",
+      "ok": true
+    },
+    {
+      "name": "gateway-start",
+      "command": "/root/lane-gwplat-core gateway start --profile f24j",
+      "output": "gateway start requested (systemd)",
+      "ok": true
+    },
+    {
+      "name": "status-running",
+      "command": "/root/lane-gwplat-core gateway status --profile f24j --json",
+      "output": "{\n  \"state\": \"running\",\n  \"pid\": 1119727,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/root/lane-gwplat-core\",\n  \"binary_version\": \"0.12.25\"\n}\nliveness_probe=kill -0 1119727 -> alive",
+      "ok": true
+    },
+    {
+      "name": "automation-add",
+      "command": "/root/lane-gwplat-core cron add --trigger every:15 --channel f24jsink --text f24j-heartbeat ; /root/lane-gwplat-core cron add --trigger \"cron:0 9 * * *\" --channel f24jsink --text f24j-daily",
+      "output": "next[0]: 2026-07-30T02:26:45.241730928+00:00\nnext[1]: 2026-07-30T02:27:45.241730928+00:00\nnext[2]: 2026-07-30T02:28:45.241730928+00:00\nadded d4923519-53d3-466d-aa8a-89244ed8445b\nnext[0]: 2026-07-30T09:00:00+00:00\nnext[1]: 2026-07-31T09:00:00+00:00\nnext[2]: 2026-08-01T09:00:00+00:00\nadded e2c9330f-4808-40db-8c61-76448bb5b6f8\n$ /root/lane-gwplat-core cron list\non  d4923519-53d3-466d-aa8a-89244ed8445b  [interval  ] @every 15s                    channel  f24jsink :: f24j-heartbeat  last_fired=never\non  e2c9330f-4808-40db-8c61-76448bb5b6f8  [cron      ] 0 9 * * *                     channel  f24jsink :: f24j-daily  last_fired=never",
+      "ok": true
+    },
+    {
+      "name": "deliveries-submit",
+      "command": "/root/lane-gwplat-core cron add --trigger every:15 --channel <per-adapter> --text f24j-delivery-NN x12 across 3 adapters",
+      "output": "submitted=12\nsubmitted_by_adapter=slack=4 whatsapp=4 sms=4\nf24j-delivery-01 -> slack: added 911a9692-6db5-4e4b-be65-14cc3a84f91e\nf24j-delivery-02 -> whatsapp: added 91806698-879c-4dad-bb34-b28b56cc6efb\nf24j-delivery-03 -> sms: added 35449462-1507-488b-a361-5d7b5be78f13\nf24j-delivery-04 -> slack: added 78d5a651-562f-484b-a84c-124e5ea94e8b\nf24j-delivery-05 -> whatsapp: added fad42f21-b17e-4cdf-8979-ef69bac5bdcd\nf24j-delivery-06 -> sms: added 07116878-f332-45f0-9daf-38fa252587ff\nf24j-delivery-07 -> slack: added ea164385-c438-4ada-b6ac-c39ee332c9f4\nf24j-delivery-08 -> whatsapp: added 8c0f70b1-5ec1-46d0-abf5-fcc741188014\nf24j-delivery-09 -> sms: added 01789bbc-1ab6-4ac9-99a1-0532aa9255b0\nf24j-delivery-10 -> slack: added cf0b9ed5-4c36-4cd6-8b33-e27811d45455\nf24j-delivery-11 -> whatsapp: added f49b43e1-12ca-4ac3-9094-ada95d31af4f\nf24j-delivery-12 -> sms: added c4af8195-b70d-4798-b212-9f83180c36ba",
+      "ok": true
+    },
+    {
+      "name": "arrival-before-kill",
+      "command": "read arrivals journal /tmp/lane-gateway-platforms-run/linux2/linux-arrivals.jsonl (owned by the independent sink)",
+      "output": "arrivals_total=9\nunique_expected_bodies=8\nfirst_arrival={\"seq\":1,\"ts\":\"1.000000\",\"endpoint\":\"chat.postMessage\",\"conversation_id\":\"f24jsink\",\"text\":\"f24j-heartbeat\",\"auth_fingerprint\":\"sha256:69ff4afa6206\",\"answered\":true,\"idempotency_key\":\"cron:d4923519-53d3-466d-aa8a-89244ed8445b:1785378405241\",\"suppressed\":false,\"at\":\"2026-07-30T02:26:46.150Z\"}",
+      "ok": true
+    },
+    {
+      "name": "hard-kill",
+      "command": "kill -9 1119727",
+      "output": "killed_pid=1119727\nkill_status=0\n\nliveness_after_kill=kill -0 1119727 -> gone",
+      "ok": true
+    },
+    {
+      "name": "platform-recover",
+      "command": "/root/lane-gwplat-core gateway status --profile f24j --json (polled; NO manual start)",
+      "output": "killed_pid=1119727\nrecovered_pid=1138279\n{\n  \"state\": \"running\",\n  \"pid\": 1138279,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/root/lane-gwplat-core\",\n  \"binary_version\": \"0.12.25\"\n}\n$ systemctl --user show -p NRestarts --value wayland-core-gateway-f24j\nstatus=0\n1",
+      "ok": true
+    },
+    {
+      "name": "delivery-reconcile",
+      "command": "tally the independent sink's journal /tmp/lane-gateway-platforms-run/linux2/linux-arrivals.jsonl, per observed endpoint",
+      "output": "arrival_source=independent-sink\nsubmitted=12\narrived=12\nunique=12\nduplicates=0\nlosses=0\njournal_lines_total=13\nadapters_exercised=3/10\n  slack endpoint=chat.postMessage submitted=4 arrived=4 unique=4\n  whatsapp endpoint=whatsapp.messages submitted=4 arrived=4 unique=4\n  sms endpoint=twilio.messages submitted=4 arrived=4 unique=4",
+      "ok": true
+    },
+    {
+      "name": "upgrade-in-place",
+      "command": "/root/lane-gwplat-core gateway uninstall --profile f24j ; /tmp/lane-gateway-platforms-run/linux2/linux-upgraded-core gateway install --profile f24j ; /root/lane-gwplat-core gateway start --profile f24j",
+      "output": "upgrade_target=/tmp/lane-gateway-platforms-run/linux2/linux-upgraded-core\nstop_status=0\ngateway stop requested (systemd)\nremoved unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway uninstalled (systemd): wayland-core-gateway-f24j\nwrote unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway installed (systemd): wayland-core-gateway-f24j\n  home:    /tmp/lane-gateway-platforms-run/linux2/linux-home\n  binary:  /tmp/lane-gateway-platforms-run/linux2/linux-upgraded-core\ngateway start requested (systemd)\nobserved_binary_path=/tmp/lane-gateway-platforms-run/linux2/linux-upgraded-core\nobserved_pid=1139696\n{\n  \"state\": \"running\",\n  \"pid\": 1139696,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/tmp/lane-gateway-platforms-run/linux2/linux-upgraded-core\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "rollback",
+      "command": "/root/lane-gwplat-core gateway uninstall --profile f24j ; /root/lane-gwplat-core gateway install --profile f24j ; /root/lane-gwplat-core gateway start --profile f24j",
+      "output": "rollback_target=/root/lane-gwplat-core\nstop_status=0\ngateway stop requested (systemd)\nremoved unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway uninstalled (systemd): wayland-core-gateway-f24j\nwrote unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway installed (systemd): wayland-core-gateway-f24j\n  home:    /tmp/lane-gateway-platforms-run/linux2/linux-home\n  binary:  /root/lane-gwplat-core\ngateway start requested (systemd)\nobserved_binary_path=/root/lane-gwplat-core\nobserved_pid=1140345\n{\n  \"state\": \"running\",\n  \"pid\": 1140345,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"/root/lane-gwplat-core\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "redaction-canary",
+      "command": "redact /tmp/lane-gateway-platforms-run/linux2/linux-raw.txt -> /tmp/lane-gateway-platforms-run/linux2/linux-redacted.md over 3 seeded secrets",
+      "output": "control=present published=absent secrets=3\nraw_bytes=7485\nredacted_bytes=7436\nredaction_markers=1",
+      "ok": true
+    },
+    {
+      "name": "drain-uninstall-clean",
+      "command": "/root/lane-gwplat-core gateway drain --profile f24j --budget-ms 15000 ; /root/lane-gwplat-core gateway uninstall --profile f24j",
+      "output": "drain requested (budget 15000ms); gateway pid 1140345\ndrain complete: Drained (deliveries pending 0)\nremoved unit: /root/.config/systemd/user/wayland-core-gateway-f24j.service\ngateway uninstalled (systemd): wayland-core-gateway-f24j\n$ systemctl --user list-unit-files wayland-core-gateway-f24j.service\nresidual_status=1\nUNIT FILE STATE PRESET\n\n0 unit files listed.\n\nresidual_pids_alive=0\nfinal_status={\n  \"state\": \"uninstalled\",\n  \"pid\": null,\n  \"uptime_secs\": null,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": null,\n  \"binary_version\": null\n}",
+      "ok": true
+    }
+  ]
+}

@@ -60,13 +60,7 @@ fn template_static_scaffolds_and_builds() {
         .arg(&template_dir)
         .args(["--name", "test-plugin", "--destination"])
         .arg(out_dir)
-        .args([
-            "--define",
-            "description=smoke test plugin",
-            "--define",
-            "authors=smoke <smoke@example.com>",
-            "--silent",
-        ])
+        .args(["--define", "description=smoke test plugin", "--silent"])
         .status()
         .expect("invoke cargo generate");
     assert!(

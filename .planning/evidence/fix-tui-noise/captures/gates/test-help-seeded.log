@@ -1,0 +1,39 @@
+   Compiling wcore-agent v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-agent)
+   Compiling wcore-cli v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.75s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/help_no_internal_ids.rs (target/debug/deps/help_no_internal_ids-bb2893bfebad10b6)
+
+running 5 tests
+test matcher_rejects_seeded_internal_ids ... ok
+test matcher_accepts_ordinary_help_prose ... ok
+test long_help_has_no_internal_identifiers ... FAILED
+test short_help_has_no_internal_identifiers ... FAILED
+test help_output_is_greppable_at_all ... ok
+
+failures:
+
+---- long_help_has_no_internal_identifiers stdout ----
+
+thread 'long_help_has_no_internal_identifiers' (4149142) panicked at crates/wcore-cli/tests/help_no_internal_ids.rs:178:5:
+`--help` leaks 1 internal identifier(s) at users:
+  [F-089] F-089: Disable colored output
+
+Describe what the thing DOES. Our sprint numbering is not a feature description. (Machine-readable tokens the product really prints, like `F23_SESSION=`, are fine and are not matched.)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- short_help_has_no_internal_identifiers stdout ----
+
+thread 'short_help_has_no_internal_identifiers' (4149145) panicked at crates/wcore-cli/tests/help_no_internal_ids.rs:199:5:
+`-h` leaks 1 internal identifier(s) at users:
+F-089: Disable colored output
+
+
+failures:
+    long_help_has_no_internal_identifiers
+    short_help_has_no_internal_identifiers
+
+test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p wcore-cli --test help_no_internal_ids`

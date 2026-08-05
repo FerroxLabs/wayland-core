@@ -1,0 +1,13 @@
+Replies from the gateway number, read back from the Twilio Messages API:
+    17 times 3 is 51. FKRIVAULT-dff6ee
+    17 times 3 is 51. FKRIVAULT-dff6ee
+    51 FKRI-657418
+    51 FKRI-657418
+
+ARM                                      NONCE                REPLY?   EXPECTED
+FIXED  e7bc6d88  no keyring, no vault    FKRI-657418          True     REPLY  OK
+PRE    b8311575  no keyring, no vault    FKRIPRE-482616       False    NO REPLY  OK
+BASE   bc90ee1c  no keyring, no vault    FKRIBASE-f87094      False    NO REPLY (control INVALID)  OK
+VAULT  e7bc6d88  vault unlocked          FKRIVAULT-dff6ee     True     REPLY  OK
+
+ALL_ARMS_AS_PREDICTED= True

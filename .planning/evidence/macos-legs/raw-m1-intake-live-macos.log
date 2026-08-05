@@ -1,0 +1,51 @@
+binary:  /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/target/debug/wayland-core
+version: wayland-core 0.12.25
+fixtures: /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa
+
+### Provider read-back: every capture below is a file THIS MOCK wrote.
+### If the engine had talked to api.anthropic.com the capture would be empty.
+
+=== OBS audio/valid — audio_path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/good.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Cannot open audio path component in /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/good.wav: Not a directory (os error 20)","success":false}
+
+=== OBS audio/denylisted — audio_path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/.ssh/id_rsa
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Invalid path: path targets a denied system location: \"/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/.ssh/id_rsa\"","success":false}
+
+=== OBS audio/traversal — audio_path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/sub/../good.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Invalid path: path contains traversal (..): \"/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/sub/../good.wav\"","success":false}
+
+=== OBS audio/symlink — audio_path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/linked.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Cannot open audio path component in /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/linked.wav: Not a directory (os error 20)","success":false}
+
+=== OBS audio/over-cap — audio_path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/over-cap.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Cannot open audio path component in /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.2flyLBDwXa/over-cap.wav: Not a directory (os error 20)","success":false}
+
+=== OBS audio/relative — audio_path=good.wav
+  captured requests: 2
+  TOOL_RESULT is_error=True: {"error":"Invalid path: path must be absolute: \"good.wav\"","success":false}
+
+=== OBS host/valid-png — /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png
+--- what the USER saw (error/result events on the protocol stream):
+--- what went ON THE WIRE to the provider:
+
+=== OBS host/mismatch — /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-png-body-jpg-ext.jpg
+--- what the USER saw (error/result events on the protocol stream):
+"type":"error","msg_id":"m1","error":{"code":"engine_error","message":"composer attachment rejected: attachment 1 (/Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-png-body-jpg-ext.jpg) extension declares image/jpeg but bytes are image/png","retryable":false}
+"message":"composer attachment rejected: attachment 1 (/Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/mismatch-png-body-jpg-ext.jpg) extension declares image/jpeg but bytes are image/png"
+--- what went ON THE WIRE to the provider:
+
+=== OBS host/pdf-as-image — /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf
+--- what the USER saw (error/result events on the protocol stream):
+"type":"error","msg_id":"m1","error":{"code":"engine_error","message":"composer attachment rejected: attachment 1 (/Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf) could not be loaded: Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)","retryable":false}
+"message":"composer attachment rejected: attachment 1 (/Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf) could not be loaded: Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)"
+--- what went ON THE WIRE to the provider:
+
+### secret sweep — the fixture bytes must not appear in any capture
+matches for the fixture credential string in /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/.planning/evidence/macos-legs/m1-intake-live:        0
+
+DONE

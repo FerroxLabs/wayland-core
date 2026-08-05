@@ -1,0 +1,23 @@
+== full workspace nextest, run 1 (partially warm tree, box LOADED load1=30.5)
+WLRC=100
+WLSECS=216
+WLDONE
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 17s
+    Starting 13562 tests across 592 binaries (72 tests skipped)
+     Summary [  76.927s] 13562 tests run: 13559 passed (2 flaky, 1 leaky), 3 failed, 72 skipped
+
+== full workspace nextest, run 2 (warm)
+WLRC=100
+WLSECS=76
+WLDONE
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+    Starting 13562 tests across 592 binaries (72 tests skipped)
+     Summary [  74.085s] 13562 tests run: 13559 passed (1 leaky), 3 failed, 72 skipped
+
+== the 3 failures, both runs identical
+  TRY 3 FAIL [   0.250s] ( 6501/13562) wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+  TRY 3 FAIL [   0.153s] (10549/13562) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  TRY 3 FAIL [  10.073s] (13557/13562) wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch
+  TRY 3 FAIL [   0.250s] ( 6501/13562) wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+  TRY 3 FAIL [   0.153s] (10549/13562) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  TRY 3 FAIL [  10.073s] (13557/13562) wcore-cli::proving_ground connect_all_env_keys_persists_across_relaunch

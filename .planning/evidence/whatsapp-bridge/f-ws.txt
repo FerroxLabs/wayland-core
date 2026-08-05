@@ -1,0 +1,16 @@
+    Checking wcore-channel-whatsapp v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-channel-whatsapp)
+   Compiling wcore-cli v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-cli)
+warning: function `record_overwrites_so_the_surface_describes_the_LATEST_turn` should have a snake case name
+   --> crates/wcore-memory/src/activation.rs:198:8
+    |
+198 |     fn record_overwrites_so_the_surface_describes_the_LATEST_turn() {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `record_overwrites_so_the_surface_describes_the_latest_turn`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: `wcore-memory` (lib test) generated 1 warning
+    Checking wcore-channels-registry v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-channels-registry)
+    Checking wcore-agent v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 52.44s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

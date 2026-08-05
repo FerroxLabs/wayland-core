@@ -1,0 +1,100 @@
+=== INTERNAL ADVERSARIAL PASS (fourth panel member) ===
+Written AFTER reading codex, gemini and kimi, and arguing AGAINST the emerging
+3/3 consensus of CONFIRM_WITH_AMENDMENT. Position taken: REJECT.
+
+--- The case for REJECT ---
+
+1. G2's permutation test proves DETERMINISM, not FAIRNESS, and I wrote it as
+   though it proved the latter.
+
+   `g2_translations_are_invariant_under_label_permutation` compiles three corpora
+   under two contradictory labellings and asserts each corpus's digest is
+   unchanged. But the compiler is a pure function of its inputs, so that test
+   passes for ANY pure function. Consider the maximally biased rule:
+
+       select the declared tool whose name is exactly "Write"
+
+   It is identity-blind, it takes no label, and it passes the permutation test
+   perfectly, every time. It would also hand Wayland a 30/30 and both peers a
+   refusal. **The permutation test cannot distinguish my filter from that rule.**
+   Any claim that G2 bounds bias is false; G2 bounds only non-determinism and
+   accidental label leakage.
+
+2. G1's ordering proof is vacuous against the actual threat.
+
+   Committing the vocabulary before capturing a corpus proves the tables were not
+   fitted to the captured bytes. It proves nothing about the author's PRIOR
+   knowledge — codex names this exactly. I have read this codebase's tool names.
+   Writing `write/create/save/put/store/make/new` while knowing `Write` is in the
+   set is not fitting-to-data, and git order cannot see it. The product-token
+   assertion does not help: `Write` is not a product name, so a rule keyed to it
+   passes G1's mechanical check cleanly.
+
+3. The disqualifying list is a 60-token discretionary lever with no
+   justification procedure.
+
+   Nothing in the design says WHY `edit` disqualifies and `write` qualifies. An
+   `edit_file` tool that creates missing files is functionally capable of the
+   oracle and is excluded by a token. That exclusion happens to remove a shape
+   peers plausibly expose while leaving a bare `Write` untouched. I cannot show
+   the list was chosen for that effect; I also cannot show it was not.
+
+4. Refusal is not neutral, and my own design document claimed it was.
+
+   I wrote "a refusal makes the leg UNPROVEN, which yields no comparison in
+   either direction". That is true of the COMPARATIVE constructor and false of
+   the report. If Wayland resolves and OpenClaw refuses, Wayland publishes an
+   absolute number and OpenClaw publishes nothing. A reader draws the inference
+   the comparative refused to state. Selective measurability is a win channel
+   that bypasses every guard I built.
+
+5. Therefore the honest grade is REJECT, not CONFIRM_WITH_AMENDMENT: the design
+   as submitted asserts a fairness property it does not have.
+
+--- Why REJECT does NOT survive, and what does ---
+
+Points 1-4 are all correct and all are adopted. Point 5 does not follow.
+
+REJECT would be the right verdict if the defect were the compiler. It is not.
+The measured defect is that the frozen script speaks one harness's dialect and
+two of three harnesses scored 0/30 without being asked the question. ANY repair
+requires some translation, and every translation is authored by somebody. REJECT
+leaves Criterion 2 permanently unre-takeable and leaves the confounded 0/30
+standing as the most recent published number about Wayland — which is worse for
+the reader and, note, worse for the vendor too, so it is not self-serving to say.
+
+What points 1-4 actually establish is narrower and sharper than REJECT:
+
+  **The claim must be downgraded, and two gates must exist before any re-take.**
+
+Not claimable: "the compiler is unbiased", "the guards prove fairness",
+"permutation invariance bounds bias". All three are struck.
+
+Claimable: the compiler is IDENTITY-BLIND and DETERMINISTIC (G2, as narrowed);
+it CANNOT rank, so it has no tie-break lever (G3); its vocabulary was not fitted
+to captured data (G1, as narrowed to that and only that); and hand-tuning is
+detectable (G4).
+
+Required before a re-take, both adopted from the external members:
+
+  A. **Symmetric-resolution gate.** If the compiler refuses for ANY harness on a
+     dimension, that dimension is INELIGIBLE for EVERY harness — nobody's number
+     is run or published. This makes selective measurability cost the vendor
+     exactly what it costs a peer, which is the only thing that neutralises
+     point 4. Codex's wording; gemini and kimi ask for the same thing as a
+     pre-benchmark dry-run.
+
+  B. **Product-blind counterfactual qualification suite.** Synthetic schemas
+     exercising sparse-vs-rich surfaces, a capable-but-denylisted tool, a generic
+     tool whose semantics live in its description, and the case where ADDING a
+     valid tool flips COMPILE to AMBIGUOUS. Its purpose is not to pass — it is to
+     PUBLISH the shape of the compiler's blind spots so a reader can price them.
+
+Point 3 (the disqualifying list) is NOT closed by A or B. It is bounded by A —
+a list tuned to exclude peers' tools now costs the vendor its own leg too — but
+the list's authorship remains vendor-side. Kimi's third-party ratification is the
+real fix and it is outside this lane's authority. Recorded as an open limitation,
+not as a solved problem.
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+PANEL_TOP_AMENDMENT=Strike every fairness claim the guards do not support, then gate any re-take on a symmetric-resolution rule that suppresses ALL harnesses' numbers for a dimension where any harness refuses.

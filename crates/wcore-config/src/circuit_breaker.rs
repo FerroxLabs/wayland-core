@@ -155,6 +155,39 @@ impl CircuitBreaker {
         self.inner.lock().state
     }
 
+    /// Whether this breaker carries live state that must survive a restart.
+    ///
+    /// A Closed breaker still requires conservative restoration when it has
+    /// failures inside the rolling window: losing that history would let a
+    /// restarted process admit calls that the original process was close to
+    /// blocking. Open and HalfOpen always require restoration, even when the
+    /// cooldown has elapsed, because observing this method must not advance
+    /// the state machine or admit a trial call.
+    pub fn requires_conservative_restore(&self) -> bool {
+        let s = self.inner.lock();
+        if s.state != BreakerState::Closed {
+            return true;
+        }
+
+        let now = Instant::now();
+        s.failures
+            .iter()
+            .any(|failure| now.saturating_duration_since(*failure) <= self.cfg.window)
+    }
+
+    /// Conservatively restore a breaker after a process restart.
+    ///
+    /// The original failure timestamps and in-flight HalfOpen trial cannot be
+    /// reconstructed safely across processes. Restart the full cooldown from
+    /// now and admit no trial as part of restoration. The next trial can only
+    /// be acquired by a later [`Self::is_open`] call after that cooldown.
+    pub fn restore_conservative(&self) {
+        let mut s = self.inner.lock();
+        s.state = BreakerState::Open;
+        s.opened_at = Some(Instant::now());
+        s.half_open_trial_taken = false;
+    }
+
     /// Record a successful call outcome.
     ///
     /// HalfOpen → Closed (clears failure history).
@@ -374,5 +407,71 @@ mod tests {
         let _ = b.is_open();
         b.record_success();
         b.record_failure();
+    }
+
+    #[test]
+    fn live_closed_failure_history_requires_conservative_restore() {
+        let b = CircuitBreaker::new(cfg(3, 30, 60));
+        assert!(!b.requires_conservative_restore());
+
+        b.record_failure();
+
+        assert_eq!(b.state(), BreakerState::Closed);
+        assert!(b.requires_conservative_restore());
+    }
+
+    #[test]
+    fn stale_closed_failure_history_does_not_require_restore() {
+        let b = CircuitBreaker::new(CircuitBreakerConfig {
+            fail_threshold: 3,
+            window: Duration::from_millis(0),
+            cooldown: Duration::from_secs(60),
+        });
+        b.record_failure();
+        std::thread::sleep(Duration::from_millis(1));
+
+        assert_eq!(b.state(), BreakerState::Closed);
+        assert!(!b.requires_conservative_restore());
+    }
+
+    #[test]
+    fn open_and_half_open_states_require_restore_without_advancing() {
+        let b = CircuitBreaker::new(CircuitBreakerConfig {
+            fail_threshold: 1,
+            window: Duration::from_secs(30),
+            cooldown: Duration::from_millis(1),
+        });
+        b.record_failure();
+        assert!(b.requires_conservative_restore());
+        assert_eq!(b.state(), BreakerState::Open);
+
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(b.requires_conservative_restore());
+        assert_eq!(
+            b.state(),
+            BreakerState::Open,
+            "read-only inspection must not admit the HalfOpen trial"
+        );
+
+        assert!(!b.is_open());
+        assert_eq!(b.state(), BreakerState::HalfOpen);
+        assert!(b.requires_conservative_restore());
+    }
+
+    #[test]
+    fn conservative_restore_restarts_full_cooldown_without_admitting_trial() {
+        let b = CircuitBreaker::new(CircuitBreakerConfig {
+            fail_threshold: 3,
+            window: Duration::from_secs(30),
+            cooldown: Duration::from_millis(20),
+        });
+
+        b.restore_conservative();
+
+        assert_eq!(b.state(), BreakerState::Open);
+        assert!(b.is_open(), "restoration must not admit an immediate trial");
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!b.is_open(), "one trial is admitted after the new cooldown");
+        assert!(b.is_open(), "the HalfOpen trial remains single-admission");
     }
 }

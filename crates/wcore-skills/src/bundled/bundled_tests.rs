@@ -1,6 +1,6 @@
 // Phase 10 inline tests for src/skills/bundled/mod.rs
 // Covers TC-10.01 ~ TC-10.28 (registration API, field mapping, file extraction,
-// resolve_skill_file_path path validation, prepare_bundled_skills, thread safety).
+// resolve_skill_file_path path validation, prepare_bundled_skills, isolation).
 
 use super::*;
 use serial_test::serial;
@@ -33,11 +33,10 @@ fn minimal_def(name: &'static str) -> BundledSkillDefinition {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_01_register_single_skill() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("tc-01"));
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("tc-01"));
+    let skills = catalog.get_bundled_skills();
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "tc-01");
 }
@@ -47,29 +46,49 @@ fn tc_10_01_register_single_skill() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_02_register_multiple_accumulate() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("a"));
-    register_bundled_skill(minimal_def("b"));
-    register_bundled_skill(minimal_def("c"));
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("a"));
+    register_bundled_skill(&mut catalog, minimal_def("b"));
+    register_bundled_skill(&mut catalog, minimal_def("c"));
+    let skills = catalog.get_bundled_skills();
     assert_eq!(skills.len(), 3);
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"a") && names.contains(&"b") && names.contains(&"c"));
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.03: clear_bundled_skills empties registry
+// TC-10.03: fresh catalogs do not inherit entries
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
-fn tc_10_03_clear_empties_registry() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("to-clear"));
-    clear_bundled_skills();
-    assert!(get_bundled_skills().is_empty());
+fn tc_10_03_fresh_catalog_is_empty() {
+    let mut first = BundledSkillCatalog::new();
+    register_bundled_skill(&mut first, minimal_def("first-only"));
+    let second = BundledSkillCatalog::new();
+    assert_eq!(first.get_bundled_skills().len(), 1);
+    assert!(second.get_bundled_skills().is_empty());
+}
+
+#[test]
+fn parallel_catalogs_do_not_share_registered_skills() {
+    let first = std::thread::spawn(|| {
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("first-session"));
+        catalog.get_bundled_skills()
+    });
+    let second = std::thread::spawn(|| {
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("second-session"));
+        catalog.get_bundled_skills()
+    });
+
+    let first = first.join().expect("first catalog thread");
+    let second = second.join().expect("second catalog thread");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].name, "first-session");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].name, "second-session");
 }
 
 // ---------------------------------------------------------------------------
@@ -77,11 +96,9 @@ fn tc_10_03_clear_empties_registry() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_04_init_registers_hello() {
-    clear_bundled_skills();
-    init_bundled_skills();
-    let skills = get_bundled_skills();
+    let catalog = init_bundled_skills();
+    let skills = catalog.get_bundled_skills();
     assert!(!skills.is_empty());
     assert!(skills.iter().any(|s| s.name == "hello"));
 }
@@ -91,24 +108,26 @@ fn tc_10_04_init_registers_hello() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_05_full_field_mapping() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        name: "full-skill",
-        description: "desc",
-        when_to_use: Some("when"),
-        argument_hint: Some("arg"),
-        allowed_tools: &["Bash", "Read"],
-        model: Some(ANTHROPIC_OPUS),
-        disable_model_invocation: false,
-        user_invocable: true,
-        context: Some("inline"),
-        agent: Some("my-agent"),
-        files: &[],
-        content: "body",
-    });
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            name: "full-skill",
+            description: "desc",
+            when_to_use: Some("when"),
+            argument_hint: Some("arg"),
+            allowed_tools: &["Bash", "Read"],
+            model: Some(ANTHROPIC_OPUS),
+            disable_model_invocation: false,
+            user_invocable: true,
+            context: Some("inline"),
+            agent: Some("my-agent"),
+            files: &[],
+            content: "body",
+        },
+    );
+    let skills = catalog.get_bundled_skills();
     let m = &skills[0];
     assert_eq!(m.name, "full-skill");
     assert_eq!(m.description, "desc");
@@ -127,11 +146,10 @@ fn tc_10_05_full_field_mapping() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_06_source_and_loaded_from_bundled() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("src-test"));
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("src-test"));
+    let skills = catalog.get_bundled_skills();
     let m = &skills[0];
     assert_eq!(m.source, SkillSource::Bundled);
     assert_eq!(m.loaded_from, LoadedFrom::Bundled);
@@ -142,14 +160,16 @@ fn tc_10_06_source_and_loaded_from_bundled() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_07_context_inline_maps_correctly() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        context: Some("inline"),
-        ..minimal_def("ctx-inline")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            context: Some("inline"),
+            ..minimal_def("ctx-inline")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.execution_context, ExecutionContext::Inline);
 }
 
@@ -158,14 +178,16 @@ fn tc_10_07_context_inline_maps_correctly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_08_context_fork_maps_correctly() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        context: Some("fork"),
-        ..minimal_def("ctx-fork")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            context: Some("fork"),
+            ..minimal_def("ctx-fork")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.execution_context, ExecutionContext::Fork);
 }
 
@@ -174,11 +196,10 @@ fn tc_10_08_context_fork_maps_correctly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_09_context_none_defaults_to_inline() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("ctx-none"));
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("ctx-none"));
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(
         m.execution_context,
         ExecutionContext::Inline,
@@ -191,11 +212,10 @@ fn tc_10_09_context_none_defaults_to_inline() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_10_no_files_skill_root_none() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("no-files"));
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("no-files"));
+    let m = &catalog.get_bundled_skills()[0];
     assert!(m.skill_root.is_none());
 }
 
@@ -204,20 +224,37 @@ fn tc_10_10_no_files_skill_root_none() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn tc_10_11_files_skill_root_set_by_prepare() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        files: &[("guide.md", "# Guide")],
-        ..minimal_def("file-skill")
-    });
-    let skills = prepare_bundled_skills().await;
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("guide.md", "# Guide")],
+            ..minimal_def("file-skill")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
     let m = skills.iter().find(|s| s.name == "file-skill").unwrap();
     assert!(
         m.skill_root.is_some(),
         "skill_root should be set by prepare_bundled_skills"
     );
-    assert!(m.skill_root.as_ref().unwrap().contains("file-skill"));
+    let root = Path::new(m.skill_root.as_deref().unwrap());
+    assert_eq!(root.file_name().unwrap(), "skill-0");
+    assert!(
+        root.join("guide.md").is_file(),
+        "reference file should exist under the catalog-owned root"
+    );
+    let process_root_name = root
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .expect("process extraction root should have a UTF-8 name");
+    let nonce = process_root_name
+        .strip_prefix("wayland-core-bundled-skills-")
+        .expect("process extraction root should use the standard prefix");
+    uuid::Uuid::parse_str(nonce).expect("process extraction root should carry a UUID nonce");
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +264,21 @@ async fn tc_10_11_files_skill_root_set_by_prepare() {
 #[tokio::test]
 #[serial]
 async fn tc_10_12_extract_creates_dir_and_file() {
-    let result = extract_bundled_skill_files("tc-12-skill", &[("data.md", "content")]).await;
-    let dir = result.expect("extraction should succeed");
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("data.md", "content")],
+            ..minimal_def("tc-12-skill")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+    let dir = PathBuf::from(
+        skills[0]
+            .skill_root
+            .as_deref()
+            .expect("catalog-owned extraction should succeed"),
+    );
     let file = dir.join("data.md");
     assert!(file.exists(), "extracted file should exist");
     assert_eq!(
@@ -236,8 +286,6 @@ async fn tc_10_12_extract_creates_dir_and_file() {
         "content",
         "file content should match"
     );
-    // cleanup
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,19 +295,35 @@ async fn tc_10_12_extract_creates_dir_and_file() {
 #[tokio::test]
 #[serial]
 async fn tc_10_13_dir_permission_0700() {
-    let result = extract_bundled_skill_files("tc-13-skill", &[("perm.md", "x")]).await;
-    let dir = result.expect("extraction should succeed");
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("perm.md", "x")],
+            ..minimal_def("tc-13-skill")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+    // `_dir` because only the POSIX mode assertion below consumes it; the
+    // Windows equivalent is the handle-bound DACL proof in
+    // `tc_10_28_*`/`tc_10_29_*`. The `expect` still runs on every platform,
+    // so a failed extraction fails this test everywhere.
+    let _dir = PathBuf::from(
+        skills[0]
+            .skill_root
+            .as_deref()
+            .expect("catalog-owned extraction should succeed"),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(&dir).unwrap();
+        let meta = std::fs::metadata(&_dir).unwrap();
         assert_eq!(
             meta.permissions().mode() & 0o777,
             0o700,
             "directory must be owner-only (0o700)"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,19 +333,32 @@ async fn tc_10_13_dir_permission_0700() {
 #[tokio::test]
 #[serial]
 async fn tc_10_14_file_permission_0600() {
-    let result = extract_bundled_skill_files("tc-14-skill", &[("file.md", "y")]).await;
-    let dir = result.expect("extraction should succeed");
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("file.md", "y")],
+            ..minimal_def("tc-14-skill")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+    // `_dir`: see `tc_10_13_dir_permission_0700` above.
+    let _dir = PathBuf::from(
+        skills[0]
+            .skill_root
+            .as_deref()
+            .expect("catalog-owned extraction should succeed"),
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let fmeta = std::fs::metadata(dir.join("file.md")).unwrap();
+        let fmeta = std::fs::metadata(_dir.join("file.md")).unwrap();
         assert_eq!(
             fmeta.permissions().mode() & 0o777,
             0o600,
             "file must be owner-only (0o600)"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -290,16 +367,28 @@ async fn tc_10_14_file_permission_0600() {
 
 #[tokio::test]
 async fn tc_10_15_path_traversal_rejected_integration() {
-    let result = extract_bundled_skill_files("tc-15-evil", &[("../escape.txt", "pwned")]).await;
-    // Either extraction fails entirely, or the traversal entry is skipped
-    if let Some(dir) = result {
-        assert!(
-            !dir.parent().unwrap().join("escape.txt").exists(),
-            "traversal file must not be created outside extract dir"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    // If result is None, the test also passes (extraction was rejected)
+    let mut catalog = BundledSkillCatalog::new();
+    let escape_path = catalog
+        .extraction_root
+        .as_ref()
+        .expect("test extraction root should be available")
+        .join("escape.txt");
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("../escape.txt", "pwned")],
+            ..minimal_def("tc-15-evil")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+    assert!(
+        skills[0].skill_root.is_none(),
+        "a rejected traversal must not publish a skill root"
+    );
+    assert!(
+        !escape_path.exists(),
+        "traversal file must not be created outside the indexed skill root"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -308,41 +397,62 @@ async fn tc_10_15_path_traversal_rejected_integration() {
 
 #[tokio::test]
 async fn tc_10_16_extraction_failure_returns_none() {
-    // Pass an empty files slice — extract_bundled_skill_files returns None for empty
-    let result = extract_bundled_skill_files("tc-16-empty", &[]).await;
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("tc-16-empty"));
+    let skills = catalog.prepare_bundled_skills().await;
     assert!(
-        result.is_none(),
-        "empty files should return None without panic"
+        skills[0].skill_root.is_none(),
+        "empty files should not publish an extraction root"
     );
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.17: get_bundled_skill_extract_dir path format
+// TC-10.17: extraction path is catalog-owned, not caller-name-derived
 // ---------------------------------------------------------------------------
 
-#[test]
-fn tc_10_17_extract_dir_path_format() {
-    let path = get_bundled_skill_extract_dir("my-skill");
+#[tokio::test]
+async fn tc_10_17_extract_dir_is_catalog_owned() {
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("guide.md", "safe")],
+            ..minimal_def("../caller-controlled-name")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+    let path = Path::new(
+        skills[0]
+            .skill_root
+            .as_deref()
+            .expect("catalog-owned extraction should succeed"),
+    );
     let s = path.to_string_lossy();
     assert!(
         s.contains("wayland-core-bundled-skills"),
         "path should contain wayland-core-bundled-skills"
     );
-    assert!(s.contains("my-skill"), "path should contain skill name");
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("skill-0")
+    );
+    assert!(
+        !s.contains("caller-controlled-name"),
+        "the extraction path must not contain the caller-provided skill name"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.19: get_bundled_skills is idempotent (does not consume registry)
+// TC-10.19: get_bundled_skills is idempotent (does not consume catalog)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_19_get_bundled_skills_idempotent() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("idem-a"));
-    register_bundled_skill(minimal_def("idem-b"));
-    assert_eq!(get_bundled_skills().len(), 2);
-    assert_eq!(get_bundled_skills().len(), 2);
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("idem-a"));
+    register_bundled_skill(&mut catalog, minimal_def("idem-b"));
+    assert_eq!(catalog.get_bundled_skills().len(), 2);
+    assert_eq!(catalog.get_bundled_skills().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -350,44 +460,37 @@ fn tc_10_19_get_bundled_skills_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_23_content_length_correct() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        content: "hello world",
-        ..minimal_def("cl-skill")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            content: "hello world",
+            ..minimal_def("cl-skill")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.content_length, "hello world".len());
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.24: concurrent registration does not panic
+// TC-10.24: embedded definitions stay ahead of appended plugin entries
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
-fn tc_10_24_concurrent_registration_no_panic() {
-    clear_bundled_skills();
-    let handles: Vec<_> = (0..10_u8)
-        .map(|i| {
-            std::thread::spawn(move || {
-                // SAFETY: each thread registers a unique name literal via a
-                // fixed array; we pick from the set of 10 pre-defined literals.
-                let names: [&'static str; 10] =
-                    ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"];
-                register_bundled_skill(minimal_def(names[i as usize]));
-            })
-        })
+fn tc_10_24_embedded_then_plugin_insertion_order_is_preserved() {
+    let mut catalog = BundledSkillCatalog::embedded();
+    register_bundled_skill(&mut catalog, minimal_def("plugin-first"));
+    register_bundled_skill(&mut catalog, minimal_def("plugin-second"));
+    let names: Vec<_> = catalog
+        .get_bundled_skills()
+        .into_iter()
+        .map(|skill| skill.name)
         .collect();
-    for h in handles {
-        h.join().expect("thread should not panic");
-    }
-    let skills = get_bundled_skills();
     assert_eq!(
-        skills.len(),
-        10,
-        "all 10 concurrent registrations should be present"
+        names,
+        vec!["plugin-first".to_owned(), "plugin-second".to_owned()],
+        "embedded() is fixture-free and appended plugin order is stable"
     );
 }
 
@@ -396,14 +499,16 @@ fn tc_10_24_concurrent_registration_no_panic() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_25_unknown_context_defaults_to_inline() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        context: Some("unknown-value"),
-        ..minimal_def("ctx-unknown")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            context: Some("unknown-value"),
+            ..minimal_def("ctx-unknown")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.execution_context, ExecutionContext::Inline);
 }
 
@@ -453,15 +558,22 @@ fn tc_10_27d_resolve_disguised_traversal_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_28_init_idempotent() {
-    clear_bundled_skills();
-    init_bundled_skills();
-    init_bundled_skills();
-    let skills = get_bundled_skills();
-    let hello_count = skills.iter().filter(|s| s.name == "hello").count();
+    let first = init_bundled_skills();
+    let second = init_bundled_skills();
+    let first_count = first
+        .get_bundled_skills()
+        .iter()
+        .filter(|skill| skill.name == "hello")
+        .count();
+    let second_count = second
+        .get_bundled_skills()
+        .iter()
+        .filter(|skill| skill.name == "hello")
+        .count();
     assert_eq!(
-        hello_count, 1,
+        (first_count, second_count),
+        (1, 1),
         "init_bundled_skills must be idempotent — hello should appear exactly once"
     );
 }
@@ -469,23 +581,138 @@ fn tc_10_28_init_idempotent() {
 // ---------------------------------------------------------------------------
 // TC-10.29 (Windows only): bundled skill extraction must succeed on Windows.
 // Audit W-3 regression guard (E2E-WINDOWS-ADDENDUM-2026-05-24 §2.2):
-// Verifies that create_dir_secure + open_secure work on Windows — previously
-// they compiled but the #[cfg(not(unix))] path had no ACL restriction at all.
+// Verifies that capability-relative extraction and ACL hardening work together.
 // ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn open_windows_acl_subject(path: &Path, directory: bool) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, READ_CONTROL,
+    };
+
+    let flags = if directory {
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+    } else {
+        FILE_FLAG_OPEN_REPARSE_POINT
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(flags)
+        .open(path)
+        .unwrap_or_else(|error| panic!("open ACL subject {}: {error}", path.display()))
+}
+
+#[cfg(windows)]
+fn assert_windows_owner_only_dacl<T: std::os::windows::io::AsRawHandle>(handle: &T) {
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
+        GetSecurityDescriptorControl, OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
+    };
+    // windows-sys 0.59 exports the ACE type constants from
+    // `Win32::System::SystemServices`, not `Win32::Security`. Note rustc's
+    // `help` for the old path is wrong — it suggests `ACCESS_ALLOWED_ACE`,
+    // which is the ACE STRUCT, not its type discriminant.
+    use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the handle carries READ_CONTROL and all output pointers are live.
+    let result = unsafe {
+        GetSecurityInfo(
+            handle.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(result, 0, "GetSecurityInfo failed: {result:#x}");
+    let _descriptor = WindowsLocalAlloc(descriptor);
+    assert!(!dacl.is_null(), "secured object must have a DACL");
+
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: descriptor is the live buffer returned by GetSecurityInfo.
+    assert_ne!(
+        unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
+        0,
+        "GetSecurityDescriptorControl failed: {}",
+        std::io::Error::last_os_error()
+    );
+    assert_ne!(
+        control & SE_DACL_PROTECTED,
+        0,
+        "bundled extraction DACL must be protected"
+    );
+
+    // SAFETY: dacl belongs to the live descriptor and is valid for inspection.
+    assert_eq!(unsafe { (*dacl).AceCount }, 1, "DACL must contain one ACE");
+    let mut raw_ace = std::ptr::null_mut();
+    // SAFETY: index zero exists because AceCount is exactly one.
+    assert_ne!(
+        unsafe { GetAce(dacl, 0, &mut raw_ace) },
+        0,
+        "GetAce failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let ace = raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+    // SAFETY: GetAce returned the sole ACE in the valid DACL.
+    // `ACE_HEADER::AceType` is `u8`; the constant is exported as `u32`. The
+    // cast is width-only and cannot change the compared value.
+    assert_eq!(
+        u32::from(unsafe { (*ace).Header.AceType }),
+        ACCESS_ALLOWED_ACE_TYPE,
+        "sole DACL entry must be an allow ACE"
+    );
+    // SAFETY: SidStart is the first byte of the variable-length SID stored in
+    // ACCESS_ALLOWED_ACE.
+    let allowed_sid = unsafe { std::ptr::addr_of_mut!((*ace).SidStart).cast() };
+    let token_user = current_windows_token_user().expect("query current TokenUser");
+    assert!(!owner.is_null(), "secured object must have an owner");
+    // SAFETY: owner belongs to the live descriptor and TokenUser remains live.
+    assert_ne!(
+        unsafe { EqualSid(owner, token_user.sid()) },
+        0,
+        "object owner must equal the current process TokenUser"
+    );
+    // SAFETY: both pointers name live, valid SIDs for the duration of the call.
+    assert_ne!(
+        unsafe { EqualSid(allowed_sid, token_user.sid()) },
+        0,
+        "allowed SID must equal the current process TokenUser"
+    );
+}
 
 #[cfg(windows)]
 #[tokio::test]
 #[serial]
 async fn tc_10_29_windows_bundled_skill_extract_succeeds() {
     // Extract two files and verify both land under the expected directory.
-    // On Windows this exercises the icacls ACL-tightening path in
-    // create_dir_secure() and open_secure().
-    let dir = extract_bundled_skill_files(
-        "tc-29-win-skill",
-        &[("skill.md", "windows test"), ("meta.toml", "[skill]")],
-    )
-    .await
-    .expect("Windows extraction must succeed");
+    // On Windows this exercises handle-relative, no-follow creation plus the
+    // fail-closed handle-bound DACL paths for both directories and files.
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("skill.md", "windows test"), ("meta.toml", "[skill]")],
+            ..minimal_def("tc-29-win-skill")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+    let dir = PathBuf::from(
+        skills[0]
+            .skill_root
+            .as_deref()
+            .expect("Windows extraction must succeed"),
+    );
 
     assert!(dir.join("skill.md").exists(), "skill.md must be created");
     assert!(dir.join("meta.toml").exists(), "meta.toml must be created");
@@ -497,5 +724,236 @@ async fn tc_10_29_windows_bundled_skill_extract_succeeds() {
         "extract dir must use the standard bundled-skill temp prefix, got: {path_str}"
     );
 
-    let _ = std::fs::remove_dir_all(&dir);
+    let catalog_dir_path = dir.parent().expect("catalog directory");
+    let process_root_path = catalog_dir_path.parent().expect("process extraction root");
+    let process_root = open_windows_acl_subject(process_root_path, true);
+    let catalog_dir = open_windows_acl_subject(catalog_dir_path, true);
+    let skill_dir = open_windows_acl_subject(&dir, true);
+    let skill_file = open_windows_acl_subject(&dir.join("skill.md"), false);
+    assert_windows_owner_only_dacl(&process_root);
+    assert_windows_owner_only_dacl(&catalog_dir);
+    assert_windows_owner_only_dacl(&skill_dir);
+    assert_windows_owner_only_dacl(&skill_file);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn tc_10_30_windows_acl_uses_token_user_without_launching_icacls() {
+    let hostile = tempfile::tempdir().expect("hostile executable directory");
+    let marker = hostile.path().join("icacls-launched");
+    let sentinel_source = hostile.path().join("icacls_sentinel.rs");
+    let sentinel_exe = hostile.path().join("icacls.exe");
+    std::fs::write(
+        &sentinel_source,
+        r#"fn main() {
+    std::fs::write(std::env::var_os("ICACLS_MARKER").unwrap(), b"launched").unwrap();
+}
+"#,
+    )
+    .expect("write hostile icacls sentinel source");
+    let sentinel_source = sentinel_source.to_string_lossy().into_owned();
+    let sentinel_exe = sentinel_exe.to_string_lossy().into_owned();
+    let mut compiler = wcore_config::shell::shell_command_argv(
+        "rustc",
+        &[
+            &sentinel_source,
+            "--crate-name",
+            "icacls_sentinel",
+            "-o",
+            &sentinel_exe,
+        ],
+    );
+    compiler.kill_on_drop(true);
+    let compile_output =
+        tokio::time::timeout(std::time::Duration::from_secs(60), compiler.output())
+            .await
+            .expect("hostile icacls sentinel compilation timed out")
+            .expect("compile hostile icacls sentinel");
+    assert!(
+        compile_output.status.success(),
+        "hostile icacls sentinel compilation failed; stdout={} stderr={}",
+        String::from_utf8_lossy(&compile_output.stdout),
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
+
+    let current_exe = std::env::current_exe().expect("current test executable");
+    let current_exe = current_exe.to_string_lossy().into_owned();
+    let hostile_path = hostile.path().to_string_lossy().into_owned();
+    let mut child = wcore_config::shell::shell_command_argv(
+        &current_exe,
+        &[
+            "--exact",
+            "bundled::tests::tc_10_30_windows_acl_subprocess",
+            "--ignored",
+            "--nocapture",
+        ],
+    );
+    child
+        .current_dir(hostile.path())
+        .env("PATH", &hostile_path)
+        .env("ICACLS_MARKER", &marker)
+        .env("USERNAME", "not-the-token-user");
+    child.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
+        .await
+        .expect("isolated ACL subprocess timed out")
+        .expect("run isolated ACL subprocess");
+    assert!(
+        output.status.success(),
+        "isolated hostile-environment extraction failed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "hostile icacls sentinel must not be launched"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "subprocess helper for hostile Windows process state"]
+async fn tc_10_30_windows_acl_subprocess() {
+    assert_eq!(
+        std::env::var("USERNAME").as_deref(),
+        Ok("not-the-token-user")
+    );
+    assert!(
+        std::env::current_dir()
+            .expect("hostile subprocess cwd")
+            .join("icacls.exe")
+            .is_file()
+    );
+
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("guide.md", "handle ACL")],
+            ..minimal_def("tc-30-handle-acl")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+
+    let root = PathBuf::from(
+        skills[0]
+            .skill_root
+            .as_deref()
+            .expect("hostile PATH/cwd must not affect native ACL hardening"),
+    );
+    let file = open_windows_acl_subject(&root.join("guide.md"), false);
+    assert_windows_owner_only_dacl(&file);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[serial]
+async fn tc_10_31_windows_non_directory_component_is_rejected() {
+    let mut catalog = BundledSkillCatalog::new();
+    let catalog_root = catalog
+        .extraction_root
+        .as_ref()
+        .expect("catalog extraction root")
+        .to_owned();
+    std::fs::create_dir(&catalog_root).expect("plant catalog directory");
+    std::fs::write(catalog_root.join("skill-0"), b"not a directory")
+        .expect("plant non-directory component");
+
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("guide.md", "must stay contained")],
+            ..minimal_def("reparse-probe")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+
+    assert!(
+        skills[0].skill_root.is_none(),
+        "every extraction component must be reopened as a directory"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[serial]
+async fn tc_10_32_windows_junction_component_is_rejected() {
+    let outside = tempfile::tempdir().expect("outside temp directory");
+    let mut catalog = BundledSkillCatalog::new();
+    let catalog_root = catalog
+        .extraction_root
+        .as_ref()
+        .expect("catalog extraction root")
+        .to_owned();
+    std::fs::create_dir(&catalog_root).expect("plant catalog directory");
+    let junction = catalog_root.join("skill-0");
+    let junction_arg = junction.to_string_lossy().into_owned();
+    let outside_arg = outside.path().to_string_lossy().into_owned();
+    let output = wcore_config::shell::shell_command_argv(
+        "cmd.exe",
+        &["/D", "/C", "mklink", "/J", &junction_arg, &outside_arg],
+    )
+    .output()
+    .await
+    .expect("launch standard Windows junction command");
+    assert!(
+        output.status.success(),
+        "standard-runner junction setup must succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("guide.md", "must stay contained")],
+            ..minimal_def("reparse-probe")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
+
+    assert!(
+        skills[0].skill_root.is_none(),
+        "a reparse-point directory must fail closed"
+    );
+    assert!(
+        !outside.path().join("guide.md").exists(),
+        "capability-relative extraction must not follow the planted reparse point"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn tc_10_33_windows_root_handle_pins_directory_until_drop() {
+    let temp = tempfile::tempdir().expect("temporary parent");
+    let root = temp.path().join("pinned-root");
+    std::fs::create_dir(&root).expect("create root");
+    let retained = open_windows_capability_root(&root).expect("open retained capability");
+
+    assert!(
+        std::fs::remove_dir(&root).is_err(),
+        "a retained no-delete handle must prevent root replacement"
+    );
+    drop(retained);
+    std::fs::remove_dir(&root).expect("root must become removable after capability drop");
+}
+
+#[cfg(windows)]
+#[test]
+fn tc_10_34_windows_relative_create_starts_owner_only() {
+    let temp = tempfile::tempdir().expect("temporary parent");
+    let root = temp.path().join("atomic-root");
+    create_windows_owner_only_directory(&root).expect("create secured process root");
+    let retained = open_windows_capability_root(&root).expect("open retained process root");
+
+    let directory =
+        create_windows_relative_object(&retained, std::ffi::OsStr::new("atomic-directory"), true)
+            .expect("create secured relative directory");
+    assert_windows_owner_only_dacl(&directory);
+
+    let directory = windows_directory_from_file(directory).expect("retain created directory");
+    let file =
+        create_windows_relative_object(&directory, std::ffi::OsStr::new("atomic-file"), false)
+            .expect("create secured relative file");
+    assert_windows_owner_only_dacl(&file);
 }

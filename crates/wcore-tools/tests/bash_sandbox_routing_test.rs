@@ -11,10 +11,16 @@
 //! `WAYLAND_SANDBOX` is process-global, so every test in this file is
 //! serialized with `#[serial]` and sets the env var itself.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde_json::json;
 use serial_test::serial;
+use wcore_sandbox::backends::SandboxBackend;
+use wcore_sandbox::{
+    ResourceLimitEnforcement, SandboxCommand, SandboxManifest, SandboxOutput, SandboxRegistry,
+};
 use wcore_tools::bash::BashTool;
 use wcore_tools::context::ToolContext;
 use wcore_tools::{Tool, ToolOutputSink};
@@ -58,6 +64,425 @@ impl CapSink {
     fn chunks(&self) -> Vec<String> {
         self.0.lock().unwrap().clone()
     }
+}
+
+struct CountingBackend {
+    calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct CapturingBackend {
+    manifests: Mutex<Vec<SandboxManifest>>,
+    commands: Mutex<Vec<SandboxCommand>>,
+}
+
+#[async_trait]
+impl SandboxBackend for CapturingBackend {
+    async fn execute(
+        &self,
+        manifest: &SandboxManifest,
+        command: SandboxCommand,
+    ) -> wcore_sandbox::Result<SandboxOutput> {
+        self.manifests.lock().unwrap().push(manifest.clone());
+        self.commands.lock().unwrap().push(command);
+        Ok(SandboxOutput {
+            exit_code: 0,
+            stdout: b"captured\n".to_vec(),
+            stderr: Vec::new(),
+            resource_limits: ResourceLimitEnforcement::Enforced,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "capturing"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+
+    fn enforces_read_deny(&self) -> bool {
+        true
+    }
+}
+
+impl CountingBackend {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SandboxBackend for CountingBackend {
+    async fn execute(
+        &self,
+        _manifest: &SandboxManifest,
+        _cmd: SandboxCommand,
+    ) -> wcore_sandbox::Result<SandboxOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(SandboxOutput {
+            exit_code: 0,
+            stdout: b"injected-session-backend\n".to_vec(),
+            stderr: Vec::new(),
+            resource_limits: ResourceLimitEnforcement::Enforced,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn ctx_paths_execute_through_injected_session_runtime() {
+    force_no_sandbox();
+    let backend = Arc::new(CountingBackend::new());
+    let runtime = Arc::new(SandboxRegistry::new(backend.clone()));
+    let ctx = ToolContext::test_default().with_sandbox(runtime);
+    let tool = BashTool;
+
+    let buffered = tool
+        .execute_with_ctx(json!({"command": "echo ignored"}), &ctx)
+        .await;
+    assert!(!buffered.is_error, "unexpected error: {}", buffered.content);
+    assert!(buffered.content.contains("injected-session-backend"));
+
+    let sink = CapSink::new();
+    let streamed = tool
+        .execute_streaming_with_ctx(json!({"command": "echo ignored"}), &ctx, &sink)
+        .await;
+    assert!(!streamed.is_error, "unexpected error: {}", streamed.content);
+    assert!(streamed.content.contains("injected-session-backend"));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_uses_only_owner_checkout_and_private_scratch() {
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let parent = std::fs::canonicalize(parent.path()).unwrap();
+    let checkout = std::fs::canonicalize(checkout).unwrap();
+    let scratch = std::fs::canonicalize(scratch).unwrap();
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [parent.clone()],
+        )
+        .unwrap(),
+    );
+    let backend = Arc::new(CapturingBackend::default());
+    let runtime = Arc::new(SandboxRegistry::new(backend.clone()).with_env_passthrough([
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ]));
+    for name in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        // SAFETY: this test is serialized and removes each value below.
+        unsafe { std::env::set_var(name, &parent) };
+    }
+    let ctx = ToolContext::test_default()
+        .with_sandbox(runtime)
+        .with_workspace(policy);
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "git status"}), &ctx)
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+
+    let manifests = backend.manifests.lock().unwrap();
+    let manifest = manifests.last().unwrap();
+    assert_eq!(
+        manifest.fs_write_allow,
+        vec![checkout.clone(), scratch.clone()]
+    );
+    assert!(manifest.fs_read_deny.contains(&parent));
+    for name in [
+        "GIT_DIR",
+        "GIT_COMMON_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    ] {
+        assert!(
+            manifest
+                .env
+                .iter()
+                .all(|(candidate, _)| !candidate.eq_ignore_ascii_case(name)),
+            "{name} leaked into delegated shell"
+        );
+        // SAFETY: paired cleanup for serialized test mutation above.
+        unsafe { std::env::remove_var(name) };
+    }
+    for name in ["TMPDIR", "TMP", "TEMP"] {
+        let value = manifest
+            .env
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value)
+            .unwrap();
+        assert!(std::path::Path::new(value).starts_with(&scratch));
+    }
+    assert_eq!(
+        backend
+            .commands
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .cwd
+            .as_deref(),
+        Some(checkout.as_path())
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_refuses_scratch_identity_substitution_before_spawn() {
+    use std::os::unix::fs::symlink;
+
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [std::fs::canonicalize(parent.path()).unwrap()],
+        )
+        .unwrap(),
+    );
+    // The delegated_mutation constructor now materializes the private scratch
+    // tmp/cache subtree (owner-relative, so TMPDIR/caches exist for the child),
+    // so the scratch root is no longer empty. Remove it wholesale before
+    // swapping in the identity-substituting symlink this test exercises.
+    std::fs::remove_dir_all(&scratch).unwrap();
+    symlink(parent.path(), &scratch).unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let ctx = ToolContext::test_default()
+        .with_sandbox(Arc::new(SandboxRegistry::new(backend.clone())))
+        .with_workspace(policy);
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo must-not-run"}), &ctx)
+        .await;
+    assert!(result.is_error);
+    assert!(result.content.contains("identity changed"));
+    assert!(backend.manifests.lock().unwrap().is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_writes() {
+    use std::os::unix::fs::symlink;
+
+    unsafe {
+        std::env::remove_var("WAYLAND_SANDBOX");
+        std::env::remove_var("WAYLAND_ALLOW_NO_SANDBOX");
+    }
+    if !wcore_tools::bash::platform_enforces_read_deny() {
+        return;
+    }
+
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::create_dir(scratch.join("tmp")).unwrap();
+    std::fs::create_dir(scratch.join("cache")).unwrap();
+    let parent = std::fs::canonicalize(parent.path()).unwrap();
+    let checkout = std::fs::canonicalize(checkout).unwrap();
+    let scratch = std::fs::canonicalize(scratch).unwrap();
+    symlink(&parent, checkout.join("parent-alias")).unwrap();
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [parent.clone()],
+        )
+        .unwrap(),
+    );
+    let ctx = ToolContext::test_default().with_workspace(policy);
+
+    let allowed = BashTool
+        .execute_with_ctx(
+            json!({"command": "printf checkout > checkout-ok && printf scratch > \"$TMPDIR/scratch-ok\""}),
+            &ctx,
+        )
+        .await;
+    if allowed.is_error {
+        eprintln!(
+            "SKIP delegated_mutation_live_sandbox_confines_parent_global_tmp_and_symlink_writes: {}",
+            allowed.content
+        );
+        return;
+    }
+    assert!(checkout.join("checkout-ok").is_file());
+    assert!(scratch.join("tmp/scratch-ok").is_file());
+
+    let global_escape =
+        std::env::temp_dir().join(format!("wayland-delegated-escape-{}", std::process::id()));
+    let _ = std::fs::remove_file(&global_escape);
+    for command in [
+        format!("printf escaped > {}/parent-write", parent.display()),
+        "printf escaped > parent-alias/symlink-write".to_owned(),
+        format!("printf escaped > {}", global_escape.display()),
+    ] {
+        let _ = BashTool
+            .execute_with_ctx(json!({"command": command}), &ctx)
+            .await;
+    }
+    assert!(!parent.join("parent-write").exists());
+    assert!(!parent.join("symlink-write").exists());
+    assert!(!global_escape.exists());
+}
+
+/// Required Linux live acceptance (runs on the Hetzner gate). Real Bash under
+/// the delegated isolated sandbox may mutate ONLY the retained checkout and
+/// private scratch — including from a forked descendant — while every parent,
+/// symlink-alias, global-temp, and inherited-secret read/write is denied.
+/// Non-skipping: it FAILS if the hard read-deny sandbox is unavailable or
+/// bypassed, and FAILS if legitimate isolated mutation is rejected.
+///
+/// `#[cfg(unix)]` because the body uses `std::os::unix::fs::symlink`, which does
+/// not exist on Windows: without this gate the whole `bash_sandbox_routing_test`
+/// binary fails to compile on Windows with E0433, taking every other test in the
+/// file down with it (found by the 20A-01 `cargo build --locked --workspace
+/// --all-targets` compile probe on real Windows hardware). The gate is `unix`,
+/// not `target_os = "linux"`, deliberately: `unix` is the minimum that fixes the
+/// compile error and it leaves this test running on macOS exactly as it does
+/// today, so a macOS result stays reportable rather than being gated away.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn delegated_mutation_required_live_sandbox_confines_parent_and_descendants() {
+    use std::os::unix::fs::symlink;
+
+    unsafe {
+        std::env::remove_var("WAYLAND_SANDBOX");
+        std::env::remove_var("WAYLAND_ALLOW_NO_SANDBOX");
+    }
+    assert!(
+        wcore_tools::bash::platform_enforces_read_deny(),
+        "required live delegated-mutation sandbox is unavailable on this host"
+    );
+
+    let parent = tempfile::tempdir().unwrap();
+    let transaction = tempfile::tempdir().unwrap();
+    let checkout = transaction.path().join("checkout");
+    let scratch = transaction.path().join("scratch");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::create_dir(&scratch).unwrap();
+    let parent = std::fs::canonicalize(parent.path()).unwrap();
+    let checkout = std::fs::canonicalize(checkout).unwrap();
+    let scratch = std::fs::canonicalize(scratch).unwrap();
+    std::fs::write(parent.join("secret.env"), "PARENT_SECRET=leak").unwrap();
+    symlink(&parent, checkout.join("parent-alias")).unwrap();
+
+    let policy = Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::delegated_mutation(
+            &checkout,
+            &scratch,
+            [parent.clone()],
+        )
+        .unwrap(),
+    );
+    let ctx = ToolContext::test_default().with_workspace(policy);
+
+    // Allowed isolated mutation, including from a forked descendant. A rejection
+    // here means the hard sandbox refused legitimate mutation: FAIL, never skip.
+    let allowed = BashTool
+        .execute_with_ctx(
+            json!({"command": "set -e; printf checkout > checkout-ok; printf scratch > \"$TMPDIR/scratch-ok\"; ( printf child > checkout-descendant ) & wait"}),
+            &ctx,
+        )
+        .await;
+    assert!(
+        !allowed.is_error,
+        "required live delegated mutation was rejected: {}",
+        allowed.content
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("checkout-ok")).unwrap(),
+        b"checkout"
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("checkout-descendant")).unwrap(),
+        b"child",
+        "forked descendant could not mutate the retained checkout"
+    );
+
+    // Denied: parent/symlink/global-temp writes (main shell AND descendant), and
+    // every inherited-secret read.
+    let global_escape =
+        std::env::temp_dir().join(format!("wayland-required-escape-{}", std::process::id()));
+    let _ = std::fs::remove_file(&global_escape);
+    for command in [
+        format!("printf escaped > {}/parent-write", parent.display()),
+        "printf escaped > parent-alias/symlink-write".to_owned(),
+        format!("printf escaped > {}", global_escape.display()),
+        format!(
+            "( printf escaped > {}/desc-parent-write ) & wait",
+            parent.display()
+        ),
+        format!("cat {}", parent.join("secret.env").display()),
+        "cat parent-alias/secret.env".to_owned(),
+    ] {
+        let result = BashTool
+            .execute_with_ctx(json!({ "command": command.clone() }), &ctx)
+            .await;
+        assert!(
+            !result.content.contains("PARENT_SECRET"),
+            "inherited parent secret leaked via `{command}`: {}",
+            result.content
+        );
+    }
+    assert!(
+        !parent.join("parent-write").exists(),
+        "parent write escaped"
+    );
+    assert!(
+        !parent.join("symlink-write").exists(),
+        "symlink-alias write escaped"
+    );
+    assert!(!global_escape.exists(), "global-temp write escaped");
+    assert!(
+        !parent.join("desc-parent-write").exists(),
+        "forked descendant escaped the sandbox"
+    );
+    assert_eq!(
+        std::fs::read(parent.join("secret.env")).unwrap(),
+        b"PARENT_SECRET=leak",
+        "parent secret must remain unchanged"
+    );
 }
 
 /// Path 1 of 4: `execute` — buffered, routed through `SandboxBackend::execute`.
@@ -223,7 +648,7 @@ async fn execute_streaming_with_ctx_routes_through_sandbox() {
 /// `env_passthrough::build_sandboxed_env`. This test asserts the new
 /// contract:
 /// - an allowlisted toolchain var (`PATH`) reaches the child;
-/// - a skill/config-registered passthrough var reaches the child;
+/// - a session-scoped passthrough var reaches the child;
 /// - an arbitrary, non-allowlisted, non-registered var does NOT;
 /// - cwd is still inherited.
 #[tokio::test]
@@ -236,19 +661,25 @@ async fn env_and_cwd_are_honored_through_sandbox() {
     unsafe {
         std::env::set_var("S9_BASH_ENV_PROBE", "probe_value_42");
     }
-    // A var registered via the passthrough allowlist — it MUST reach the
-    // child even though it is not on the base allowlist.
-    wcore_tools::env_passthrough::register_env_passthrough(["S9_PASSTHROUGH_PROBE"]);
     unsafe {
         std::env::set_var("S9_PASSTHROUGH_PROBE", "passed_through_99");
     }
     let tool = BashTool;
+    let runtime = Arc::new(
+        SandboxRegistry::new(Arc::new(
+            wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new(),
+        ))
+        .with_env_passthrough(["S9_PASSTHROUGH_PROBE"]),
+    );
+    let ctx = ToolContext::test_default().with_sandbox(runtime);
 
     #[cfg(unix)]
     {
         // PATH is on the base allowlist — it must reach the child so the
         // shell can find binaries.
-        let result = tool.execute(json!({"command": "echo \"$PATH\""})).await;
+        let result = tool
+            .execute_with_ctx(json!({"command": "echo \"$PATH\""}), &ctx)
+            .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
             result.content.contains('/'),
@@ -256,9 +687,9 @@ async fn env_and_cwd_are_honored_through_sandbox() {
             result.content
         );
 
-        // The registered passthrough var must reach the child.
+        // The session-scoped passthrough var must reach the child.
         let result = tool
-            .execute(json!({"command": "echo \"$S9_PASSTHROUGH_PROBE\""}))
+            .execute_with_ctx(json!({"command": "echo \"$S9_PASSTHROUGH_PROBE\""}), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
@@ -270,7 +701,7 @@ async fn env_and_cwd_are_honored_through_sandbox() {
         // The arbitrary, unregistered var must NOT reach the child — this
         // is the HIGH-2 secret-confinement guarantee.
         let result = tool
-            .execute(json!({"command": "echo \"[$S9_BASH_ENV_PROBE]\""}))
+            .execute_with_ctx(json!({"command": "echo \"[$S9_BASH_ENV_PROBE]\""}), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
@@ -282,7 +713,7 @@ async fn env_and_cwd_are_honored_through_sandbox() {
         // Cwd: `pwd` reflects the directory the command runs in. BashTool
         // does not set an explicit cwd, so the child inherits the engine's
         // working directory — `pwd` must succeed and emit a path.
-        let result = tool.execute(json!({"command": "pwd"})).await;
+        let result = tool.execute_with_ctx(json!({"command": "pwd"}), &ctx).await;
         assert!(!result.is_error, "pwd failed: {}", result.content);
         assert!(
             result.content.contains('/'),
@@ -293,7 +724,7 @@ async fn env_and_cwd_are_honored_through_sandbox() {
     #[cfg(windows)]
     {
         let result = tool
-            .execute(json!({"command": "echo %S9_PASSTHROUGH_PROBE%"}))
+            .execute_with_ctx(json!({"command": "echo %S9_PASSTHROUGH_PROBE%"}), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(result.content.contains("passed_through_99"));
@@ -304,7 +735,6 @@ async fn env_and_cwd_are_honored_through_sandbox() {
         std::env::remove_var("S9_BASH_ENV_PROBE");
         std::env::remove_var("S9_PASSTHROUGH_PROBE");
     }
-    wcore_tools::env_passthrough::clear_env_passthrough();
 }
 
 /// The credential-exfiltration denylist must still refuse before any

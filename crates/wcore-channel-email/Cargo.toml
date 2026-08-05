@@ -11,6 +11,11 @@ chrono = { workspace = true, features = ["serde"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 imap = { version = "2" }
 native-tls = "0.2"
+# Used to COUNT the anchors in `smtp.tls_root_cert_path` with the same parser
+# lettre uses. Needed because lettre's `Certificate::from_pem` returns Ok on
+# input containing no PEM block (empty anchor set) on the rustls path — see
+# `smtp::build_tls_params`. Already resolved transitively; adds no new crate.
+rustls-pki-types = "1"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -22,4 +27,21 @@ wcore-channels = { workspace = true }
 wcore-config = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
+# `tests/smtp_tls_root_live.rs` stands up a real STARTTLS SMTP relay on a
+# loopback socket with a throwaway private CA, so the reply leg is proven
+# against an actual TLS handshake rather than a mock. Test-only.
+#
+# `rcgen` mints the CA + relay certificate in-process, which is what keeps that
+# test portable and always-executed: no openssl binary, no committed private
+# key, no `#[ignore]`, nothing to skip on a platform that lacks a tool.
+rcgen = "0.14"
+# Matches the workspace rustls 0.23 / tokio-rustls 0.26 stack (ring, no
+# openssl / aws-lc-rs) so the test relay links the same provider the SMTP
+# client already uses.
+rustls = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# Needed to construct the `lettre::Message` handed to `MailSender::send`;
+# integration tests do not inherit the crate's own [dependencies].
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+tempfile = { workspace = true }

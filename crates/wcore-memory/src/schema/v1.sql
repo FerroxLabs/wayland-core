@@ -3,7 +3,11 @@
 -- partitions skip writes via gate + tier-resolver; the schema is identical
 -- so any DB can host any partition's table if needed for relocation.
 
-PRAGMA journal_mode = WAL;
+-- NOTE: journal_mode is deliberately NOT set here. It depends on the backing
+-- filesystem (WAL corrupts databases on network mounts), so it is chosen by
+-- `wcore_config::sqlite_journal` in `apply_migrations` before this file runs.
+-- Re-adding a `PRAGMA journal_mode` line here would silently override that
+-- decision and put network-mounted databases back on WAL.
 PRAGMA foreign_keys = ON;
 
 -- Schema-version tracking (single row).

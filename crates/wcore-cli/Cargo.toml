@@ -28,7 +28,7 @@ harness = false
 # M5.4: remote-registry gates the network-backed `GitHubReleasesResolver`
 # behind a feature flag (default ON for v0.6) so unit tests stay offline
 # and a stripped build can disable the reqwest dep entirely.
-default = ["remote-registry", "workflow", "monitor", "review_artifact"]
+default = ["remote-registry", "workflow", "monitor", "review_artifact", "voice"]
 remote-registry = ["dep:reqwest", "dep:wcore-egress"]
 # User-flow harness Layer 3: the `harness_failure_injection` integration
 # test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
@@ -52,9 +52,13 @@ harness-failure-injection = []
 workflow = []
 monitor = []
 review_artifact = []
-# Issue #14 — re-export wcore-agent's optional `voice` feature so the binary
-# can be built with mic capture: `cargo build -p wcore-cli --features voice`.
-# OFF by default to keep libasound.so.2 (ALSA) off the default Linux binary.
+# Issue #14 — re-exports wcore-agent's `voice` feature (cpal mic capture).
+# 27-C4: now ON by default. The feature only *links* the OS audio library —
+# on a host with no input device `build_voice_mode_backend` returns `None`
+# and the `voice_mode` tool hides via `Tool::is_available() == false`, so a
+# headless server still starts cleanly. Cost of the default: the Linux binary
+# gains a dynamic dependency on libasound.so.2 (ALSA), and building it needs
+# the ALSA dev headers (`libasound2-dev` / `alsa-lib-devel`).
 voice = ["wcore-agent/voice"]
 
 [dependencies]
@@ -66,7 +70,11 @@ wcore-agents-pack.workspace = true
 # engine loader uses. Already in the graph transitively via wcore-agent.
 wcore-channels-registry = { path = "../wcore-channels-registry" }
 wcore-compact.workspace  = true
-wcore-config.workspace   = true
+# `sqlite` feature: `backup create` captures live SQLite databases through
+# `wcore_config::sqlite_snapshot` rather than reading their file trio
+# independently (F26-SC3-O1). Additive — wcore-memory already enables it, so
+# this adds no build.
+wcore-config = { workspace = true, features = ["sqlite"] }
 wcore-memory.workspace   = true
 # Wave OL: needed for the `PluginProvider` trait surface that the
 # CLI-side `make_plugin_provider_router` consumes (downcasts via
@@ -82,6 +90,9 @@ wcore-replay.workspace   = true
 # renders an inline summary. `wcore-repomap` is a leaf crate (no internal deps).
 wcore-repomap.workspace  = true
 wcore-tools.workspace    = true
+wcore-sandbox.workspace  = true
+# F25-01: the `wayland-core backend` operator surface.
+wcore-exec-backend.workspace = true
 wcore-mcp.workspace      = true
 # v0.6.4 Task 2.5: `PolicyGateAdapter` bridges `wcore-mcp::PolicyCheck` to
 # the workspace `PolicyGate`. The `mcp-serve` subcommand constructs a
@@ -106,6 +117,10 @@ axum = "0.7"
 wcore-swarm = { path = "../wcore-swarm" }
 # v0.8.1 U7: `cron` subcommand wires `wcore-cron` into the CLI.
 wcore-cron  = { path = "../wcore-cron" }
+# Phase 24 plan 24-01: the persistent gateway runtime. The scheduler daemon
+# takes its Windows process-creation flags from this crate so the workspace
+# has ONE definition of what "detached" means, measured rather than guessed.
+wcore-gateway = { path = "../wcore-gateway" }
 # F-089: `models list` subcommand reads the bundled pricing catalog to
 # enumerate known provider/model ids without a live API call.
 wcore-pricing.workspace = true
@@ -147,6 +162,7 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace   = true
 clap.workspace   = true
 serde_json.workspace = true
+base64.workspace = true
 uuid.workspace   = true
 
 # TUI (ratatui terminal UI) — Wave 0 foundation. ratatui re-exports
@@ -192,6 +208,10 @@ serde.workspace = true
 # `serde_yaml` parses Hermes `config.yaml` for the `migrate` importer (#228).
 serde_yaml.workspace = true
 thiserror.workspace = true
+# F23-02: `session retain` takes a typed retain-until instant. Already a
+# workspace dependency (wcore-agent, wcore-memory and others use it), so this
+# adds no new package to the lock.
+chrono.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["blocking"], optional = true }
 # B1: self_update routes through the egress chokepoint. Gated behind the same
@@ -223,6 +243,11 @@ zip          = { workspace = true }
 open         = { workspace = true }
 
 workspace-hack.workspace = true
+# F25-04: `plugin sign --new-key` mints the Ed25519 keypair an author signs
+# with, so key generation is a PRODUCTION path, not a test one. `rand` was
+# already a dev-dependency of this crate and is already pinned at 0.8 in the
+# workspace lockfile — this promotion adds ZERO packages to `Cargo.lock`.
+rand.workspace = true
 
 # W-1 fix: OpenProcess + GetExitCodeProcess for process_is_alive() on Windows.
 # windows-sys is already a workspace dependency (see wcore-sandbox/Cargo.toml).
@@ -232,19 +257,24 @@ workspace-hack.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_System_Console",
   "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
+libc.workspace = true
+# F26-SC3-O1: `backup_sqlite_capture` builds a LIVE WAL database and asserts the
+# archive captures it as one consistent file. Needs a real SQLite client to make
+# the WAL non-empty — a fixture written with `fs::write` would not be a database.
+rusqlite.workspace = true
 # v0.9.4 S0.4: criterion bench harness for agent_nav_perf bench.
 criterion.workspace = true
 # v0.8.1 U9: mockito mocks the GitHub Releases API in the
 # `fetch_latest_release_from_url` round-trip test (no live network).
 mockito = "1"
-# v0.7.0 1.E.1: ed25519 keypair generation in `plugin::index` tests.
+# NOTE: `rand` moved to [dependencies] for F25-04 (`plugin sign --new-key`).
 # Workspace `rand` is at 0.8 — `rand::rngs::OsRng` satisfies dalek 2.x's
-# `CryptoRng + RngCore` bounds via its rand_core re-export.
-rand.workspace = true
+# `CryptoRng + RngCore` bounds via its rand_core re-export. Tests still get it.
 # W6 B.7: test the boot-time `McpReady` emission helper against a
 # pre-populated `McpManager` without spinning up real transports.
 wcore-mcp = { path = "../wcore-mcp", features = ["test-utils"] }
@@ -259,9 +289,6 @@ async-trait.workspace = true
 # WCORE_MEMORY_DIR env var; serialize against other crates that
 # touch the same env (wcore-memory/wcore-cua/wcore-browser/wcore-agent).
 serial_test.workspace = true
-# Test fixtures for the chatgpt OAuth verbs build base64url-encoded JWT
-# payloads (Task 5.2) — same encoder wcore-agent's oauth module uses.
-base64.workspace = true
 # User-flow harness Layer 2/3: drive the real `wayland-core` binary
 # through a pseudo-terminal like a human would.
 # - `portable-pty` spawns the binary attached to a PTY (so the TUI's

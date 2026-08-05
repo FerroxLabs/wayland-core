@@ -1,0 +1,18 @@
+HOST=Ubuntu-2404-noble-amd64-base COMMIT=5bc6afb7 DATE=2026-07-29T13:07:50Z
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID f0cd6952-8c69-4a8b-aa8a-34402aeec0f8 with nextest profile: default
+    Starting 8 tests across 1 binary
+        PASS [   0.014s] (1/8) wcore-agent::memory_control_lifecycle controls_refuse_out_loud_on_a_backend_with_no_store
+        PASS [   0.024s] (2/8) wcore-agent::memory_control_lifecycle the_nudge_bound_is_reachable_through_the_memory_api_and_refuses_past_its_cap
+        PASS [   0.025s] (3/8) wcore-agent::memory_control_lifecycle provenance_reports_the_partition_that_actually_reaches_the_prompt
+        PASS [   0.507s] (4/8) wcore-agent::memory_control_lifecycle the_probe_can_fail
+        PASS [   0.516s] (5/8) wcore-agent::memory_control_lifecycle a_semantic_privacy_scope_removes_facts_from_the_outbound_body
+        PASS [   0.546s] (6/8) wcore-agent::memory_control_lifecycle forgetting_a_fact_removes_it_from_the_outbound_provider_request_body
+        PASS [   0.553s] (7/8) wcore-agent::memory_control_lifecycle correcting_a_fact_replaces_it_in_the_outbound_body_rather_than_dropping_it
+        PASS [   0.716s] (8/8) wcore-agent::memory_control_lifecycle a_semantic_retention_bound_removes_expired_facts_from_the_outbound_body
+────────────
+     Summary [   0.716s] 8 tests run: 8 passed, 0 skipped

@@ -763,9 +763,17 @@ impl ConfigSurface {
                     .unwrap_or(0);
                 let next = (idx as isize + delta).rem_euclid(len as isize) as usize;
                 self.current.approval = ApprovalMode::ALL[next];
+                self.current.tools_auto_approve = self.current.approval == ApprovalMode::Force;
             }
             Row::PlanFirst => self.current.plan_first = !self.current.plan_first,
-            Row::Tools => self.current.tools_auto_approve = !self.current.tools_auto_approve,
+            Row::Tools => {
+                self.current.tools_auto_approve = !self.current.tools_auto_approve;
+                if self.current.tools_auto_approve {
+                    self.current.approval = ApprovalMode::Force;
+                } else if self.current.approval == ApprovalMode::Force {
+                    self.current.approval = ApprovalMode::Default;
+                }
+            }
             Row::Compaction => {
                 let len = Compaction::ALL.len();
                 let idx = Compaction::ALL
@@ -1164,6 +1172,14 @@ pub(crate) enum ProviderStatus {
     OAuthConnected,
     /// OAuth tokens stored but expired (Google Meet only).
     OAuthExpired,
+    /// A login IS stored for this provider and the secure credential store
+    /// cannot produce it — a locked vault, or a keyring that is not running.
+    ///
+    /// Distinct from `NotConfigured` and the distinction is the whole point.
+    /// "Not configured" tells a signed-in user they are signed out and sends
+    /// them to re-authenticate; this one tells them their credential store is
+    /// shut, which is both true and fixable without touching the login.
+    OAuthStoreLocked,
     /// Device available (voice_mode cpal probe).
     DeviceAvailable,
     /// Device unavailable (voice_mode cpal probe failed).
@@ -1173,6 +1189,19 @@ pub(crate) enum ProviderStatus {
     /// surface. Until the probe exists we report this honest "unknown"
     /// rather than a false "device ready" (D028).
     DeviceUnprobed,
+    /// The capability is **not compiled into this binary** because its cargo
+    /// feature was off at build time.
+    ///
+    /// 27-C4: this is distinct from every other non-ok state and the
+    /// distinction is the point. `DeviceUnprobed` / `DeviceUnavailable` /
+    /// `NotConfigured` all say *"the capability is here and something about
+    /// your machine or config is not ready"* — they read to a user as
+    /// **broken**. This one says *"the capability is absent from the artifact
+    /// you are running"*, which reads as **not built**, and is the only one of
+    /// the five that a user cannot fix without a different binary. Rendering
+    /// an absent feature as merely-unprobed is a half-claim: it invites the
+    /// user to go hunting for a microphone problem that does not exist.
+    NotCompiledIn { feature: &'static str },
     /// Deferred to a future version.
     Deferred,
 }
@@ -1185,10 +1214,34 @@ impl ProviderStatus {
             ProviderStatus::NotConfigured => "⚠ not configured",
             ProviderStatus::OAuthConnected => "✓ oauth connected",
             ProviderStatus::OAuthExpired => "⚠ oauth token expired",
+            ProviderStatus::OAuthStoreLocked => "⚠ signed in — credential store locked",
             ProviderStatus::DeviceAvailable => "✓ device ready",
             ProviderStatus::DeviceUnavailable => "⚠ no audio device",
             ProviderStatus::DeviceUnprobed => "· device not probed",
+            ProviderStatus::NotCompiledIn { .. } => "· not in this build",
             ProviderStatus::Deferred => "· not yet available",
+        }
+    }
+
+    /// The remedy line for a status the user cannot fix by changing config.
+    ///
+    /// [`ProviderStatus::NotCompiledIn`] needs a different build, and
+    /// [`ProviderStatus::OAuthStoreLocked`] needs the credential store opened —
+    /// neither is fixable by editing config, and both would otherwise read as
+    /// an unexplained warning. Every other state is actionable from the running
+    /// binary (set an env var, plug in a mic, run an OAuth flow), and returning
+    /// `None` there keeps the render path from inventing advice.
+    pub fn remedy(self) -> Option<String> {
+        match self {
+            ProviderStatus::NotCompiledIn { feature } => Some(format!(
+                "    not compiled into this binary — rebuild with `--features {feature}`"
+            )),
+            ProviderStatus::OAuthStoreLocked => Some(
+                "    the login is stored but the credential store is shut — set \
+                 WAYLAND_VAULT_PASSPHRASE, or start your OS keyring, then reopen"
+                    .to_string(),
+            ),
+            _ => None,
         }
     }
 
@@ -1202,6 +1255,27 @@ impl ProviderStatus {
         )
     }
 }
+
+/// The `voice_mode` row's description, which is genuinely build-dependent.
+///
+/// 27-C4. This text used to be stated unconditionally, and the comment that
+/// justified doing so reasoned that the build requirement "is true in both
+/// builds — a `--features voice` binary satisfies it, a default one does not".
+/// **That premise died when `voice` entered the default feature list.** A
+/// default binary now HAS mic capture linked, so telling its user to rebuild
+/// with `--features voice` is false, and it points them at a remedy that would
+/// change nothing — while `resolve_voice_mode_status` on the very same row
+/// simultaneously reports a live `✓ device ready` / `⚠ no audio device` probe.
+///
+/// The catalog stops being pure data at exactly this row because the fact it
+/// describes is build-dependent. Keeping it "pure" would only be preserving the
+/// shape of the old invariant after its substance was gone.
+#[cfg(feature = "voice")]
+const VOICE_MODE_DESCRIPTION: &str =
+    "Local microphone capture via cpal. Compiled into this build; no env var needed.";
+#[cfg(not(feature = "voice"))]
+const VOICE_MODE_DESCRIPTION: &str = "Local microphone capture via cpal. Requires a build with \
+                                      `--features voice`; no env var needed.";
 
 /// The full Tools & Providers catalog. Order matches the W4 E1 brief:
 /// search → vision → audio → image → tts → channels → home → db →
@@ -1233,8 +1307,14 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderEntry] = &[
     ProviderEntry {
         name: "vision_analyze",
         category: "Vision",
-        description: "Describe and analyse images. Picks Anthropic → OpenAI → Gemini.",
-        env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"],
+        description: "Describe and analyse images. Picks Anthropic → OpenAI → Gemini → \
+                      active OpenAI-wire provider → FluxRouter.",
+        env_vars: &[
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "FLUX_API_KEY",
+        ],
         signup_url: "https://console.anthropic.com/",
         deferred: false,
     },
@@ -1319,7 +1399,10 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderEntry] = &[
     ProviderEntry {
         name: "voice_mode",
         category: "Audio",
-        description: "Local microphone capture via cpal. No env var needed.",
+        // 27-C4: the build requirement is part of the capability's identity,
+        // not a footnote — but WHICH requirement is true is now build-
+        // dependent. See VOICE_MODE_DESCRIPTION.
+        description: VOICE_MODE_DESCRIPTION,
         env_vars: &[],
         signup_url: "",
         deferred: false,
@@ -1435,23 +1518,21 @@ pub(crate) enum GoogleMeetTokenStatus {
     Expired,
 }
 
-/// Decode the stored Google Meet token file's expiry without depending on
-/// `wcore-agent`. The file is the serialised `OAuthTokens` struct; we only
-/// read `expires_at_unix_secs` (unix epoch seconds, `Option<u64>`).
+/// Classify a stored Google Meet token by its `expires_at_unix_secs` (unix
+/// epoch seconds).
 ///
-/// - File missing / unreadable / unparsable → `Absent`.
-/// - No `expires_at_unix_secs` field (provider returned no `expires_in`) →
-///   `Valid` (mirrors the engine's `token_is_fresh`, which treats a missing
-///   expiry as fresh).
+/// - No token → `Absent`.
+/// - No `expires_at_unix_secs` (provider returned no `expires_in`) → `Valid`
+///   (mirrors the engine's `token_is_fresh`, which treats a missing expiry as
+///   fresh).
 /// - Expiry in the past relative to wall-clock → `Expired`; otherwise `Valid`.
-pub(crate) fn google_meet_token_status(path: &std::path::Path) -> GoogleMeetTokenStatus {
-    let Ok(raw) = std::fs::read_to_string(path) else {
+pub(crate) fn google_meet_token_status(
+    tokens: Option<&wcore_agent::oauth::OAuthTokens>,
+) -> GoogleMeetTokenStatus {
+    let Some(tokens) = tokens else {
         return GoogleMeetTokenStatus::Absent;
     };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return GoogleMeetTokenStatus::Absent;
-    };
-    match json.get("expires_at_unix_secs").and_then(|v| v.as_u64()) {
+    match tokens.expires_at_unix_secs {
         None => GoogleMeetTokenStatus::Valid,
         Some(exp) => {
             let now = std::time::SystemTime::now()
@@ -1494,7 +1575,15 @@ fn resolve_voice_mode_status() -> ProviderStatus {
     }
     #[cfg(not(feature = "voice"))]
     {
-        ProviderStatus::DeviceUnprobed
+        // 27-C4. This used to report `DeviceUnprobed`, which was honest about
+        // the *probe* but not about the *binary*: it says "we have not checked
+        // your audio device", when the truth is that no mic-capture code was
+        // linked at all and no probe will ever run. A user reading "device not
+        // probed" against the description "Local microphone capture via cpal.
+        // No env var needed." reasonably concludes the feature is present and
+        // their hardware is at fault. It is not — the feature is absent from
+        // the artifact, and `--features voice` is the only way to get it.
+        ProviderStatus::NotCompiledIn { feature: "voice" }
     }
 }
 
@@ -1513,13 +1602,60 @@ fn resolve_chatgpt_status() -> ProviderStatus {
     chatgpt_status_from_storage(&storage)
 }
 
+/// Resolve the `google_meet` OAuth status from the credential ladder.
+///
+/// This row used to `stat` `~/.wayland/oauth/google_meet.json` directly. Once
+/// OAuth tokens moved into the ladder that file stops existing after the first
+/// load, so a signed-in Meet user rendered "not configured" — display-only (the
+/// Meet tools authenticate through `storage.load` and kept working) but wrong,
+/// and wrong in the direction that makes a working integration look broken.
+/// Reading through [`wcore_agent::oauth::OAuthStorage`] is what keeps this badge
+/// and the tool that actually authenticates on the same source.
+fn resolve_google_meet_status() -> ProviderStatus {
+    let Ok(storage) = wcore_agent::oauth::OAuthStorage::from_home() else {
+        return ProviderStatus::NotConfigured;
+    };
+    google_meet_status_from_storage(&storage)
+}
+
+/// Classify the Google Meet OAuth status from an explicit token store. Split
+/// from [`resolve_google_meet_status`] for the same reason as the ChatGPT pair:
+/// tests mount an `OAuthStorage::at_root` tempdir instead of racing on
+/// process-global `HOME` / `WAYLAND_HOME`.
+fn google_meet_status_from_storage(storage: &wcore_agent::oauth::OAuthStorage) -> ProviderStatus {
+    match storage.load(wcore_agent::tool_backends::google_meet::PROVIDER) {
+        Ok(tokens) => match google_meet_token_status(tokens.as_ref()) {
+            GoogleMeetTokenStatus::Valid => ProviderStatus::OAuthConnected,
+            GoogleMeetTokenStatus::Expired => ProviderStatus::OAuthExpired,
+            GoogleMeetTokenStatus::Absent => ProviderStatus::NotConfigured,
+        },
+        Err(error) => oauth_error_status(error),
+    }
+}
+
+/// Map a token-store failure to a badge.
+///
+/// A store that cannot be opened is NOT "not configured": the user is signed in
+/// and the credential store is what is unavailable. Rendering that as
+/// `NotConfigured` is the silent sign-out this release closed everywhere else,
+/// so the badge gets its own state and carries the store's own remedy text.
+fn oauth_error_status(error: wcore_agent::oauth::OAuthStorageError) -> ProviderStatus {
+    match error {
+        wcore_agent::oauth::OAuthStorageError::SecureStoreUnavailable { .. } => {
+            ProviderStatus::OAuthStoreLocked
+        }
+        _ => ProviderStatus::NotConfigured,
+    }
+}
+
 /// Classify the ChatGPT OAuth status from an explicit token store. Split from
 /// [`resolve_chatgpt_status`] so tests can inject an `OAuthStorage::at_root`
 /// tempdir instead of racing on process-global `HOME`/`WAYLAND_HOME` env vars.
 fn chatgpt_status_from_storage(storage: &wcore_agent::oauth::OAuthStorage) -> ProviderStatus {
-    let status = wcore_agent::oauth::chatgpt_login_status(storage)
-        .ok()
-        .flatten();
+    let status = match wcore_agent::oauth::chatgpt_login_status(storage) {
+        Ok(status) => status,
+        Err(error) => return oauth_error_status(error),
+    };
     let Some(status) = status else {
         return ProviderStatus::NotConfigured;
     };
@@ -1550,24 +1686,13 @@ pub(crate) fn resolve_provider_status(entry: &ProviderEntry) -> ProviderStatus {
         return resolve_voice_mode_status();
     }
     if entry.name == "google_meet" {
-        // OAuth status is driven by the stored token file, not the client
-        // env vars: a stored token is what actually authenticates the call.
-        // We decode the token's `expires_at_unix_secs` (unix epoch seconds,
-        // as serialised by `wcore_agent::oauth::OAuthTokens`) so an expired
-        // token reaches `OAuthExpired` instead of falsely rendering "oauth
-        // connected" (D030). Decoding is a plain serde_json read of a single
-        // field — no `wcore-agent` dependency is needed.
-        let tokens_path =
-            dirs::home_dir().map(|h| h.join(".wayland").join("oauth").join("google_meet.json"));
-        let token_status = tokens_path
-            .as_ref()
-            .map(|p| google_meet_token_status(p))
-            .unwrap_or(GoogleMeetTokenStatus::Absent);
-        return match token_status {
-            GoogleMeetTokenStatus::Valid => ProviderStatus::OAuthConnected,
-            GoogleMeetTokenStatus::Expired => ProviderStatus::OAuthExpired,
-            GoogleMeetTokenStatus::Absent => ProviderStatus::NotConfigured,
-        };
+        // OAuth status is driven by the STORED TOKEN, not the client env vars:
+        // a stored token is what actually authenticates the call. The token
+        // lives in the credential ladder, so this reads it back the same way
+        // the Meet backend does, and decodes `expires_at_unix_secs` so an
+        // expired token reaches `OAuthExpired` instead of falsely rendering
+        // "oauth connected" (D030).
+        return resolve_google_meet_status();
     }
     if entry.name == "openai-chatgpt" {
         // OAuth-backed: status is driven by the stored ChatGPT token, decoded
@@ -1652,8 +1777,26 @@ impl CredentialsModal {
         self.entry().env_vars.get(self.var_idx).copied()
     }
 
-    /// Attempt to save the buffer to `~/.wayland/.env`. Sets `status`
-    /// + `last_ok` for the render path. Returns whether a write happened.
+    /// Save the buffer.
+    ///
+    /// TWO DESTINATIONS, chosen by whether the env var this row edits names a
+    /// provider that HAS a credentials-store slot:
+    ///
+    /// * **It does** (`ANTHROPIC_API_KEY`, `GROQ_API_KEY`, …) → the credential
+    ///   ladder (`store_provider_api_key`): OS keyring, else encrypted vault,
+    ///   else a refusal. This was the primary interactive way a user handed us
+    ///   an API key and it wrote CLEARTEXT to `~/.wayland/.env`, bypassing the
+    ///   credentials backend entirely. It also fixes the F21 note below for
+    ///   these keys: `resolve_api_key` DOES read the store, so the value applies
+    ///   on the next rebind instead of being invisible until a restart.
+    /// * **It does not** (`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, …) → still
+    ///   `~/.wayland/.env`, because nothing reads a tool key from the
+    ///   credentials store; routing it there would make it unreadable. That is
+    ///   an accepted cleartext sink, and the status line now SAYS SO rather
+    ///   than implying the key was stored securely.
+    ///
+    /// Sets `status` + `last_ok` for the render path. Returns whether a write
+    /// happened.
     pub fn save(&mut self) -> bool {
         let Some(key) = self.var_name() else {
             self.status = "This provider has no env-var-based credentials.".into();
@@ -1666,6 +1809,30 @@ impl CredentialsModal {
             self.last_ok = false;
             return false;
         }
+
+        // Provider keys go to the ladder, never to cleartext.
+        if let Some(provider) = wcore_config::config::provider_for_credential_env_var(key)
+            && wcore_config::config::credentials_store_key(provider).is_some()
+        {
+            return match wcore_config::config::store_provider_api_key(provider, value.trim()) {
+                Ok(()) => {
+                    self.status = "Saved to the encrypted credentials store · applies on \
+                                   the next rebind"
+                        .into();
+                    self.last_ok = true;
+                    true
+                }
+                Err(e) => {
+                    // The ladder's refusal is the actionable one; surface it
+                    // verbatim rather than degrading to the `.env` file, which
+                    // is the downgrade this whole change removes.
+                    self.status = format!("Couldn't save the key: {e}");
+                    self.last_ok = false;
+                    false
+                }
+            };
+        }
+
         let env_path = match dirs::home_dir() {
             Some(h) => h.join(".wayland").join(".env"),
             None => {
@@ -1679,8 +1846,10 @@ impl CredentialsModal {
                 // F21: `resolve_api_key` reads cli→config→store→process-env and
                 // never the `.env` file, so a key written here is invisible until
                 // a restart reloads `.env` into the process env. The status must
-                // not claim a live application that does not happen.
-                self.status = "Saved to ~/.wayland/.env · applies on next launch".into();
+                // not claim a live application that does not happen — nor imply
+                // encryption this path does not provide.
+                self.status =
+                    "Saved UNENCRYPTED to ~/.wayland/.env (0600) · applies on next launch".into();
                 self.last_ok = true;
                 true
             }
@@ -3123,7 +3292,14 @@ impl ConfigSurface {
             };
             let status_style = if status.is_ok() {
                 Style::default().fg(t.success)
-            } else if matches!(status, ProviderStatus::Deferred) {
+            } else if matches!(
+                status,
+                ProviderStatus::Deferred | ProviderStatus::NotCompiledIn { .. }
+            ) {
+                // 27-C4: muted, not warning. A warning colour tells the user
+                // something on their machine needs attention; an uncompiled
+                // feature is a property of the build, and there is nothing
+                // for them to fix here.
                 Style::default().fg(t.text_muted)
             } else {
                 Style::default().fg(t.warning)
@@ -3133,8 +3309,13 @@ impl ConfigSurface {
                 Span::styled(format!("{:<22}", entry.name), name_style),
                 Span::styled(status.label().to_string(), status_style),
             ]));
-            // The env-var hint, dimmed.
-            let var_hint = if entry.env_vars.is_empty() {
+            // The env-var hint, dimmed. 27-C4: an uncompiled feature's remedy
+            // outranks it — "(no env var — auto-detected)" is actively
+            // misleading for a capability that is not in the binary, because
+            // it promises auto-detection that no linked code can perform.
+            let var_hint = if let Some(remedy) = status.remedy() {
+                remedy
+            } else if entry.env_vars.is_empty() {
                 "    (no env var — auto-detected)".to_string()
             } else {
                 format!("    env: {}", entry.env_vars.join(" | "))
@@ -3812,56 +3993,130 @@ mod tests {
         }
     }
 
-    // ── D030: google_meet token expiry decode ───────────────────────────
+    // ── D030: google_meet token expiry, read through the ladder ─────────
 
-    fn write_meet_token(dir: &std::path::Path, expires_at: Option<u64>) -> std::path::PathBuf {
-        let path = dir.join("google_meet.json");
-        let body = match expires_at {
-            Some(exp) => format!(
-                r#"{{"access_token":"tok","refresh_token":"r","expires_at_unix_secs":{exp},"token_type":"Bearer"}}"#
-            ),
-            None => {
-                r#"{"access_token":"tok","refresh_token":"r","token_type":"Bearer"}"#.to_string()
-            }
-        };
-        std::fs::write(&path, body).expect("write token file");
-        path
+    /// Build a tempdir-rooted `OAuthStorage` over an in-memory secure tier and
+    /// classify the Meet row exactly the way `/config` does.
+    ///
+    /// `token`:
+    /// - `None` → nothing stored (not signed in).
+    /// - `Some(None)` → a token with no `expires_at_unix_secs`.
+    /// - `Some(Some(exp))` → a token whose expiry is `exp`.
+    ///
+    /// The token is written through `storage.store`, i.e. through the credential
+    /// ladder — NOT as a `google_meet.json` file. That is the point: after the
+    /// ladder change no such file exists, and a badge that stats one reports a
+    /// signed-in user as unconfigured.
+    fn meet_status_with_token(token: Option<Option<u64>>) -> ProviderStatus {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let storage = wcore_agent::oauth::OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("oauth storage at tempdir root");
+        if let Some(expires_at) = token {
+            storage
+                .store(
+                    wcore_agent::tool_backends::google_meet::PROVIDER,
+                    &wcore_agent::oauth::OAuthTokens {
+                        access_token: "tok".into(),
+                        refresh_token: Some("r".into()),
+                        expires_at_unix_secs: expires_at,
+                        token_type: "Bearer".into(),
+                        scope: None,
+                        id_token: None,
+                    },
+                )
+                .expect("store the meet login through the ladder");
+        }
+        google_meet_status_from_storage(&storage)
     }
 
     #[test]
-    fn google_meet_token_status_absent_when_file_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("nope.json");
-        assert_eq!(
-            google_meet_token_status(&missing),
-            GoogleMeetTokenStatus::Absent
-        );
+    fn google_meet_status_not_configured_when_no_stored_login() {
+        assert_eq!(meet_status_with_token(None), ProviderStatus::NotConfigured);
     }
 
     #[test]
-    fn google_meet_token_status_expired_when_past_expiry() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn google_meet_status_expired_when_past_expiry() {
         // expiry of 1 (1970) is unambiguously in the past.
-        let path = write_meet_token(dir.path(), Some(1));
         assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Expired
+            meet_status_with_token(Some(Some(1))),
+            ProviderStatus::OAuthExpired
         );
     }
 
+    /// THE REGRESSION. A Meet login stored through the ladder leaves NO
+    /// `~/.wayland/oauth/google_meet.json`, so the old file-stat badge rendered
+    /// "not configured" for a user who was signed in and whose Meet tools were
+    /// working. Route the badge back through the store the tools read.
+    ///
+    /// MUTATION TARGET. Point `resolve_google_meet_status` back at a file stat
+    /// and this fails with `NotConfigured`.
     #[test]
-    fn google_meet_token_status_valid_when_future_expiry() {
-        let dir = tempfile::tempdir().expect("tempdir");
+    fn google_meet_status_connected_for_a_ladder_stored_login() {
         let far_future = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
             + 3600;
-        let path = write_meet_token(dir.path(), Some(far_future));
         assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Valid
+            meet_status_with_token(Some(Some(far_future))),
+            ProviderStatus::OAuthConnected
         );
+    }
+
+    /// A locked credential store is NOT "not configured": the login is there
+    /// and the store is shut. Both OAuth rows must say so, and both must carry
+    /// a remedy rather than a bare warning.
+    #[test]
+    fn a_locked_credential_store_is_not_reported_as_not_configured() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("oauth");
+        for provider in [
+            wcore_agent::tool_backends::google_meet::PROVIDER,
+            wcore_agent::oauth::chatgpt::PROVIDER,
+        ] {
+            let signed_in = wcore_agent::oauth::OAuthStorage::at_root(
+                root.clone(),
+                Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+            )
+            .expect("storage");
+            signed_in
+                .store(
+                    provider,
+                    &wcore_agent::oauth::OAuthTokens {
+                        access_token: "hdr.e30.sig".into(),
+                        refresh_token: Some("r".into()),
+                        expires_at_unix_secs: None,
+                        token_type: "Bearer".into(),
+                        scope: None,
+                        id_token: None,
+                    },
+                )
+                .expect("store");
+        }
+
+        // A fresh in-memory tier is exactly the "the vault is not mounted"
+        // state: the login record is on disk, the store holds nothing.
+        let locked = wcore_agent::oauth::OAuthStorage::at_root(
+            root,
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("storage");
+
+        for status in [
+            google_meet_status_from_storage(&locked),
+            chatgpt_status_from_storage(&locked),
+        ] {
+            assert_eq!(status, ProviderStatus::OAuthStoreLocked);
+            assert!(!status.is_ok(), "a locked store must not read as ready");
+            let remedy = status.remedy().expect("a locked store must name a remedy");
+            assert!(
+                remedy.contains("WAYLAND_VAULT_PASSPHRASE") && remedy.contains("keyring"),
+                "unhelpful remedy: {remedy}"
+            );
+        }
     }
 
     // ── FIX 3: openai-chatgpt OAuth status row ───────────────────────────
@@ -3878,8 +4133,11 @@ mod tests {
     fn chatgpt_status_with_token(token: Option<Option<u64>>) -> ProviderStatus {
         let tmp = tempfile::tempdir().expect("tempdir");
         let oauth_dir = tmp.path().join("oauth");
-        let storage = wcore_agent::oauth::OAuthStorage::at_root(oauth_dir.clone())
-            .expect("oauth storage at tempdir root");
+        let storage = wcore_agent::oauth::OAuthStorage::at_root(
+            oauth_dir.clone(),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .expect("oauth storage at tempdir root");
         if let Some(expires_at) = token {
             // A JWT-less access_token is fine: the plan decode just yields None,
             // and the status row only reads expiry. The struct must round-trip
@@ -3938,25 +4196,12 @@ mod tests {
     }
 
     #[test]
-    fn google_meet_token_status_valid_when_no_expiry_field() {
+    fn google_meet_status_connected_when_no_expiry_field() {
         // No `expires_at_unix_secs` (provider returned no `expires_in`) is
         // treated as fresh — mirrors the engine's `token_is_fresh`.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write_meet_token(dir.path(), None);
         assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Valid
-        );
-    }
-
-    #[test]
-    fn google_meet_token_status_absent_when_unparsable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("google_meet.json");
-        std::fs::write(&path, "{ not json").expect("write");
-        assert_eq!(
-            google_meet_token_status(&path),
-            GoogleMeetTokenStatus::Absent
+            meet_status_with_token(Some(None)),
+            ProviderStatus::OAuthConnected
         );
     }
 
@@ -4039,11 +4284,14 @@ mod tests {
         assert_eq!(surface.current.approval, ApprovalMode::Default);
         surface.handle_key(ch(' '), &mut app);
         assert_eq!(surface.current.approval, ApprovalMode::AutoEdit);
+        assert!(!surface.current.tools_auto_approve);
         surface.handle_key(ch(' '), &mut app);
         assert_eq!(surface.current.approval, ApprovalMode::Force);
+        assert!(surface.current.tools_auto_approve);
         // Cycles back around to Default.
         surface.handle_key(ch(' '), &mut app);
         assert_eq!(surface.current.approval, ApprovalMode::Default);
+        assert!(!surface.current.tools_auto_approve);
     }
 
     #[test]
@@ -5058,20 +5306,187 @@ mod tests {
         );
     }
 
-    /// With the `voice` feature OFF the cpal backend is not linked, so we
-    /// cannot probe audio devices and MUST report the honest "not probed"
-    /// state (explicitly not an `is_ok()` value). This is the only path that
-    /// is deterministic regardless of build features (D028).
+    /// 27-C4. With the `voice` feature OFF the cpal backend is not linked at
+    /// all, so the honest report is that the capability is **absent from this
+    /// binary** — not that its device is "unprobed".
+    ///
+    /// This test previously asserted `DeviceUnprobed`. That was honest about
+    /// the probe and dishonest about the artifact: `DeviceUnprobed` sits in the
+    /// same family as `DeviceUnavailable` / `NotConfigured`, all of which tell
+    /// the user *something on your machine is not ready*. A user who reads that
+    /// against a row described as "Local microphone capture via cpal" goes
+    /// looking for a microphone fault that cannot exist, and nothing on the
+    /// screen names the build flag that would actually give them the feature.
     #[cfg(not(feature = "voice"))]
     #[test]
-    fn voice_mode_status_is_unprobed_when_feature_off() {
+    fn voice_mode_reports_not_compiled_in_when_feature_off() {
         let status = resolve_voice_mode_status();
         assert_eq!(
             status,
-            ProviderStatus::DeviceUnprobed,
-            "feature-off voice_mode must report DeviceUnprobed, not a false readiness claim"
+            ProviderStatus::NotCompiledIn { feature: "voice" },
+            "feature-off voice_mode must say it is absent from the build"
         );
-        assert!(!status.is_ok(), "DeviceUnprobed must never count as ready");
+        assert!(!status.is_ok(), "an uncompiled feature is never ready");
+
+        // The remedy must name the actual cargo flag, or the state is just a
+        // differently-worded dead end.
+        let remedy = status.remedy().expect("NotCompiledIn must carry a remedy");
+        assert!(
+            remedy.contains("--features voice"),
+            "remedy must name the build flag, got: {remedy}"
+        );
+
+        // KNOWN-NEGATIVE (can this assertion fail?): a capability that IS
+        // compiled in must NOT report NotCompiledIn, and must NOT carry a
+        // remedy. Without this the test above would pass on an implementation
+        // that returned NotCompiledIn for every row in the catalog.
+        let anthropic = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "Anthropic")
+            .expect("catalog must contain the Anthropic row");
+        let anthropic_status = resolve_provider_status(anthropic);
+        assert!(
+            !matches!(anthropic_status, ProviderStatus::NotCompiledIn { .. }),
+            "a compiled-in provider must never report NotCompiledIn, got {anthropic_status:?}"
+        );
+        assert!(
+            anthropic_status.remedy().is_none(),
+            "only an uncompiled feature may carry a build remedy"
+        );
+    }
+
+    /// 27-C4, the other direction (`LANE-BRIEF` §3b-iii: a gate must be able to
+    /// PASS, not merely to fail). The check above asserts an absence; on its
+    /// own an absence assertion is satisfiable by a resolver that is simply
+    /// broken. This constructs the state the product claims to detect — the
+    /// row rendered from the real catalog — and confirms the honest text is
+    /// actually reachable and actually reaches the user.
+    #[cfg(not(feature = "voice"))]
+    #[test]
+    fn voice_mode_row_tells_the_user_it_is_not_in_this_build() {
+        let entry = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "voice_mode")
+            .expect("catalog must contain the voice_mode row");
+
+        // The row must not be marked `deferred` — it is not a future feature,
+        // it is a present feature behind a build flag, and conflating the two
+        // would tell the user to wait for something that already exists.
+        assert!(
+            !entry.deferred,
+            "voice_mode is buildable today; `deferred` would misdescribe it"
+        );
+
+        // The description must name the build requirement. This is the claim
+        // the criterion turns on: the shipped binary must not present voice as
+        // an unconditionally-available capability.
+        assert!(
+            entry.description.contains("--features voice"),
+            "voice_mode description must state the build requirement, got: {}",
+            entry.description
+        );
+
+        let status = resolve_provider_status(entry);
+        assert_eq!(status.label(), "· not in this build");
+        assert!(
+            !status.label().contains("not probed"),
+            "the old wording implied a hardware problem; it must be gone"
+        );
+
+        // KNOWN-POSITIVE liveness control for the two assertions above: prove
+        // the catalog lookup and the description matcher are alive by finding
+        // a string that IS present for a DIFFERENT reason on another row. A
+        // dead `contains` returns false and would silently satisfy a
+        // negative-shaped assertion.
+        let meet = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "google_meet")
+            .expect("catalog must contain the google_meet row");
+        assert!(
+            meet.description.contains("OAuth"),
+            "liveness control failed: description matcher is not working"
+        );
+        assert!(
+            !meet.description.contains("--features voice"),
+            "the build-flag matcher must discriminate between rows"
+        );
+    }
+
+    /// 27-C4, the feature-ON counterpart of
+    /// `voice_mode_row_tells_the_user_it_is_not_in_this_build`, and the test
+    /// whose ABSENCE was the actual defect.
+    ///
+    /// When `voice` joined the default feature list, both `cfg(not(voice))`
+    /// tests compiled out of the shipped configuration. The resolver kept its
+    /// coverage (`voice_mode_status_reflects_cpal_probe_when_feature_on`
+    /// compiled IN), so this was never "two tests deleted" — it was one
+    /// DIMENSION going dark: the catalog row and its description had no
+    /// feature-ON guard at all.
+    ///
+    /// That is not a hypothetical gap. It is exactly the hole the false string
+    /// went through: the row kept telling users of a voice-enabled binary to
+    /// rebuild with `--features voice`, and no test in the shipped build could
+    /// see it. A conditional test is only honest if BOTH conditions are tested;
+    /// otherwise flipping the feature silently retires the assertion.
+    #[cfg(feature = "voice")]
+    #[test]
+    fn voice_mode_row_does_not_demand_a_rebuild_it_already_has() {
+        let entry = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "voice_mode")
+            .expect("catalog must contain the voice_mode row");
+
+        // THE REGRESSION THIS EXISTS FOR. In a binary that already links mic
+        // capture, naming the build flag is a false instruction.
+        assert!(
+            !entry.description.contains("--features voice"),
+            "a voice-enabled build must not tell the user to rebuild with the \
+             feature it already has, got: {}",
+            entry.description
+        );
+        // ...and it must still describe the capability, so the fix cannot be
+        // "empty the string".
+        assert!(
+            entry.description.contains("microphone capture"),
+            "the row must still say what the capability IS, got: {}",
+            entry.description
+        );
+        assert!(
+            !entry.deferred,
+            "voice_mode is compiled in here; `deferred` would misdescribe it"
+        );
+
+        // The status must be a real probe outcome, never the not-compiled-in
+        // state — and must carry no build remedy, because there is nothing to
+        // rebuild.
+        let status = resolve_provider_status(entry);
+        assert!(
+            matches!(
+                status,
+                ProviderStatus::DeviceAvailable | ProviderStatus::DeviceUnavailable
+            ),
+            "a compiled-in voice build must report a probe outcome, got {status:?}"
+        );
+        assert!(
+            status.remedy().is_none(),
+            "only an uncompiled feature may carry a build remedy, got {:?}",
+            status.remedy()
+        );
+        assert_ne!(status.label(), "· not in this build");
+
+        // KNOWN-POSITIVE liveness control: prove the description matcher is
+        // alive by finding a string that IS present on another row for an
+        // unrelated reason. A dead `contains` returns false and would silently
+        // satisfy the negative-shaped assertion at the top of this test — the
+        // single most likely way for this guard to rot into a no-op.
+        let meet = PROVIDER_CATALOG
+            .iter()
+            .find(|e| e.name == "google_meet")
+            .expect("catalog must contain the google_meet row");
+        assert!(
+            meet.description.contains("OAuth"),
+            "liveness control failed: the description matcher is not working"
+        );
     }
 
     /// With the `voice` feature ON the resolver runs the same cpal probe the
@@ -5099,6 +5514,18 @@ mod tests {
             status,
             ProviderStatus::DeviceUnprobed,
             "feature-on voice_mode must not return the permanent 'not probed' badge"
+        );
+        // 27-C4: and it must not claim to be absent from a build that contains
+        // it. This is the "can it pass" half of the NotCompiledIn control —
+        // the state must be reachable when the feature is off AND unreachable
+        // when it is on, or it is not measuring the build at all.
+        assert!(
+            !matches!(status, ProviderStatus::NotCompiledIn { .. }),
+            "a voice-enabled build must never report the feature as uncompiled"
+        );
+        assert!(
+            status.remedy().is_none(),
+            "a compiled-in feature must not tell the user to rebuild"
         );
         assert_eq!(
             status.is_ok(),

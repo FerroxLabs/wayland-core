@@ -17,6 +17,15 @@ fn default_breaker_cfg() -> CircuitBreakerConfig {
     CircuitBreakerConfig::default()
 }
 
+/// A requested circuit-breaker restoration named tools that are not
+/// registered in this registry.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("cannot restore circuit breakers for unregistered tools: {names:?}")]
+pub struct BreakerRestoreError {
+    /// Sorted, deduplicated unregistered tool names.
+    pub names: Vec<String>,
+}
+
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     /// One circuit breaker per registered tool name. `Arc<RwLock<…>>`
@@ -38,6 +47,23 @@ pub struct ToolRegistry {
     /// `Workspace` posture (`Contained`). Threaded onto every dispatched
     /// `ToolContext` so BashTool can root its OS sandbox at the workspace.
     workspace_policy: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
+
+    /// Immutable per-session OS sandbox runtime threaded into every
+    /// `ToolContext`. The default fails closed so a host that forgets to
+    /// install a session runtime cannot inherit process-global bypass state;
+    /// production bootstrap replaces it with the resolved session runtime.
+    sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+
+    /// `[default] read_only` for this session. When `true` the orchestration
+    /// dispatcher refuses every tool that does not declare
+    /// [`crate::Tool::read_only_safe`] for its concrete input — BEFORE
+    /// PreToolUse hooks run, so a refused call fires no operator shell.
+    ///
+    /// Carried on the registry for the same reason `tool_vfs` and
+    /// `workspace_policy` are: it is already threaded into every
+    /// orchestration `execute_*` call, so a new dispatch path cannot forget
+    /// to plumb a parameter and silently lose the gate.
+    read_only: bool,
 }
 
 impl Default for ToolRegistry {
@@ -52,7 +78,24 @@ impl ToolRegistry {
             breakers: Arc::new(RwLock::new(HashMap::new())),
             tool_vfs: None,
             workspace_policy: None,
+            sandbox_runtime: Arc::new(wcore_sandbox::SandboxRegistry::new(Arc::new(
+                wcore_sandbox::FailClosedBackend::new(),
+            ))),
+            read_only: false,
         }
+    }
+
+    /// Install the session's `[default] read_only` posture. Set once at
+    /// bootstrap; there is no un-set — a read-only session cannot be talked
+    /// back into mutating.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    /// Whether this session is read-only. Consulted by the orchestration
+    /// dispatcher before anything else happens to a tool call.
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Set the filesystem every dispatched tool's `ToolContext` is built
@@ -74,6 +117,14 @@ impl ToolRegistry {
 
     pub fn workspace_policy(&self) -> Option<Arc<crate::workspace_policy::WorkspacePolicy>> {
         self.workspace_policy.clone()
+    }
+
+    pub fn set_sandbox_runtime(&mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>) {
+        self.sandbox_runtime = runtime;
+    }
+
+    pub fn sandbox_runtime(&self) -> Arc<wcore_sandbox::SandboxRegistry> {
+        Arc::clone(&self.sandbox_runtime)
     }
 
     /// Drop every registered tool for which `keep` returns `false`.
@@ -144,6 +195,26 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
+    /// Rebuild the registered `ToolSearch` tool from the live registry.
+    ///
+    /// `ToolSearch` deliberately owns a snapshot so searches do not hold a
+    /// registry lock. Any tool added after bootstrap (for example a deferred
+    /// config MCP or `/mcp add`) therefore has to replace that snapshot before
+    /// it can be discovered. Reapply the configured cold split so a newly
+    /// added non-deferred proxy is still searchable when global cold deferral
+    /// is enabled.
+    pub fn refresh_tool_search_catalog(
+        &mut self,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    ) {
+        let mut snapshot = self.to_tool_defs();
+        snapshot.retain(|def| def.name != "ToolSearch");
+        if defer_cold.enabled {
+            apply_cold_deferral(&mut snapshot, &defer_cold.hot_allowlist);
+        }
+        self.replace_by_name(Box::new(crate::tool_search::ToolSearchTool::new(snapshot)));
+    }
+
     /// Find a tool by name
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools
@@ -194,9 +265,93 @@ impl ToolRegistry {
         }
     }
 
+    /// Return the registered tool names whose live breaker state must be
+    /// restored conservatively after a process restart.
+    ///
+    /// The result is sorted by tool name so callers can persist and compare it
+    /// deterministically regardless of `HashMap` iteration order.
+    pub fn breakers_requiring_conservative_restore(&self) -> Vec<String> {
+        let breakers = self.breakers.read();
+        let mut names: Vec<String> = breakers
+            .iter()
+            .filter(|(_, breaker)| breaker.requires_conservative_restore())
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Restore exactly the supplied circuit breakers conservatively.
+    ///
+    /// Every name is validated before any breaker is changed, so an invalid
+    /// request is atomic. Supplied names are sorted and deduplicated for
+    /// deterministic application. Breakers omitted from `tool_names` are left
+    /// untouched; a fresh registry therefore keeps them Closed, while an
+    /// already-live registry preserves their existing state.
+    pub fn restore_breakers_conservatively(
+        &self,
+        tool_names: &[String],
+    ) -> Result<(), BreakerRestoreError> {
+        let breakers = self.breakers.read();
+        let requested: std::collections::BTreeSet<&str> =
+            tool_names.iter().map(String::as_str).collect();
+        let unknown: Vec<String> = requested
+            .iter()
+            .filter(|name| !breakers.contains_key(**name))
+            .map(|name| (*name).to_string())
+            .collect();
+        if !unknown.is_empty() {
+            return Err(BreakerRestoreError { names: unknown });
+        }
+
+        for name in requested {
+            breakers
+                .get(name)
+                .expect("all breaker names were validated above")
+                .restore_conservative();
+        }
+        Ok(())
+    }
+
     /// Get all registered tool names
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.iter().map(|t| t.name().to_string()).collect()
+    }
+
+    /// Count registered MCP tools by server without materializing provider
+    /// schemas. Intended for read-only runtime diagnostics.
+    pub fn mcp_tool_counts(&self) -> HashMap<String, u32> {
+        let mut counts = HashMap::new();
+        for tool in &self.tools {
+            if let Some(server) = tool.mcp_server() {
+                let count = counts.entry(server.to_string()).or_insert(0_u32);
+                *count = count.saturating_add(1);
+            }
+        }
+        counts
+    }
+
+    /// Remove every callable tool owned by one MCP server.
+    ///
+    /// Returns sorted removed display names for a deterministic host receipt.
+    /// The caller must refresh the `ToolSearch` snapshot after this mutation.
+    pub fn remove_mcp_server(&mut self, server: &str) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.tools.retain(|tool| {
+            if tool.mcp_server() == Some(server) {
+                removed.push(tool.name().to_string());
+                false
+            } else {
+                true
+            }
+        });
+        let mut breakers = self.breakers.write();
+        for name in &removed {
+            breakers.remove(name);
+        }
+        drop(breakers);
+        removed.sort();
+        removed
     }
 
     /// Generate API tool definitions for all registered tools
@@ -261,7 +416,7 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
     }
 }
 
-/// Layer D3 (token-opt, openclaw parity): fold every deferred def OUT of the
+/// Layer D3 (token-opt): fold every deferred def OUT of the
 /// tools[] array entirely, replacing the per-tool name-only stubs with ONE
 /// compact catalog line appended to ToolSearch's description. Measured on
 /// the reference workload the 43 stub entries cost ~2.5k tokens/request —
@@ -275,8 +430,8 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// already changes (a hydration admission).
 ///
 /// `catalog_max_chars` bounds the names portion of the line; overflow is
-/// replaced by a `+N more — search to discover` suffix (openclaw's bounded
-/// directory), keeping an MCP swarm from ballooning the prompt while every
+/// replaced by a `+N more — search to discover` suffix, keeping the line a
+/// bounded directory so an MCP swarm cannot balloon the prompt while every
 /// omitted tool stays discoverable through ToolSearch queries.
 ///
 /// Fallback: when no non-deferred `ToolSearch` def is present there is no
@@ -447,6 +602,25 @@ mod tests {
         assert_eq!(reg.workspace_policy().unwrap().root(), policy.root());
     }
 
+    #[test]
+    fn sandbox_runtime_is_preserved_by_arc_identity() {
+        let mut reg = ToolRegistry::new();
+        let runtime = Arc::new(wcore_sandbox::SandboxRegistry::new(Arc::new(
+            wcore_sandbox::FailClosedBackend::new(),
+        )));
+        reg.set_sandbox_runtime(Arc::clone(&runtime));
+
+        assert!(Arc::ptr_eq(&runtime, &reg.sandbox_runtime()));
+    }
+
+    #[test]
+    fn sandbox_runtime_defaults_fail_closed() {
+        assert_eq!(
+            ToolRegistry::new().sandbox_runtime().backend_name(),
+            "fail_closed"
+        );
+    }
+
     /// A minimal Tool implementation used only in tests
     struct MockTool {
         tool_name: String,
@@ -609,6 +783,74 @@ mod tests {
         );
         registry.set_tool_vfs(Arc::new(crate::vfs::RealFs));
         assert!(registry.tool_vfs().is_some(), "installed vfs is observable");
+    }
+
+    #[test]
+    fn conservative_restore_candidates_are_sorted_and_include_closed_history() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("zeta", "last"));
+        registry.register(make_tool("alpha", "first"));
+        registry.register(make_tool("middle", "middle"));
+
+        registry.record_breaker_outcome("zeta", true);
+        registry.record_breaker_outcome("alpha", true);
+
+        assert_eq!(
+            registry.breakers_requiring_conservative_restore(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+        assert_eq!(
+            registry.breakers.read()["alpha"].state(),
+            BreakerState::Closed,
+            "a below-threshold failure is still restart-relevant"
+        );
+    }
+
+    #[test]
+    fn conservative_restore_mutates_only_supplied_breakers() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("alpha", "already has history"));
+        registry.register(make_tool("beta", "restore this"));
+        registry.register(make_tool("gamma", "leave fresh"));
+        registry.record_breaker_outcome("alpha", true);
+
+        registry
+            .restore_breakers_conservatively(&["beta".to_string(), "beta".to_string()])
+            .unwrap();
+
+        let breakers = registry.breakers.read();
+        assert_eq!(breakers["alpha"].state(), BreakerState::Closed);
+        assert!(breakers["alpha"].requires_conservative_restore());
+        assert_eq!(breakers["beta"].state(), BreakerState::Open);
+        assert_eq!(breakers["gamma"].state(), BreakerState::Closed);
+        assert!(!breakers["gamma"].requires_conservative_restore());
+    }
+
+    #[test]
+    fn invalid_conservative_restore_is_atomic_and_reports_sorted_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("alpha", "registered"));
+
+        let error = registry
+            .restore_breakers_conservatively(&[
+                "zeta".to_string(),
+                "alpha".to_string(),
+                "missing".to_string(),
+                "zeta".to_string(),
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            BreakerRestoreError {
+                names: vec!["missing".to_string(), "zeta".to_string()]
+            }
+        );
+        assert_eq!(
+            registry.breakers.read()["alpha"].state(),
+            BreakerState::Closed,
+            "validation failure must not partially restore registered names"
+        );
     }
 
     // --- to_tool_defs_filtered tests ---
@@ -964,6 +1206,78 @@ mod tests {
         assert_eq!(result.content, "ok");
     }
 
+    /// TEST A from the Wayland Desktop handoff, 2026-08-04. It asked whether
+    /// `ToolSearchTool`'s construction-time snapshot is why MCP tools could not
+    /// be found. This settles it: the snapshot IS frozen, and that is NOT the
+    /// outage, because production rebuilds it.
+    ///
+    /// The handoff flagged an apparent contradiction — `bootstrap.rs` says
+    /// "Late tool REGISTRATION is fully supported" while ToolSearch owns a
+    /// private `Vec<ToolDef>` copy. Both are true. Late registration is
+    /// supported BECAUSE `refresh_tool_search_catalog` exists to rebuild that
+    /// copy, and every late-registration path calls it: bootstrap, the MCP tool
+    /// proxy, `/mcp add`, and the TUI engine bridge.
+    ///
+    /// Corroborated live on this build: a config-declared stdio MCP server's
+    /// tools ARE returned by ToolSearch. So discovery was never the failure —
+    /// the real defects were the whole-query substring match (see
+    /// `a_multi_word_query_matches_words_scattered_through_a_description`) and
+    /// the absent callability signal.
+    ///
+    /// Pinned so the answer cannot rot: skip the refresh and a late tool goes
+    /// silently undiscoverable, which is a real way to break every MCP server.
+    #[tokio::test]
+    async fn a_late_registered_tool_is_invisible_until_the_catalog_is_refreshed() {
+        let defer_cold = wcore_config::tools::DeferColdConfig {
+            enabled: true,
+            hot_allowlist: vec!["Read".to_string()],
+            catalog: false,
+            catalog_max_chars: 4096,
+        };
+
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("Read", "read files"));
+        registry.refresh_tool_search_catalog(&defer_cold);
+
+        // Arrives AFTER the snapshot was taken — the shape of every config MCP
+        // proxy and every `/mcp add`.
+        registry.register(make_tool(
+            "late_mcp_tool",
+            "a tool registered after ToolSearch was built",
+        ));
+
+        let before = registry
+            .get("ToolSearch")
+            .expect("ToolSearch registered")
+            .execute(serde_json::json!({"query": "late_mcp_tool"}))
+            .await;
+        // Assert on the not-found SENTINEL, not on absence of the name: the
+        // miss message echoes the query back ("No deferred tools matching
+        // \"late_mcp_tool\" found."), so a `contains(name)` check is true on
+        // both branches and can never fail.
+        assert!(
+            before.content.starts_with("No deferred tools matching"),
+            "the snapshot is taken at construction, so a later tool is invisible \
+             until refreshed — got: {}",
+            before.content
+        );
+
+        registry.refresh_tool_search_catalog(&defer_cold);
+
+        let after = registry
+            .get("ToolSearch")
+            .expect("ToolSearch still registered")
+            .execute(serde_json::json!({"query": "late_mcp_tool"}))
+            .await;
+        assert!(
+            after.content.contains("late_mcp_tool"),
+            "refresh_tool_search_catalog must make a late tool discoverable — \
+             every production late-registration path relies on exactly this; \
+             got: {}",
+            after.content
+        );
+    }
+
     /// v0.9.1.1 F8 — the catalog the LLM sees must use the exact
     /// string each backend reports from `Tool::name()`. A mismatch
     /// here means the model is taught the tool is called X, the
@@ -1024,5 +1338,64 @@ mod tests {
                 backend_names
             );
         }
+    }
+
+    struct MockMcpTool {
+        name: String,
+        server: String,
+    }
+
+    #[async_trait]
+    impl Tool for MockMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "mcp fixture"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Mcp
+        }
+
+        fn mcp_server(&self) -> Option<&str> {
+            Some(&self.server)
+        }
+    }
+
+    #[test]
+    fn removing_mcp_server_is_scoped_and_idempotent() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("Read", "built in"));
+        registry.register(Box::new(MockMcpTool {
+            name: "alpha_search".into(),
+            server: "alpha".into(),
+        }));
+        registry.register(Box::new(MockMcpTool {
+            name: "beta_search".into(),
+            server: "beta".into(),
+        }));
+
+        assert_eq!(registry.remove_mcp_server("alpha"), ["alpha_search"]);
+        assert!(registry.get("alpha_search").is_none());
+        assert!(registry.get("beta_search").is_some());
+        assert!(registry.get("Read").is_some());
+        assert!(registry.remove_mcp_server("alpha").is_empty());
     }
 }

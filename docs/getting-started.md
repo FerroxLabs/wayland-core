@@ -52,9 +52,14 @@ wayland-core [OPTIONS] [PROMPT]...
 | `--max-tokens <n>` | Max output tokens per response |
 | `--max-turns <n>` | Max agent loop turns |
 | `--system-prompt <text>` | Custom system prompt |
-| `--force` | Approve every tool call without prompting (aliases: `--yolo`, `--dangerously-skip-permissions`) |
+| `--dangerously-skip-permissions` | **Tier 1.** Approve every tool call without prompting while the OS sandbox **stays on** (aliases: `--force`, `--yolo`) |
+| `--dangerously-skip-permissions-and-sandbox` | **Tier 2**, a superset of tier 1: bypasses approvals **and** the OS sandbox for a bounded lease (deprecated alias: `--dangerous`) |
+| `--dangerous-ttl-secs <n>` | Tier-2 lease lifetime; defaults to 15 minutes and is capped at one hour |
 | `--auto-approve` | Skip all tool confirmations |
 | `--project-dir <path>` | Directory to load the project `.wayland-core.toml` from (defaults to CWD) |
+| `--trust-workspace` | Trust the current executable repository fingerprint in Core's external user store; material changes make the grant stale |
+| `--untrust-workspace` | Remove the current repository's stored trust decision and launch with the strict profile |
+| `--allow-host-workspace-grants` | With `--json-stream`, let a local host approve read-only developer runtime roots for this process; never disables the sandbox |
 | `--continue`, `-c` | Resume the most-recent session |
 | `--resume <id>` | Resume a previous session |
 | `--session-id <id>` | Use a specific session ID instead of auto-generating one |
@@ -116,7 +121,8 @@ CLI parameters / env vars        (highest priority)
 
 Each level is a `config.toml`-format file. A field set at a lower level is
 overridden by the same field at a higher level; fields you do not set inherit
-from the level below.
+from the level below. The `[execution]` managed-policy block is the exception:
+it is accepted only from the global config and ignored in project files.
 
 #### Global config
 
@@ -162,6 +168,7 @@ provider = "anthropic"
 # model = "claude-sonnet-4-20250514"
 max_tokens = 8192
 max_turns = 30
+# read_only = true            # refuse every tool that can change anything
 
 [providers.anthropic]
 # api_key = "sk-ant-xxx"       # or env var ANTHROPIC_API_KEY
@@ -198,6 +205,14 @@ provider = "my-service"
 auto_approve = false
 allow_list = ["Read", "Grep", "Glob"]
 
+# Optional global-only administrator floor. Project config cannot set or
+# relax this block. "deny" prevents even a local tier-2
+# (--dangerously-skip-permissions-and-sandbox) launch.
+[execution]
+managed = false
+approval_mode = "default"   # default | auto-edit | force
+dangerous = "deny"          # allow | deny
+
 [session]
 enabled = true
 directory = ".wayland-core/sessions"
@@ -215,6 +230,79 @@ max_entries = 100
 enabled = true
 plan_directory = ".wayland-core/plans"
 ```
+
+### Execution Postures
+
+There are exactly **two danger tiers**, and the flag names are written so the
+superset relationship is visible in the spelling itself.
+
+**Tier 1 — `--dangerously-skip-permissions`** (aliases `--force`, `--yolo`).
+Approvals are bypassed; **the OS sandbox stays on**. All three spellings are
+aliases of one flag, so they always mean the same thing. `--auto-approve` also
+affects approvals only.
+
+**Tier 2 — `--dangerously-skip-permissions-and-sandbox`** (deprecated alias
+`--dangerous`). A strict superset of tier 1: it bypasses approvals **and** the
+OS sandbox, for a monotonic, time-bounded lease; the session is terminated when
+that lease expires. Config files, environment variables, resumed state, child
+agents, ACP clients, and JSON-stream commands cannot create that lease — only
+argv on a local launch can.
+
+The two tiers refuse to stack: passing one of each is a usage error.
+
+`--dangerous` continues to work and is not scheduled for removal in this
+release, but it is deprecated in `--help`; prefer the explicit spelling.
+
+Managed installs a global approval floor and an allow/deny decision for local
+Dangerous launches. Lower-trust project, protocol, TUI, ACP, resume, and child
+inputs can tighten the floor but cannot relax it.
+
+### Read-only sessions
+
+`[default] read_only = true` makes the session non-mutating. It is off by
+default.
+
+What it does, exactly:
+
+- Only tools that declare read-only safety may run. Today that is **Read,
+  Grep and Glob**, and nothing else. The check is a positive claim each tool
+  makes about a specific invocation, not a category or a name list, so a tool
+  that says nothing is refused.
+- The refusal happens **before PreToolUse hooks**. A refused call fires no
+  operator-configured hook command, so a read-only session does not execute a
+  shell for work it is not going to do.
+- **`Skill` is refused.** A skill body can write its declared artifacts and can
+  execute embedded `` !`…` `` shell directives, so skills are refused wholesale
+  rather than inspected — at the dispatcher and again inside the skill tool, so
+  the cron skill path, which has no dispatcher, is covered too.
+- Nothing can talk the session back out of it: the posture is installed once at
+  boot. `auto_approve`, `approval_mode = "force"`,
+  `--dangerously-skip-permissions` and an explicit allow rule all leave it in
+  force — they govern approval, and this is not an approval.
+
+What it does **not** do: it does not block outbound provider API calls. A
+read-only session still talks to its model. It bounds tool effects only.
+
+### Workspace trust
+
+Repository-controlled executable configuration is inert by default. This
+includes project hooks, MCP servers, environment injection, executable skills,
+and other project settings that can cause code to run. Prompt-only project
+guidance and restrictions that make the session safer remain active.
+
+`--trust-workspace` records a hash of the repository's executable configuration
+surface in Core's user-owned configuration directory. Editing that surface
+invalidates the decision automatically; review the change and run the flag
+again to renew it. `--untrust-workspace` removes the decision. Managed, remote,
+and child-agent constraints always select the strict profile even if a local
+fingerprint was previously trusted.
+
+Trusted local sessions use the `trusted_local_smart` sandbox profile. Core
+detects installed developer runtimes and exposes only their required roots as
+read-only, while keeping workspace/cache writes explicit. A Desktop host may
+request an additional read-only runtime root only when Core was launched with
+both `--json-stream` and `--allow-host-workspace-grants`. These grants last for
+the process, do not add writable roots, and are refused for strict sessions.
 
 ### API Key Resolution Order
 
@@ -381,7 +469,14 @@ Allow? [y]es / [n]o / [a]lways / [q]uit > y
 | `a` / `always` | Auto-approve this tool for the rest of the session |
 | `q` / `quit` | Abort the entire agent run |
 
-- Read-only tools (Read, Grep, Glob) are auto-approved by default
+- **Eleven** tools are auto-approved by default, not three
+  (`config.rs:1186-1206`): `Read`, `Grep`, `Glob`, `web`, `WebFetch`,
+  `vision_analyze`, `transcribe_audio`, `ToolSearch`, `Skill`, `wayland_status`,
+  `wayland_telemetry_query`. Nothing that writes, executes or sends a message is in
+  that list. Two entries are worth knowing about before you rely on the default:
+  `web` and `WebFetch` reach the network, and `Skill` can write declared artifacts
+  and run a skill's embedded `!` shell directives. If that is more than you want
+  approved silently, narrow `tools.allow_list`.
 - `--auto-approve` skips all confirmations
 - `tools.allow_list` in config customizes the whitelist
 

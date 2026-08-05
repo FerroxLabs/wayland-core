@@ -28,6 +28,7 @@ pub mod adapter;
 pub mod backend;
 pub mod backends;
 pub mod error;
+pub mod liveness;
 pub mod op;
 pub mod policy;
 pub mod redact;

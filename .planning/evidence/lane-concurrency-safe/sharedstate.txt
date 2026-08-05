@@ -1,0 +1,34 @@
+CONTROL_FILE=crates/wcore-tools/src/registry.rs exists=True
+CONTROL registry.rs                                    {'RwLock': 1, 'ArcField': 10}
+CONTROL_ALIVE=YES
+
+wcore-agent/plan/tools.rs                            {'Atomic': 7, 'ArcField': 5}
+wcore-tools/ask_user_question.rs                     none
+wcore-tools/aws_cli_tool.rs                          none
+wcore-tools/clarify.rs                               none
+wcore-tools/doc_tool.rs                              none
+wcore-tools/email_parse_tool.rs                      none
+wcore-tools/gcloud_tool.rs                           none
+wcore-tools/glob.rs                                  {'ArcField': 1}
+wcore-tools/google_meet_tool.rs                      {'Mutex': 1, 'ArcField': 12}
+wcore-tools/grep.rs                                  none
+wcore-tools/image_generation_tool.rs                 {'Mutex': 1, 'ArcField': 4}
+wcore-tools/image_inspect_tool.rs                    none
+wcore-tools/jsonl_tool.rs                            none
+wcore-tools/kubectl_tool.rs                          {'Mutex': 1, 'ArcField': 1, 'env_set_var': 2}
+wcore-tools/linear_tool.rs                           {'Mutex': 1, 'ArcField': 3}
+wcore-tools/markdown_tool.rs                         none
+wcore-tools/osv_check.rs                             {'Mutex': 2, 'ArcField': 2}
+wcore-tools/pdf_tool.rs                              none
+wcore-tools/postgres_schema_tool.rs                  {'Mutex': 1, 'ArcField': 2}
+wcore-tools/read.rs                                  {'RwLock': 4, 'ArcField': 4}
+wcore-tools/repomap.rs                               none
+wcore-tools/session_search.rs                        {'ArcField': 6}
+wcore-tools/spotify_tool.rs                          {'Mutex': 1, 'ArcField': 18}
+wcore-tools/sql_query_tool.rs                        none
+wcore-tools/tool_search.rs                           none
+wcore-tools/transcription_tools.rs                   {'Mutex': 1, 'ArcField': 4}
+wcore-tools/video_analyze_tool.rs                    {'ArcField': 2}
+wcore-tools/vision_tools.rs                          {'Mutex': 1, 'ArcField': 4}
+wcore-tools/wayland_introspection.rs                 {'Mutex': 1, 'ArcField': 5}
+wcore-tools/web_tools.rs                             {'Mutex': 1, 'ArcField': 3}

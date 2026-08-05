@@ -1,0 +1,4 @@
+COMMAND: Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*f25-04-win-orphan-40608*" } | Select-Object ProcessId,ParentProcessId,CommandLine
+--- AFTER THE REAP ---
+
+ROWS-MATCHING-NONCE: 0

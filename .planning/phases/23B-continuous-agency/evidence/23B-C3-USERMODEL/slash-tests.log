@@ -1,0 +1,76 @@
+   Compiling wcore-agent v0.12.25 (/root/wl-23bc3um/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 08s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/wcore_agent-0f5c376c315919b2)
+
+running 66 tests
+test slash::agent::tests::show_missing_name_errors ... ok
+test slash::help::tests::help_returns_banner ... ok
+test slash::agent::tests::new_via_slash_invokes_run_new_and_aborts_on_empty_stdin ... ok
+test slash::agent::tests::run_new_aborts_on_blank_description ... ok
+test slash::agent::tests::run_new_rejects_non_numeric_max_turns ... ok
+test slash::memory::tests::default_constructs_stub ... ok
+test slash::memory::tests::parse_partition_maps_all_five ... ok
+test slash::memory::tests::stub_clear_requires_partition ... ok
+test slash::memory::tests::stub_refuses_every_control_instead_of_reporting_success ... ok
+test slash::memory::tests::runtime_clear_unknown_partition_errors ... ok
+test slash::memory::tests::stub_show_default_handled ... ok
+test slash::memory::tests::stub_clear_with_partition_handled ... ok
+test slash::memory::tests::runtime_show_reaches_memory_api ... ok
+test slash::memory::tests::stub_unknown_subcommand_errors ... ok
+test slash::memory::tests::runtime_without_controls_says_so_rather_than_claiming_success ... ok
+test slash::plugin::tests::default_constructs_stub ... ok
+test slash::memory::tests::runtime_clear_invokes_memory_api ... ok
+test slash::plugin::tests::runtime_install_documents_workflow ... ok
+test slash::plugin::tests::runtime_remove_documents_workflow ... ok
+test slash::plugin::tests::runtime_list_empty_handles ... ok
+test slash::plugin::tests::stub_list_handled ... ok
+test slash::plugin::tests::stub_install_requires_name ... ok
+test slash::plugin::tests::stub_remove_requires_name ... ok
+test slash::skill::tests::default_constructs_stub ... ok
+test slash::agent::tests::list_shows_builtins ... ok
+test slash::agent::tests::show_known_builtin ... ok
+test slash::agent::tests::run_new_rejects_unknown_parent ... ok
+test slash::agent::tests::run_new_rejects_clash_with_builtin ... ok
+test slash::skill::tests::runtime_list_empty_catalog ... ok
+test slash::skill::tests::runtime_run_missing_skill_says_not_found ... ok
+test slash::skill::tests::govern_on_a_clean_store_reports_empty_rather_than_erroring ... ok
+test slash::skill::tests::runtime_show_missing_skill ... ok
+test slash::skill::tests::revoke_of_an_unknown_skill_says_so_without_touching_the_store ... ok
+test slash::agent::tests::run_new_minimal_no_parent_no_tools ... ok
+test slash::skill::tests::runtime_run_rejects_model_hidden_skill ... ok
+test slash::skill::tests::rollback_of_an_unknown_id_reports_failure ... ok
+test slash::skill::tests::stub_list_handled ... ok
+test slash::agent::tests::run_new_happy_path ... ok
+test slash::skill::tests::stub_run_requires_name ... ok
+test slash::skill::tests::stub_show_requires_name ... ok
+test slash::skill::tests::revoke_refuses_a_bundled_skill_rather_than_touching_the_install ... ok
+test slash::skill::tests::unknown_sub_action_advertises_the_governance_verbs ... ok
+test slash::style::tests::no_arg_shows_options ... ok
+test slash::style::tests::accepts_valid_styles ... ok
+test slash::style::tests::rejects_unknown ... ok
+test slash::tests::dispatcher_returns_exit ... ok
+test slash::tests::dispatcher_routes_clear_as_handled ... ok
+test slash::tests::dispatcher_lists_8_builtins ... ok
+test slash::tests::dispatcher_routes_real_style_handler ... ok
+test slash::tests::dispatcher_unknown_command ... ok
+test slash::tests::ignores_non_slash_input ... ok
+test slash::tests::parses_command_with_args ... ok
+test slash::tests::help_lines_are_sorted ... ok
+test slash::tests::parses_simple_command ... ok
+test slash::tests::trims_trailing_newline ... ok
+test slash::tests::dispatcher_with_runtime_uses_runtime_variants ... ok
+test slash::usermodel::tests::bare_show_says_nothing_is_corrected_rather_than_printing_an_empty_list ... ok
+test slash::usermodel::tests::correct_without_a_value_is_refused_rather_than_storing_blank ... ok
+test slash::usermodel::tests::forget_reports_a_miss_as_a_miss ... ok
+test slash::usermodel::tests::forget_removes_only_the_named_correction ... ok
+test slash::usermodel::tests::correct_then_show_round_trips_and_reports_the_previous_value ... ok
+test slash::usermodel::tests::multi_word_values_survive_tokenisation ... ok
+test slash::usermodel::tests::unknown_subaction_lists_the_real_ones ... ok
+test slash::skill::tests::revoke_then_govern_shows_the_revocation_and_its_history ... ok
+test slash::memory::tests::a_privacy_scope_is_reported_as_an_exclusion_not_as_an_empty_result ... ok
+test slash::memory::tests::controls_reach_a_real_store_and_report_the_item_they_acted_on ... ok
+
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 2159 filtered out; finished in 0.02s
+

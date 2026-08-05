@@ -1,0 +1,18 @@
+2026-07-29T02:57:19.168354Z  INFO channel auto-registered channel=f24finone platform=slack
+2026-07-29T02:57:19.168426Z  INFO channel auto-registered channel=f24fintwo platform=slack
+[gateway] channels registered=2
+[gateway] inbound: subscriber spawned, webhook host listening bind=127.0.0.1:18899 policies=2
+[gateway] started pid=706983 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+2026-07-29T02:57:20.130571Z DEBUG channel turn dispatch channel=f24finone posture=Conversational
+2026-07-29T02:57:20.149457Z  INFO W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+2026-07-29T02:57:20.149471Z  INFO M3.2: memory.enabled ON — decay scheduler spawned interval_secs=3600
+2026-07-29T02:57:20.151526Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+2026-07-29T02:57:20.152212Z  INFO channel engine tool posture applied posture=Conversational sandbox_enforces_read_deny=true
+2026-07-29T02:57:20.247143Z  INFO another process owns the schedule; this session observes and will not fire dir=/root/f24h5-ev/prefix-reload/home/cron
+2026-07-29T02:57:28.592688Z  INFO channel auto-registered channel=f24finone platform=slack
+2026-07-29T02:57:28.592728Z  INFO channel auto-registered channel=f24finthree platform=slack
+2026-07-29T02:57:28.592750Z  INFO channel auto-registered channel=f24fintwo platform=slack
+[gateway] channel reload: added=["f24finthree"] replaced=["f24finone", "f24fintwo"] removed=[] unchanged=[]
+2026-07-29T02:57:40.365946Z  INFO inbound denied channel=f24finthree reason=sender not in dm allowlist
+2026-07-29T02:59:10.615839Z  INFO inbound denied channel=f24finthree reason=sender not in dm allowlist
+2026-07-29T02:59:25.655433Z DEBUG channel turn dispatch channel=f24finone posture=Conversational

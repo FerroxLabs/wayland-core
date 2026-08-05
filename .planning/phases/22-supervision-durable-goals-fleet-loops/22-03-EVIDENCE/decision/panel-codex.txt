@@ -1,0 +1,8 @@
+PANEL-CMD: codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check "$(cat panel-prompt.txt)" < /dev/null
+Implement `lease-with-fencing-token`. The lease revokes a dead or unresponsive worker’s claim after its bounded term; incrementing the task’s durable claim epoch fences the replacement. Any later write from the former owner must present its old epoch and be rejected atomically at the authoritative append. This permits some bounded duplicate execution—30 seconds under the proposed parameters—but prevents duplicate durable effects.
+
+Linux’s process-group reaping reduces one failure mode, but it does not settle the design: Windows remains unmeasured, a wedged process can recover without dying, and future cross-host reassignment makes OS liveness insufficient. Heartbeats and process probes may improve early revocation, but neither can refuse stale writes. They are optional lease accelerators, not alternatives to fencing.
+
+The main risk is incomplete enforcement. Two of six identified write paths are currently review-only, and the enumeration is not exhaustive. Therefore, this option should ship only after every authoritative effect path is routed through a structurally guarded commit API that requires the claim epoch and compares it atomically with the ledger’s current epoch. Status and diagnostic writes may be exempt only if they cannot affect task completion, reassignment, accounting, or dependency release. Otherwise, a forgotten token recreates the exact unbounded late-write hole the design is meant to close.
+
+PANEL_POSITION=lease-with-fencing-token

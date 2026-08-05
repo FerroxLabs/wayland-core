@@ -1,0 +1,28 @@
+• Answer decisively. This is a design question, no tools needed.
+
+  Weigh options. Threat: unapproved code executing in agent. B doesn't close the threat (attacker writes dir directly — but wait, the attacker who can write into the plugins root already... actually a loader walking a root and executing whatever is there means anyone who can write there gets code exec; the approval gate is meant to require operator consent). B fails to close because the gate is keyed to generation records that the attacker simply won't create. A closes it once governed but silently fail-closes for siblings — that's "honest" in that it breaks loudly, not fail-open, but it's surprising and implicit. C closes threat fully, fails genuinely, and breaks loudly — migration is honest but painful; config opt-out default ON means enforcement is the default. D is fail-open/advisory.
+
+  The strongest security answer: A — it's fail-closed, genuinely enforced, doesn't break existing installs/tests that never touch the new lifecycle (root has no state file → unchanged behavior), and migration is honest because when governance starts it stops loading loudly rather than silently permitting. C also closes the threat but breaks every existing install and test on upgrade — arguably the "most secure" but the migration is disruptive, and the config default-ON with opt-out... C is honest too. But which does the panel pick?
+
+  Key differentiators: A vs C. Both enforce inside governed/all roots. A's drawback: implicit governance of siblings on first use of new verbs — surprising. C's drawback: everything breaks on upgrade until approved. The question says "existing tests drop plugin dirs into temp root and expect them to load" — under A, tests that never run the new lifecycle verbs keep passing; the gate can still genuinely fail (tests can create a governed root). Under C, tests need updating — that's the honest-but-painful route.
+
+  Security-wise, A has a gap: an attacker-written directory in an ungoverned root loads. But the same is true today; the approval gate's purpose is operator consent for what executes. If the root is ungoverned, behavior = today, which is the accepted baseline. The moment the operator adopts the lifecycle, the whole root becomes enforced — fail-closed. That's honest migration: it doesn't silently fail-open (D), doesn't pretend to protect while having a trivial bypass (B), and doesn't break the world (C).
+
+  I'd pick A. It's the standard answer for this class: governance is a property of the root once the operator opts into the lifecycle, enforcement is fail-closed inside governed roots, and the trigger (writing state via the new verbs) is explicit operator action, not silent upgrade behavior. The "implicit sibling gating" is a feature: it forces the operator to reconcile the whole root, closing the attacker-write bypass that B leaves open, and it fails loudly (plugins stop loading until approved) rather than silently.
+
+  C would be the maximal-security pick, but it converts an upgrade into a breaking change for thousands of installs and its escape hatch (default-ON flag to disable) invites operators to just flip it off — practical outcome often equals D. A gets enforcement adopted because it's tied to operator action.
+
+  Answer: A.
+
+• PANEL_POSITION=A
+
+  Reasoning:
+
+  - B does not close the threat. The gate is keyed to generation records, and the attacker's move is simply to not create one — a directory written straight into the root executes with zero approval. That is a gate that structurally cannot fail against its actual adversary; it's self-passing by construction.
+  - D is fail-open by default. An advisory gate that requires opt-in protects almost no one; operators who need it most never turn it on.
+  - C closes the threat but makes the upgrade itself a breaking event for thousands of installs and every existing test, and its escape hatch (a default-ON flag you can flip off) is exactly what frustrated operators will flip — the real-world outcome converges to D while looking like enforcement on paper.
+  - A is fail-closed where it matters and honest about migration. The trigger for governance is an explicit operator action (using the new install/approve verbs), not silent upgrade behavior, so existing installs and temp-root tests that never touch the lifecycle behave exactly as today — no surprise breakage. The moment the operator adopts the lifecycle, the whole root goes behind the digest-bound gate, including the attacker-write case B leaves open, and it fails loudly (plugins stop loading until approved) rather than silently permitting.
+  - The "implicit sibling gating" is the correct behavior, not a defect: installing one plugin through the governed path while letting unvetted siblings keep executing would be a false sense of security. Forcing root-wide reconciliation at adoption is the honest migration — the operator is told, by refusal, exactly what needs approval.
+  - The digest binding keeps the gate genuinely falsifiable: a tampered or updated plugin invalidates its record, so there is a concrete state in which the loader must refuse, and that refusal is testable.
+
+To resume this session: kimi -r session_cab76874-318f-464e-835d-2dd22ddade81

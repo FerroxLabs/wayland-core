@@ -37,14 +37,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use wcore_channels::{Attachment, ChannelManager, MediaKind};
+use wcore_channels::{Attachment, ChannelManager, MediaBounds, MediaKind};
+use wcore_tools::media_intake::admit_bytes;
 use wcore_tools::transcription_tools::{
-    TRANSCRIPTION_MAX_BYTES, TRANSCRIPTION_MIN_BYTES, TranscriptionBackend, TranscriptionOutcome,
-    detect_audio_mime,
+    TranscriptionBackend, TranscriptionOutcome, audio_intake_policy,
 };
-use wcore_tools::vision_tools::{
-    VISION_MAX_BYTES, VISION_MIN_BYTES, VisionBackend, VisionOutcome, detect_image_mime,
-};
+use wcore_tools::vision_tools::{VisionBackend, VisionOutcome, image_intake_policy};
 
 /// Max characters of derived text injected per attachment, to protect the
 /// turn's prompt budget. Longer transcripts/descriptions are truncated.
@@ -67,7 +65,8 @@ const IMAGE_DESCRIBE_PROMPT: &str =
 // `build_turn_prompt` surfaces into the turn.
 const IMAGE_NO_VISION_NOTICE: &str = "[Inbound image received but NOT analyzed: no vision backend is configured, so the \
      assistant cannot see this image. Do not guess its contents. To enable image \
-     understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]";
+     understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or \
+     FLUX_API_KEY, or configure an OpenAI-wire provider (FluxRouter / OpenAI).]";
 const AUDIO_NO_TRANSCRIPTION_NOTICE: &str = "[Inbound audio received but NOT transcribed: no transcription backend is configured, so \
      the assistant cannot hear this audio. To enable transcription, set GROQ_API_KEY or \
      OPENAI_API_KEY.]";
@@ -83,6 +82,19 @@ const AUDIO_ANALYSIS_FAILED_NOTICE: &str = "[Inbound audio could not be transcri
 pub trait MediaByteSource: Send + Sync {
     /// Fetch the bytes of `attachment` as received on `channel`.
     async fn fetch(&self, channel: &str, attachment: &Attachment) -> Result<Vec<u8>, String>;
+
+    /// The bounds `channel` declares. Defaulted so a test source need not
+    /// model them; the production source resolves the real per-adapter
+    /// declaration.
+    ///
+    /// This exists so `max_attachments` has an enforcement point at all. The
+    /// byte bound is enforced inside `fetch` (connector-side and again at
+    /// `ChannelManager::fetch_media_on`), but a per-message attachment COUNT
+    /// can only be applied where the whole list is in scope, which is
+    /// [`ChannelMediaEnricher::enrich`] — not the per-attachment fetch.
+    async fn bounds(&self, _channel: &str) -> MediaBounds {
+        MediaBounds::default()
+    }
 }
 
 /// Production [`MediaByteSource`]: routes through the [`ChannelManager`] so
@@ -106,6 +118,18 @@ impl MediaByteSource for ManagerMediaSource {
             .fetch_media_on(channel, attachment)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn bounds(&self, channel: &str) -> MediaBounds {
+        let guard = self.manager.read().await;
+        // An unknown channel falls back to the trait default rather than to
+        // "unbounded": a missing declaration is not permission to fetch
+        // anything, which is the reasoning `MediaBounds::DEFAULT_MAX_BYTES`
+        // already carries.
+        guard
+            .media_bounds_on(channel)
+            .await
+            .unwrap_or_else(MediaBounds::default)
     }
 }
 
@@ -154,10 +178,32 @@ impl ChannelMediaEnricher {
     /// configured, or fetch/analysis failed — an honest degraded notice is
     /// written to [`Attachment::transcribed`] instead of silently leaving a
     /// bare URL (#660). Non-media kinds are left untouched.
+    ///
+    /// # The declared attachment-count bound is applied here
+    ///
+    /// Attachments past the channel's declared `max_attachments` are NOT
+    /// fetched or analysed, and get a notice saying so. They are never removed
+    /// from the list — a truncated list is a message the agent answers with no
+    /// idea it was incomplete, which is the same reasoning
+    /// [`normalize_all`](wcore_channels::media::normalize_all) carries. This is
+    /// the only place the count bound can be applied, because it is the only
+    /// place the whole list is in scope.
     pub async fn enrich(&self, attachments: &mut [Attachment], channel: &str) {
-        for att in attachments.iter_mut() {
+        let max_attachments = self.source.bounds(channel).await.max_attachments;
+        let total = attachments.len();
+        for (idx, att) in attachments.iter_mut().enumerate() {
             // Never overwrite a connector-supplied transcript.
             if att.transcribed.is_some() {
+                continue;
+            }
+            // Past the declared count bound: record why, keep the record.
+            if idx >= max_attachments {
+                att.transcribed = Some(format!(
+                    "[Inbound attachment {} of {total} was NOT analyzed: it is past this \
+                     channel's declared bound of {max_attachments} attachments per message. The \
+                     assistant has NOT seen its contents; do not guess.]",
+                    idx + 1
+                ));
                 continue;
             }
             // No backend for this media kind → record why, don't drop it blind.
@@ -243,16 +289,22 @@ impl ChannelMediaEnricher {
 
     async fn describe_image(&self, bytes: &[u8], channel: &str) -> Option<String> {
         let backend = self.vision.as_ref()?;
-        if bytes.len() < VISION_MIN_BYTES || bytes.len() > VISION_MAX_BYTES {
-            tracing::debug!(
-                target: "wcore_agent::channel_media",
-                channel,
-                bytes = bytes.len(),
-                "image size out of bounds; skipping"
-            );
-            return None;
-        }
-        let mime = detect_image_mime(bytes)?;
+        // Connector-supplied bytes face the SAME caps and the SAME format
+        // decision a composer path faces, through the shared chokepoint — so a
+        // channel cannot introduce a class the composer would have refused.
+        let mime = match admit_bytes(bytes, &image_intake_policy()) {
+            Ok(kind) => kind.as_str(),
+            Err(reason) => {
+                tracing::debug!(
+                    target: "wcore_agent::channel_media",
+                    channel,
+                    bytes = bytes.len(),
+                    %reason,
+                    "inbound image refused by media intake; skipping"
+                );
+                return None;
+            }
+        };
         match tokio::time::timeout(
             self.analyze_timeout,
             backend.analyze(mime, bytes, IMAGE_DESCRIBE_PROMPT),
@@ -273,16 +325,20 @@ impl ChannelMediaEnricher {
 
     async fn transcribe_audio(&self, bytes: &[u8], channel: &str) -> Option<String> {
         let backend = self.transcription.as_ref()?;
-        if bytes.len() < TRANSCRIPTION_MIN_BYTES || bytes.len() > TRANSCRIPTION_MAX_BYTES {
-            tracing::debug!(
-                target: "wcore_agent::channel_media",
-                channel,
-                bytes = bytes.len(),
-                "audio size out of bounds; skipping"
-            );
-            return None;
-        }
-        let mime = detect_audio_mime(bytes)?;
+        // Same shared chokepoint, this surface's audio policy.
+        let mime = match admit_bytes(bytes, &audio_intake_policy()) {
+            Ok(kind) => kind.as_str(),
+            Err(reason) => {
+                tracing::debug!(
+                    target: "wcore_agent::channel_media",
+                    channel,
+                    bytes = bytes.len(),
+                    %reason,
+                    "inbound audio refused by media intake; skipping"
+                );
+                return None;
+            }
+        };
         match tokio::time::timeout(self.analyze_timeout, backend.transcribe(mime, bytes, None))
             .await
         {
@@ -324,6 +380,7 @@ mod tests {
     use super::*;
     use wcore_tools::transcription_tools::CapturingTranscriptionBackend;
     use wcore_tools::vision_tools::CapturingVisionBackend;
+    use wcore_tools::vision_tools::VISION_MAX_BYTES;
 
     /// Minimal valid PNG header — passes `detect_image_mime` + min-size.
     fn png_bytes() -> Vec<u8> {
@@ -515,5 +572,127 @@ mod tests {
         let (t, cut) = truncate("short".to_string(), 100);
         assert_eq!(t, "short");
         assert!(!cut);
+    }
+
+    // -----------------------------------------------------------------------
+    // The declared attachment-COUNT bound.
+    //
+    // `max_attachments` was the more thoroughly dead half of `MediaBounds`:
+    // `max_bytes` at least had hardcoded counterparts being enforced elsewhere,
+    // whereas `max_attachments` was enforced NOWHERE in the workspace — its
+    // only non-definition use was inside `media::normalize_all`, which has no
+    // production caller. These tests carry the same three assertions as the
+    // byte-bound suite, including the one that fails against the pre-fix code.
+    // -----------------------------------------------------------------------
+
+    /// A source that declares a count bound and counts how often it is asked
+    /// for bytes. The fetch counter is the instrument: it distinguishes "the
+    /// attachment was skipped" from "the attachment was fetched and then
+    /// relabelled", which a `transcribed` assertion alone cannot.
+    struct CountingSource {
+        max_attachments: usize,
+        fetches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MediaByteSource for CountingSource {
+        async fn fetch(&self, _channel: &str, _att: &Attachment) -> Result<Vec<u8>, String> {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(png_bytes())
+        }
+        async fn bounds(&self, _channel: &str) -> MediaBounds {
+            MediaBounds {
+                max_bytes: MediaBounds::DEFAULT_MAX_BYTES,
+                max_attachments: self.max_attachments,
+            }
+        }
+    }
+
+    /// ASSERTIONS 1+2+3 in one case, because the third is a statement about the
+    /// same run as the first two.
+    #[tokio::test]
+    async fn attachments_past_the_declared_count_bound_are_not_fetched_and_say_so() {
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enricher = ChannelMediaEnricher::new(
+            Some(Arc::new(CapturingVisionBackend::new("a red bicycle"))),
+            None,
+            Arc::new(CountingSource {
+                max_attachments: 2,
+                fetches: Arc::clone(&fetches),
+            }),
+        );
+
+        let mut atts = vec![image_att(), image_att(), image_att()];
+        enricher.enrich(&mut atts, "slack").await;
+
+        // (1) KNOWN-POSITIVE — the first two are genuinely enriched. Without
+        // this the case would pass on an enricher that refused everything.
+        assert_eq!(atts[0].transcribed.as_deref(), Some("a red bicycle"));
+        assert_eq!(atts[1].transcribed.as_deref(), Some("a red bicycle"));
+
+        // (2) KNOWN-NEGATIVE — the third is past the bound, is NOT analysed,
+        // and the notice names both its position and the bound.
+        let third = atts[2].transcribed.as_deref().unwrap_or_default();
+        assert!(
+            third.contains("NOT analyzed") && third.contains("declared bound of 2"),
+            "the past-bound attachment must carry an honest notice naming the \
+             bound, got: {third}"
+        );
+        assert_ne!(
+            atts[2].transcribed.as_deref(),
+            Some("a red bicycle"),
+            "the past-bound attachment must not carry a description — that \
+             would mean it was analysed after all"
+        );
+
+        // (3) THE OLD SHAPE WOULD HAVE MISSED IT. Pre-fix, `enrich` never
+        // consulted any bound and fetched every attachment, so this counter
+        // read 3. It is the only assertion here that the pre-fix code fails:
+        // assertions (1) and (2) are about content, and a `transcribed` string
+        // could in principle be produced without the fetch ever being skipped.
+        assert_eq!(
+            fetches.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "exactly the in-bound attachments may be fetched; a 3 here is the \
+             pre-fix behaviour, where the declared count bound was enforced \
+             nowhere in the workspace"
+        );
+
+        // Nothing is removed. A truncated list is a message the agent answers
+        // with no idea it was incomplete.
+        assert_eq!(atts.len(), 3, "the list must never be truncated");
+    }
+
+    /// The count bound is a BOUND, not a blanket refusal: a message inside it
+    /// is fetched in full. This is the control that keeps the case above from
+    /// passing on an enricher that simply stopped fetching.
+    #[tokio::test]
+    async fn a_message_within_the_declared_count_bound_is_fully_enriched() {
+        let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enricher = ChannelMediaEnricher::new(
+            Some(Arc::new(CapturingVisionBackend::new("a red bicycle"))),
+            None,
+            Arc::new(CountingSource {
+                max_attachments: 5,
+                fetches: Arc::clone(&fetches),
+            }),
+        );
+
+        let mut atts = vec![image_att(), image_att(), image_att()];
+        enricher.enrich(&mut atts, "slack").await;
+
+        assert_eq!(
+            fetches.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "all three are inside a bound of 5 and must all be fetched"
+        );
+        for (i, a) in atts.iter().enumerate() {
+            assert_eq!(
+                a.transcribed.as_deref(),
+                Some("a red bicycle"),
+                "attachment {i} is within the bound and must be enriched"
+            );
+        }
     }
 }

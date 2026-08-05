@@ -1,0 +1,31 @@
+# CRIT-02 -- 'Wayland, Hermes, and OpenClaw complete common correctness, recovery,
+#             security, cost, and cognitive-tax trials with pinned baselines and
+#             confidence bounds.'
+# GRADE: NOT_MET
+#
+# 15 legs = 5 dimensions x 3 tools. Accounted for exactly once each:
+RUN=9   UNPROVEN=6
+#
+# TWO OF FIVE DIMENSIONS HAVE ZERO LEGS FOR ALL THREE TOOLS:
+#   security      0/3 -- the shared meter records body digests, not bodies, so the
+#                        frozen extraction cannot be performed. A narrower extraction
+#                        was deliberately NOT substituted.
+#   cognitive_tax 0/3 -- all four panel members independently refused to proxy it,
+#                        BEFORE any trial ran.
+#
+# AND THE NINE LEGS THAT DID RUN ARE CONFOUNDED. The canonical script emits a tool
+# call named write_file, a name only Hermes exposes; OpenClaw scored 0/30 on the
+# identical script. The numbers do not measure the dimension they are named after.
+# 30-03's rule confounded_leg_supports_no_comparison refuses every comparison resting
+# on them, in EITHER direction, and 30-03 published ZERO peer comparisons as a result.
+#
+# What DID hold: both peer baselines re-verify at their pinned commits (Hermes 0.17.0
+# @ dbe734be, OpenClaw 2026.6.2 @ 11a0ad10), and the nine RUN legs carry real
+# confidence bounds (Wilson / ZERO_EMPIRICAL_VARIANCE).
+#
+# WHY NOT PARTIAL (dissent recorded): three of five dimensions produced numbers with
+# pinned baselines and bounds, which is literally partial completion. It is graded
+# NOT_MET because ZERO of the five dimensions produced a USABLE comparative: the two
+# unmeasured ones produced nothing, and the three measured ones produced numbers that
+# the phase's own checker refuses to compare. The criterion exists to yield comparable
+# evidence; on this run it yielded none.

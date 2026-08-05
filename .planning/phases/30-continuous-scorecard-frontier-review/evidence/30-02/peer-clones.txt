@@ -1,0 +1,36 @@
+=== 30-02 peer clone resolution, 2026-07-28T17:49:21Z ===
+Both clones are DISPOSABLE directories created from a read-only bundle of Sean's
+reference checkouts. Nothing was ever written into those checkouts.
+
+--- hermes ---
+hermes EXPECTED_PIN=dbe734beff0caf5e8ee2acbe4277db7f6cf84a21
+hermes CLONE_HEAD=dbe734beff0caf5e8ee2acbe4277db7f6cf84a21
+hermes PIN_MATCH=YES
+
+--- openclaw ---
+openclaw EXPECTED_PIN=11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc
+openclaw CLONE_HEAD=11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc
+openclaw PIN_MATCH=YES
+
+=== base-URL override MEASURED at the pinned commit, not assumed from HEAD ===
+--- hermes: OPENAI_BASE_URL in the agent's own provider path
+HEAD:agent/auxiliary_client.py:163:# Module-level flag: only warn once per process about stale OPENAI_BASE_URL.
+HEAD:agent/auxiliary_client.py:1933:    This covers both env-driven OPENAI_BASE_URL setups and config-saved custom
+HEAD:agent/auxiliary_client.py:1946:        openai_base = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+HEAD:agent/auxiliary_client.py:3599:    # ── Warn once if OPENAI_BASE_URL is set but config.yaml uses a named
+--- hermes: HERMES_BASE_URL anywhere in the agent / CLI entry paths
+hermes HERMES_BASE_URL_HITS_IN_AGENT_PATHS=0
+(0 hits REFUTES the 30-02 plan's claim that Hermes uses HERMES_BASE_URL.)
+--- hermes: version at the pin
+version = "0.17.0"
+--- openclaw: OPENAI_BASE_URL in the openai extension
+HEAD:extensions/openai/base-url.ts:10:  return normalizeOptionalString(env.OPENAI_BASE_URL) ?? OPENAI_API_BASE_URL;
+--- openclaw: version at the pin
+  "version": "2026.6.2",
+
+=== openclaw provisioning + build, from its OWN pnpm lockfile at the pin ===
+Done in 21.4s using pnpm v11.2.2
+[build-all] phase timings: total 243.4s; slowest tsdown 176.8s; write-plugin-sdk-entry-dts 44.6s; write-cli-startup-metadata 6.11s; build:plugin-sdk:dts 6.02s; ui:build 4.82s; plugins:assets:build 3.11s; runtime-postbuild 683ms; plugins:assets:copy 413ms; check-plugin-sdk-exports 280ms; check-cli-bootstrap-imports 212ms; write-cli-compat 74ms; write-build-info 64ms; copy-export-html-templates 63ms; copy-hook-metadata 58ms; build-stamp 35ms; runtime-postbuild-stamp 33ms
+
+=== df -h /root after ===
+/dev/md2        1.8T  974G  692G  59% /

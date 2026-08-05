@@ -1,0 +1,22 @@
+=== all edit_on / delete_on occurrences workspace-wide ===
+crates/wcore-channels/tests/framework_matrix.rs:416:    let e = mgr.edit_on("plain", "c1", "m1", "new").await.unwrap_err();
+crates/wcore-channels/tests/framework_matrix.rs:421:    let e = mgr.delete_on("plain", "c1", "m1").await.unwrap_err();
+crates/wcore-channels/tests/framework_matrix.rs:441:    let r = mgr.edit_on("real", "c1", "m1", "corrected").await.unwrap();
+crates/wcore-channels/tests/framework_matrix.rs:443:    mgr.delete_on("real", "c1", "m1").await.unwrap();
+crates/wcore-channels/src/manager.rs:504:    pub async fn edit_on(
+crates/wcore-channels/src/manager.rs:522:    /// [`Self::edit_on`].
+crates/wcore-channels/src/manager.rs:523:    pub async fn delete_on(
+crates/wcore-channels/src/manager.rs:882:    /// Read this BEFORE calling [`Self::edit_on`] / [`Self::delete_on`] when the
+crates/wcore-channels-registry/tests/native_action_matrix.rs:265:        let edit = mgr.edit_on(&name, "conv-1", "msg-1", "new text").await;
+crates/wcore-channels-registry/tests/native_action_matrix.rs:270:        let del = mgr.delete_on(&name, "conv-1", "msg-1").await;
+(end-target)
+
+=== KNOWN-POSITIVE in the same query shape: react_on (a manager method WITH a production caller) ===
+crates/wcore-agent/src/channel_inbound.rs:520:            .react_on(channel_name, &msg.conversation_id, &msg.id, "👀")
+crates/wcore-agent/src/channel_inbound.rs:553:            .react_on(channel_name, &msg.conversation_id, &msg.id, emoji)
+crates/wcore-channels/tests/framework_matrix.rs:423:    let e = mgr.react_on("plain", "c1", "m1", "👀").await.unwrap_err();
+crates/wcore-channels/src/manager.rs:801:    pub async fn react_on(
+crates/wcore-channels/src/manager.rs:818:    /// Mirrors [`Self::react_on`]. Unknown channel → `Config` error;
+crates/wcore-channels/src/manager.rs:821:    /// NOTE (concurrency): like `react_on`/`send_typing_to`, this holds the
+crates/wcore-channels-registry/tests/native_action_matrix.rs:275:        let react = mgr.react_on(&name, "conv-1", "msg-1", "👀").await;
+(end-control)

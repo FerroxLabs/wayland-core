@@ -1,0 +1,85 @@
+### 27-C2(c) three policy baselines — macOS leg
+host:   Seans-MacBook-Pro.local
+uname:  Darwin Seans-MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+sw_vers: 26.3 build 25D125
+HEAD:   0675c051623dadb2c66b7ae250b4edbdc16fc3fb
+branch: lane/macos-legs
+date:   2026-07-31T01:11:41Z
+rustc:  rustc 1.95.0 (59807616e 2026-04-14)
+
+=== INSTRUMENT LIVENESS — --list on each binary ===
+--- target/debug/deps/downloads_root_baseline_test-ce9c468fb1fbc7e1
+baseline_default_root_is_fail_closed_pair: test
+baseline_downloads_root_confinement_both_directions: test
+
+2 tests, 0 benchmarks
+LISTED_TESTS=2
+
+--- target/debug/deps/process_count_reaper_baseline_test-bb87cef0d1bbd120
+baseline_process_count_against_real_camoufox_sidecar: test
+baseline_process_count_before_during_after: test
+baseline_reaper_one_interval_both_directions: test
+ps_instrument_is_live: test
+
+4 tests, 0 benchmarks
+LISTED_TESTS=4
+
+--- target/debug/deps/approval_gate_baseline_test-25583ae04a0507a4
+baseline_approval_gate_blocks_dispatch: test
+
+1 test, 0 benchmarks
+LISTED_TESTS=1
+
+=== BASELINE 1 — downloads-root confinement ===
+
+running 2 tests
+test baseline_default_root_is_fail_closed_pair ... EV1-DEFAULTROOT: out_of_root_refused=true out_of_root_provider_ops=0 in_root_admitted=true in_root_provider_ops=1 in_root_landed=true
+ok
+test baseline_downloads_root_confinement_both_directions ... EV1: arm=A-in-root refused=false provider_ops=1 landed_inside_root=true
+EV1: arm=B1-absolute refused=true provider_ops=0 file_created=false
+EV1: arm=B2-traversal refused=true provider_ops=0 file_created=false
+EV1: arm=B3-dotfile refused=true provider_ops=0 file_created=false
+EV1: arm=B4-symlink refused=true provider_ops=0 file_created=false
+EV1: arm=C-naive-prefix-check lexically_in_root=true really_in_root=false naive_check_verdict=ADMIT real_gate_verdict=REFUSE
+EV1: arm=D-discrimination same_path_refused_under_root_A=true same_path_admitted_under_root_B=true provider_ops=1 landed=true
+EV1-SUMMARY: escape_shapes_tested=4 escape_shapes_refused=4 provider_ops_on_refusal=0 files_landed_outside_root=0 in_root_admitted=1 in_root_landed=1 discrimination_control=PASS
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+BASELINE1_RC=0
+
+=== BASELINE 3 — browser process count + reaper ===
+
+running 4 tests
+test baseline_process_count_against_real_camoufox_sidecar ... ignored, needs a real camofox-browser at $WAYLAND_CAMOUFOX_BIN; run with -- --ignored
+test baseline_process_count_before_during_after ... EV3A: phase=before tracked_sessions=0 sidecar_pid=none tree_size=0
+EV3A: phase=during tracked_sessions=1 sidecar_pid=49593 pid_alive=true tree_size=1 health=2xx
+EV3A: phase=after tracked_sessions=0 pid_alive=false tree_size=0 returned_to_baseline=true
+EV3A-SUMMARY: before_tracked=0 before_tree=0 during_tracked=1 during_tree=1 after_tracked=0 after_tree=0 leaked_processes=0
+ok
+test baseline_reaper_one_interval_both_directions ... EV3B: arm=orphan parent=dead reaper_interval_ms=200 child_alive_before=true child_alive_after=false tracked_sessions_after=0 PASS
+EV3B: arm=live-parent-control parent=alive waited_ms=2000 child_alive_after=true tracked_sessions_after=1 PASS
+EV3B-SUMMARY: arms=2 orphan_reaped_within_one_interval=true live_parent_child_survived=true discrimination=PASS
+ok
+test ps_instrument_is_live ... EV3-INSTRUMENT: ps_rows=815 self_pid=49592 self_ppid=49401 self_comm=process_count_reaper_baseline_test-bb87cef0d1bbd120 alive_self=true alive_impossible=false discrimination=PASS
+ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.87s
+
+BASELINE3_RC=0
+
+=== BASELINE 2 — CUA approval gate (default features) ===
+
+running 1 test
+test baseline_approval_gate_blocks_dispatch ... EV2A: arm=withheld outcome=PolicySuspended backend_dispatches=0
+EV2A: arm=granted outcome=Ok backend_dispatches=1
+EV2A: arm=first_time_before outcome=PolicySuspended backend_dispatches=0 arm=first_time_after outcome=Ok backend_dispatches=1
+EV2A-SUMMARY: arms=4 withheld_suspended=2 withheld_backend_dispatches=0 granted_ok=2 granted_backend_dispatches=2 discrimination=PASS
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+BASELINE2_RC=0
+
+DONE 2026-07-31T01:11:46Z

@@ -1,0 +1,36 @@
+### THE LEDGER'S EXACT MEASUREMENT, re-run on the macOS binary at 7c610798
+--- needle: gateway  (the ledger measured 0) ---
+1
+--- KNOWN-POSITIVE control, needle: acp (must be non-zero if the instrument is alive) ---
+1
+--- KNOWN-POSITIVE control 2, needle: cron ---
+1
+--- KNOWN-NEGATIVE control, needle: zzznotarealsubcommand (must be 0) ---
+0
+--- the matching help line, verbatim ---
+  acp              v0.7.0 1.A.10: ACP server + client surface. `acp serve` binds the HTTP/SSE transport; `acp request` drives a one-shot session/message round-trip
+  cron             v0.8.1 U7: manage scheduled cron jobs (add / list / remove / enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner spawned at session boot picks up changes on its next tick
+  gateway          F24-B: the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes
+### DOES THE SUBCOMMAND ACTUALLY RUN (help text is not execution) ###
+F24-B: the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes
+
+Usage: wayland-core gateway <COMMAND>
+
+Commands:
+  install         Register the gateway as a per-user native service for this platform
+  uninstall       Remove the native service registration
+  start           Start the registered gateway through the platform's service manager
+  stop            Stop it through the platform's service manager
+  restart         Stop then start. A stop refusal because nothing was running is not an error here — restarting a stopped gateway is a start
+  status          Report what the gateway is doing
+  abandoned       List the deliveries this gateway GAVE UP on, and why
+  ack             Record that you have reviewed an abandoned delivery and dealt with it
+  resend          Send an abandoned delivery again, through the channel it was bound for
+  support-bundle  Collect redacted health, log and configuration evidence a support engineer can act on, into a directory you can read before you send it
+  drain           Close admission, finish in-flight work within a budget, and exit
+  run             The long-lived runtime itself. This is what every generated service unit invokes; it is not normally typed by an operator
+  help            Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+gateway_help_rc=0

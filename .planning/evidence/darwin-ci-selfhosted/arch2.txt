@@ -1,0 +1,40 @@
+=== cfg(target_arch = ...) ATTRIBUTES (the thing an Intel build could uniquely catch) ===
+exit=1
+=== KNOWN-POSITIVE CONTROL: cfg(target_os = ...) attributes ===
+crates/wcore-acp/src/auth.rs:1
+crates/wcore-skills/src/watcher_tests.rs:1
+crates/wcore-eval-scenarios/bin/wcore-eval-fixture.rs:4
+crates/wcore-eval-scenarios/tests/runner_contracts.rs:9
+crates/wcore-eval-scenarios/tests/packaged_driver_gate.rs:1
+crates/wcore-eval-scenarios/src/process_tree.rs:16
+crates/wcore-eval-scenarios/src/runner.rs:2
+crates/wcore-eval-scenarios/src/scenario.rs:3
+=== control total files ===
+      64
+=== self_update.rs arch mapping context ===
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    fetch_latest_release_from_url(&url).await
+}
+
+// ---------------------------------------------------------------------
+// Host artifact mapping
+// ---------------------------------------------------------------------
+
+/// Map `(target_os, target_arch)` → the Rust target triple used in release
+/// artifact names. Matches the build matrix in `.github/workflows/release.yml`.
+pub fn target_triple_for(os: &str, arch: &str) -> String {
+    match (os, arch) {
+        ("macos", "aarch64") => "aarch64-apple-darwin".into(),
+        ("macos", "x86_64") => "x86_64-apple-darwin".into(),
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu".into(),
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu".into(),
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc".into(),
+        ("windows", "aarch64") => "aarch64-pc-windows-msvc".into(),
+        (o, a) => format!("{a}-unknown-{o}"),
+    }
+}
+
+/// Release archive filename for the host, e.g.
+/// `wayland-core-v0.11.0-aarch64-apple-darwin.tar.gz`. Windows targets ship a
+/// `.zip`; every other target ships `.tar.gz` (see release.yml packaging).
+pub fn archive_name_for_host(version: &str) -> String {

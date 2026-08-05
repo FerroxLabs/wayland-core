@@ -1,0 +1,52 @@
+F29-02-LIVE-CHECK-ONLY — the real check-only run, no credential of any kind
+==========================================================================
+Commit:    3658c4281fe228af1f700a56a42e662d3d6a9c7c
+Platform:  hetzner-dsm, Linux x86_64
+Binary:    /root/wayland-29-03/target/release/wayland-core (cargo build --release --locked -p wcore-cli)
+Endpoint:  https://api.github.com/repos/FerroxLabs/wayland-core/releases/latest (real, public)
+
+Exact invocation. GH_TOKEN and GITHUB_TOKEN are explicitly UNSET and HOME and
+WAYLAND_HOME point at a throwaway directory, so no ambient configuration and no
+credential can leak in:
+
+    rm -rf /tmp/throwaway-29-03; mkdir -p /tmp/throwaway-29-03
+    env -u GH_TOKEN -u GITHUB_TOKEN \
+        HOME=/tmp/throwaway-29-03 WAYLAND_HOME=/tmp/throwaway-29-03 \
+        ./target/release/wayland-core self-update --check-only
+
+VERBATIM OUTPUT
+---------------
+current: v0.12.25
+latest:  v0.12.25
+manifest: UNAVAILABLE — the bundled release trust root is a placeholder and is refused: it holds no keys. Replace RELEASE_TRUST_ROOT_JSON in crates/wcore-cli/src/update_trust.rs with the real FerroxLabs release trust root before release-manifest verification can work.
+already up to date.
+
+exit status: 0
+
+WHAT THIS ESTABLISHES, AND WHAT IT DOES NOT
+-------------------------------------------
+- The shipped binary reaches the real public release API unauthenticated and
+  prints both operands of the version comparison verbatim.
+- The bundled release trust root is REPORTED to the user, in the shipped
+  binary, as a refused placeholder that names exactly what must be replaced.
+  This is live leg two, captured in the same run.
+- The running version equals the published latest, so this run takes the
+  equality branch and returns cleanly. It does NOT exercise the install branch
+  — see live-downgrade.txt, which does.
+- Nothing was written under WAYLAND_HOME: `ls -la /tmp/throwaway-29-03` after
+  the run showed only `.` and `..`. A check-only run persists no state, which
+  is the high-water mark's advance rule observed rather than asserted.
+
+FLAG NOTE — a defect in this plan's own gate
+--------------------------------------------
+The plan's Task 3 remote gate specifies `wayland-core self-update --check`.
+That flag does not exist; the shipped flag is `--check-only`. Measured:
+
+    $ ./target/release/wayland-core self-update --check
+    error: unexpected argument '--check' found
+      tip: a similar argument exists: '--check-only'
+    rc=2
+
+The gate as written would have gone RED for a reason unrelated to anything it
+was testing. It was run with the correct flag and the discrepancy is recorded
+here rather than silently corrected.

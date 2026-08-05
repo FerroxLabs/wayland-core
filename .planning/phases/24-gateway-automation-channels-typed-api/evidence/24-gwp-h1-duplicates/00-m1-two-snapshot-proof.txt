@@ -1,0 +1,15 @@
+windows-receipt-attempt3.json
+  counts        : {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+  cov arrived   : 24  unique: 12
+  started/fin   : 2026-07-30T02:15:55.696Z 2026-07-30T02:19:04.611Z
+  reconcile ts  : None
+FINAL-windows-receipt.json
+  counts        : {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+  cov arrived   : 12  unique: 12
+  started/fin   : 2026-07-30T02:25:32.295Z 2026-07-30T02:28:03.487Z
+  reconcile ts  : None
+FINAL-macos-receipt.json
+  counts        : {'submitted': 12, 'arrived': 12, 'unique': 12, 'duplicates': 0, 'losses': 0}
+  cov arrived   : 12  unique: 12
+  started/fin   : 2026-07-30T02:27:06.030Z 2026-07-30T02:28:17.957Z
+  reconcile ts  : None

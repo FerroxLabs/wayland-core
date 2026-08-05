@@ -3,10 +3,59 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::tools::AdvertisedCapabilitiesConfig;
-use wcore_protocol::events::{Capabilities, ErrorInfo, FinishReason, ProtocolEvent, Usage};
+use wcore_protocol::events::{
+    Capabilities, ErrorInfo, FinishReason, ProtocolEvent, SessionPersistence, Usage,
+};
+use wcore_protocol::execution_policy::ExecutionPolicySnapshot;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 use super::OutputSink;
+
+/// Classify a `ready` frame's `session_id` for the host.
+///
+/// The two inputs are exactly the two facts that decide the answer, and both
+/// are unambiguous at the emission site:
+///
+/// * `Engine::current_session_id()` is `Some` iff a `SessionManager` exists,
+///   which is iff `config.session.enabled` (`engine.rs:3154`/`:3396`), so a
+///   `Some` really is a journaled session.
+/// * [`wcore_config::config::replay_protection_unavailable`] is the flag config
+///   resolution sets when this host cannot seal a prepared provider request —
+///   no usable OS keyring, no unlocked credentials vault.
+///
+/// # Both inputs changed meaning, and the second one flipped
+///
+/// The second input used to be `durable_sessions_disabled_by_host()`, and a
+/// `true` there meant `session_id` was `None` *because of* the host. That
+/// coupling is gone: a keyless host now journals, so `session.enabled == false`
+/// has exactly ONE cause left — the operator — and the host fact has become
+/// orthogonal to whether a session exists at all.
+///
+/// Which is why `(Some(_), _) => Durable` had to be split. It was correct while
+/// a keyless host had no session; it is an over-claim now that it has one,
+/// because `durable` is what a host reads to decide whether to WAIT for
+/// auto-recovery. `(None, true)` is correspondingly unreachable — sessions off
+/// short-circuits the availability probe before it can set the flag — so
+/// `DisabledByHost` is no longer produced here at all. It survives on the type
+/// as a decode-only legacy value; see its docs.
+///
+/// Split out from the emitter so the mapping is provable without standing up a
+/// keyring-less host: the degraded frame is the one no developer ever runs by
+/// hand, so it is the one a wrong mapping ships in.
+fn session_persistence_for(
+    session_id: Option<&str>,
+    replay_protection_unavailable: bool,
+) -> SessionPersistence {
+    match (session_id, replay_protection_unavailable) {
+        (Some(_), false) => SessionPersistence::Durable,
+        (Some(_), true) => SessionPersistence::JournaledWithoutReplay,
+        // No session id means the operator asked for none. It is deliberately
+        // NOT conditioned on the host flag: a host that cannot seal no longer
+        // takes the journal away, so attributing this to the host would send an
+        // operator hunting for a keyring to restore a journal they switched off.
+        (None, _) => SessionPersistence::DisabledByOperator,
+    }
+}
 
 /// Wave SC SECURITY MAJOR fix — shared set of active approval-bridge
 /// correlation ids. The bridge updates this set on every `request` /
@@ -152,6 +201,70 @@ impl PluginCapabilitySet {
             computer_use: verified("wayland-cua"),
         }
     }
+
+    /// 27-C2(b) — advertise on liveness, not on linkage.
+    ///
+    /// [`Self::from_verified`] answers "is the plugin present and genuine?".
+    /// That is a necessary condition for the capability, not a sufficient one:
+    /// on a headless host `browser_suite` read `true`, the desktop app rendered
+    /// the capability, and the first operation died with
+    /// `spawn camoufox: No such file or directory`. The host was shown a
+    /// capability that could not work.
+    ///
+    /// This runs the backend crates' own probes on top and **can only clear a
+    /// flag, never set one** — the identity guarantee `from_verified` provides
+    /// is preserved intact, because a `false` can never become `true` here.
+    ///
+    /// The probes narrow only on positive proof that every compiled-in backend
+    /// is unable to start; anything undecidable without launching a backend
+    /// keeps the capability (`*Liveness::Indeterminate`). Under-advertising a
+    /// working capability is the same defect as over-advertising a broken one.
+    ///
+    /// **Wire compatibility.** Nothing in `wcore-protocol` changes: same field,
+    /// same type, same value domain, and `false` is already the value a host
+    /// sees when the plugin is absent. The `schema_digest` cannot observe this,
+    /// so no `CONTRACT_MINOR` bump and no manifest regeneration is implied.
+    /// Confirmed 3-of-3 by cross-audit panel; see
+    /// `.planning/FALSE-ADVERTISING-SUMMARY.md`.
+    ///
+    /// Each narrowing is logged at WARN with the probe's reason and remedy. A
+    /// recorded panel dissent held that silently dropping a capability replaces
+    /// an actionable runtime error with an un-debuggable missing feature; the
+    /// log is how that objection is honoured without keeping the false claim.
+    pub async fn narrowed_to_live(self) -> Self {
+        let mut out = self;
+
+        if out.browser_suite {
+            let probe = wcore_browser::liveness::probe(
+                wcore_browser::backends::CamoufoxBackend::default_url(),
+            )
+            .await;
+            if let Some(u) = probe.unavailable() {
+                tracing::warn!(
+                    capability = "browser_suite",
+                    reason = %u.reason,
+                    remedy = %u.remedy,
+                    "not advertising browser_suite: the plugin is loaded but no backend can start"
+                );
+                out.browser_suite = false;
+            }
+        }
+
+        if out.computer_use {
+            let probe = wcore_cua::liveness::probe();
+            if let Some(u) = probe.unavailable() {
+                tracing::warn!(
+                    capability = "computer_use",
+                    reason = %u.reason,
+                    remedy = %u.remedy,
+                    "not advertising computer_use: the plugin is loaded but no backend can start"
+                );
+                out.computer_use = false;
+            }
+        }
+
+        out
+    }
 }
 
 /// JSON stream protocol output sink
@@ -195,6 +308,9 @@ pub struct ProtocolSink {
     /// arrives; the value persists until the next update so in-turn info
     /// events (slash output, engine progress notes) carry a valid id.
     current_msg_id: Arc<RwLock<String>>,
+    /// Core session identity advertised to the host and reused by producer
+    /// contracts such as Anvil receipts.
+    session_id: Arc<RwLock<Option<String>>>,
 }
 
 impl ProtocolSink {
@@ -210,7 +326,22 @@ impl ProtocolSink {
             user_model_backend: std::sync::OnceLock::new(),
             token_redactor: ActiveTokenRedactor::new(),
             current_msg_id: Arc::new(RwLock::new(String::new())),
+            session_id: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Emit a turn-scoped error when the caller still owns the protocol
+    /// command's correlation id (for example, before the engine starts).
+    pub fn emit_correlated_error(&self, msg_id: &str, msg: &str, retryable: bool) {
+        let code = auth_error_code(msg).unwrap_or("engine_error");
+        let _ = self.writer.emit(&ProtocolEvent::Error {
+            msg_id: Some(msg_id.to_string()),
+            error: ErrorInfo {
+                code: code.to_string(),
+                message: msg.to_string(),
+                retryable,
+            },
+        });
     }
 
     /// F-079: update the active turn msg_id so subsequent `emit_info`
@@ -358,9 +489,41 @@ impl ProtocolSink {
         plugin_caps: &PluginCapabilitySet,
         advertised: &AdvertisedCapabilitiesConfig,
     ) {
+        self.emit_ready_with_plugins_and_policy(
+            compat,
+            has_mcp,
+            session_id,
+            current_mode,
+            has_plugins,
+            plugin_caps,
+            advertised,
+            None,
+        );
+    }
+
+    /// Contract-aware Ready emission. The optional snapshot keeps the legacy
+    /// helper byte-compatible while allowing the Desktop JSON-stream producer
+    /// to publish revision zero before accepting any turn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_ready_with_plugins_and_policy(
+        &self,
+        compat: &ProviderCompat,
+        has_mcp: bool,
+        session_id: Option<String>,
+        current_mode: &str,
+        has_plugins: bool,
+        plugin_caps: &PluginCapabilitySet,
+        advertised: &AdvertisedCapabilitiesConfig,
+        execution_policy: Option<ExecutionPolicySnapshot>,
+    ) {
+        let session_persistence = session_persistence_for(
+            session_id.as_deref(),
+            wcore_config::config::replay_protection_unavailable(),
+        );
         let _ = self.writer.emit(&ProtocolEvent::Ready {
             version: env!("CARGO_PKG_VERSION").to_string(),
             session_id,
+            session_persistence,
             capabilities: self.build_capabilities_with_plugins(
                 compat,
                 has_mcp,
@@ -369,6 +532,8 @@ impl ProtocolSink {
                 plugin_caps,
                 advertised,
             ),
+            contract: Some(wcore_protocol::contract::producer_contract_descriptor()),
+            execution_policy,
         });
     }
 
@@ -492,6 +657,29 @@ impl ProtocolSink {
 }
 
 impl OutputSink for ProtocolSink {
+    fn bind_session_id(&self, session_id: &str) {
+        *self.session_id.write() = Some(session_id.to_string());
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        self.session_id.read().clone()
+    }
+
+    fn emit_anvil_receipt(&self, receipt: &wcore_protocol::anvil::AnvilReceipt) {
+        let _ = self.writer.emit(&ProtocolEvent::AnvilReceipt {
+            receipt: receipt.clone(),
+        });
+    }
+
+    fn emit_anvil_receipt_invalidation(
+        &self,
+        invalidation: &wcore_protocol::anvil::AnvilReceiptInvalidation,
+    ) {
+        let _ = self.writer.emit(&ProtocolEvent::AnvilReceiptInvalidated {
+            invalidation: invalidation.clone(),
+        });
+    }
+
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
         let _ = self.writer.emit(&ProtocolEvent::TextDelta {
             text: text.to_string(),
@@ -783,6 +971,49 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_provider_failover_receipt(&self, receipt: serde_json::Value) {
+        let _ = self
+            .writer
+            .emit(&ProtocolEvent::ProviderFailoverReceipt { receipt });
+    }
+
+    fn emit_provider_attempt(&self, failure: Option<&str>) {
+        let _ = self.writer.emit(&ProtocolEvent::ProviderAttempt {
+            failure: failure.map(String::from),
+        });
+    }
+
+    fn emit_provider_retry(&self, failure: Option<&str>) {
+        let _ = self.writer.emit(&ProtocolEvent::ProviderRetry {
+            failure: failure.map(String::from),
+        });
+    }
+
+    fn emit_provider_failure(&self, failure: &str) {
+        let _ = self.writer.emit(&ProtocolEvent::ProviderFailure {
+            failure: failure.to_string(),
+        });
+    }
+
+    fn emit_midflight_monitor_decision(
+        &self,
+        directive: wcore_protocol::events::MonitorDirective,
+        reason: wcore_protocol::events::MonitorReason,
+    ) {
+        let _ = self
+            .writer
+            .emit(&ProtocolEvent::MidFlightMonitorDecision { directive, reason });
+    }
+
+    fn emit_capability_activation(
+        &self,
+        activation: &wcore_protocol::events::CapabilityActivation,
+    ) {
+        let _ = self.writer.emit(&ProtocolEvent::CapabilityActivation {
+            activation: activation.clone(),
+        });
+    }
+
     /// W8a A.7: emit `ProtocolEvent::BudgetExceeded` unconditionally.
     /// No capability flag (audit F5 — host-tolerated additive variant);
     /// fires once per session when the first ExecutionBudget cap trips.
@@ -891,6 +1122,29 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_correlated_sub_agent_event(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &serde_json::Value,
+        correlation: &wcore_protocol::events::WorkflowChildCorrelation,
+    ) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::CorrelatedSubAgentEvent {
+            parent_call_id: parent_call_id.to_string(),
+            agent_name: agent_name.to_string(),
+            inner: inner.clone(),
+            run_id: correlation.run_id.clone(),
+            child_run_id: correlation.child_run_id.clone(),
+            parent_child_run_id: correlation.parent_child_run_id.clone(),
+            child_sequence: correlation.child_sequence,
+            event_id: correlation.event_id.clone(),
+            terminal_state: correlation.terminal_state,
+        });
+    }
+
     /// ForgeFlows-Live: emit `ProtocolEvent::WorkflowStarted` when the sink
     /// was configured with `with_sub_agent_traces(true)`. Shares the
     /// `sub_agent_traces` gate with `emit_sub_agent_event` so hosts that
@@ -906,6 +1160,36 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_correlated_workflow_started(&self, event: &wcore_protocol::events::WorkflowRunStarted) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::CorrelatedWorkflowStarted {
+            workflow_id: event.workflow_id.clone(),
+            name: event.name.clone(),
+            node_count: event.node_count,
+            run_id: event.run_id.clone(),
+            event_id: event.event_id.clone(),
+            sequence: event.sequence,
+            parent_run_id: event.parent_run_id.clone(),
+        });
+    }
+
+    fn emit_workflow_node_event(&self, event: &wcore_protocol::events::WorkflowNodeLifecycle) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::WorkflowNodeEvent {
+            run_id: event.run_id.clone(),
+            node_id: event.node_id.clone(),
+            child_run_id: event.child_run_id.clone(),
+            event_id: event.event_id.clone(),
+            sequence: event.sequence,
+            state: event.state,
+            failure: event.failure.clone(),
+        });
+    }
+
     /// ForgeFlows-Live: emit `ProtocolEvent::WorkflowFinished` under the
     /// same `sub_agent_traces` gate as `emit_workflow_started`.
     fn emit_workflow_finished(&self, workflow_id: &str, succeeded: bool) {
@@ -916,6 +1200,28 @@ impl OutputSink for ProtocolSink {
             workflow_id: workflow_id.to_string(),
             succeeded,
         });
+    }
+
+    fn emit_correlated_workflow_finished(
+        &self,
+        event: &wcore_protocol::events::WorkflowRunFinished,
+    ) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let succeeded =
+            event.terminal_state == wcore_protocol::events::WorkflowTerminalState::Succeeded;
+        let _ = self
+            .writer
+            .emit(&ProtocolEvent::CorrelatedWorkflowFinished {
+                workflow_id: event.workflow_id.clone(),
+                succeeded,
+                run_id: event.run_id.clone(),
+                event_id: event.event_id.clone(),
+                sequence: event.sequence,
+                terminal_state: event.terminal_state,
+                failure: event.failure.clone(),
+            });
     }
 
     /// W6 F7. Emits `ProtocolEvent::SessionCost` when
@@ -976,6 +1282,80 @@ fn message_carries_status(msg: &str, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole mapping, including the arm nobody can reach on a developer
+    /// machine.
+    ///
+    /// A host with no OS keyring and no unlocked vault is the only way to reach
+    /// the replay-degraded arms, so on any laptop with a working keychain they
+    /// are unreachable and a wrong mapping there would ship green. Pinning all
+    /// four input combinations is the only way they are ever exercised off a
+    /// keyring-less server.
+    ///
+    /// The load-bearing row is `(Some, true)`. It used to assert `Durable`,
+    /// with a comment arguing that a live session is durable whatever the host
+    /// flag says. That was true while a keyless host had NO session — the row
+    /// only described a stale process-global. It is exactly the reachable
+    /// production state now, and calling it `durable` tells a host to wait for
+    /// an auto-recovery that will never come.
+    #[test]
+    fn session_persistence_names_what_the_host_can_and_cannot_do() {
+        assert_eq!(
+            session_persistence_for(Some("sess-1"), false),
+            SessionPersistence::Durable
+        );
+        assert_eq!(
+            session_persistence_for(Some("sess-1"), true),
+            SessionPersistence::JournaledWithoutReplay,
+            "a journaled session with no sealed request is not `durable`: a host \
+             reading `durable` waits for an auto-recovery this session cannot do"
+        );
+        assert_eq!(
+            session_persistence_for(None, false),
+            SessionPersistence::DisabledByOperator
+        );
+        // No session id means the operator asked for none — even on a keyless
+        // host. Attributing it to the host would send them hunting for a
+        // keyring to restore a journal they switched off themselves.
+        assert_eq!(
+            session_persistence_for(None, true),
+            SessionPersistence::DisabledByOperator
+        );
+    }
+
+    /// `disabled_by_host` must be UNPRODUCIBLE and still DECODABLE.
+    ///
+    /// Two halves that pull in opposite directions, so both are asserted here:
+    /// no input to the mapping may yield it (a keyless host journals now, so
+    /// emitting it would describe a state this Core cannot be in), and the wire
+    /// value must still round-trip, because an older Core sends it and a host
+    /// may have stored it against a session it is still tracking.
+    ///
+    /// Deleting the variant would satisfy the first half and silently break the
+    /// second — which is why removing a value we once published is not the same
+    /// operation as ceasing to send it.
+    #[test]
+    fn disabled_by_host_is_no_longer_produced_but_is_still_decodable() {
+        for session_id in [None, Some("sess-1")] {
+            for replay_unavailable in [false, true] {
+                assert_ne!(
+                    session_persistence_for(session_id, replay_unavailable),
+                    SessionPersistence::DisabledByHost,
+                    "this Core emitted a value it can no longer be in the state of: \
+                     session_id={session_id:?} replay_unavailable={replay_unavailable}"
+                );
+            }
+        }
+
+        let decoded: SessionPersistence = serde_json::from_str("\"disabled_by_host\"")
+            .expect("an older Core's value must decode");
+        assert_eq!(decoded, SessionPersistence::DisabledByHost);
+        assert_eq!(
+            serde_json::to_value(SessionPersistence::JournaledWithoutReplay).unwrap(),
+            serde_json::json!("journaled_without_replay"),
+            "the new value's wire spelling is a published contract"
+        );
+    }
 
     /// W7 F2-3.2: a default-built ProtocolSink (no builder methods called)
     /// must NOT advertise sub_agent_traces. This is the W0 byte-identity

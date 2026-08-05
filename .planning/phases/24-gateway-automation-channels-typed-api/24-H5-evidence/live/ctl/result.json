@@ -1,0 +1,112 @@
+{
+  "verdict": "PASS",
+  "exit_code": 0,
+  "legs_total": 6,
+  "legs_failed": 0,
+  "arrivals_total": 2,
+  "arrivals_journal_bytes": 540,
+  "turns_total": 2,
+  "turns_journal_bytes": 578,
+  "baseline_arrivals": 1,
+  "instrument_fault": false,
+  "instrument_faults": [],
+  "webhook_host_bound": true,
+  "observed_postures": {
+    "f24finone": {
+      "posture": "Conversational",
+      "tier": "same-line",
+      "sightings": 1
+    },
+    "f24fintwo": {
+      "posture": null,
+      "tier": "absent",
+      "sightings": 0
+    },
+    "f24finthree": {
+      "posture": "Workspace",
+      "tier": "same-line",
+      "sightings": 1
+    }
+  },
+  "legs": [
+    {
+      "clause": "health",
+      "leg": "refuses-with-no-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24h5-ev/ctl/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayland-"
+    },
+    {
+      "clause": "gateway",
+      "leg": "webhook-host-bound",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "bound 127.0.0.1:18899"
+    },
+    {
+      "clause": "gateway",
+      "leg": "inbound-arrives-post-fixes",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finone-d04e21e4 accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1"
+    },
+    {
+      "clause": "health",
+      "leg": "reports-running-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 3,
+      "control_ok": true,
+      "detail": "configured=3 registered=3 registration_error=none per_adapter=[f24finone:healthy,f24finthree:healthy,f24fintwo:healthy] reason_contract_held=true"
+    },
+    {
+      "clause": "lifecycle-control",
+      "leg": "same-config-admitted-when-present-at-startup",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finthree-ceb2fecb accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2. PASS here + FAIL in the reload run isolates the defect to the RELOAD PATH. FAIL here would mean the config is at fault and there is NO product defect."
+    },
+    {
+      "clause": "lifecycle-control",
+      "leg": "startup-posture-observed",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "posture=Workspace tier=same-line sightings=1. null here is an INSTRUMENT problem (no dispatch line), not a product finding."
+    }
+  ],
+  "clauses_addressed": [
+    "health",
+    "reconnect-reload"
+  ],
+  "clauses_NOT_addressed": [
+    "media",
+    "native-actions"
+  ],
+  "notes": [
+    "[clauses] 2026-07-29T02:49:55.689Z run dir /root/f24h5-ev/ctl",
+    "[clauses] 2026-07-29T02:49:55.694Z fixtures spawned: sink=18898 llm=18897 (separate OS processes)",
+    "[clauses] 2026-07-29T02:49:57.695Z CONTROL MODE --all-at-start: 3 channels on disk BEFORE start; reload legs skipped",
+    "[clauses] 2026-07-29T02:49:57.747Z LEG health/refuses-with-no-gateway PASS assertion=true control=n/a :: rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24h5-ev/ctl/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayland-",
+    "[clauses] 2026-07-29T02:49:57.750Z gateway run started (foreground, owned by this driver)",
+    "[clauses] 2026-07-29T02:49:58.843Z webhook host bound after 1s",
+    "[clauses] 2026-07-29T02:49:58.843Z LEG gateway/webhook-host-bound PASS assertion=true control=n/a :: bound 127.0.0.1:18899",
+    "[clauses] 2026-07-29T02:49:58.900Z submit f24finone token=f24c3-fin-f24finone-d04e21e4 url=http://127.0.0.1:18899/webhooks/f24finone http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T02:50:01.902Z journal bytes: arrivals=268 turns=286 (an empty journal and an absent journal both read as 0 records)",
+    "[clauses] 2026-07-29T02:50:01.902Z LEG gateway/inbound-arrives-post-fixes PASS assertion=true control=1 :: token=f24c3-fin-f24finone-d04e21e4 accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1",
+    "[clauses] 2026-07-29T02:50:01.983Z LEG health/reports-running-gateway PASS assertion=true control=3 :: configured=3 registered=3 registration_error=none per_adapter=[f24finone:healthy,f24finthree:healthy,f24fintwo:healthy] reason_contract_held=true",
+    "[clauses] 2026-07-29T02:50:02.037Z submit f24finthree token=f24c3-fin-f24finthree-ceb2fecb url=http://127.0.0.1:18899/webhooks/f24finthree http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T02:50:05.039Z LEG lifecycle-control/same-config-admitted-when-present-at-startup PASS assertion=true control=1 :: token=f24c3-fin-f24finthree-ceb2fecb accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2. PASS here + FAIL in the reload run isolates the defect to the RELOAD PATH. FAIL here would mean the config is at fault and there is NO product defect.",
+    "[clauses] 2026-07-29T02:50:05.040Z LEG lifecycle-control/startup-posture-observed PASS assertion=true control=1 :: posture=Workspace tier=same-line sightings=1. null here is an INSTRUMENT problem (no dispatch line), not a product finding.",
+    "[clauses] 2026-07-29T02:50:05.040Z posture baseline written to /root/f24h5-ev/posture-baseline.json: {\"posture\":\"Workspace\",\"tier\":\"same-line\",\"sightings\":1}"
+  ]
+}

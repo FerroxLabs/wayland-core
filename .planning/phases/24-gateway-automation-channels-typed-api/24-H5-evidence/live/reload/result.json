@@ -1,0 +1,165 @@
+{
+  "verdict": "PASS",
+  "exit_code": 0,
+  "legs_total": 11,
+  "legs_failed": 0,
+  "arrivals_total": 3,
+  "arrivals_journal_bytes": 808,
+  "turns_total": 3,
+  "turns_journal_bytes": 864,
+  "baseline_arrivals": 1,
+  "instrument_fault": false,
+  "instrument_faults": [],
+  "webhook_host_bound": true,
+  "observed_postures": {
+    "f24finone": {
+      "posture": "Conversational",
+      "tier": "same-line",
+      "sightings": 2
+    },
+    "f24fintwo": {
+      "posture": null,
+      "tier": "absent",
+      "sightings": 0
+    },
+    "f24finthree": {
+      "posture": "Workspace",
+      "tier": "same-line",
+      "sightings": 1
+    }
+  },
+  "legs": [
+    {
+      "clause": "health",
+      "leg": "refuses-with-no-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24h5-ev/reload/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayla"
+    },
+    {
+      "clause": "gateway",
+      "leg": "webhook-host-bound",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "bound 127.0.0.1:18899"
+    },
+    {
+      "clause": "gateway",
+      "leg": "inbound-arrives-post-fixes",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finone-3cd3d929 accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1"
+    },
+    {
+      "clause": "health",
+      "leg": "reports-running-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 2,
+      "control_ok": true,
+      "detail": "configured=2 registered=2 registration_error=none per_adapter=[f24finone:healthy,f24fintwo:healthy] reason_contract_held=true"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "new-config-not-picked-up-without-reload",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "registered=2 (want 2 — the third is on disk but unannounced)"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reload-registers-the-new-adapter",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 3,
+      "control_ok": true,
+      "detail": "reload_rc=0 registered_before=2 registered_after=3 registration_error=none"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reloaded-adapter-actually-carries-inbound",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finthree-56dd3746 accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2 after=3000ms"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reloaded-adapter-runs-under-its-configured-posture",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "observed_posture=Workspace want=Workspace tier=same-line sightings=1. The config says tools=\"workspace\"; the dispatcher fallback is Conversational, so \"Conversational\" here means the policy was refreshed and the POSTURE was not — the half-fix. \"null\" means no turn was dispatched at all (an instrument or arrival problem)."
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reloaded-posture-equals-startup-posture",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "reload=Workspace startup=Workspace (from /root/f24h5-ev/posture-baseline.json). The same config through two lifecycles must resolve to the same permission."
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reloaded-adapter-still-denies-a-non-allowlisted-sender",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "intruder_token=f24c3-fin-f24finthree-2ec6b843 accepted=true http=200 denials_seen=1 log_slice_bytes=144 arrivals_before=2 arrivals_after=2. The denial is SIGHTED in the gateway log, so this leg cannot pass on a dead pipe."
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "unchanged-adapter-survives-the-reload",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finone-ee9c972e accepted=true http=200 tier=exact arrivals_before=2 arrivals_after=3"
+    }
+  ],
+  "clauses_addressed": [
+    "health",
+    "reconnect-reload"
+  ],
+  "clauses_NOT_addressed": [
+    "media",
+    "native-actions"
+  ],
+  "notes": [
+    "[clauses] 2026-07-29T02:50:29.470Z run dir /root/f24h5-ev/reload",
+    "[clauses] 2026-07-29T02:50:29.474Z fixtures spawned: sink=18898 llm=18897 (separate OS processes)",
+    "[clauses] 2026-07-29T02:50:31.476Z base config: 2 channels on disk, 1 held back for the reload leg",
+    "[clauses] 2026-07-29T02:50:31.530Z LEG health/refuses-with-no-gateway PASS assertion=true control=n/a :: rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24h5-ev/reload/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayla",
+    "[clauses] 2026-07-29T02:50:31.533Z gateway run started (foreground, owned by this driver)",
+    "[clauses] 2026-07-29T02:50:32.625Z webhook host bound after 1s",
+    "[clauses] 2026-07-29T02:50:32.625Z LEG gateway/webhook-host-bound PASS assertion=true control=n/a :: bound 127.0.0.1:18899",
+    "[clauses] 2026-07-29T02:50:32.678Z submit f24finone token=f24c3-fin-f24finone-3cd3d929 url=http://127.0.0.1:18899/webhooks/f24finone http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T02:50:35.680Z journal bytes: arrivals=268 turns=286 (an empty journal and an absent journal both read as 0 records)",
+    "[clauses] 2026-07-29T02:50:35.680Z LEG gateway/inbound-arrives-post-fixes PASS assertion=true control=1 :: token=f24c3-fin-f24finone-3cd3d929 accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1",
+    "[clauses] 2026-07-29T02:50:35.764Z LEG health/reports-running-gateway PASS assertion=true control=2 :: configured=2 registered=2 registration_error=none per_adapter=[f24finone:healthy,f24fintwo:healthy] reason_contract_held=true",
+    "[clauses] 2026-07-29T02:50:35.764Z third channel written to disk; gateway NOT yet told",
+    "[clauses] 2026-07-29T02:50:40.844Z LEG reconnect-reload/new-config-not-picked-up-without-reload PASS assertion=true control=n/a :: registered=2 (want 2 — the third is on disk but unannounced)",
+    "[clauses] 2026-07-29T02:50:40.925Z channel reload rc=0 out=reload requested; gateway pid 612388 will re-read /root/f24h5-ev/reload/home/channels ",
+    "[clauses] 2026-07-29T02:50:53.007Z LEG reconnect-reload/reload-registers-the-new-adapter PASS assertion=true control=3 :: reload_rc=0 registered_before=2 registered_after=3 registration_error=none",
+    "[clauses] 2026-07-29T02:50:53.063Z submit f24finthree token=f24c3-fin-f24finthree-56dd3746 url=http://127.0.0.1:18899/webhooks/f24finthree http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T02:50:56.065Z LEG reconnect-reload/reloaded-adapter-actually-carries-inbound PASS assertion=true control=1 :: token=f24c3-fin-f24finthree-56dd3746 accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2 after=3000ms",
+    "[clauses] 2026-07-29T02:50:56.065Z LEG reconnect-reload/reloaded-adapter-runs-under-its-configured-posture PASS assertion=true control=1 :: observed_posture=Workspace want=Workspace tier=same-line sightings=1. The config says tools=\"workspace\"; the dispatcher fallback is Conversational, so \"Conversational\" here means the policy was refreshed and the POSTURE was not — the half-fix. \"null\" means no turn was dispatched at all (an instrument or arrival problem).",
+    "[clauses] 2026-07-29T02:50:56.066Z LEG reconnect-reload/reloaded-posture-equals-startup-posture PASS assertion=true control=1 :: reload=Workspace startup=Workspace (from /root/f24h5-ev/posture-baseline.json). The same config through two lifecycles must resolve to the same permission.",
+    "[clauses] 2026-07-29T02:50:56.121Z submit f24finthree token=f24c3-fin-f24finthree-2ec6b843 url=http://127.0.0.1:18899/webhooks/f24finthree http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T02:51:11.122Z LEG reconnect-reload/reloaded-adapter-still-denies-a-non-allowlisted-sender PASS assertion=true control=1 :: intruder_token=f24c3-fin-f24finthree-2ec6b843 accepted=true http=200 denials_seen=1 log_slice_bytes=144 arrivals_before=2 arrivals_after=2. The denial is SIGHTED in the gateway log, so this leg cannot pass on a dead pipe.",
+    "[clauses] 2026-07-29T02:51:11.176Z submit f24finone token=f24c3-fin-f24finone-ee9c972e url=http://127.0.0.1:18899/webhooks/f24finone http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T02:51:14.177Z LEG reconnect-reload/unchanged-adapter-survives-the-reload PASS assertion=true control=1 :: token=f24c3-fin-f24finone-ee9c972e accepted=true http=200 tier=exact arrivals_before=2 arrivals_after=3"
+  ]
+}

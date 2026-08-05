@@ -1,0 +1,41 @@
+waiting for mock: iteration 1
+=== 0. the binary is alive (guards every later capture) ===
+UM_LIVE=PASS  binary reports its version (found 'wayland-core')
+=== 1. /usermodel exists and reports honestly when nothing is corrected ===
+UM_LIVE_RC=0 session=um-empty sid=c3ce1fee0001
+UM_LIVE=PASS  /usermodel reports an empty correction set as empty, not as a blank list (found 'corrected nothing')
+=== 2. a turn reaches the mock, and the nonce is NOT there yet ===
+UM_LIVE_RC=0 session=turn-before sid=c3ce1fee0002
+UM_LIVE=PASS  outbound body carries THIS turn's user message (not a stale capture) (found 'summarise the deployment plan')
+UM_LIVE=PASS  the captured body is the request the PRODUCT built (provider read-back, brief 3b-ii) (found 'claude-mock')
+UM_LIVE=PASS  the correction nonce is absent BEFORE any correction is made ('QK7UM3LIVE' absent from a proven-non-empty capture)
+=== 3. correct the user model through the shipped slash surface ===
+UM_LIVE_RC=0 session=um-correct sid=c3ce1fee0003
+UM_LIVE=PASS  /usermodel correct echoes what it stored (found 'QK7UM3LIVE')
+UM_LIVE=PASS  /usermodel correct says WHEN it takes effect rather than implying it is already live (found 'next session')
+=== 4. the correction SURVIVES process exit (a different process sees it) ===
+UM_LIVE_RC=0 session=um-show sid=c3ce1fee0004
+UM_LIVE=PASS  a NEW process reads back the correction written by a previous one (found 'QK7UM3LIVE')
+UM_LIVE=PASS  /usermodel show states that corrections override what was inferred (found 'override')
+=== 5. THE WIRE CLAIM: the correction reaches the provider request body ===
+UM_LIVE_RC=0 session=turn-after sid=c3ce1fee0005
+UM_LIVE=PASS  post-correction outbound body carries THIS turn's user message (found 'summarise the deployment plan')
+UM_LIVE=PASS  THE USER'S CORRECTION IS IN THE OUTBOUND PROVIDER REQUEST BODY (found 'QK7UM3LIVE')
+UM_LIVE=PASS  the correction is framed to the model as authoritative, not as one more signal (found 'Corrected by the user')
+=== 6. forgetting a correction removes it from the wire ===
+UM_LIVE_RC=0 session=um-forget sid=c3ce1fee0006
+UM_LIVE=PASS  /usermodel forget reports what it removed (found 'dropped style')
+UM_LIVE_RC=0 session=turn-forgotten sid=c3ce1fee0007
+UM_LIVE=PASS  post-forget outbound body carries THIS turn's user message (found 'summarise the deployment plan')
+UM_LIVE=PASS  the forgotten correction is GONE from the outbound provider request body ('QK7UM3LIVE' absent from a proven-non-empty capture)
+=== 7. forget refuses out loud for a key that is not there ===
+UM_LIVE_RC=0 session=um-forget-miss sid=c3ce1fee0008
+UM_LIVE=PASS  a forget miss is reported as a miss, never as success (found 'nothing removed')
+=== 8. /memory nudge is GONE, and the removal is not a dead binary ===
+UM_LIVE_RC=0 session=act-show sid=c3ce1fee0009
+UM_LIVE=PASS  KNOWN-POSITIVE: /memory still dispatches its real sub-actions (found 'automatic recall')
+UM_LIVE_RC=0 session=nudge-gone sid=c3ce1fee000a
+UM_LIVE=PASS  /memory nudge no longer exists (paired with the known-positive above) (found 'unknown sub-action')
+UM_LIVE=PASS  the nudge bound is no longer advertised anywhere in /memory ('cap 3 per session' absent from a proven-non-empty capture)
+UM_LIVE_TOTALS pass=19 fail=0 total=19 expected=19
+UM_LIVE_RESULT=GREEN 19/19

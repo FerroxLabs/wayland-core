@@ -1,0 +1,24 @@
+DISPLAY=:100
+--- t0 ---
+X=640
+Y=512
+SCREEN=0
+WINDOW=543
+--- mousemove --sync 300 200 ---
+rc=0
+X=640
+Y=512
+SCREEN=0
+WINDOW=543
+--- mousemove_relative --sync 50 50 ---
+rc=0
+X=640
+Y=512
+SCREEN=0
+WINDOW=543
+--- xdotool click 1 ---
+rc=0
+X=640
+Y=512
+SCREEN=0
+WINDOW=543

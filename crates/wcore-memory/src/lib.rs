@@ -15,6 +15,7 @@ pub mod store;
 pub mod types;
 
 // ----- v2 surface (W5) -----
+pub mod activation;
 pub mod api;
 pub mod audit;
 pub mod auto_memorize;
@@ -31,6 +32,7 @@ pub mod memory;
 pub mod null;
 pub mod partition;
 pub mod propagation;
+pub mod provenance;
 pub mod retrieve;
 pub mod schema;
 pub mod staleness;
@@ -38,6 +40,7 @@ pub mod tier;
 pub mod v2_prompt;
 pub mod v2_types;
 
+pub use activation::{ActivatedItem, ActivationLog, RecallActivation};
 pub use api::MemoryApi;
 pub use contradiction::{
     ContradictionCandidate, ContradictionResolution, ContradictionResolver, ResolutionResult,
@@ -45,6 +48,11 @@ pub use contradiction::{
 pub use memory::Memory;
 pub use null::NullMemory;
 pub use propagation::MemoryLineage;
+pub use provenance::{
+    ExclusionCause, MemoryControls, NudgeBudget, NudgeRefusal, RecallExclusion, RecallModality,
+    RecallProvenance, RecallReport,
+};
+pub use staleness::StalenessVerdict;
 pub use v2_types::AccessToken;
 
 /// Test-only constructor: returns a fully-wired in-memory `Memory`

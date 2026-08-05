@@ -1,0 +1,47 @@
+=== INSTRUMENT CONTROL: validator must be able to REJECT and ACCEPT ===
+  known-negative (missing 'a'): errors=1  (expect >0)
+  known-positive ({'a':1}):     errors=0  (expect 0)
+
+=== C5: full corpus sweep against core-event.schema.json ===
+  corpus event files: 52
+  REJECTED by core-event.schema.json:      1
+    goal_snapshot.json: 1 error(s) schemaPath=[['oneOf']]
+  REJECTED by producer-complete.schema.json: 1
+    goal_snapshot.json: 1 error(s) schemaPath=[['anyOf']]
+
+=== C5 root cause isolation ===
+  core-event.schema.json top-level oneOf branches: 53
+  producer-complete.schema.json top-level anyOf branches: 77
+  core-event branches with type=goal_snapshot: [50]
+  producer-complete branches with type=goal_snapshot: [73]
+  core-event.oneOf[50] vs goal_snapshot.json: 2 error(s)
+      instancePath=/goal/tasks/0 schemaPath=['properties', 'goal', 'properties', 'tasks', 'items', 'oneOf']
+      instancePath=/goal/tasks/1 schemaPath=['properties', 'goal', 'properties', 'tasks', 'items', 'oneOf']
+
+=== C5: the tasks/items oneOf itself ===
+  core-event[50] required=['type', 'goal_version', 'session_id', 'goal_id', 'cursor', 'state_digest', 'goal']
+  core-event[50] tasks/items.oneOf branch count: 2
+      branch[0] title=None required=None additionalProperties=True propkeys=['attempts', 'dependency_releases', 'epoch', 'idempotency_key', 'last_transition_seq', 'outcome', 'status', 'task_id']
+      branch[1] title=None required=None additionalProperties=True propkeys=['attempts', 'dependency_releases', 'depends_on', 'epoch', 'idempotency_key', 'last_transition_seq', 'status', 'task_id']
+      probe {} matches branches [0, 1] -> oneOf VIOLATED
+      probe task[0] id=None matches branches [0, 1] -> oneOf VIOLATED
+      probe task[1] id=None matches branches [0, 1] -> oneOf VIOLATED
+  producer-complete[73] required=['type', 'goal_version', 'session_id', 'goal_id', 'cursor', 'state_digest', 'goal']
+  producer-complete[73] tasks/items.oneOf branch count: 2
+      branch[0] title=None required=None additionalProperties=True propkeys=['attempts', 'dependency_releases', 'epoch', 'idempotency_key', 'last_transition_seq', 'outcome', 'status', 'task_id']
+      branch[1] title=None required=None additionalProperties=True propkeys=['attempts', 'dependency_releases', 'depends_on', 'epoch', 'idempotency_key', 'last_transition_seq', 'status', 'task_id']
+      probe {} matches branches [0, 1] -> oneOf VIOLATED
+      probe task[0] id=None matches branches [0, 1] -> oneOf VIOLATED
+      probe task[1] id=None matches branches [0, 1] -> oneOf VIOLATED
+
+=== C3: duplicate discriminators ===
+  core-event: 52 distinct discriminators, duplicates={"sub_agent_event": [26, 27]}
+  producer-complete: 82 distinct discriminators, duplicates={"approval_resume": [4, 59], "sub_agent_event": [49, 50]}
+
+=== C4: workspace_policy presence ===
+  manifest.json events: 52
+  'workspace_policy' in manifest events: False
+  'execution_policy' in manifest events (CONTROL): True
+  'workspace_policy' in core-event.schema.json: False
+  'execution_policy' in core-event.schema.json (CONTROL): True
+  producer-complete.anyOf[76] title='Non-Desktop producer inventory discriminator' contains workspace_policy; enum=['grant_workspace_capability', 'workspace_policy', 'capability_activation', 'provider_attempt', 'provider_retry', 'provider_failure', 'mid_flight_monitor_decision', 'compact_offload']

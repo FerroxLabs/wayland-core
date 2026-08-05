@@ -1,0 +1,51 @@
+{
+  "schema": "wayland.phase30.verdict",
+  "schema_version": 1,
+  "source_sha": "b8556eb7c2190754595637ea10c1120c3d8dc339",
+  "criteria": [
+    {
+      "id": "CRIT-01",
+      "statement": "Every surface has versioned activation, operator-completeness, maturity, security-owner, evidence, and peer-delta truth refreshed at each phase.",
+      "grade": "NOT_MET",
+      "evidence": [
+        { "id": "SURFACE-TRUTHS", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/surface-truths.tsv" }, "measurement": "proven" },
+        { "id": "OPERATOR-COMPLETENESS-148-OF-148", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/surface-truths.tsv" }, "measurement": "unproven" },
+        { "id": "PEER-DELTA-148-OF-148", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-01/surface-truths.tsv" }, "measurement": "unproven" },
+        { "id": "SURFACE-INVENTORY", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-01-SURFACE-INVENTORY.md" }, "measurement": "proven" }
+      ]
+    },
+    {
+      "id": "CRIT-02",
+      "statement": "Wayland, Hermes, and OpenClaw complete common correctness, recovery, security, cost, and cognitive-tax trials with pinned baselines and confidence bounds.",
+      "grade": "NOT_MET",
+      "evidence": [
+        { "id": "LEGS", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv" }, "measurement": "proven" },
+        { "id": "TRIAL-RESULTS", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-02-TRIAL-RESULTS.md" }, "measurement": "proven" },
+        { "id": "SECURITY-DIMENSION-0-OF-3", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv" }, "measurement": "unproven" },
+        { "id": "COGNITIVE-TAX-DIMENSION-0-OF-3", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv" }, "measurement": "unproven" }
+      ]
+    },
+    {
+      "id": "CRIT-03",
+      "statement": "Published claims and limitations match raw redacted evidence and contain no unsupported superiority language.",
+      "grade": "MET_WITH_STATED_EXCEPTIONS",
+      "evidence": [
+        { "id": "CLAIMS-ALLOWED", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-03-CLAIMS-ALLOWED.md" }, "measurement": "proven" },
+        { "id": "CLAIMS-PROHIBITED", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-03-CLAIMS-PROHIBITED.md" }, "measurement": "proven" },
+        { "id": "LIMITATIONS", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-03-LIMITATIONS.md" }, "measurement": "proven" },
+        { "id": "ATTACK-CORPUS", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-03/attack-corpus.tsv" }, "measurement": "proven" }
+      ]
+    },
+    {
+      "id": "CRIT-04",
+      "statement": "No main merge, issue closure, release, deployment, or frontier positioning occurs without Sean's explicit approval.",
+      "grade": "PARTIAL",
+      "evidence": [
+        { "id": "AUTHORITY-PROOF", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/30-04-AUTHORITY-PROOF.md" }, "measurement": "proven" },
+        { "id": "AUTHORITY-AUDIT", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-04/authority-audit.tsv" }, "measurement": "proven" },
+        { "id": "ISSUE-CLOSURE-RELEASE-DEPLOYMENT-UNOBSERVABLE", "locator": { "kind": "path", "path": ".planning/phases/30-continuous-scorecard-frontier-review/evidence/30-04/captures/auth-08-09-not-observable.txt" }, "measurement": "unproven" }
+      ]
+    }
+  ],
+  "surfaces": []
+}

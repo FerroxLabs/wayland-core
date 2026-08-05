@@ -1,0 +1,9 @@
+=== A: no credential (the state probe 9 grades RED) ===
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/h/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+{"type":"error","error":{"code":"init_failed","message":"Engine failed to start during init: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).\nProvider 'anthropic' requires an API key. To use a LOCAL model with Ollama, select a model id prefixed with `ollama:` (e.g. `ollama:qwen3-coder:30b`) — no API key is needed. Otherwise add a key via onboarding or set ANTHROPIC_API_KEY / OPENAI_API_KEY.","retryable":false}}
+Error: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).
+=== B: dummy credential present (constructed PASS state) ===
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /tmp/h/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+[2m2026-07-30T01:55:44.413095Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m36
+[2m2026-07-30T01:55:44.436477Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+rc=0

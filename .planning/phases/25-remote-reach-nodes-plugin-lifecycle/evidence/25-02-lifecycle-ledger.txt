@@ -1,0 +1,18 @@
+F25-SC3-VERB-NEW: PASS host=hetzner-dsm exit=0 state=scaffolded evidence=25-02-verb-new.txt
+F25-SC3-VERB-TEST: PASS host=hetzner-dsm exit=0 state=cargo-test-exit-0 evidence=25-02-verb-test.txt
+F25-SC3-VERB-VERIFY: PASS host=hetzner-dsm exit=0 state=verified-exit-0 evidence=25-02-verb-verify.txt
+F25-SC3-VERB-SIGN: PASS host=hetzner-dsm exit=0 state=signature-64-bytes-beside-entry evidence=25-02-verb-sign.txt
+F25-SC3-VERB-PUBLISH: PASS host=hetzner-dsm exit=0 state=bundle-and-catalog-written evidence=25-02-verb-publish.txt
+F25-SC3-NEG-TAMPERED-REFUSED: PASS host=hetzner-dsm evidence=25-02-neg-tampered.txt
+F25-SC3-VERB-INSTALL: PASS host=hetzner-dsm exit=0 state=install-dir-and-generation-ledger-written evidence=25-02-verb-install.txt
+F25-SC3-VERB-INSPECT: PASS host=hetzner-dsm exit=0 state=reports-refused-while-unapproved evidence=25-02-verb-inspect.txt
+F25-SC3-NEG-UNAPPROVED-REFUSED: PASS host=hetzner-dsm evidence=25-02-neg-unapproved.txt
+F25-SC3-VERB-APPROVE: PASS host=hetzner-dsm exit=0 state=approval-record-bound-to-digest evidence=25-02-verb-approve.txt
+F25-SC3-NEG-APPROVED-LOADS: PASS host=hetzner-dsm evidence=25-02-pos-approved.txt
+F25-SC3-VERB-UPDATE: PASS host=hetzner-dsm exit=0 state=live-digest-changed-prior-generation-retained evidence=25-02-verb-update.txt
+F25-SC3-VERB-ROLLBACK: PASS host=hetzner-dsm exit=0 state=restored-digest-equals-pre-update-digest evidence=25-02-verb-rollback.txt
+F25-SC3-NEG-ROLLBACK-DIGEST-EQUAL: PASS host=hetzner-dsm evidence=25-02-verb-rollback.txt
+F25-SC3-VERB-RECOVER: PASS host=hetzner-dsm exit=0 state=install-dir-restored-and-staging-swept evidence=25-02-verb-recover.txt
+F25-SC3-NEG-RECOVER-REPAIRED: PASS host=hetzner-dsm evidence=25-02-verb-recover.txt
+F25-SC3-VERB-REMOVE: PASS host=hetzner-dsm exit=0 state=install-dir-and-approval-gone evidence=25-02-verb-remove.txt
+F25-SC3-WINDOWS: PASS host=SeanDesktop evidence=25-02-lifecycle-windows.log reason=full-twelve-verb-drive-ran-see-25-02-lifecycle-windows-ledger.txt

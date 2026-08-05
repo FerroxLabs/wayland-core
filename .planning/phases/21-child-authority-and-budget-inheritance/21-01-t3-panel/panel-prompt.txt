@@ -1,0 +1,252 @@
+BUNDLE-ID=3d80f14662c3df9bd63aeb7ecffc144fe643a553
+
+You are one of four independent reviewers on a cross-audit panel. You are being given
+exactly the same bytes as the other three. Answer on the evidence below. Do not ask
+for more information; decide with what is here.
+
+================================================================================
+THE QUESTION
+================================================================================
+
+Does broad Phase 21 execution proceed now, proceed under a named scope limit, or
+hold until the admission controls close?
+
+Phase 21 of the Wayland Core project is "Child Authority and Budget Inheritance".
+Its goal: every delegated actor stays inside the parent's authority and resource
+envelope. Its Success Criteria: (1) a child cannot widen any provider, tool,
+filesystem, egress, secret, approval, depth, fan-out, time, token or cost
+restriction; (2) nested reservation, refund, escalation, approval, cancellation and
+result delivery stay attributable to the correct parent/session; (3) standalone and
+host-protocol hostile corpora prove equivalent enforcement.
+
+The phase has exactly FOUR plans and the count is capped: 21-01 (this one: admission
+gate + authority census), 21-02 (dual-surface hostile corpus), 21-03 (triage +
+authorized repair), 21-04 (attribution + phase verdict). Plan 21-01 is complete
+except for this decision. The decision governs whether 21-02, 21-03 and 21-04 run.
+
+ROADMAP.md line 83 states the admission prerequisite verbatim:
+
+  "**Admission prerequisite**: before broad Phase 21 execution - (CTRL-02 / D1) the
+  linked Desktop plan and consumer/reducer conformance harness are pinned to the
+  exact Core producer contract, AND (CTRL-01) the Competitive Capability Ledger has
+  pinned exact Hermes + OpenClaw baselines with F03/F05 evidence mapped."
+
+================================================================================
+THE THREE OPTIONS - copied verbatim from the plan, presented in rotated order.
+There is no fourth option. Pick exactly one id.
+================================================================================
+
+OPTION id=hold
+  name: Hold - one or both controls NOT-OPEN and the phase waits
+  pros: Honors ROADMAP.md:83 exactly; the census still ships and is the input the
+        moment the gate opens, so the wait costs nothing already done; avoids
+        building a host-protocol corpus against a contract that is not yet pinned
+  cons: Phase 21 stalls behind work owned elsewhere; phases 22 and 23 are serial
+        behind 21, so the stall propagates
+
+OPTION id=proceed-broad
+  name: Proceed with broad execution - both controls verified OPEN
+  pros: The gate's stated condition is met, so 21-02, 21-03 and 21-04 run under
+        their own termination criteria with no extra constraint; the phase completes
+        on its own Success Criteria
+  cons: Available ONLY if Task 1 returned OPEN for both CTRL-01 and CTRL-02; a single
+        NOT-OPEN verdict removes this option, and selecting it anyway is bypassing
+        the gate rather than passing it
+
+OPTION id=proceed-scope-limited
+  name: Proceed under a named scope limit - one or both controls NOT-OPEN, but
+        specific downstream work is authorized anyway
+  pros: The corpus and harness in 21-02 are largely independent of the Desktop
+        consumer contract, so building and running them can proceed while CTRL-02
+        closes elsewhere; keeps the phase moving without pretending the gate is open
+  cons: Requires naming EXACTLY which downstream plans may proceed and which may
+        not, and that limit is binding on every one of them; the risk is that a
+        corpus built before the producer contract is pinned encodes a contract that
+        later changes, so any protocol-surface case may need re-proving
+
+================================================================================
+TASK 1 - THE ADMISSION GATE, READ AT EXECUTION TIME FROM THE REAL ARTIFACTS
+================================================================================
+
+GATE-VERDICT :: CTRL-01 :: OPEN :: .planning/intel/COMPETITIVE-LEDGER.md
+GATE-VERDICT :: CTRL-02 :: NOT-OPEN :: .planning/intel/DESKTOP-PROTOCOL-CHECKPOINT.md
+
+Evidence for CTRL-01 = OPEN, quoted from COMPETITIVE-LEDGER.md (last commit
+d06a60513e1b41507ae41a7513e892ddb6cf6fc6, 2026-07-26):
+  - "Both peer baselines are **PINNED** as of 2026-07-26" - Hermes Agent 0.17.0 at
+    dbe734beff0caf5e8ee2acbe4277db7f6cf84a21 (pin source: git show
+    dbe734be:pyproject.toml line 10) and OpenClaw 2026.6.2 at
+    11a0ad10e91a50d5a0e636494eea4d7ad3eaf9fc (pin source: git show
+    11a0ad10:package.json line 3). Zero UNPINNED.
+  - "**Status: CLOSED for admission purposes - with two carried limitations, neither
+    of which is a missing external input.**" The file discharges each of its own
+    seven close-condition clauses in a table where every cell reads MET.
+  - An "F03/F05 retroactive evidence map" section maps F03-RECEIPT@1c644ccd to the
+    AUTH-* and SUPPLY-* families and maps all EIGHT F05 audited capability
+    identities to ledger rows, including honest negatives.
+  Two carried limitations, both self-labelled "tracked, not blocking": the
+  delegate_isolation F05 identity has not been re-gated after Phase 20; every delta
+  is static-source rather than runtime-measured (owner Phase 30 by design).
+
+Evidence for CTRL-02 = NOT-OPEN, quoted from DESKTOP-PROTOCOL-CHECKPOINT.md (last
+commit 738977ee1f3e84a121855f4a98c874576c18abb7, 2026-07-23):
+  - "Before Phase 21 broad execution, publish a linked Desktop plan and host
+    conformance suite consuming a pinned clean Core producer. Record protocol
+    version, fixture/schema digests, generator version, EffectiveExecutionPolicy
+    semantics, lifecycle/correlation/ordering/duplicate/terminal/failure behavior,
+    and ownership boundaries. Issue coordination is not completion."
+
+CTRL-02 IS ASYMMETRIC AND THAT ASYMMETRY IS THE WHOLE DECISION:
+  (a) CORE half - DISCHARGED. .planning/intel/D1-CORE-PRODUCER-CONTRACT.md publishes
+      the producer contract pinned at SHA b6936299d9c3a7d3110e9ba03c36e5debe965b85,
+      with three digest_named_bytes digests, and records an observed
+      "302 tests run: 302 passed, 0 skipped" for wcore-protocol at that SHA on the
+      authoritative Linux host. Its own header: "Status: the CORE half of D1 is
+      complete. D1 itself is NOT complete."
+  (b) DESKTOP half - NOT DISCHARGED. Section 9 of that document lists eleven items
+      the Desktop lane must still supply and closes: "Until items 1-2 exist with a
+      green run, D1 is not complete." Items 1-2 are the linked Desktop plan and the
+      real consumer/reducer conformance suite.
+
+PRECISE UNMET CLAUSE: the pinning TARGET exists and is exact (SHA b6936299, three
+digests, published). The pinned PARTY does not: no linked Desktop plan referencing
+that SHA, and no consumer/reducer conformance harness replaying the serialized
+corpus through the real Desktop reducer.
+
+THE DESKTOP HALF LIVES IN A DIFFERENT REPOSITORY (Wayland Desktop) AND CANNOT BE
+CLOSED FROM THIS ONE. It is not reserved to any human approver; it is simply not
+reachable from this checkout. Waiting on it from here is a decision to stall
+indefinitely, not a decision to be careful.
+
+================================================================================
+THE CLAUSE YOU MUST ENGAGE EXPLICITLY - do not pass over it
+================================================================================
+
+DESKTOP-PROTOCOL-CHECKPOINT.md - the file that DEFINES the CTRL-02/D1 obligation -
+ends with this sentence. It was re-read at execution time and confirmed to still be
+the file's last sentence:
+
+  "Both receipts are required for a whole-Wayland claim; neither blocks Core-only
+  engine claims outside the shared contract."
+
+Your answer MUST engage this sentence directly. It is the checkpoint document's own
+statement about the scope of the gate it creates. Phase 21 is a Core-side enforcement
+phase about child authority inheritance inside the engine. State whether you read
+Phase 21 as a "Core-only engine claim outside the shared contract", as a claim
+inside the shared contract, or as partly both - and let that reading drive your pick.
+An answer that does not address this sentence is not responsive.
+
+================================================================================
+TASK 2 - THE AUTHORITY CENSUS (what Phase 21 would actually be proving)
+================================================================================
+
+Eleven dimensions, five seams. Verdict vocabulary: ENFORCED (a mechanism runs on a
+production path and refuses widening), VACUOUS (no child-request channel exists, so
+the property holds by absence not enforcement), UNREACHABLE (mechanism exists but no
+production path invokes it), ABSENT (no mechanism for the property).
+
+  provider    VACUOUS    severity HIGH
+  tool        ABSENT     severity HIGH
+  filesystem  ENFORCED   -
+  egress      ENFORCED   -
+  secret      ENFORCED   -
+  approval    VACUOUS    severity HIGH
+  depth       ENFORCED   -
+  fan-out     ENFORCED   -
+  time        ENFORCED   -
+  token       ENFORCED   -
+  cost        ENFORCED   -
+
+The four HIGH findings, all of which the amended phase rules say must be fixed or
+disproved with executable evidence (MEDIUM and below go to backlog and do not block):
+
+  HIGH-1  Tool authority is a REPLACEMENT, not an intersection, and the request
+          channel is LLM-DRIVEN. The Delegate tool's JSON input schema advertises a
+          model-fillable "toolsets" array; it flows verbatim into
+          ForkOverrides.allowed_tools; build_tool_registry grants exactly what was
+          named from a fixed 6-tool array (Read/Write/Edit/Bash/Grep/Glob) and NEVER
+          consults the parent's own registry. A parent restricted to Delegate +
+          Read/Grep/Glob can hand its child Bash. Mitigations that bound the blast
+          radius: empty toolsets defaults to read-only; anything beyond that forces
+          an isolated-mutation worktree; Delegate is not in the child's 6-tool array
+          so a child cannot re-delegate.
+  HIGH-2  No intersection mechanism exists for the provider dimension at all. The
+          property holds today only because no shipped tool schema exposes the field.
+  HIGH-3  PolicyGate is ORPHAN CODE on the agent path. set_policy_gate has ZERO
+          callers in the workspace. Every policy_gate field initialiser in the engine
+          is None. The only production PolicyGate::new is in the "mcp-serve"
+          subcommand. The policy layer that would express parent/child intersection
+          is never consulted by an agent session.
+  HIGH-4  The non-managed branch of with_requested_approvals REPLACES rather than
+          ratchets: a requested Bypass is accepted verbatim. No child can reach it
+          today, but PolicySource::Child already exists as a type (test-only).
+
+Measured, not assumed: intersect_execution_budget has exactly 2 occurrences in the
+whole workspace - its definition and one call on the snapshot-RESTORE path. It is NOT
+the child-spawn primitive. Every production caller of sub_budget passes None; only
+tests pass Some(..). So the budget non-wideability property is carried by ancestor
+ROLLUP, and its request channel is currently absent - which is why the corpus plan
+mandates a NO-CHANNEL canary class that fails if the property is only vacuously true.
+
+RELEVANCE TO THE DECISION: the two dimensions most entangled with the Desktop shared
+contract are approval (EffectiveExecutionPolicy revisions cross the wire) and
+attribution/correlation (plan 21-04). The four HIGH findings are all Core-internal
+seams. Weigh that.
+
+================================================================================
+STEP 1 MEASUREMENT - THE NAMED RISK OF proceed-scope-limited, MEASURED ON REAL
+HARDWARE RATHER THAN ARGUED
+================================================================================
+
+The stated cost of proceed-scope-limited is that "a corpus built before the producer
+contract is pinned encodes a contract that later changes". That has a byte-exact
+answer today. Four legs were run on the authoritative Linux host (hetzner-dsm) in a
+phase-dedicated worktree at the decision commit
+3d80f14662c3df9bd63aeb7ecffc144fe643a553. Each leg's script emitted its own verdict
+line; these are tool output, not an operator's impression:
+
+  CONTRACT-DIGEST RESULT=MATCH RC=0
+  CONTRACT-CHECK RESULT=CURRENT RC=0
+  LIVE-READY RESULT=EMITTED RC=0
+  CORPUS-PIN RESULT=MATCH RC=0
+
+What each leg means:
+  CONTRACT-DIGEST - "cargo run -p wcore-protocol --bin wcore-contract -- digest"
+    printed fixture_digest, schema_digest and source_inputs_digest, and all three
+    equal the values published in D1 section 3. This closes a gap D1 itself records
+    as open: its author states plainly they did NOT run the canonical Rust
+    reproduction (no toolchain on the authoring machine) and reproduced the digests
+    with a throwaway Python script instead. This run is the canonical one.
+  CONTRACT-CHECK - "wcore-contract check" regenerated every artifact in memory and
+    compared byte-for-byte against the checked-in corpus. Exit 0: the corpus is
+    neither stale nor hand-edited.
+  LIVE-READY - the real shipped binary was BUILT AND DRIVEN. wayland-core
+    --json-stream was spawned against a hermetic WAYLAND_HOME and the "ready" event
+    it emitted was parsed. Its contract descriptor reported name
+    wayland-desktop-core, major 1, minor 8, generator wcore-desktop-contract-gen/11,
+    fixture_digest sha256:42f142ab..., schema_digest sha256:e5d1744a...,
+    source_inputs_digest sha256:d8b1a8b5... - identical to both D1 section 3 and the
+    checked-in manifest.json. The running product emits exactly the contract Desktop
+    would pin.
+  CORPUS-PIN - the toolchain-free whole-corpus pin over all 156 files re-derived to
+    a39c13794669e1afca2218ddf3437ba967b4dceb25d9c7e669974358495821e6, matching D1
+    section 3.3 exactly.
+
+MEASURED :: contract-drift :: STABLE
+
+In plain terms: the Core producer contract that a host-protocol corpus would be built
+against is pinned, self-consistent, byte-stable, and confirmed to be what the running
+binary actually emits, at the exact commit this decision is being taken at. The named
+risk of proceed-scope-limited was measured and did not materialise.
+
+================================================================================
+HOW TO ANSWER
+================================================================================
+
+Reason briefly and concretely. Engage the checkpoint's last sentence explicitly.
+Say what you think the strongest argument AGAINST your own pick is.
+
+Then end your response with EXACTLY these two lines and NOTHING after them:
+
+BUNDLE=3d80f14662c3df9bd63aeb7ecffc144fe643a553
+PANEL_POSITION=<one of: proceed-broad, proceed-scope-limited, hold>

@@ -1,0 +1,19 @@
+wayland-core  66.6M
+=== guest uname ===
+aarch64
+=== file header ===
+ 7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00
+ 03 00 b7 00
+=== ldd ===
+/bin-under-test/wayland-core: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found (required by /bin-under-test/wayland-core)
+/bin-under-test/wayland-core: /lib/aarch64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found (required by /bin-under-test/wayland-core)
+	linux-vdso.so.1 (0x0000ffff885b1000)
+	libssl.so.3 => /lib/aarch64-linux-gnu/libssl.so.3 (0x0000ffff84fc0000)
+	libcrypto.so.3 => /lib/aarch64-linux-gnu/libcrypto.so.3 (0x0000ffff84bc0000)
+	libdbus-1.so.3 => not found
+	libseccomp.so.2 => /lib/aarch64-linux-gnu/libseccomp.so.2 (0x0000ffff84b90000)
+	libgcc_s.so.1 => /lib/aarch64-linux-gnu/libgcc_s.so.1 (0x0000ffff84b60000)
+	libm.so.6 => /lib/aarch64-linux-gnu/libm.so.6 (0x0000ffff84ac0000)
+	libc.so.6 => /lib/aarch64-linux-gnu/libc.so.6 (0x0000ffff84910000)
+	/lib/ld-linux-aarch64.so.1 (0x0000ffff88570000)
+rc=0

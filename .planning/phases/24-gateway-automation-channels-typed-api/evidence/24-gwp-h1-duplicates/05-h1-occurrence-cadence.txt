@@ -1,0 +1,13 @@
+=== per body: scheduled_millis of each occurrence, and the delta ===
+f24j-delivery-01  job=2b1290cb  occurrences=2  scheduled_deltas_ms=[110347]
+f24j-delivery-04  job=5b9f212c  occurrences=2  scheduled_deltas_ms=[110249]
+f24j-delivery-07  job=43f00e85  occurrences=2  scheduled_deltas_ms=[124715]
+f24j-delivery-10  job=70d4b6ba  occurrences=2  scheduled_deltas_ms=[124615]
+f24j-heartbeat  job=b4a964fb  occurrences=3  scheduled_deltas_ms=[60068, 64940]
+
+=== the point: do the two occurrences of one body share a delivery id? ===
+f24j-delivery-01 distinct ids = 2 of 2 -> DIFFERENT(new occurrence)
+f24j-delivery-04 distinct ids = 2 of 2 -> DIFFERENT(new occurrence)
+f24j-delivery-07 distinct ids = 2 of 2 -> DIFFERENT(new occurrence)
+f24j-delivery-10 distinct ids = 2 of 2 -> DIFFERENT(new occurrence)
+f24j-heartbeat distinct ids = 3 of 3 -> DIFFERENT(new occurrence)

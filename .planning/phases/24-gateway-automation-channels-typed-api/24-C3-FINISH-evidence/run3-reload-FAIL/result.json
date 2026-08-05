@@ -1,0 +1,117 @@
+{
+  "verdict": "FAIL",
+  "exit_code": 1,
+  "legs_total": 8,
+  "legs_failed": 1,
+  "arrivals_total": 2,
+  "arrivals_journal_bytes": 536,
+  "turns_total": 2,
+  "turns_journal_bytes": 572,
+  "baseline_arrivals": 1,
+  "instrument_fault": false,
+  "instrument_faults": [],
+  "webhook_host_bound": true,
+  "legs": [
+    {
+      "clause": "health",
+      "leg": "refuses-with-no-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24c3fin-run3/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayland"
+    },
+    {
+      "clause": "gateway",
+      "leg": "webhook-host-bound",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "bound 127.0.0.1:18899"
+    },
+    {
+      "clause": "gateway",
+      "leg": "inbound-arrives-post-fixes",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finone-d48f1327 accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1"
+    },
+    {
+      "clause": "health",
+      "leg": "reports-running-gateway",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 2,
+      "control_ok": true,
+      "detail": "configured=2 registered=2 registration_error=none per_adapter=[f24finone:healthy,f24fintwo:healthy] reason_contract_held=true"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "new-config-not-picked-up-without-reload",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": null,
+      "control_ok": null,
+      "detail": "registered=2 (want 2 — the third is on disk but unannounced)"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reload-registers-the-new-adapter",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 3,
+      "control_ok": true,
+      "detail": "reload_rc=0 registered_before=2 registered_after=3 registration_error=none"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "reloaded-adapter-actually-carries-inbound",
+      "pass": false,
+      "assertion_held": false,
+      "positive_control": 0,
+      "control_ok": false,
+      "detail": "token=f24c3-fin-f24finthree-8c1f2b61 accepted=true http=200 tier=absent arrivals_before=1 arrivals_after=1 after=90000ms"
+    },
+    {
+      "clause": "reconnect-reload",
+      "leg": "unchanged-adapter-survives-the-reload",
+      "pass": true,
+      "assertion_held": true,
+      "positive_control": 1,
+      "control_ok": true,
+      "detail": "token=f24c3-fin-f24finone-fdabef9e accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2"
+    }
+  ],
+  "clauses_addressed": [
+    "health",
+    "reconnect-reload"
+  ],
+  "clauses_NOT_addressed": [
+    "media",
+    "native-actions"
+  ],
+  "notes": [
+    "[clauses] 2026-07-29T01:47:03.882Z run dir /root/f24c3fin-run3",
+    "[clauses] 2026-07-29T01:47:03.886Z fixtures spawned: sink=18898 llm=18897 (separate OS processes)",
+    "[clauses] 2026-07-29T01:47:05.887Z base config: 2 channels on disk, 1 held back for the reload leg",
+    "[clauses] 2026-07-29T01:47:05.939Z LEG health/refuses-with-no-gateway PASS assertion=true control=n/a :: rc=1 stdout_bytes=0 stderr=wayland-core channel: no running gateway for /root/f24c3fin-run3/home — channel health is an OBSERVATION and nothing has observed anything. Start one with `wayland-core gateway start`, or use `wayland",
+    "[clauses] 2026-07-29T01:47:05.941Z gateway run started (foreground, owned by this driver)",
+    "[clauses] 2026-07-29T01:47:07.036Z webhook host bound after 1s",
+    "[clauses] 2026-07-29T01:47:07.036Z LEG gateway/webhook-host-bound PASS assertion=true control=n/a :: bound 127.0.0.1:18899",
+    "[clauses] 2026-07-29T01:47:07.091Z submit f24finone token=f24c3-fin-f24finone-d48f1327 url=http://127.0.0.1:18899/webhooks/f24finone http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T01:47:10.092Z journal bytes: arrivals=268 turns=286 (an empty journal and an absent journal both read as 0 records)",
+    "[clauses] 2026-07-29T01:47:10.092Z LEG gateway/inbound-arrives-post-fixes PASS assertion=true control=1 :: token=f24c3-fin-f24finone-d48f1327 accepted=true http=200 tier=exact after=3000ms arrivals=1 turns=1",
+    "[clauses] 2026-07-29T01:47:10.173Z LEG health/reports-running-gateway PASS assertion=true control=2 :: configured=2 registered=2 registration_error=none per_adapter=[f24finone:healthy,f24fintwo:healthy] reason_contract_held=true",
+    "[clauses] 2026-07-29T01:47:10.173Z third channel written to disk; gateway NOT yet told",
+    "[clauses] 2026-07-29T01:47:15.257Z LEG reconnect-reload/new-config-not-picked-up-without-reload PASS assertion=true control=n/a :: registered=2 (want 2 — the third is on disk but unannounced)",
+    "[clauses] 2026-07-29T01:47:15.339Z channel reload rc=0 out=reload requested; gateway pid 3827514 will re-read /root/f24c3fin-run3/home/channels ",
+    "[clauses] 2026-07-29T01:47:27.422Z LEG reconnect-reload/reload-registers-the-new-adapter PASS assertion=true control=3 :: reload_rc=0 registered_before=2 registered_after=3 registration_error=none",
+    "[clauses] 2026-07-29T01:47:27.476Z submit f24finthree token=f24c3-fin-f24finthree-8c1f2b61 url=http://127.0.0.1:18899/webhooks/f24finthree http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T01:48:57.492Z LEG reconnect-reload/reloaded-adapter-actually-carries-inbound FAIL assertion=false control=0 :: token=f24c3-fin-f24finthree-8c1f2b61 accepted=true http=200 tier=absent arrivals_before=1 arrivals_after=1 after=90000ms",
+    "[clauses] 2026-07-29T01:48:57.546Z submit f24finone token=f24c3-fin-f24finone-fdabef9e url=http://127.0.0.1:18899/webhooks/f24finone http=200 accepted=true raw=ST 200 ",
+    "[clauses] 2026-07-29T01:49:00.547Z LEG reconnect-reload/unchanged-adapter-survives-the-reload PASS assertion=true control=1 :: token=f24c3-fin-f24finone-fdabef9e accepted=true http=200 tier=exact arrivals_before=1 arrivals_after=2"
+  ]
+}

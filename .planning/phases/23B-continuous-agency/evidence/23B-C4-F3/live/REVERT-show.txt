@@ -1,0 +1,2 @@
+F23_CACHE=turn round_trip=1 turn=0 provider=anthropic model=ollama:smollm2:135m retention=1h uncached_input=1126 cache_read=0 cache_write=0 output=26 hit=false hit_ratio=0.0000 invalidation=no_marker cost_usd=0.018840 cost_source=provider_defaults uncached_equivalent_usd=0.018840 saving_usd=0.000000 watermark=1126 threshold=167000 emergency_limit=197000 pressure=0.0067
+F23_CACHE=show session=30343417-893a-4abc-90d1-43ad343ba4d8 round_trips_shown=1 compactions=0 path=/root/lane-cost-provider-live/home-REVERT/cache-ledger/30343417-893a-4abc-90d1-43ad343ba4d8.json

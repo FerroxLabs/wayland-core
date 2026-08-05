@@ -65,6 +65,16 @@ impl CrossSessionEnv {
         let dir = TempDir::new()?;
         let root = dir.path();
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // The privileged evaluator retains ownership of the shared root,
+            // while the unprivileged candidate must traverse it to reach the
+            // separately owned project and home directories.
+            fs::set_permissions(root, fs::Permissions::from_mode(0o711))?;
+        }
+
         let home = root.join("home");
         let project = root.join("project");
         let sessions_dir = home.join("sessions");
@@ -74,7 +84,6 @@ impl CrossSessionEnv {
 
         let session_dir_abs = sessions_dir.to_string_lossy().to_string();
         let provider_id = provider.id.cli_name();
-        let api_key = provider.resolved_key().unwrap_or_default();
 
         let mut toml = String::new();
         toml.push_str("# wcore-eval-scenarios — D4 cross-session config\n");
@@ -96,7 +105,6 @@ impl CrossSessionEnv {
         toml.push_str("skills_lifecycle = true\n\n");
 
         toml.push_str(&format!("[provider.{provider_id}]\n"));
-        toml.push_str(&format!("api_key = \"{}\"\n", escape_toml_basic(&api_key)));
         toml.push_str(&format!(
             "model = \"{}\"\n\n",
             escape_toml_basic(&provider.model)
@@ -165,10 +173,15 @@ mod tests {
 
     #[test]
     fn seeded_config_enables_memory_with_no_dream_throttle() {
-        let p = ProviderConfig::new(ProviderId::DeepSeek, "deepseek-v4-pro").with_api_key("k");
+        let p = ProviderConfig::new(ProviderId::DeepSeek, "deepseek-v4-pro")
+            .with_api_key("cross-session-secret-canary");
         let env = CrossSessionEnv::build(&p).expect("build env");
         let cfg = fs::read_to_string(env.project().join(".wayland-core/config.toml"))
             .expect("seeded config exists");
+        assert!(
+            !cfg.contains("cross-session-secret-canary") && !cfg.contains("api_key"),
+            "cross-session config must not persist credentials: {cfg}"
+        );
         assert!(cfg.contains("[memory]"), "must declare [memory]: {cfg}");
         assert!(cfg.contains("enabled = true"), "memory must be on: {cfg}");
         assert!(
@@ -215,5 +228,15 @@ mod tests {
         assert_ne!(env.home(), env.project());
         assert!(env.home().is_dir());
         assert!(env.project().join(".wayland-core").is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let root_mode = fs::metadata(env._dir.path())
+                .expect("read shared root metadata")
+                .permissions()
+                .mode();
+            assert_eq!(root_mode & 0o007, 0o001);
+        }
     }
 }

@@ -1,0 +1,19 @@
+EVIDENCE ID : F24-04-TYPEDCLIENT
+LEDGER ROW  : 25
+ARTIFACT    : `phases/24-gateway-automation-channels-typed-api/24-04-SUMMARY.md` (lane 24e) — a client that severed its connection **having received ZERO bytes** recovered, twelve seconds later, an event the server produced entirely after it had gone; over HTTP/SSE on Linux through the shipped binary. `wcore-acp` 148 passed; 11 mutations each reddened their named test. **24-04's own four tasks (journey driver, Windows interface decision, three platform journeys, acceptance panel) NOT STARTED; the phase is NOT closed**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/24-gateway-automation-channels-typed-api/24-04-SUMMARY.md
+       -> .planning/phases/24-gateway-automation-channels-typed-api/24-04-SUMMARY.md  size=20595
+       head:
+---
+phase: 24-gateway-automation-channels-typed-api
+plan: "04"
+subsystem: typed-authenticated-clients
+tags: [acp, roles, idempotency, cursor, resume, negotiation, criterion-4]
+status: partial
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

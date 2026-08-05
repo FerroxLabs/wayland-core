@@ -147,16 +147,17 @@ async fn reified_browser_tool_drives_real_http_to_wiremock_sidecar() {
     // Wiremock pretends to be the Camoufox sidecar.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/sessions"))
+        .and(path("/tabs"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "session_id": "wm-sess-1"
+            "tabId": "wm-sess-1",
+            "url": "about:blank"
         })))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
-        .and(path("/sessions/wm-sess-1/navigate"))
+        .and(path("/tabs/wm-sess-1/navigate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "final_url": "https://example.com/"
+            "url": "https://example.com/"
         })))
         .mount(&server)
         .await;
@@ -182,17 +183,22 @@ async fn reified_browser_tool_drives_real_http_to_wiremock_sidecar() {
 async fn reified_browser_tool_routes_get_state_through_wiremock() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/sessions"))
+        .and(path("/tabs"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "session_id": "wm-sess-2"
+            "tabId": "wm-sess-2",
+            "url": "about:blank"
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/sessions/wm-sess-2/state"))
+        .and(path("/tabs"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "url": "https://example.com/x",
-            "title": "Hi"
+            "running": true,
+            "tabs": [{
+                "tabId": "wm-sess-2",
+                "url": "https://example.com/x",
+                "title": "Hi"
+            }]
         })))
         .mount(&server)
         .await;

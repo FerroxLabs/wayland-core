@@ -1,0 +1,59 @@
+WLRC=0
+WLDONE
+=====GATES=====
+commit=1c5fe1164e1cd713e7eb611e106992ac75be9baa
+df: /dev/md2        1.8T  720G  946G  44% /
+
+### cargo fmt --all -- --check
+FMT_RC=0
+
+### cargo metadata --locked
+METADATA_RC=0
+{"packages":[{"name":"addr2line","version":"0.25.1","id":"registry+https://github.com/rust-lang/crates.io-index#addr2line@0.25.1","license":"Apache-2.0 OR MIT","license_file":null,"description":"A cro
+
+### cargo check --workspace --all-targets
+CHECK_RC=0
+    Checking wcore-evolve v0.12.25 (/root/wayland-chanonb/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-chanonb/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 34s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+
+### cargo clippy (touched crates) -D warnings
+CLIPPY_RC=101
+error: struct update has no effect, all the fields in the struct have already been specified
+error: could not compile `wcore-agent` (test "cache_ledger_engine_test") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+   = note: `-D clippy::needless-update` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::needless_update)]`
+
+error: could not compile `wcore-agent` (test "cache_ledger_engine_test") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+
+### targeted suites
+CHANNELS_RC=0
+test result: ok. 123 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.60s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+REGISTRY_RC=0
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/channels_doc_configs_load.rs (target/debug/deps/channels_doc_configs_load-6e132f4d1adbaae4)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+AGENT_POLICY_RC=0
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 2250 filtered out; finished in 0.00s
+
+### release rebuild for the probe re-run
+RELEASE_RC=0
+    Finished `release` profile [optimized] target(s) in 5m 56s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

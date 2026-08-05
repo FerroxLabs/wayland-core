@@ -63,9 +63,99 @@ pub fn should_autocompact(last_input_tokens: u64, config: &CompactConfig) -> boo
     if !config.enabled {
         return false;
     }
-    let effective_window = config.context_window.saturating_sub(config.output_reserve);
-    let threshold = effective_window.saturating_sub(config.autocompact_buffer);
-    last_input_tokens as usize >= threshold
+    last_input_tokens as usize >= autocompact_threshold(config)
+}
+
+/// The autocompact trigger threshold in tokens:
+/// `context_window - output_reserve - autocompact_buffer`.
+///
+/// F23-04 exposes this so the cache/compaction ledger can report token pressure
+/// as a fraction of the boundary that actually fires, rather than as a raw
+/// watermark a reader has to interpret. Extracted from — not duplicated
+/// alongside — [`should_autocompact`], so the number reported to an operator is
+/// by construction the number the engine acts on.
+///
+/// Note this ignores `config.enabled`: it is the threshold's VALUE, and a
+/// disabled compactor still has one worth showing next to the watermark.
+pub fn autocompact_threshold(config: &CompactConfig) -> usize {
+    config
+        .context_window
+        .saturating_sub(config.output_reserve)
+        .saturating_sub(config.autocompact_buffer)
+}
+
+// ── Request sanitation ──────────────────────────────────────────────────────
+
+/// Drop every `tool_use` block that is not answered by a `tool_result` in the
+/// IMMEDIATELY following message, and drop any message left with no content.
+///
+/// **C4L-F1, measured live rather than reasoned about.** Anthropic states the
+/// invariant explicitly — *"Each `tool_use` block must have a corresponding
+/// `tool_result` block in the next message"* — and enforces it with a 400.
+/// Autocompact's trigger is checked while the agent loop is mid-tool-call, so
+/// the conversation it is handed normally ends with an assistant turn whose
+/// calls are still outstanding. Appending the summary prompt after that turn
+/// puts a plain user text message where the provider demands a `tool_result`.
+///
+/// Driven live on `hetzner-dsm` against `claude-haiku-4-5` (23B-C4), three
+/// consecutive autocompact attempts failed with
+/// `API error 400 … "tool_use ids were found without tool_result blocks
+/// immediately after"`. The ledger recorded `compactions=3 failed=3
+/// tokens_reclaimed=0` at `peak_pressure=2.2021` — i.e. **autocompaction never
+/// ran at all in a tool-using Anthropic session**, and the session was walking
+/// toward the emergency hard stop with no relief available.
+///
+/// Summarization does not need an in-flight call — it needs a request the
+/// provider will accept. Text in the same assistant turn is preserved; only the
+/// unanswered `tool_use` blocks go. A `tool_result` message can never be
+/// emptied by this pass (it contains no `tool_use` blocks), so dropping an
+/// emptied assistant turn cannot orphan anything after it.
+pub(crate) fn drop_unanswered_tool_calls(messages: &[Message]) -> Vec<Message> {
+    let answered = |idx: usize| -> std::collections::HashSet<&str> {
+        messages
+            .get(idx + 1)
+            .map(|next| {
+                next.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut out = Vec::with_capacity(messages.len());
+    for (i, msg) in messages.iter().enumerate() {
+        let has_tool_use = msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        if !has_tool_use {
+            out.push(msg.clone());
+            continue;
+        }
+        let answered_ids = answered(i);
+        let kept: Vec<ContentBlock> = msg
+            .content
+            .iter()
+            .filter(|b| match b {
+                ContentBlock::ToolUse { id, .. } => answered_ids.contains(id.as_str()),
+                _ => true,
+            })
+            .cloned()
+            .collect();
+        if kept.is_empty() {
+            // Every block was an unanswered call — the turn carried nothing
+            // else, so there is nothing left to summarize from it.
+            continue;
+        }
+        let mut trimmed = msg.clone();
+        trimmed.content = kept;
+        out.push(trimmed);
+    }
+    out
 }
 
 // ── Core autocompact ────────────────────────────────────────────────────────
@@ -104,9 +194,16 @@ pub async fn autocompact(
     // string — no provider is assumed.
     let compact_model = config.compaction_model.as_deref().unwrap_or(model);
 
-    // Build messages for the compact LLM call: conversation + summary prompt
+    // Build messages for the compact LLM call: conversation + summary prompt.
+    //
+    // C4L-F1: the conversation must be sanitized FIRST. Autocompact is checked
+    // mid-tool-loop, so `messages` routinely ends with an assistant turn whose
+    // tool calls are still in flight; appending the summary prompt after that
+    // produces a `tool_use` with no `tool_result` in the next message, which
+    // Anthropic-wire providers reject outright. See
+    // [`drop_unanswered_tool_calls`].
     let prompt = build_compact_prompt();
-    let mut conv_messages = messages.to_vec();
+    let mut conv_messages = drop_unanswered_tool_calls(messages);
     conv_messages.push(Message::new(
         Role::User,
         vec![ContentBlock::Text { text: prompt }],
@@ -336,6 +433,149 @@ mod tests {
 
     fn default_config() -> CompactConfig {
         CompactConfig::default()
+    }
+
+    // ── C4L-F1: unanswered tool calls must not reach the compact request ────
+
+    fn tool_use(id: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"file_path": "/tmp/x"}),
+            extra: None,
+        }
+    }
+
+    fn tool_result(id: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.to_string(),
+            content: "ok".to_string(),
+            is_error: false,
+        }
+    }
+
+    fn text(t: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: t.to_string(),
+        }
+    }
+
+    /// Anthropic's stated invariant, implemented independently of the code under
+    /// test: *"Each `tool_use` block must have a corresponding `tool_result`
+    /// block in the next message."* This is the instrument — it is what turns
+    /// the tests below into a measurement rather than a restatement of the fix.
+    fn violates_anthropic_pairing(messages: &[Message]) -> bool {
+        messages.iter().enumerate().any(|(i, m)| {
+            m.content.iter().any(|b| match b {
+                ContentBlock::ToolUse { id, .. } => !messages.get(i + 1).is_some_and(|next| {
+                    next.content.iter().any(|nb| {
+                        matches!(nb, ContentBlock::ToolResult { tool_use_id, .. }
+                                if tool_use_id == id)
+                    })
+                }),
+                _ => false,
+            })
+        })
+    }
+
+    /// The instrument itself must be able to report BOTH answers, or every
+    /// assertion built on it is self-passing.
+    #[test]
+    fn pairing_instrument_reports_both_answers() {
+        let bad = vec![Message::new(Role::Assistant, vec![tool_use("t1")])];
+        assert!(
+            violates_anthropic_pairing(&bad),
+            "instrument must detect an unanswered tool_use"
+        );
+        let good = vec![
+            Message::new(Role::Assistant, vec![tool_use("t1")]),
+            Message::new(Role::User, vec![tool_result("t1")]),
+        ];
+        assert!(
+            !violates_anthropic_pairing(&good),
+            "instrument must accept a correctly paired tool_use"
+        );
+    }
+
+    #[test]
+    fn unanswered_tail_tool_call_is_dropped_and_the_old_path_would_not_have_been() {
+        // The exact live shape: a completed tool round-trip, then an assistant
+        // turn whose calls are still in flight when the watermark trips.
+        let raw = vec![
+            Message::new(Role::User, vec![text("do the thing")]),
+            Message::new(Role::Assistant, vec![tool_use("t1")]),
+            Message::new(Role::User, vec![tool_result("t1")]),
+            Message::new(Role::Assistant, vec![tool_use("t2"), tool_use("t3")]),
+        ];
+
+        // Assertion 1 (known-positive): the OLD path — `messages.to_vec()` then
+        // push the summary prompt — produces the shape the provider rejects.
+        // Without this the test would pass on a no-op sanitizer.
+        let mut old_path = raw.clone();
+        old_path.push(Message::new(Role::User, vec![text("summarize")]));
+        assert!(
+            violates_anthropic_pairing(&old_path),
+            "the pre-fix request must violate the pairing rule — otherwise this \
+             test is not exercising the defect that was measured live"
+        );
+
+        // Assertion 2: the sanitized request does not.
+        let mut fixed = drop_unanswered_tool_calls(&raw);
+        fixed.push(Message::new(Role::User, vec![text("summarize")]));
+        assert!(
+            !violates_anthropic_pairing(&fixed),
+            "sanitized request still violates the pairing rule: {fixed:?}"
+        );
+
+        // Assertion 3 (known-negative on over-deletion): the ANSWERED call and
+        // its result must survive. A sanitizer that simply dropped every
+        // tool_use would pass assertion 2 and destroy the transcript.
+        assert_eq!(fixed.len(), 4, "expected 3 kept messages + the prompt");
+        assert!(
+            matches!(&fixed[1].content[0], ContentBlock::ToolUse { id, .. } if id == "t1"),
+            "the answered tool_use must be preserved"
+        );
+        assert!(
+            matches!(&fixed[2].content[0], ContentBlock::ToolResult { tool_use_id, .. }
+                if tool_use_id == "t1"),
+            "the tool_result must be preserved"
+        );
+    }
+
+    #[test]
+    fn text_alongside_an_unanswered_call_survives() {
+        let raw = vec![Message::new(
+            Role::Assistant,
+            vec![text("I will read the file"), tool_use("t9")],
+        )];
+        let out = drop_unanswered_tool_calls(&raw);
+        assert_eq!(
+            out.len(),
+            1,
+            "the turn carried text, so it must not be dropped"
+        );
+        assert_eq!(out[0].content.len(), 1);
+        assert!(
+            matches!(&out[0].content[0], ContentBlock::Text { text } if text == "I will read the file")
+        );
+    }
+
+    #[test]
+    fn a_conversation_with_no_tool_calls_is_returned_unchanged() {
+        // Known-negative: the sanitizer must be a no-op on the shape it is not
+        // for, or it would silently perturb every non-tool session.
+        let raw = vec![
+            Message::new(Role::User, vec![text("hello")]),
+            Message::new(Role::Assistant, vec![text("hi")]),
+        ];
+        // `Message` has no `PartialEq` (it lives in wcore-types and this lane
+        // does not widen a shared type for a test), so compare structurally.
+        let out = drop_unanswered_tool_calls(&raw);
+        assert_eq!(out.len(), raw.len(), "no message may be dropped");
+        for (a, b) in out.iter().zip(raw.iter()) {
+            assert_eq!(a.role, b.role);
+            assert_eq!(a.content.len(), b.content.len());
+        }
     }
 
     /// Fake provider that records the model id from the request it is given,

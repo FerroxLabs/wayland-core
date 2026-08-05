@@ -1,0 +1,19 @@
+EVIDENCE ID : F22-FLEET-WIRE
+LEDGER ROW  : 14
+ARTIFACT    : `phases/22-supervision-durable-goals-fleet-loops/22-03-SUMMARY-WIRE.md` — `kill -9` on the process group of `wayland-core 0.12.25` release mid-wave, 2026-07-27T12:13:53Z: 7 group members → 0, restart exit 0, 2 claims revoked on lease expiry, 4 completions drained from the outbox the dead parent never observed, effects **12 / 12 / 12**, 14 attempts, 12 dependency releases, 0 unresolved. **The counting gate was falsified in the same run** (a duplicated effect → 13, exit 1). Windows `taskkill /T /F` at 2026-07-27T13:12:06Z reproduced the same numbers
+
+== PATH RESOLUTION ==
+[OK]   stat phases/22-supervision-durable-goals-fleet-loops/22-03-SUMMARY-WIRE.md
+       -> .planning/phases/22-supervision-durable-goals-fleet-loops/22-03-SUMMARY-WIRE.md  size=21928
+       head:
+---
+phase: 22-supervision-durable-goals-fleet-loops
+plan: "03"
+subsystem: orchestration
+tags: [fleet, ledger, wire, cli, kill-restart, shipped-binary, idempotency]
+requires:
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

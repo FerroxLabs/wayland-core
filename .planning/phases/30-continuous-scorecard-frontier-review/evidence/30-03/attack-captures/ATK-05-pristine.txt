@@ -1,0 +1,8 @@
+case: ATK-05
+what: a comparison is built on a leg carrying a recorded instrument defect
+half: PRISTINE
+class: comparative
+scope: STATIC_SOURCE
+text: Sandbox/egress: Core architectural lead, operationally unproven
+outcome: ACCEPTED
+rule: NONE

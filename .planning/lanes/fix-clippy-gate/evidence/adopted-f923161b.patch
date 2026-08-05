@@ -1,0 +1,65 @@
+commit f923161b2c1698174542ad525f0284da230bd996
+Author: ci <ci@ferroxlabs.local>
+Date:   Thu Jul 30 21:13:28 2026 +0700
+
+    fix(cron): unblock Windows CI clippy and reap the unlaunched lease child
+    
+    crates/wcore-cron/tests/single_owner.rs failed `just lint`
+    (cargo clippy --workspace --all-targets -- -D warnings) on the
+    ferrox-win-msvc self-hosted runner with two deny-level lints, which
+    aborted the job at the Clippy step and left "Run tests (nextest CI
+    profile)" SKIPPED. Every completed Windows self-hosted CI job in the
+    last 40 runs failed this way, so Windows CI has been producing no test
+    signal at all.
+    
+    - clippy::collapsible_if -> let-chain (workspace is edition 2024).
+    - clippy::zombie_processes -> spawn_child returned the child on the
+      success path but leaked it on the START-marker timeout path. Kill and
+      wait before panicking. This is a real leak, not just a lint: the child
+      may still take the lease, so an orphan would hold the exclusion the
+      next case contends against and turn one failure into a cascade. On
+      Windows there is no process group to collect it.
+    
+    Neither lint is suppressed; no test is weakened, re-gated or re-timed.
+    Verified on SeanDesktop at this tree: single_owner 11 passed / 0 failed
+    / 0 ignored / 0 filtered out, unchanged from before the fix.
+
+diff --git a/crates/wcore-cron/tests/single_owner.rs b/crates/wcore-cron/tests/single_owner.rs
+index 2bf74eb9..56530070 100644
+--- a/crates/wcore-cron/tests/single_owner.rs
++++ b/crates/wcore-cron/tests/single_owner.rs
+@@ -502,7 +502,7 @@ fn cross_process_lease_worker() {
+ 
+ /// Spawn a child worker against `dir`, and wait for it to publish a verdict.
+ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Child {
+-    let child = std::process::Command::new(std::env::current_exe().unwrap())
++    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+         .args(["--exact", "cross_process_lease_worker", "--nocapture"])
+         .env(CHILD_DIR_ENV, dir)
+         .env(CHILD_OUT_ENV, out)
+@@ -511,13 +511,21 @@ fn spawn_child(dir: &std::path::Path, out: &std::path::Path) -> std::process::Ch
+         .spawn()
+         .expect("re-executing the test binary as a child must succeed");
+     for _ in 0..300 {
+-        if let Ok(text) = std::fs::read_to_string(out) {
+-            if text.starts_with("STARTED") {
+-                return child;
+-            }
++        if let Ok(text) = std::fs::read_to_string(out)
++            && text.starts_with("STARTED")
++        {
++            return child;
+         }
+         std::thread::sleep(std::time::Duration::from_millis(50));
+     }
++    // The participant never launched, so nothing was contended. Reap it before
++    // panicking rather than leaking it: a child left alive here outlives the
++    // test process, and — because it may yet take the lease — it would hold the
++    // exclusion the NEXT case tries to contend against, turning one failure
++    // into a cascade of unrelated ones. On Windows it also survives as a
++    // genuine orphan, since there is no process group to collect it.
++    let _ = child.kill();
++    let _ = child.wait();
+     panic!(
+         "child never reached its START marker at {} — the participant did not launch, \
+          so nothing was contended",

@@ -1,0 +1,23 @@
+EVIDENCE ID : CTRL01-PANEL-2026-07-28
+LEDGER ROW  : 42
+ARTIFACT    : `.planning/intel/evidence/ctrl-01-refresh-2026-07-28/` — the four-way maturity panel run for this refresh: `panel-prompt.txt` (the identical prompt sent to all three externals), `panel-codex.txt`, `panel-gemini.txt`, `panel-kimi.txt`. Splits recorded verbatim in "Maturity panel" below
+
+== PATH RESOLUTION ==
+[OK]   stat .planning/intel/evidence/ctrl-01-refresh-2026-07-28/
+       -> .planning/intel/evidence/ctrl-01-refresh-2026-07-28  size=192
+       head:
+  panel-codex.txt
+  panel-gemini.txt
+  panel-kimi.txt
+  panel-prompt.txt
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling panel-prompt.txt -> .planning/intel/evidence/ctrl-01-refresh-2026-07-28/panel-prompt.txt
+[OK]   sibling panel-codex.txt -> .planning/intel/evidence/ctrl-01-refresh-2026-07-28/panel-codex.txt
+[OK]   sibling panel-gemini.txt -> .planning/intel/evidence/ctrl-01-refresh-2026-07-28/panel-gemini.txt
+[OK]   sibling panel-kimi.txt -> .planning/intel/evidence/ctrl-01-refresh-2026-07-28/panel-kimi.txt
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

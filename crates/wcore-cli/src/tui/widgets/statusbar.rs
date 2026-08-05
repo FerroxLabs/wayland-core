@@ -188,18 +188,46 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
     ));
     spans.push(divider(t));
 
-    // Session mode label (the engine's real SessionMode).
-    spans.push(Span::styled(
-        format!(" {} ", mode_label(&app.mode)),
-        bar_style,
-    ));
-    if app.config.force {
+    // Execution posture is immutable launch authority; SessionMode remains
+    // the live approval posture and is rendered alongside it.
+    let posture = app.execution_policy.as_ref().map(|policy| policy.posture());
+    let primary_label = posture
+        .map(posture_label)
+        .unwrap_or_else(|| mode_label(&app.mode));
+    spans.push(Span::styled(format!(" {primary_label} "), bar_style));
+    if matches!(
+        posture,
+        Some(wcore_types::execution_policy::ExecutionPosture::Dangerous)
+    ) {
+        spans.push(Span::styled(
+            " · DANGEROUS ",
+            Style::default()
+                .bg(t.bg)
+                .fg(t.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if posture.is_some() {
+        spans.push(Span::styled(
+            format!(" · {} ", mode_label(&app.mode)),
+            bar_style,
+        ));
+    } else if matches!(&app.mode, wcore_protocol::commands::SessionMode::Force) {
         spans.push(Span::styled(
             " · FORCE ",
             Style::default()
                 .bg(t.bg)
                 .fg(t.warning)
                 .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if app
+        .workspace_policy
+        .as_ref()
+        .is_some_and(|policy| !policy.trust.is_trusted())
+    {
+        spans.push(Span::styled(
+            " · STRICT REPO ",
+            Style::default().bg(t.bg).fg(t.text_muted),
         ));
     }
     spans.push(divider(t));
@@ -223,6 +251,9 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
         // health line and Sean's cost = real-or-nothing rule). A recorded zero
         // (Some(0.0)) is honest data and still prints `$0.00`.
         let cost_str = match app.cost.as_ref() {
+            Some(c) if c.has_unpriced_turns() => {
+                format!("{} + unpriced", format_cost(c.total_cost_usd))
+            }
             Some(c) => format_cost(c.total_cost_usd),
             None => "—".to_string(),
         };
@@ -236,6 +267,19 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
                 " {} ",
                 format_duration(app.session.turn_started_at.elapsed())
             ),
+            Style::default().bg(t.bg).fg(t.text_dim),
+        ));
+    }
+
+    // F22-C1 — durable Goal activity. Placed BEFORE the toast so a transient
+    // message never displaces standing Goal state, and rendered only when a
+    // Goal has actually been reported, so a session that never opens one pays
+    // no width. Before this segment the terminal had no way to show a durable
+    // Goal at all; the user had to shell out to `wayland-core goal status`.
+    if let Some(summary) = crate::tui::protocol_bridge::goal_status_summary(app) {
+        spans.push(divider(t));
+        spans.push(Span::styled(
+            format!(" {summary} "),
             Style::default().bg(t.bg).fg(t.text_dim),
         ));
     }
@@ -305,13 +349,22 @@ fn mode_label(mode: &wcore_protocol::commands::SessionMode) -> &'static str {
     }
 }
 
+fn posture_label(posture: wcore_types::execution_policy::ExecutionPosture) -> &'static str {
+    use wcore_types::execution_policy::ExecutionPosture;
+    match posture {
+        ExecutionPosture::Smart => "Smart",
+        ExecutionPosture::Managed => "Managed",
+        ExecutionPosture::Dangerous => "Dangerous",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::tui::app::{App, ContextView, SessionCostView};
+    use crate::tui::app::{App, ContextView, SessionCostView, TurnCostView};
     use crate::tui::theme::Theme;
 
     /// A fixed sample so status-bar render tests are deterministic — no
@@ -516,6 +569,48 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_distinguishes_unpriced_from_known_free_cost() {
+        let mut app = App::new();
+        app.cost = Some(SessionCostView {
+            session_id: "unpriced".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![TurnCostView {
+                turn: 1,
+                model: "unknown-model".into(),
+                provider: "custom".into(),
+                cost_usd: 0.0,
+                priced: false,
+            }],
+        });
+        let unpriced = render(&app, &Theme::hearth(), 140);
+        assert!(
+            unpriced.contains("$0.00 + unpriced"),
+            "unknown price must not render as free: {unpriced:?}"
+        );
+
+        app.cost = Some(SessionCostView {
+            session_id: "known-free".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![TurnCostView {
+                turn: 1,
+                model: "local-model".into(),
+                provider: "ollama".into(),
+                cost_usd: 0.0,
+                priced: true,
+            }],
+        });
+        let known_free = render(&app, &Theme::hearth(), 140);
+        assert!(
+            known_free.contains("$0.00"),
+            "known-free price must remain zero: {known_free:?}"
+        );
+        assert!(
+            !known_free.contains("unpriced"),
+            "known-free price must not be marked unpriced: {known_free:?}"
+        );
+    }
+
+    #[test]
     fn status_bar_shows_em_dash_when_no_cost_recorded() {
         // Real-or-nothing: at boot `app.cost` is None — the status bar must
         // show an em-dash, never a fabricated `$0.00`.
@@ -570,27 +665,57 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_renders_the_force_badge_when_force_is_on() {
+    fn status_bar_renders_the_force_badge_for_active_force_mode() {
         let mut app = App::new();
         app.config.provider = "anthropic".into();
         app.config.model = "sonnet-4-6".into();
-        app.config.force = true;
+        app.mode = wcore_protocol::commands::SessionMode::Force;
         let line = render(&app, &Theme::hearth(), 100);
         assert!(
             line.contains("FORCE"),
-            "force badge missing while force is on:\n{line}"
+            "force badge missing while Force is active:\n{line}"
         );
     }
 
     #[test]
-    fn status_bar_hides_the_force_badge_when_force_is_off() {
+    fn status_bar_distinguishes_dangerous_from_approval_bypass() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest,
+            EffectiveExecutionPolicy, PolicySource, resolve_dangerous_launch,
+        };
+
         let mut app = App::new();
         app.config.model = "local".into();
-        assert!(!app.config.force);
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(30, "statusbar-dangerous"),
+            0,
+        )
+        .unwrap();
+        app.execution_policy = Some(EffectiveExecutionPolicy::dangerous(&grant));
+        app.mode = wcore_protocol::commands::SessionMode::Force;
+
+        let line = render(&app, &Theme::hearth(), 100);
+        assert!(line.contains("Dangerous"), "posture missing: {line}");
+        assert!(line.contains("DANGEROUS"), "warning badge missing: {line}");
+        assert!(
+            !line.contains(" · FORCE"),
+            "Dangerous must not be mislabeled as approval-only Force: {line}"
+        );
+    }
+
+    #[test]
+    fn status_bar_hides_stale_force_badge_after_deescalation() {
+        let mut app = App::new();
+        app.config.model = "local".into();
+        app.config.force = true;
+        app.mode = wcore_protocol::commands::SessionMode::Default;
         let line = render(&app, &Theme::hearth(), 100);
         assert!(
             !line.contains("FORCE"),
-            "force badge leaked while force is off:\n{line}"
+            "launch authority leaked a stale FORCE badge after de-escalation:\n{line}"
         );
     }
 

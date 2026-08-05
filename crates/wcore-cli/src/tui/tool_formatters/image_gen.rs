@@ -15,33 +15,52 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::ToolResultFormatter;
-use super::{fmt_duration, str_or, u64_or};
+use super::{fmt_duration, join_facts, opt_str, opt_u64};
 use crate::tui::theme::Theme;
 
 /// Max chars of a `data:` URI shown in `detail_lines` before truncating.
 const DATA_URI_PREVIEW: usize = 80;
 
+/// The generated image reference, under whichever key the payload carries.
+/// The tool emits `image`; this formatter historically read only `url`.
+fn image_ref(payload: &Value) -> Option<&str> {
+    opt_str(payload, "image").or_else(|| opt_str(payload, "url"))
+}
+
 pub struct ImageGenFormatter;
 
 impl ToolResultFormatter for ImageGenFormatter {
+    // UAT-T3. `ImageGenerationTool` returns
+    // `{success, image, freeFallbackUsed, usedProvider, width, height, accounting}`
+    // (`wcore-tools/src/image_generation_tool.rs`). `width`/`height` matched;
+    // the provider is `usedProvider` (so `?` was printed for every call) and
+    // the image is `image`, not `url` — which also meant `extract_urls`
+    // returned nothing and the Sources block never carried the image.
     fn summary_line(&self, payload: &Value, duration: Duration) -> String {
-        let provider = str_or(payload, "provider", "?");
-        let w = u64_or(payload, "width", 0);
-        let h = u64_or(payload, "height", 0);
-        format!(
-            "Generated image · {} · {}x{} · {}",
-            provider,
-            w,
-            h,
-            fmt_duration(duration)
-        )
+        let mut facts = vec!["Generated image".to_string()];
+        if let Some(p) = opt_str(payload, "usedProvider").or_else(|| opt_str(payload, "provider")) {
+            facts.push(p.to_string());
+        }
+        if let (Some(w), Some(h)) = (opt_u64(payload, "width"), opt_u64(payload, "height")) {
+            facts.push(format!("{w}x{h}"));
+        }
+        if payload
+            .get("freeFallbackUsed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            facts.push("free fallback".to_string());
+        }
+        if !duration.is_zero() {
+            facts.push(fmt_duration(duration));
+        }
+        join_facts(&facts)
     }
 
     fn detail_lines(&self, payload: &Value, theme: &Theme) -> Vec<Line<'static>> {
-        let url = str_or(payload, "url", "");
-        if url.is_empty() {
+        let Some(url) = image_ref(payload) else {
             return Vec::new();
-        }
+        };
         let style = Style::default().fg(theme.text_dim);
         let display = if url.starts_with("data:") && url.chars().count() > DATA_URI_PREVIEW {
             let preview: String = url.chars().take(DATA_URI_PREVIEW).collect();
@@ -53,8 +72,8 @@ impl ToolResultFormatter for ImageGenFormatter {
     }
 
     fn extract_urls(&self, payload: &Value) -> Vec<String> {
-        match payload.get("url").and_then(Value::as_str) {
-            Some(u) if !u.is_empty() && !u.starts_with("data:") => vec![u.to_string()],
+        match image_ref(payload) {
+            Some(u) if !u.starts_with("data:") => vec![u.to_string()],
             _ => Vec::new(),
         }
     }

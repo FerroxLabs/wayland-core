@@ -1,0 +1,19 @@
+=== POSITIVE: real contract root ===
+  contract files: 164
+  OK
+  rc=0
+total 32
+-rw-r--r-- 1 root root 29125 Jul 30 16:37 wayland-core-v0.0.0-lane-proof-desktop-contract-v1.tar.gz
+  tar entries: 164
+  reproducible? rebuild and compare sha256:
+  A=585c3e96c3ea1f40a8babc4768f2be326264a3480c2ad38b5f1a1792fc5da018
+  B=585c3e96c3ea1f40a8babc4768f2be326264a3480c2ad38b5f1a1792fc5da018
+  DETERMINISTIC=yes
+
+=== NEGATIVE 1: missing manifest.json ===
+GUARD1_FIRED: manifest.json missing
+  rc=1
+=== NEGATIVE 2: truncated tree (manifest present, too few files) ===
+  contract files: 1
+GUARD2_FIRED: only 1 files, expected >= 80
+  rc=1

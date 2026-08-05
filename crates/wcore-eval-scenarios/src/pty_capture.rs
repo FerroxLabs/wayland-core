@@ -20,11 +20,11 @@
 //!
 //! Reuses [`crate::tempenv`] exactly like the json-stream runner: a throwaway
 //! tempdir holds a seeded `.wayland-core/config.toml` (absolute session dir per
-//! cross-audit C-3, plus the provider id/model/key), the binary is spawned with
+//! cross-audit C-3, plus the provider id/model), the binary is spawned with
 //! `cwd = env.path()`, and `WAYLAND_HOME` is pointed at the tempdir so
 //! `wcore_config::wayland_config_dir()` resolves the seeded config on every
-//! platform (matching `wcore-cli/tests/harness_tui_flow.rs`). Ambient provider
-//! keys are stripped so a test never makes a hidden network call.
+//! platform (matching `wcore-cli/tests/harness_tui_flow.rs`). The child receives
+//! only the evaluator's allowlisted environment and selected provider key.
 //!
 //! ## Screen capture & assertions
 //!
@@ -63,6 +63,7 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -70,7 +71,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::child_env::ChildEnvironment;
+use crate::process_tree::UnixProcessGroup;
 use crate::providers::ProviderConfig;
+use crate::redaction::SecretRedactor;
 use crate::tempenv::{self, TempEnv, TempEnvOptions};
 
 /// Default PTY geometry. 100 columns keeps the workspace right rail visible
@@ -112,6 +116,14 @@ pub struct PtyCapture {
     master: Box<dyn MasterPty + Send>,
     /// The spawned child. `wait` consumes it; until then `Drop` kills it.
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// `portable-pty` makes the child a session/process-group leader before
+    /// exec. This guard owns that group independently of the direct child.
+    process_group: UnixProcessGroup,
+    cleanup_complete: bool,
+    /// Exact provider-secret redactor applied before screen text leaves this
+    /// capture object.
+    redactor: SecretRedactor,
+    secret_detected: AtomicBool,
     /// Reader-thread handle. Held so a clean shutdown can join; on panic
     /// `Drop` simply lets it dangle.
     _reader: JoinHandle<()>,
@@ -119,6 +131,56 @@ pub struct PtyCapture {
     /// seeded config + session dir + cwd) is not deleted out from under the
     /// running binary.
     _env: TempEnv,
+}
+
+type PtyChild = Box<dyn portable_pty::Child + Send + Sync>;
+
+/// Owns a just-spawned child until every fallible PTY setup step completes.
+/// This closes the construction gap where returning `Err` would otherwise
+/// drop a plain `std::process::Child` without terminating its process group.
+struct PendingPtyChild {
+    child: Option<PtyChild>,
+    process_group: Option<UnixProcessGroup>,
+}
+
+impl PendingPtyChild {
+    fn new(child: PtyChild) -> Self {
+        Self {
+            child: Some(child),
+            process_group: None,
+        }
+    }
+
+    fn child(&self) -> &PtyChild {
+        self.child.as_ref().expect("pending PTY child is armed")
+    }
+
+    fn set_process_group(&mut self, process_group: UnixProcessGroup) {
+        self.process_group = Some(process_group);
+    }
+
+    fn disarm(mut self) -> PtyChild {
+        self.child.take().expect("pending PTY child is armed")
+    }
+}
+
+impl Drop for PendingPtyChild {
+    fn drop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if let Some(process_group) = self.process_group {
+            let _ = process_group.kill();
+        }
+        let _ = child.kill();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
 }
 
 impl PtyCapture {
@@ -141,13 +203,27 @@ impl PtyCapture {
         geometry: PtyGeometry,
         extra_args: &[&str],
     ) -> Result<Self> {
+        if crate::process_tree::authoritative_required() {
+            bail!(
+                "authoritative PTY process-tree containment is unavailable; use a disposable native worker"
+            );
+        }
         // Reuse the json-stream runner's binary discovery so PTY scenarios and
         // pipe scenarios always target the same artifact.
         let bin = crate::runner::discover_binary()
             .map_err(|e| anyhow!("locate wayland-core binary: {e}"))?;
+        Self::spawn_binary(provider, geometry, extra_args, &bin, &[])
+    }
 
+    fn spawn_binary(
+        provider: &ProviderConfig,
+        geometry: PtyGeometry,
+        extra_args: &[&str],
+        bin: &std::path::Path,
+        extra_env: &[(&str, &str)],
+    ) -> Result<Self> {
         // Hermetic tempdir + seeded config.toml (absolute session dir per C-3,
-        // provider id/model/key). Held in `self._env` for the child's lifetime.
+        // provider id/model). Held in `self._env` for the child's lifetime.
         let env = tempenv::build_with(provider, &TempEnvOptions::default())
             .context("build hermetic tempenv for PTY run")?;
 
@@ -162,9 +238,7 @@ impl PtyCapture {
 
         // Build the hermetic command. cwd = tempdir so the engine's config
         // cwd-walk lands inside the sandbox; WAYLAND_HOME = tempdir so
-        // `wayland_config_dir()` resolves the seeded config on every platform;
-        // a TTY-capable TERM so the TUI gate passes; ambient provider keys
-        // stripped so the only key in play is the one tempenv seeded.
+        // `wayland_config_dir()` resolves the seeded config on every platform.
         let mut cmd = CommandBuilder::new(
             bin.to_str()
                 .ok_or_else(|| anyhow!("binary path is not valid UTF-8: {}", bin.display()))?,
@@ -172,19 +246,34 @@ impl PtyCapture {
         for arg in extra_args {
             cmd.arg(arg);
         }
+        let secret = provider.resolved_key();
+        let child_environment = ChildEnvironment::build(env.path(), env.path(), secret.as_deref())?;
+        let vault_guard = child_environment.apply_pty(&mut cmd)?;
+        for (name, value) in extra_env {
+            cmd.env(*name, *value);
+        }
         cmd.cwd(env.path());
-        cmd.env("WAYLAND_HOME", env.path());
-        cmd.env("HOME", env.path());
+        // Override the noninteractive default from ChildEnvironment: a
+        // TTY-capable TERM is required for the TUI launch gate.
         cmd.env("TERM", "xterm-256color");
-        cmd.env_remove("API_KEY");
-        cmd.env_remove("ANTHROPIC_API_KEY");
-        cmd.env_remove("OPENAI_API_KEY");
-        cmd.env_remove("DEEPSEEK_API_KEY");
 
         let child = pty
             .slave
             .spawn_command(cmd)
-            .context("spawn wayland-core under PTY")?;
+            .context("spawn wayland-core under PTY");
+        drop(vault_guard);
+        let child = child?;
+        let mut pending_child = PendingPtyChild::new(child);
+        let child_pid = pending_child
+            .child()
+            .process_id()
+            .ok_or_else(|| anyhow!("spawned PTY child had no process id"))?;
+        let process_group =
+            UnixProcessGroup::from_pid(child_pid).context("capture PTY process group")?;
+        pending_child.set_process_group(process_group);
+        process_group
+            .verify_session_leader()
+            .context("verify PTY session ownership")?;
 
         // Reader thread: pump the PTY byte stream into a shared vt100 parser.
         let mut reader = pty.master.try_clone_reader().context("clone PTY reader")?;
@@ -194,28 +283,36 @@ impl PtyCapture {
             0,
         )));
         let parser_for_thread = Arc::clone(&parser);
-        let reader_handle = std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break, // EOF — child closed the PTY.
-                    Ok(n) => {
-                        if let Ok(mut p) = parser_for_thread.lock() {
-                            p.process(&buf[..n]);
+        let reader_handle = std::thread::Builder::new()
+            .name("wcore-eval-pty-reader".to_string())
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break, // EOF — child closed the PTY.
+                        Ok(n) => {
+                            if let Ok(mut p) = parser_for_thread.lock() {
+                                p.process(&buf[..n]);
+                            }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            }
-        });
+            })
+            .context("spawn PTY reader thread")?;
 
         let writer = pty.master.take_writer().context("take PTY writer")?;
+        let child = pending_child.disarm();
 
         Ok(Self {
             writer,
             parser,
             master: pty.master,
             child,
+            process_group,
+            cleanup_complete: false,
+            redactor: SecretRedactor::from_secret(secret),
+            secret_detected: AtomicBool::new(false),
             _reader: reader_handle,
             _env: env,
         })
@@ -232,13 +329,24 @@ impl PtyCapture {
     /// blanks trimmed by vt100. ANSI is already resolved, so this is the
     /// human-visible text, suitable for direct substring matching.
     pub fn screen_text(&self) -> String {
-        match self.parser.lock() {
+        let screen = match self.parser.lock() {
             Ok(p) => p.screen().contents(),
             // A poisoned lock means the reader thread panicked mid-process;
             // surface an empty screen rather than propagating the poison so
             // callers' `wait_for`/assert paths report a clean timeout/mismatch.
             Err(_) => String::new(),
+        };
+        let (screen, detected) = self.redactor.text(screen);
+        if detected {
+            self.secret_detected.store(true, Ordering::Release);
         }
+        screen
+    }
+
+    /// Whether provider material reached the rendered PTY output. The screen
+    /// returned to callers is already redacted; this flag makes the run fail.
+    pub fn secret_detected(&self) -> bool {
+        self.secret_detected.load(Ordering::Acquire)
     }
 
     /// Push raw bytes to the PTY as if typed on a keyboard. Use for control
@@ -304,6 +412,9 @@ impl PtyCapture {
         let mut last = String::new();
         while Instant::now() < deadline {
             last = self.screen_text();
+            if self.secret_detected() {
+                bail!("provider secret detected in PTY output");
+            }
             if predicate(&last) {
                 return Ok(());
             }
@@ -351,41 +462,98 @@ impl PtyCapture {
         }
     }
 
-    /// Block until the child exits or `timeout` elapses. Returns the exit
-    /// status, or `None` on timeout (the caller decides whether that is a
-    /// failure).
-    pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
+    /// Block until the child exits or `timeout` elapses. A normal exit first
+    /// removes remaining group members. A timeout terminates and bounded-reaps
+    /// the complete group before returning `None`.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<Option<portable_pty::ExitStatus>> {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => return None,
+            match self.process_group.child_exited_unreaped() {
+                Ok(true) => return self.reap_exited_group().map(Some),
+                Ok(false) => std::thread::sleep(Duration::from_millis(50)),
+                Err(error) => {
+                    let cleanup = self.terminate_and_reap();
+                    return match cleanup {
+                        Ok(()) => Err(error).context("poll PTY child"),
+                        Err(cleanup) => Err(anyhow!(
+                            "poll PTY child: {error}; PTY cleanup failed: {cleanup}"
+                        )),
+                    };
+                }
             }
         }
-        None
+        self.terminate_and_reap()?;
+        Ok(None)
     }
 
     /// Drive a clean shutdown via the command palette's `/exit` path — the same
     /// quit route the TUI flow tests use. Best-effort: errors writing to a
     /// possibly-dying PTY are swallowed; the returned status is `None` if the
-    /// child did not exit within `grace`.
-    pub fn quit_via_palette(&mut self, grace: Duration) -> Option<portable_pty::ExitStatus> {
+    /// child required forced termination after `grace`.
+    pub fn quit_via_palette(
+        &mut self,
+        grace: Duration,
+    ) -> Result<Option<portable_pty::ExitStatus>> {
         let _ = self.send(b"/");
         std::thread::sleep(Duration::from_millis(300));
         let _ = self.send(b"exit\r");
         self.wait_for_exit(grace)
     }
+
+    fn reap_exited_group(&mut self) -> Result<portable_pty::ExitStatus> {
+        let group_kill = self.process_group.kill().err();
+        // The unreaped leader anchors the numeric PGID through the kill. Never
+        // signal or probe that PGID after `wait`, when it may be recycled.
+        self.cleanup_complete = true;
+        let status = self.child.wait().context("reap exited PTY child")?;
+        self.finish_cleanup([group_kill, None, None, None])?;
+        Ok(status)
+    }
+
+    fn terminate_and_reap(&mut self) -> Result<()> {
+        if self.cleanup_complete {
+            return Ok(());
+        }
+        let group_kill = self.process_group.kill().err();
+        self.cleanup_complete = true;
+        let child_kill = self.child.kill().err();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let reap = loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break None,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    break Some(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "direct PTY child was not reaped within 5 seconds",
+                    ));
+                }
+                Err(error) => break Some(error),
+            }
+        };
+        let child_kill = reap.as_ref().and(child_kill);
+        self.finish_cleanup([group_kill, child_kill, reap, None])
+    }
+
+    fn finish_cleanup(&mut self, errors: [Option<std::io::Error>; 4]) -> Result<()> {
+        let errors = errors
+            .into_iter()
+            .flatten()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(errors.join("; ")))
+        }
+    }
 }
 
 impl Drop for PtyCapture {
     fn drop(&mut self) {
-        // Last-ditch cleanup: if a test panicked mid-flow, kill the child so it
-        // never outlives the test process. `try_wait` first to skip the kill on
-        // a clean exit.
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-        }
+        let _ = self.terminate_and_reap();
     }
 }
 
@@ -410,8 +578,10 @@ pub fn capture_prompt(provider: &ProviderConfig, prompt: &str, settle: Duration)
     cap.send_prompt(prompt)?;
     std::thread::sleep(settle);
     let screen = cap.screen_text();
-    // Best-effort clean shutdown; the captured screen is already in hand.
-    let _ = cap.quit_via_palette(Duration::from_secs(8));
+    if cap.secret_detected() {
+        bail!("provider secret detected in PTY output");
+    }
+    cap.quit_via_palette(Duration::from_secs(8))?;
     Ok(screen)
 }
 
@@ -507,6 +677,158 @@ pub fn screenshot_png(_cap: &PtyCapture, _out_path: &std::path::Path) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HELPER_TEST: &str = "pty_capture::tests::pty_process_tree_helper";
+
+    #[test]
+    #[ignore = "subprocess helper for PTY process-group lifecycle tests"]
+    #[allow(clippy::zombie_processes)]
+    fn pty_process_tree_helper() {
+        let role = std::env::var("WCORE_PTY_HELPER_ROLE").expect("helper role");
+        let state_path = std::path::PathBuf::from(
+            std::env::var_os("WCORE_PTY_HELPER_STATE").expect("helper state path"),
+        );
+        if role == "descendant" {
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("bind PTY descendant listener");
+            let state = format!(
+                "pid={}\nport={}\n",
+                std::process::id(),
+                listener.local_addr().expect("listener address").port()
+            );
+            std::fs::write(state_path, state).expect("publish PTY descendant state");
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let mut descendant = std::process::Command::new(executable);
+        descendant
+            .args(std::env::args_os().skip(1))
+            .env("WCORE_PTY_HELPER_ROLE", "descendant")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        descendant.spawn().expect("spawn PTY descendant");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !state_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(state_path.exists(), "PTY descendant did not publish state");
+        if std::env::var("WCORE_PTY_HELPER_MODE").as_deref() == Ok("exit") {
+            return;
+        }
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn spawn_process_tree_helper(mode: &str, state: &std::path::Path) -> PtyCapture {
+        let provider = ProviderConfig::new(
+            crate::providers::ProviderId::DeepSeek,
+            "pty-process-tree-fixture",
+        );
+        let executable = std::env::current_exe().expect("resolve test executable");
+        let state = state.to_str().expect("UTF-8 test state path");
+        PtyCapture::spawn_binary(
+            &provider,
+            PtyGeometry::default(),
+            &["--ignored", "--exact", HELPER_TEST],
+            &executable,
+            &[
+                ("WCORE_PTY_HELPER_ROLE", "parent"),
+                ("WCORE_PTY_HELPER_MODE", mode),
+                ("WCORE_PTY_HELPER_STATE", state),
+            ],
+        )
+        .expect("spawn PTY process-tree helper")
+    }
+
+    #[derive(Clone, Copy)]
+    struct ListenerState {
+        pid: u32,
+        port: u16,
+    }
+
+    fn wait_for_listener_state(path: &std::path::Path) -> ListenerState {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path)
+                && let Some(pid) = contents
+                    .lines()
+                    .find_map(|line| line.strip_prefix("pid="))
+                    .and_then(|pid| pid.parse().ok())
+                && let Some(port) = contents
+                    .lines()
+                    .find_map(|line| line.strip_prefix("port="))
+                    .and_then(|port| port.parse().ok())
+            {
+                return ListenerState { pid, port };
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PTY descendant did not publish listener state"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn listener_accepts_connections(port: u16) -> bool {
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok()
+    }
+
+    /// Was a `kill(pid, 0) == 0` probe, which a **zombie** satisfies — so two
+    /// tests here read a successfully-killed PTY descendant as a survivor
+    /// whenever the host had no reaping init. Centralised in
+    /// `wcore_types::process_liveness`; see `.planning/ZOMBIE-PROBE.md`.
+    fn process_exists(pid: u32) -> bool {
+        wcore_types::process_liveness::process_is_alive(pid)
+    }
+
+    fn assert_descendant_closes(state: ListenerState) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (listener_accepts_connections(state.port) || process_exists(state.pid))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !listener_accepts_connections(state.port) && !process_exists(state.pid),
+            "PTY descendant pid={} or listener on 127.0.0.1:{} survived cleanup",
+            state.pid,
+            state.port
+        );
+    }
+
+    #[test]
+    fn direct_child_exit_reaps_pty_descendant_group() {
+        let state_dir = tempfile::tempdir().expect("create PTY state dir");
+        let state = state_dir.path().join("listener-state");
+        let mut capture = spawn_process_tree_helper("exit", &state);
+        let descendant = wait_for_listener_state(&state);
+
+        let status = capture
+            .wait_for_exit(Duration::from_secs(3))
+            .expect("wait for PTY helper");
+
+        assert!(status.is_some(), "PTY helper should exit normally");
+        assert_descendant_closes(descendant);
+    }
+
+    #[test]
+    fn drop_reaps_live_pty_process_group() {
+        let state_dir = tempfile::tempdir().expect("create PTY state dir");
+        let state = state_dir.path().join("listener-state");
+        let capture = spawn_process_tree_helper("hold", &state);
+        let descendant = wait_for_listener_state(&state);
+
+        drop(capture);
+
+        assert_descendant_closes(descendant);
+    }
 
     #[test]
     fn strip_ansi_removes_csi_color_sequences() {

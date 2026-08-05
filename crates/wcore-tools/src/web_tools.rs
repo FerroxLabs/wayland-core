@@ -72,7 +72,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::url_safety::is_safe_url;
@@ -557,13 +557,22 @@ impl WebTool {
             .unwrap_or(true);
 
         let (safe, rejected) = validate_url_list(&urls);
-        // If every URL was rejected, short-circuit without calling the
-        // backend — mirrors the prior engine returning a results-only response.
+        // If EVERY url was rejected, nothing was fetched — so this is a
+        // failure, not a success. Reporting `"success": true` here told the
+        // model the extraction had run and simply found nothing, when in fact
+        // no request was ever made; `dispatch_crawl` already errors on the same
+        // condition. Name the rejected urls and their reasons so the model can
+        // correct the input instead of retrying an unsatisfiable call.
         if safe.is_empty() {
-            return ok_result(json!({
-                "success": true,
-                "results": rejected_to_rows(&rejected),
-            }));
+            let detail = rejected
+                .iter()
+                .map(|r| format!("{}: {}", r.url, r.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return err_result(&format!(
+                "All {} URL(s) were rejected, nothing was fetched — {detail}",
+                urls.len(),
+            ));
         }
 
         let req = ExtractRequest {
@@ -760,6 +769,11 @@ impl Tool for WebTool {
         ToolCategory::Info
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // External search, extraction, and crawl backends expose no replay reconciler.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let op_str = match input.get("operation").and_then(Value::as_str) {
             Some(s) => s,
@@ -793,6 +807,14 @@ impl Tool for WebTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wcore_types::tool::ToolEffectKind;
+
+    #[test]
+    fn effect_contract_remains_opaque() {
+        let contract = WebTool::default().effect_contract(&json!({ "operation": "search" }));
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
 
     fn parse(result: &ToolResult) -> Value {
         serde_json::from_str(&result.content).expect("ToolResult content must be JSON")
@@ -942,19 +964,26 @@ mod tests {
                 ]
             }))
             .await;
-        // All blocked → backend never called, response is success with
-        // every row marked as error (matches the prior engine's partial-results).
-        assert!(!r.is_error);
+        // All blocked → backend never called. Nothing was fetched, so this is
+        // a failure. This test previously asserted `success: true` with
+        // per-row error entries: it encoded the defect, so the tool told the
+        // model the extraction had run and found nothing.
+        assert!(
+            r.is_error,
+            "an all-rejected extract fetched nothing and must be an error: {}",
+            r.content
+        );
         assert_no_backend_calls(&backend);
         let v = parse(&r);
-        let rows = v["results"].as_array().expect("results array");
-        assert_eq!(rows.len(), 3);
-        for row in rows {
-            let err = row["error"].as_str().unwrap_or("");
-            assert!(
-                err.contains("private or internal"),
-                "expected SSRF block message, got: {err}"
-            );
+        assert_eq!(v["success"], json!(false), "got: {}", r.content);
+        let err = v["error"].as_str().expect("error string");
+        assert!(
+            err.contains("private or internal"),
+            "the error must name why each URL was rejected, got: {err}"
+        );
+        // Every rejected URL is still accounted for individually.
+        for host in ["127.0.0.1", "localhost:8080", "169.254.169.254"] {
+            assert!(err.contains(host), "error must name {host}, got: {err}");
         }
     }
 
@@ -968,12 +997,22 @@ mod tests {
                 "urls": ["https://evil.com/path?token=sk-AAAAAAAAAAAAAAAA"]
             }))
             .await;
-        assert!(!r.is_error);
+        // The only URL was rejected, so nothing was fetched — an error, not a
+        // success carrying a single failure row.
+        assert!(
+            r.is_error,
+            "an all-rejected extract must be an error: {}",
+            r.content
+        );
         assert_no_backend_calls(&backend);
         let v = parse(&r);
-        let rows = v["results"].as_array().expect("results array");
-        assert_eq!(rows.len(), 1);
-        assert!(rows[0]["error"].as_str().unwrap().contains("API key"));
+        assert_eq!(v["success"], json!(false), "got: {}", r.content);
+        assert!(
+            v["error"]
+                .as_str()
+                .expect("error string")
+                .contains("API key")
+        );
     }
 
     #[tokio::test]

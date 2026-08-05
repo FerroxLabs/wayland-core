@@ -1,0 +1,16 @@
+• Answer the panel verdict based on evidence. All four backends: refused, target not written, message names backend/count/action, no absolute path. That matches `remap-actionable`.
+
+  Should I write to a file? The user just wants the answer. The prompt says answer with exactly one line PANEL-VERDICT and one line PANEL-BASIS, then up to 250 words. Just reply.
+
+• PANEL-VERDICT: remap-actionable
+  PANEL-BASIS: Every captured refusal across all four backends left its target unwritten (measured by digest, not message), and every message names the backend, the count of absent credential sources, and a concrete next action, with no source-machine absolute path surviving.
+
+  The records show four for four on each criterion the bar requires. Each backend — `auto`, `plaintext`, `keyring`, `encrypted-file` — exited 1 with disposition `refused`, and `REMAP-TARGET-WRITTEN: no` was established by digesting the target before and after rather than trusting the message text, so the "warns and writes anyway" failure mode of `remap-warns-and-continues` is contradicted by measurement, not by claim.
+
+  On operator actionability, each message names all three required elements: the backend (including the honest `encrypted_file` spelling), the count of credential sources that will be absent (2, 1, 2, 3 respectively), and a two-pronged action — re-add credentials via `wayland-core auth add <provider>`, or explicitly opt in with `--accept-missing-secrets` knowing the install starts without them. The `absent:` lines go further than the bar and enumerate the specific sources (keychain secrets, `credentials.toml`, `cipher_path`, `key_params_path`). That contradicts `remap-opaque`.
+
+  `remap-blocked` is unreachable here: no backend required moving an unreadable secret or emitting a config pointing at nothing — the keyring and absolute-path cases, the peers' hardest unhandled scenario, were each handled by a naming refusal. `REMAP-CARRIES-SOURCE-ABSOLUTE-PATH: no` on all four records confirms no dangling machine-specific path leaked into any restored artifact.
+
+  Residual risk acknowledged in the option's own con: nothing is recorded as outstanding, so coverage is only as good as the four-backend capture. But within what was measured — and the capture script is proven able to go red — the peer bar (name what is not carried, state the next action) is cleared on the harder case the peers never face.
+
+To resume this session: kimi -r session_6fac1158-79f2-4876-b240-d76127af37bb

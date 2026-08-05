@@ -1,0 +1,10 @@
+case: ATK-10
+what: a scripted-harness result is restated at real-world scope
+half: MUTATION
+class: factual
+scope: LIVE_PROVIDER
+text: The wayland correctness leg produced a recorded run of thirty trials.
+outcome: REFUSED
+rule: scope_not_contained
+refusal: claim `P` is scoped `LIVE_PROVIDER` but cites `LEG-01 in .planning/phases/30-continuous-scorecard-frontier-review/evidence/30-02/legs.tsv` gathered at `SCRIPTED_HARNESS`, which does not contain it
+missing: evidence at its own scope (it has only `SCRIPTED_HARNESS`)

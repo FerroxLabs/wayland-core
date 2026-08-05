@@ -1,0 +1,116 @@
+=== binary under test ===
+e39dbcc8
+wayland-core 0.12.25
+
+=== 1. independent sink up FIRST, owns the arrivals journal ===
+SINK_READY url=http://127.0.0.1:18472 journal=/tmp/f24c1-run/arrivals.jsonl
+sink_pid=2688002
+
+=== 2. seed 6 deliveries through the SHIPPED binary ===
+seeded; cron list:
+on  4d8ee677-5551-4620-8b92-8645d16bc11c  [interval  ] @every 30s                    channel  f24c1sink :: f24c1-delivery-1  last_fired=never
+on  606a5cd2-3cfd-4737-b523-1991c19e636d  [interval  ] @every 30s                    channel  f24c1sink :: f24c1-delivery-2  last_fired=never
+on  b9a0c0de-66e2-4e51-a44c-e05e3e70a18e  [interval  ] @every 30s                    channel  f24c1sink :: f24c1-delivery-3  last_fired=never
+on  30e74a27-4c5c-4a55-9f83-5ec45d7ea0cc  [interval  ] @every 30s                    channel  f24c1sink :: f24c1-delivery-4  last_fired=never
+on  3c34e0d3-1dfa-4635-97f0-da081be18c4a  [interval  ] @every 30s                    channel  f24c1sink :: f24c1-delivery-5  last_fired=never
+on  cebd63a9-1290-4844-815e-10e373bdcc1b  [interval  ] @every 30s                    channel  f24c1sink :: f24c1-delivery-6  last_fired=never
+
+=== 3. install + start the REAL service ===
+  home:    /tmp/f24c1-run/home
+  binary:  /root/wayland-24-abandon-surface/target/release/wayland-core
+gateway start requested (systemd)
+status:
+{
+  "state": "running",
+  "pid": 2689586,
+  "uptime_secs": 4,
+  "profile": "f24c1",
+
+=== 4. COUNT POSITIVE DELIVERY at the independent sink ===
+    (nothing below is trustworthy unless this is non-zero)
+  t=1s arrivals_at_sink=0
+  t=2s arrivals_at_sink=0
+  t=3s arrivals_at_sink=0
+  t=4s arrivals_at_sink=0
+  t=5s arrivals_at_sink=0
+  t=6s arrivals_at_sink=0
+  t=7s arrivals_at_sink=0
+  t=8s arrivals_at_sink=0
+  t=9s arrivals_at_sink=0
+  t=10s arrivals_at_sink=0
+  t=11s arrivals_at_sink=0
+  t=12s arrivals_at_sink=0
+  t=13s arrivals_at_sink=0
+  t=14s arrivals_at_sink=0
+  t=15s arrivals_at_sink=0
+  t=16s arrivals_at_sink=0
+  t=17s arrivals_at_sink=0
+  t=18s arrivals_at_sink=0
+  t=19s arrivals_at_sink=0
+  t=20s arrivals_at_sink=0
+  t=21s arrivals_at_sink=0
+  t=22s arrivals_at_sink=0
+  t=23s arrivals_at_sink=0
+  t=24s arrivals_at_sink=0
+  t=25s arrivals_at_sink=0
+  t=26s arrivals_at_sink=0
+  t=27s arrivals_at_sink=0
+  t=28s arrivals_at_sink=0
+  t=29s arrivals_at_sink=4
+ARRIVALS_AT_INDEPENDENT_SINK=4
+ANSWERED=3 STALLED=1
+
+=== 5. ledger BEFORE the drain ===
+pending per gateway status:
+{
+  "state": "running",
+  "pid": 2689586,
+  "uptime_secs": 59,
+  "profile": "f24c1",
+  "turns_in_flight": 0,
+abandoned BEFORE (must be empty -- a surface that always lists something proves nothing):
+No abandoned deliveries recorded in /tmp/f24c1-run/home.
+abandoned --json BEFORE:
+{
+  "abandoned": [],
+  "dropped_past_retention": 0,
+  "home": "/tmp/f24c1-run/home",
+  "quarantined": 0
+}
+
+=== 6. FORCE a real abandonment: drain with a budget it cannot meet ===
+pending right before drain:
+  "deliveries_pending": 0,
+drain requested (budget 8000ms); gateway pid 2689586
+wayland-core gateway: drain did not reach a terminal state within 8000ms + slack; last observed state was Running
+gateway journal (drain lines):
+Jul 28 20:20:04 Ubuntu-2404-noble-amd64-base wayland-core[2659955]: [gateway] channels registered=1
+Jul 28 20:20:04 Ubuntu-2404-noble-amd64-base wayland-core[2659955]: [gateway] inbound: subscriber spawned, webhook host disabled policies=1
+Jul 28 20:20:04 Ubuntu-2404-noble-amd64-base wayland-core[2659955]: [gateway] started pid=2659955 role=Owner profile=f24c1 carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+Jul 28 20:21:16 Ubuntu-2404-noble-amd64-base wayland-core[2659955]: [gateway] drain requested (budget Some(1000)ms)
+Jul 28 20:21:16 Ubuntu-2404-noble-amd64-base wayland-core[2659955]: [gateway] drain Clean: observations=1 abandoned=0 flushed=true
+Jul 28 20:21:16 Ubuntu-2404-noble-amd64-base wayland-core[2659955]: [gateway] stopped (clean=true)
+Jul 28 20:22:02 Ubuntu-2404-noble-amd64-base wayland-core[2689586]: [gateway] channels registered=1
+Jul 28 20:22:02 Ubuntu-2404-noble-amd64-base wayland-core[2689586]: [gateway] inbound: subscriber spawned, webhook host disabled policies=1
+Jul 28 20:22:02 Ubuntu-2404-noble-amd64-base wayland-core[2689586]: [gateway] started pid=2689586 role=Owner profile=f24c1 carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+
+=== 7. THE SURFACE: what did you give up on? ===
+--- operator view ---
+No abandoned deliveries recorded in /tmp/f24c1-run/home.
+--- json ---
+{
+  "abandoned": [],
+  "dropped_past_retention": 0,
+  "home": "/tmp/f24c1-run/home",
+  "quarantined": 0
+}
+
+=== 8. raw ledger, for cross-check against the surface ===
+raw_abandoned_records=0
+{"id":"cron:606a5cd2-3cfd-4737-b523-1991c19e636d:1785270181603","state":"settled","at":"2026-07-28T20:23:02.487435744+00:00","delivered":true,"destination":"f24c1sink"}
+{"id":"cron:b9a0c0de-66e2-4e51-a44c-e05e3e70a18e:1785270181653","state":"accepted","at":"2026-07-28T20:23:02.487797069+00:00","destination":"f24c1sink"}
+{"id":"cron:b9a0c0de-66e2-4e51-a44c-e05e3e70a18e:1785270181653","state":"attempted","at":"2026-07-28T20:23:02.487805422+00:00","destination":"f24c1sink"}
+{"id":"cron:b9a0c0de-66e2-4e51-a44c-e05e3e70a18e:1785270181653","state":"settled","at":"2026-07-28T20:23:02.488344715+00:00","delivered":true,"destination":"f24c1sink"}
+{"id":"cron:30e74a27-4c5c-4a55-9f83-5ec45d7ea0cc:1785270181705","state":"accepted","at":"2026-07-28T20:23:02.488649695+00:00","destination":"f24c1sink"}
+{"id":"cron:30e74a27-4c5c-4a55-9f83-5ec45d7ea0cc:1785270181705","state":"attempted","at":"2026-07-28T20:23:02.488656916+00:00","destination":"f24c1sink"}
+F24C1_LIVE_DONE

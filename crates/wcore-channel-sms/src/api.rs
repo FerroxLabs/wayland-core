@@ -12,6 +12,41 @@ use serde::Deserialize;
 
 use crate::error::SmsError;
 
+/// The request header a keyed send carries the gateway's delivery id on.
+///
+/// # This is an ATTRIBUTION carrier, not a dedup token — read this before
+/// changing [`crate::SmsChannel::supports_outbound_idempotency`]
+///
+/// Twilio's `Messages` create resource has **no client-supplied idempotency or
+/// opaque-tracking parameter**. Its documented optional parameters are
+/// `StatusCallback`, `ApplicationSid`, `MaxPrice`, `ProvideFeedback`,
+/// `Attempt`, `ValidityPeriod`, `ForceDelivery`, `ContentRetention`,
+/// `AddressRetention`, `SmartEncoded`, `PersistentAction`, `TrafficType`,
+/// `ShortenUrls`, `ScheduleType`, `SendAt`, `SendAsMms`, `ContentVariables`
+/// and `RiskCheck` — not one of which is a dedup slot. So there is nothing in
+/// the request body for a delivery id to ride on, and this header is what is
+/// left.
+///
+/// A header `api.twilio.com` does not read is inert AT TWILIO. What it is not
+/// inert for is the request itself: it makes each outbound self-identifying at
+/// any destination that records what we sent, which is the difference between
+/// an arrival that can be traced back to a (job, scheduled instant) pair and
+/// one that cannot. Before this existed, `twilio.messages` arrivals carried no
+/// identity at all and a repeat was **unclassifiable in principle** — neither
+/// provably a replay nor provably a recurrence.
+///
+/// Mirrors `wcore-channel-slack`'s header of the same name, which is
+/// likewise transmitted and likewise ignored by its platform, so one rule at a
+/// recording destination reads both.
+///
+/// **Sending it is not evidence that Twilio honours it, and this constant must
+/// never be cited as such.** Slack and Discord both declared outbound
+/// idempotency `true` on exactly that inference, from `mockito` tests, and both
+/// produced TWO messages the first time a replay was driven at the real API
+/// (2026-07-30). A mock proves what we put on the wire and nothing about what
+/// the destination does with it.
+pub const IDEMPOTENCY_HEADER: &str = "Idempotency-Key";
+
 /// Base backoff for transient retries.
 pub(crate) const SEND_BASE_BACKOFF_MS: u64 = 250;
 /// Cap any single sleep between retries so a malicious or buggy server
@@ -26,7 +61,11 @@ pub(crate) const MEDIA_HOSTS: &[&str] = &["api.twilio.com"];
 
 /// Cap on a single inbound media fetch. MMS media is small; bound it so an
 /// oversized/malicious resource can't exhaust memory.
-pub(crate) const MAX_MEDIA_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// Derived from the adapter's DECLARED bound rather than being a second
+/// hardcoded number, so `media_bounds()` cannot advertise one figure while this
+/// path enforces another.
+pub(crate) const MAX_MEDIA_BYTES: u64 = crate::MEDIA_BOUNDS.max_bytes;
 
 /// Download one inbound MMS media resource from Twilio.
 ///
@@ -115,6 +154,7 @@ pub(crate) async fn send_message(
     to: &str,
     body: &str,
     max_attempts: u32,
+    idempotency_key: Option<&str>,
 ) -> Result<MessageResponse, SmsError> {
     let url = format!(
         "{}/2010-04-01/Accounts/{}/Messages.json",
@@ -126,12 +166,22 @@ pub(crate) async fn send_message(
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=max_attempts {
-        let resp = http
+        let mut builder = http
             .post(&url)
             .basic_auth(account_sid, Some(auth_token))
-            .form(&form)
-            .send()
-            .await;
+            .form(&form);
+        // Attached ONLY on a keyed send. An unkeyed send must carry no header
+        // at all, so "this arrival has no identity" stays a fact about the
+        // request rather than a header with an empty or synthesised value —
+        // the sink cannot tell those apart and would grade an unidentifiable
+        // arrival as identified.
+        //
+        // Re-attached inside the retry loop on purpose: a transport retry is
+        // the SAME logical delivery, so every attempt must carry the same id.
+        if let Some(key) = idempotency_key {
+            builder = builder.header(IDEMPOTENCY_HEADER, key);
+        }
+        let resp = builder.send().await;
 
         let resp = match resp {
             Ok(r) => r,

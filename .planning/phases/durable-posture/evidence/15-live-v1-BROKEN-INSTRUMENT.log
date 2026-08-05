@@ -1,0 +1,87 @@
+BINARY=/root/dp-wayland-core-56d6ff89
+wayland-core 0.12.25
+HOSTNAME=Ubuntu-2404-noble-amd64-base
+DBUS_SESSION_BUS_ADDRESS=<unset>
+
+########## ARM degrade-default (require_durability=no vault=no session=dp0000000000000000000000000001) ##########
+--- config.toml ---
+[default]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[session]
+directory = "/root/dp-live-3077623/degrade-default/.wayland-core/sessions"
+--- stdout ---
+ARM_RC[degrade-default]=0
+FRAME_TYPES: ['ready(session_id=None)', 'execution_policy', 'workspace_policy', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation', 'capability_activation']
+--- stderr (degrade/refusal lines only) ---
+notice: durable session persistence is OFF for this run. This host has no usable OS keyring and no unlocked credentials vault, and a durable session seals every provider request into its recovery journal, which cannot be done without one. Everything else works normally — prompts, channels, tools and replies — but conversation history is not saved to disk and an interrupted turn cannot be recovered. To turn durable sessions back on, unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and silence the notice, set [session] enabled = false in config.toml.
+STDERR_GREP_RC=0
+--- sessions/ entries ---
+SESSION_ENTRY_COUNT=0
+
+########## ARM require-refuses (require_durability=yes vault=no session=dp0000000000000000000000000002) ##########
+--- config.toml ---
+[default]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[session]
+directory = "/root/dp-live-3077623/require-refuses/.wayland-core/sessions"
+require_durability = true
+--- stdout ---
+ARM_RC[require-refuses]=1
+ERROR_MESSAGE: Engine failed to start during init: [session] require_durability = true, but this host cannot protect a durable session: it has no usable OS keyring and no unlocked credentials vault. Refusing to start rather than running with no recovery journal. Unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = "keyring" on a host that has one. To accept running without durable sessions on this host, set [session] require_durability = false.
+FRAME_TYPES: ["error(code='init_failed', retryable=False)"]
+--- stderr (degrade/refusal lines only) ---
+Error: [session] require_durability = true, but this host cannot protect a durable session: it has no usable OS keyring and no unlocked credentials vault. Refusing to start rather than running with no recovery journal. Unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = "keyring" on a host that has one. To accept running without durable sessions on this host, set [session] require_durability = false.
+STDERR_GREP_RC=0
+--- sessions/ entries ---
+SESSION_ENTRY_COUNT=0
+
+########## ARM vault-control (require_durability=no vault=yes session=dp0000000000000000000000000003) ##########
+--- config.toml ---
+[default]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[session]
+directory = "/root/dp-live-3077623/vault-control/.wayland-core/sessions"
+--- stdout ---
+ARM_RC[vault-control]=1
+ERROR_MESSAGE: Engine failed to start: Invalid session ID 'dp0000000000000000000000000003': must be 6-40 hex characters (optionally with hyphens)
+FRAME_TYPES: ["error(code='init_failed', retryable=False)"]
+--- stderr (degrade/refusal lines only) ---
+STDERR_GREP_RC=1
+--- sessions/ entries ---
+SESSION_ENTRY_COUNT=0
+
+########## ARM require-with-vault (require_durability=yes vault=yes session=dp0000000000000000000000000004) ##########
+--- config.toml ---
+[default]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[session]
+directory = "/root/dp-live-3077623/require-with-vault/.wayland-core/sessions"
+require_durability = true
+--- stdout ---
+ARM_RC[require-with-vault]=1
+ERROR_MESSAGE: Engine failed to start: Invalid session ID 'dp0000000000000000000000000004': must be 6-40 hex characters (optionally with hyphens)
+FRAME_TYPES: ["error(code='init_failed', retryable=False)"]
+--- stderr (degrade/refusal lines only) ---
+STDERR_GREP_RC=1
+--- sessions/ entries ---
+SESSION_ENTRY_COUNT=0
+
+########## ARM journal-then-key-lost ##########
+PRE_RELAUNCH_ENTRIES=0
+ARM_RC[journal-then-key-lost]=1
+ERROR_MESSAGE: Engine failed to start: Invalid session ID 'dp0000000000000000000000000003': must be 6-40 hex characters (optionally with hyphens)
+FRAME_TYPES: ["error(code='init_failed')"]
+notice: durable session persistence is OFF for this run. This host has no usable OS keyring and no unlocked credentials vault, and a durable session seals every provider request into its recovery journal, which cannot be done without one. Everything else works normally — prompts, channels, tools and replies — but conversation history is not saved to disk and an interrupted turn cannot be recovered. To turn durable sessions back on, unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and silence the notice, set [session] enabled = false in config.toml.
+RELAUNCH_NOTICE_GREP_RC=0
+POST_RELAUNCH_ENTRIES=0
+
+ROOT=/root/dp-live-3077623
+WLDONE

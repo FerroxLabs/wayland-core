@@ -113,7 +113,23 @@ impl SignalChannel {
 /// Cap on a single inbound attachment read. signal-cli has already written the
 /// bytes to local disk; bound the read so an oversized file can't exhaust
 /// memory.
-const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`MAX_ATTACHMENT_BYTES`] — the
+/// cap `fetch_media` applies to the on-disk attachment before reading it — is
+/// derived from it. One constant, both sites, so the advertised number and the
+/// enforced number cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 64 MiB, because the declaration had no
+/// reader anywhere in the workspace. 64 MiB is the value that has actually
+/// governed inbound reads since 2026-06-12.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 64 * 1024 * 1024,
+    max_attachments: 10,
+};
+
+const MAX_ATTACHMENT_BYTES: u64 = MEDIA_BOUNDS.max_bytes;
 
 #[async_trait]
 impl Channel for SignalChannel {
@@ -333,6 +349,44 @@ impl Channel for SignalChannel {
         include_str!("schemas/signal.json")
     }
 
+    /// Signal: **`NotImplemented`, not `PlatformHasNoApi` — and the distinction
+    /// is the whole point of the type.**
+    ///
+    /// Signal the protocol has remote-delete and message-edit, and `signal-cli`
+    /// — the subprocess this adapter already drives over line-delimited
+    /// JSON-RPC — surfaces them. The plumbing to reach them is *already here*:
+    /// the pending-request map, the id-correlated `oneshot`, the supervisor's
+    /// stdin swap and the fixture launcher used by every send test. Nothing
+    /// structural is missing.
+    ///
+    /// It is nevertheless declared `NotImplemented` rather than implemented,
+    /// deliberately. The proof available in this lane is a hermetic fixture that
+    /// answers whatever method name this code writes — so a test asserting
+    /// `"method" == "remoteDelete"` would assert **this author's recollection of
+    /// signal-cli's RPC vocabulary**, not signal-cli's behaviour, and would pass
+    /// green while production failed with `unknown method`. That is a
+    /// self-passing gate, and the honest move is to name the cell as open rather
+    /// than to fill it with something only a real `signal-cli` can falsify.
+    ///
+    /// **This is the cheapest remaining cell in the matrix** and the one to take
+    /// next: verify the method name and parameter shape against a real
+    /// `signal-cli --version`-pinned binary, then reuse the existing send
+    /// plumbing verbatim.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::NotImplemented;
+        wcore_channels::NativeActions::none()
+            .edit(NotImplemented)
+            .delete(NotImplemented)
+            .react(NotImplemented)
+            .typing(NotImplemented)
+            .note(
+                "signal-cli exposes remote-delete and edit over the same JSON-RPC channel \
+                 this adapter already drives; NOT implemented because the only proof \
+                 available here is a fixture that would echo our own guessed method name. \
+                 Needs a version-pinned real signal-cli. Cheapest open cell.",
+            )
+    }
+
     /// Read an inbound Signal attachment's bytes off local disk. signal-cli
     /// writes each attachment to `<config-dir>/attachments/<id>`; the `id`
     /// rides in `Attachment.path`. No network fetch, so no SSRF surface —
@@ -369,6 +423,12 @@ impl Channel for SignalChannel {
         })
         .await
         .map_err(|e| ChannelError::Transport(format!("attachment read task panic: {e}")))?
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// [`MAX_ATTACHMENT_BYTES`] is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 }
 

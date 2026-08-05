@@ -1,0 +1,34 @@
+=== STEP 4 — instantiate the Phase 28 seam IN THE CLEAN ROOM ===
+The shipped 'manifest build' hardcodes certification = Unavailable (finding
+F29-04-01). To obtain the POSITIVE CONTROL that criterion 4 needs, the
+binding is filled from a receipt the REAL evaluation pipeline produced here,
+and the manifest is then signed and verified by the real binary.
+[wayland-eval fixture run] rc=0
+    PASS canary deepseek os=linux approval=yolo
+    SUMMARY pass=1 fail=0 skip=0 aborted=0
+receipt produced at: /tmp/29-04-GTjIF2/reports/000-canary-deepseek/receipt.json
+[wayland-receipt sign] rc=1
+    wayland-receipt: fixture digest is a synthetic binary/scenario label, not fixture provenance
+=> MEASURED, NOT WORKED AROUND. The product REFUSES to mint a CI authority
+   claim over a receipt whose fixture provenance is synthetic. That guard is
+   correct and this lane does not bypass it, so the clean-room binding below
+   names a LOCAL-authority receipt and says so in its key-id field. A real
+   release binding needs a real CI-signed receipt from Phase 28 on real
+   hardware; that is enumerated as a phase limit, not papered over here.
+    certification binding installed from the real receipt:
+      receipt_body_sha256 = 7ca52d3b6ad2a3e7b9922da96a040be02a4e8b19affcc3cb43eb5690209fe69a
+      receipt_schema = wayland.eval.receipt
+      receipt_schema_version = 1
+      receipt_signing_key_id = local-authority-unsigned-no-ci-signature
+      source_commit = 0123456789abcdef0123456789abcdef01234567
+      binary_sha256 = 2d868f5eff0d952ab88b4ba4f2b5036a47e6d672424cbdfc22ba5cba931e39f4
+      target_os = linux
+      target_architecture = x86_64
+    recomputed manifest body_sha256 = f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+[manifest-sign(A)] rc=0
+    MANIFEST SIGNED body_sha256=f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+[manifest-verify(A)] rc=0
+    MANIFEST VERIFIED body_sha256=f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c
+=> manifest-verify rc=0 proves the spliced body digest is EXACTLY what the
+   product computes; a wrong digest would have failed here.
+

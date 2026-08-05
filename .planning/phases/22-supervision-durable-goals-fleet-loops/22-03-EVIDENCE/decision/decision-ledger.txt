@@ -1,0 +1,9 @@
+F22-03-PANEL-CODEX: RECOMMENDS lease-with-fencing-token evidence=panel-codex.txt
+F22-03-PANEL-GEMINI: RECOMMENDS lease-with-fencing-token evidence=panel-gemini.txt
+F22-03-PANEL-KIMI: RECOMMENDS lease-with-fencing-token evidence=panel-kimi.txt
+F22-03-PANEL-CLAUDE-ADVERSARIAL: RECOMMENDS lease-with-fencing-token evidence=panel-claude-adversarial.txt
+F22-03-MEASURE-FENCING-SURFACE: OK evidence=fencing-surface.txt option=lease-with-fencing-token
+F22-03-MEASURE-PROCESS-IDENTITY: OK evidence=process-identity.txt host=hetzner-dsm+seandesktop option=os-process-liveness
+F22-03-MEASURE-SUSPEND-CLOCK: OK evidence=suspend-clock.txt host=hetzner-dsm option=heartbeat-liveness
+F22-03-CLAIM-MODEL: CHOSEN lease-with-fencing-token basis=majority dup_window_ms=30000 lost_window_ms=0 dissent=panel-dissent.txt rationale=panel-dissent.txt
+F22-03-GATE-CAVEAT: the plan's Task 2 gate additionally binds the commitment to BOTH baseline legs recording RAN. The windows leg is NOT-RUN (see ../baseline/INDEX.txt). That clause is therefore NOT satisfied and is reported unmet rather than worked around; the decision stands on the evidence that does exist and Condition 2 in panel-dissent.txt carries the outstanding measurement.

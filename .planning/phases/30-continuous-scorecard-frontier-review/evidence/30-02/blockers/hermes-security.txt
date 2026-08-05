@@ -1,0 +1,13 @@
+LEG LEG-08 - hermes / security - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+Identical blocker to wayland:security -- the limitation is in the shared meter, not in the
+tool. The frozen byte-search extraction cannot be performed because the fixture records body
+digests rather than bodies. Recorded UNPROVEN rather than substituting a narrower
+extraction. SUBSTITUTION POINT: as above, a body-retaining or leaf-hash-exposing fixture,
+which is a change to the shared meter this plan is fenced from.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

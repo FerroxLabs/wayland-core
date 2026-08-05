@@ -7,7 +7,6 @@
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use serial_test::serial;
 use wcore_agent::confirm::ToolConfirmer;
 use wcore_agent::orchestration::{StreamingContext, execute_tool_calls_with_streaming};
 use wcore_agent::output::OutputSink;
@@ -16,6 +15,10 @@ use wcore_types::message::{ContentBlock, FinishReason};
 /// (msg_id, call_id, tool_name, chunk) — captured by the recording sinks.
 type Captured = (String, String, String, String);
 type CapturedBuf = Arc<Mutex<Vec<Captured>>>;
+
+fn test_openai_key() -> String {
+    ["sk", "-", "abcdefghijklmnopqrstuvwxyz0123456789AB"].concat()
+}
 
 #[derive(Default)]
 struct CapSink {
@@ -47,6 +50,9 @@ impl OutputSink for CapSink {
 
 fn make_registry() -> wcore_tools::registry::ToolRegistry {
     let mut reg = wcore_tools::registry::ToolRegistry::new();
+    reg.set_sandbox_runtime(Arc::new(wcore_sandbox::SandboxRegistry::new(Arc::new(
+        wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new(),
+    ))));
     reg.register(Box::new(wcore_tools::bash::BashTool));
     reg
 }
@@ -60,29 +66,8 @@ fn bash_call(id: &str, command: &str) -> ContentBlock {
     }
 }
 
-/// Force the NoSandbox backend so these STREAMING tests exercise the real
-/// `printf` exec path regardless of host isolation tech. `BashTool` routes
-/// through `wcore-sandbox`, which (correctly) FAILS CLOSED when no real
-/// backend can spawn — e.g. bwrap can't create user namespaces in an
-/// unprivileged CI container, so the command is refused and no chunks are
-/// emitted. These are chunk-delivery tests, not isolation tests, so the
-/// documented `WAYLAND_ALLOW_NO_SANDBOX=1` opt-in is the intended way to
-/// exercise the streaming path. Mirrors `wcore-tools`'
-/// `bash_sandbox_routing_test::force_no_sandbox`. Every test that calls this
-/// is `#[serial]` because the env vars are process-global.
-fn force_no_sandbox() {
-    // SAFETY: test-only env mutation; every caller is `#[serial]` so no
-    // other thread races this write.
-    unsafe {
-        std::env::set_var("WAYLAND_SANDBOX", "none");
-        std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
-    }
-}
-
 #[tokio::test]
-#[serial]
 async fn bash_emits_tool_chunks_when_streaming_advertised() {
-    force_no_sandbox();
     let registry = make_registry();
     let confirmer = Arc::new(std::sync::Mutex::new(ToolConfirmer::new(true, vec![])));
     let sink: Arc<dyn OutputSink> = Arc::new(CapSink {
@@ -146,9 +131,7 @@ impl OutputSink for CapSinkShared {
 }
 
 #[tokio::test]
-#[serial]
 async fn bash_streams_through_dispatcher_when_advertised_on() {
-    force_no_sandbox();
     let registry = make_registry();
     let confirmer = Arc::new(std::sync::Mutex::new(ToolConfirmer::new(true, vec![])));
     let chunks: CapturedBuf = Arc::new(Mutex::new(Vec::new()));
@@ -199,9 +182,46 @@ async fn bash_streams_through_dispatcher_when_advertised_on() {
 }
 
 #[tokio::test]
-#[serial]
+async fn bash_stream_secret_is_redacted_before_host_chunks() {
+    let secret = test_openai_key();
+    let registry = make_registry();
+    let confirmer = Arc::new(std::sync::Mutex::new(ToolConfirmer::new(true, vec![])));
+    let chunks: CapturedBuf = Arc::new(Mutex::new(Vec::new()));
+    let sink: Arc<dyn OutputSink> = Arc::new(CapSinkShared {
+        chunks: Arc::clone(&chunks),
+        streaming_on: true,
+    });
+    let calls = vec![bash_call("secret-stream", &format!("printf '{secret}\\n'"))];
+
+    execute_tool_calls_with_streaming(
+        &registry,
+        &calls,
+        &confirmer,
+        None,
+        wcore_compact::CompactionLevel::Off,
+        false,
+        Some(StreamingContext {
+            output: Arc::clone(&sink),
+            msg_id: "secret-message".into(),
+        }),
+        &tokio_util::sync::CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("streaming dispatch");
+
+    let combined = chunks
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, _, _, chunk)| chunk.as_str())
+        .collect::<String>();
+    assert!(!combined.contains(&secret), "secret escaped host stream");
+    assert!(combined.contains("[REDACTED:OPENAI_API_KEY]"));
+}
+
+#[tokio::test]
 async fn bash_does_not_stream_when_advertised_off() {
-    force_no_sandbox();
     let registry = make_registry();
     let confirmer = Arc::new(std::sync::Mutex::new(ToolConfirmer::new(true, vec![])));
     let chunks: CapturedBuf = Arc::new(Mutex::new(Vec::new()));
@@ -236,9 +256,7 @@ async fn bash_does_not_stream_when_advertised_off() {
 }
 
 #[tokio::test]
-#[serial]
 async fn streaming_none_falls_back_to_buffered_execute() {
-    force_no_sandbox();
     // No streaming context at all — must run through the legacy
     // buffered execute() path. Nothing to assert on chunks (sink omitted),
     // just verify the call completes without panicking.

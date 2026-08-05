@@ -1,0 +1,2 @@
+wayland-core migrate: quarantine index is invalid: EOF while parsing a string at line 3758 column 13: EOF while parsing a string at line 3758 column 13
+rc=1

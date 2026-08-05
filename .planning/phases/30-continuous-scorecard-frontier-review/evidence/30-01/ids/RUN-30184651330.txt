@@ -1,0 +1,26 @@
+EVIDENCE ID : RUN-30184651330
+LEDGER ROW  : 6
+ARTIFACT    : `nightly-windows-soak` `workflow_dispatch` run `30184651330`, 2026-07-26. Windows job `89747993276` 6/6 PASS; macOS job `89747992986` 8/8 PASS; both at nonce `96c91107…`. Detail: `phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md` §13
+
+== PATH RESOLUTION ==
+[OK]   stat phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+       -> .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md  size=89630
+       head:
+---
+phase: 20A-native-windows-macos-uat
+plan: "04"
+subsystem: infra
+tags: [windows, macos, native-uat, appcontainer, candidate-seal, dispatch-gate, sean-gate]
+status: complete
+
+== GIT OBJECT RESOLUTION ==
+[OK]   RUN 30184651330 found 15x in .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+       cmd: /usr/bin/grep -c -F 30184651330 .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+[OK]   RUN 89747993276 found 3x in .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+       cmd: /usr/bin/grep -c -F 89747993276 .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+[OK]   RUN 89747992986 found 3x in .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+       cmd: /usr/bin/grep -c -F 89747992986 .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+[OK]   DIGEST 96c91107 found 11x in .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+       cmd: /usr/bin/grep -c -F 96c91107 .planning/phases/20A-native-windows-macos-uat/20A-04-SUMMARY.md
+
+== VERDICT == CONFIRMED

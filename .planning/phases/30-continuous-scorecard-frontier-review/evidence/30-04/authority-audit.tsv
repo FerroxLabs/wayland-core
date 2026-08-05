@@ -1,0 +1,10 @@
+AUTH-01::CONFIRMED::evidence=captures/auth-01-positive-control.txt
+AUTH-02::CONFIRMED::evidence=captures/auth-02-placeholder-refusal.txt
+AUTH-03::CONFIRMED::evidence=captures/auth-03-no-main-contains-head.txt
+AUTH-04::CONFIRMED::evidence=captures/auth-04-no-tag-at-head.txt
+AUTH-05::CONFIRMED::evidence=captures/auth-05-retained-evidence-refs.txt
+AUTH-06::CONFIRMED::evidence=captures/auth-06-ref-count-two-ways.txt
+AUTH-07::CONFIRMED::evidence=captures/auth-07-remote-main-observability.txt
+AUTH-08::NOT-OBSERVABLE-HERE::evidence=captures/auth-08-09-not-observable.txt
+AUTH-09::NOT-OBSERVABLE-HERE::evidence=captures/auth-08-09-not-observable.txt
+AUTH-10::CONFIRMED::evidence=captures/auth-10-no-seed-disclosure.txt

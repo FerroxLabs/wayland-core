@@ -1,0 +1,148 @@
+HEAD=56d6ff8960abf06df6ba71545b96046c7d5bcf0e BASE=c9ab048b952c5bc74c75ea8f76df06788408de59
+===== WITH LANE CODE (HEAD) =====
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/harness_regression.rs (target/debug/deps/harness_regression-7671914b16b21dbf)
+
+running 15 tests
+test r008_session_schema_version_migration ... ok
+test r009_pricing_gpt4o_mini_accurate ... ok
+test r010_openrouter_url_no_double_v1 ... ok
+test r013_customer_flow_assistants ... ok
+test r014_customer_flow_skills_hello ... ok
+test r002_yaml_config_migration ... ok
+test r001_cron_schedule_alias_deserializes ... ok
+test r004_crash_sentinel_clears_on_clean_exit ... ok
+test r006_init_history_injects_system_prompt ... ok
+test r015_customer_flow_routines_cli_plumbing ... ok
+test r012_honcho_fallback_on_no_key ... FAILED
+test r011_channels_auto_register_logs ... FAILED
+test r005_force_mode_aliases ... ok
+test r003_no_model_guard ... ok
+test r007_session_wal_survives_mid_turn_kill ... ok
+
+failures:
+
+---- r012_honcho_fallback_on_no_key stdout ----
+
+thread 'r012_honcho_fallback_on_no_key' (3350312) panicked at crates/wcore-cli/tests/harness_regression.rs:1129:13:
+R-012 FAIL: no honcho fallback log found in stderr with HONCHO_API_KEY unset.
+expected stderr to contain at least one of ["local backend", "HONCHO_API_KEY", "user-model: using local", "honcho"] but none matched.
+stderr tail:
+warning: /tmp/.tmpoIpQKl/.wayland-core/config.toml has permissions 0o644; tightening to 0o600 on next write
+Either RUST_LOG did not propagate or F-093 regressed (user-model fallback not logged).
+failures: [CostMissing]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- r011_channels_auto_register_logs stdout ----
+
+thread 'r011_channels_auto_register_logs' (3350311) panicked at crates/wcore-cli/tests/harness_regression.rs:1053:13:
+R-011 FAIL: F-014 channel bootstrap log absent from stderr.
+expected stderr to contain at least one of ["start_all() complete", "channel_manager", "inbound polling active"] but none matched.
+stderr tail:
+warning: /tmp/.tmpdTNe42/.wayland-core/config.toml has permissions 0o644; tightening to 0o600 on next write
+This means start_all() is not being called (F-014 regression) or RUST_LOG did not propagate.
+failures: [CostMissing]
+
+
+failures:
+    r011_channels_auto_register_logs
+    r012_honcho_fallback_on_no_key
+
+test result: FAILED. 13 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+error: test failed, to rerun pass `-p wcore-cli --test harness_regression`
+RC[with-lane]=101
+ABLATED porcelain=[M  crates/wcore-agent/src/engine.rs M  crates/wcore-agent/tests/acceptance/helpers.rs M  crates/wcore-agent/tests/common/mod.rs M  crates/wcore-agent/tests/e2e/anthropic.rs M  crates/wcore-agent/tests/e2e/compaction.rs M  crates/wcore-agent/tests/e2e/openai.rs M  crates/wcore-cli/tests/f14_sigkill_recovery.rs M  crates/wcore-config/src/config.rs ]
+===== WITHOUT LANE CODE (files at BASE) =====
+   Compiling wcore-config v0.12.25 (/root/wayland-durable-posture/crates/wcore-config)
+   Compiling wcore-observability v0.12.25 (/root/wayland-durable-posture/crates/wcore-observability)
+   Compiling wcore-channels v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels)
+   Compiling wcore-providers v0.12.25 (/root/wayland-durable-posture/crates/wcore-providers)
+   Compiling wcore-pricing v0.12.25 (/root/wayland-durable-posture/crates/wcore-pricing)
+   Compiling wcore-gateway v0.12.25 (/root/wayland-durable-posture/crates/wcore-gateway)
+   Compiling wcore-acp v0.12.25 (/root/wayland-durable-posture/crates/wcore-acp)
+   Compiling wcore-replay v0.12.25 (/root/wayland-durable-posture/crates/wcore-replay)
+   Compiling wcore-exec-backend v0.12.25 (/root/wayland-durable-posture/crates/wcore-exec-backend)
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval-scenarios)
+   Compiling wcore-memory v0.12.25 (/root/wayland-durable-posture/crates/wcore-memory)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-discord)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-email)
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-sms)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-signal)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-slack)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-telegram)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-matrix)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-durable-posture/crates/wcore-channel-msteams)
+   Compiling wcore-tools v0.12.25 (/root/wayland-durable-posture/crates/wcore-tools)
+   Compiling wcore-swarm v0.12.25 (/root/wayland-durable-posture/crates/wcore-swarm)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-durable-posture/crates/wcore-channels-registry)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-durable-posture/crates/wcore-mcp)
+   Compiling wcore-browser v0.12.25 (/root/wayland-durable-posture/crates/wcore-browser)
+   Compiling wcore-cua v0.12.25 (/root/wayland-durable-posture/crates/wcore-cua)
+   Compiling wcore-skills v0.12.25 (/root/wayland-durable-posture/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-durable-posture/crates/wcore-plugin-subprocess)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-durable-posture/crates/wayland-ollama)
+   Compiling wcore-eval v0.12.25 (/root/wayland-durable-posture/crates/wcore-eval)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-durable-posture/crates/wcore-evolve)
+   Compiling wcore-agent v0.12.25 (/root/wayland-durable-posture/crates/wcore-agent)
+   Compiling wcore-cli v0.12.25 (/root/wayland-durable-posture/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 05s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/harness_regression.rs (target/debug/deps/harness_regression-7671914b16b21dbf)
+
+running 15 tests
+test r008_session_schema_version_migration ... ok
+test r010_openrouter_url_no_double_v1 ... ok
+test r009_pricing_gpt4o_mini_accurate ... ok
+test r014_customer_flow_skills_hello ... ok
+test r013_customer_flow_assistants ... ok
+test r002_yaml_config_migration ... ok
+test r001_cron_schedule_alias_deserializes ... ok
+test r004_crash_sentinel_clears_on_clean_exit ... ok
+test r006_init_history_injects_system_prompt ... ok
+test r015_customer_flow_routines_cli_plumbing ... ok
+test r011_channels_auto_register_logs ... FAILED
+test r005_force_mode_aliases ... ok
+test r012_honcho_fallback_on_no_key ... FAILED
+test r003_no_model_guard ... ok
+test r007_session_wal_survives_mid_turn_kill ... ok
+
+failures:
+
+---- r011_channels_auto_register_logs stdout ----
+
+thread 'r011_channels_auto_register_logs' (3376161) panicked at crates/wcore-cli/tests/harness_regression.rs:1053:13:
+R-011 FAIL: F-014 channel bootstrap log absent from stderr.
+expected stderr to contain at least one of ["start_all() complete", "channel_manager", "inbound polling active"] but none matched.
+stderr tail:
+warning: /tmp/.tmpglcMXW/.wayland-core/config.toml has permissions 0o644; tightening to 0o600 on next write
+This means start_all() is not being called (F-014 regression) or RUST_LOG did not propagate.
+failures: [CostMissing]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- r012_honcho_fallback_on_no_key stdout ----
+
+thread 'r012_honcho_fallback_on_no_key' (3376162) panicked at crates/wcore-cli/tests/harness_regression.rs:1129:13:
+R-012 FAIL: no honcho fallback log found in stderr with HONCHO_API_KEY unset.
+expected stderr to contain at least one of ["local backend", "HONCHO_API_KEY", "user-model: using local", "honcho"] but none matched.
+stderr tail:
+warning: /tmp/.tmprNjLDa/.wayland-core/config.toml has permissions 0o644; tightening to 0o600 on next write
+Either RUST_LOG did not propagate or F-093 regressed (user-model fallback not logged).
+failures: [CostMissing]
+
+
+failures:
+    r011_channels_auto_register_logs
+    r012_honcho_fallback_on_no_key
+
+test result: FAILED. 13 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+error: test failed, to rerun pass `-p wcore-cli --test harness_regression`
+RC[without-lane]=101
+RESTORED porcelain=[]
+RESTORED_SHA_MATCHES=yes
+WLDONE

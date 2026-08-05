@@ -1,5 +1,5 @@
-//! `ScopedSkillRegistry` — plugin-registered bundled skills. Host adapter
-//! delegates to `wcore_skills::bundled::register_bundled_skill`.
+//! `ScopedSkillRegistry` — plugin-registered bundled skills. The host adapter
+//! collects owned specs for insertion into one session-local catalog.
 
 use crate::access_gate::PluginAccessGate;
 use crate::bundled_skill_spec::BundledSkillSpec;

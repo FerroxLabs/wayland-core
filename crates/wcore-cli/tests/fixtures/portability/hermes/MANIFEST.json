@@ -1,0 +1,219 @@
+{
+  "bounded": true,
+  "bounding_rule": "Only importer-relevant files are cloned verbatim; large trees are reproduced as directory markers preserving subdirectory counts.",
+  "canaries": [
+    {
+      "canary": "CANARY-ef99eee9de09ddd844af811e3b8349db",
+      "file": ".env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-a62993845693b6e909fce803b060e21f",
+      "file": ".env",
+      "key": "OPENROUTER_API_KEY"
+    },
+    {
+      "canary": "CANARY-e2776068b76317c9a403fe2454a05cff",
+      "file": ".env",
+      "key": "VOICE_TOOLS_OPENAI_KEY"
+    },
+    {
+      "canary": "CANARY-aa9337f180b0232bc17bad82fa3a47dd",
+      "file": "profiles/flux-backend-eng/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-4efd7d98f5af4d777b7e0ba6783ad057",
+      "file": "profiles/flux-ceo/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-ee6b6f5eafb79f2a7639e230134735e1",
+      "file": "profiles/flux-ceo/.env",
+      "key": "OPENROUTER_API_KEY"
+    },
+    {
+      "canary": "CANARY-06649f06555a1cac9f8d3af6b9790c61",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[0].access_token"
+    },
+    {
+      "canary": "CANARY-9ed78061011cef58eb5cde37df22b27b",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[0].base_url"
+    },
+    {
+      "canary": "CANARY-e2f8e48a4ba3e7e397ecd3bbeb555999",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[0].label"
+    },
+    {
+      "canary": "CANARY-c344c6208b447e64863136b7c65eb3f7",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[1].base_url"
+    },
+    {
+      "canary": "CANARY-d19b33598fd925bbc43a3f52bae6e354",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[1].label"
+    },
+    {
+      "canary": "CANARY-613124301636cb715b78abc017e510b3",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[1].secret_fingerprint"
+    },
+    {
+      "canary": "CANARY-d6f08e7ae5b158ffd386ab626b959ff1",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.deepseek[1].source"
+    },
+    {
+      "canary": "CANARY-43c768bf60c924667ab7a86b56d4aad3",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.openrouter[0].base_url"
+    },
+    {
+      "canary": "CANARY-81c6c3377f13b5ad38efc3dc935a26b2",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.openrouter[0].label"
+    },
+    {
+      "canary": "CANARY-4a99ec6f5521b31fae8954dcb948097c",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.openrouter[0].secret_fingerprint"
+    },
+    {
+      "canary": "CANARY-67942856730254c5a217aea38ab106e9",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "credential_pool.openrouter[0].source"
+    },
+    {
+      "canary": "CANARY-06a2b996f00498e1fe0d2da42095161e",
+      "file": "profiles/flux-ceo/auth.json",
+      "key": "updated_at"
+    },
+    {
+      "canary": "CANARY-73cf972b7e1938c1622ea7c234bfccfc",
+      "file": "profiles/flux-cro/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-f931c0d411e3a5293bcb25fc8bae666a",
+      "file": "profiles/flux-cron-sentinel/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-ea7c0cb285bba47a217d9ae0f483126d",
+      "file": "profiles/flux-eng-lead/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-642cc6cb3d92eec9501d7866a4ed49b5",
+      "file": "profiles/flux-intake/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-769a418167273b2b3e935df81017dfaa",
+      "file": "profiles/flux-ops-lead/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-1cd2ff237f3de23299aa32532e0d50a7",
+      "file": "profiles/flux-pricing/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-537c958f603443aa96494fa70ab3ae62",
+      "file": "profiles/flux-qa/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-d48a759229bffdcc814ec68ade859481",
+      "file": "profiles/flux-rq-lead/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-416e5c2af5644cd9c9a82c176cd888da",
+      "file": "profiles/flux-security/.env",
+      "key": "DEEPSEEK_API_KEY"
+    },
+    {
+      "canary": "CANARY-25ad77563d3eea550ca16e462b35cbc9",
+      "file": "profiles/fred/.env",
+      "key": "OPENROUTER_API_KEY"
+    },
+    {
+      "canary": "CANARY-d931d7d6f1126f6df350789712104c29",
+      "file": "profiles/fred/.env",
+      "key": "VOICE_TOOLS_OPENAI_KEY"
+    },
+    {
+      "canary": "CANARY-5648dedfc5219643a4e9562b9c78b224",
+      "file": "profiles/fred/auth.json",
+      "key": "credential_pool.openrouter[0].access_token"
+    },
+    {
+      "canary": "CANARY-ea115b20daea77aab8c1c870518f17dc",
+      "file": "profiles/fred/auth.json",
+      "key": "credential_pool.openrouter[0].base_url"
+    },
+    {
+      "canary": "CANARY-a239e359aaad58255e40351ee5dd9beb",
+      "file": "profiles/fred/auth.json",
+      "key": "credential_pool.openrouter[0].label"
+    },
+    {
+      "canary": "CANARY-448fd105c523763e694b26717ae2e429",
+      "file": "profiles/fred/auth.json",
+      "key": "credential_pool.openrouter[0].last_error_message"
+    },
+    {
+      "canary": "CANARY-ffd0b41073fd46fc1b163e65c3a823e1",
+      "file": "profiles/fred/auth.json",
+      "key": "credential_pool.openrouter[0].last_status"
+    },
+    {
+      "canary": "CANARY-b4cde8d9127a32f4baf717805f13cb92",
+      "file": "profiles/fred/auth.json",
+      "key": "credential_pool.openrouter[0].source"
+    },
+    {
+      "canary": "CANARY-8baf9f47792cea9b496cf30f2a631603",
+      "file": "profiles/fred/auth.json",
+      "key": "updated_at"
+    }
+  ],
+  "classification_rules": {
+    "R1": "dotenv key matching *_(API_KEY|TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL)",
+    "R2": "JSON/YAML mapping key containing key/token/secret/auth/pass/cred with a string value >= 8 chars",
+    "R3": "every string value under credentials/ or in auth.json"
+  },
+  "counts": {
+    "profiles": 12,
+    "profiles/flux-backend-eng/memories": 0,
+    "profiles/flux-backend-eng/skills": 45,
+    "profiles/flux-ceo/memories": 0,
+    "profiles/flux-ceo/skills": 45,
+    "profiles/flux-cro/memories": 0,
+    "profiles/flux-cro/skills": 45,
+    "profiles/flux-cron-sentinel/memories": 0,
+    "profiles/flux-cron-sentinel/skills": 45,
+    "profiles/flux-eng-lead/memories": 0,
+    "profiles/flux-eng-lead/skills": 45,
+    "profiles/flux-intake/memories": 0,
+    "profiles/flux-intake/skills": 45,
+    "profiles/flux-ops-lead/memories": 0,
+    "profiles/flux-ops-lead/skills": 45,
+    "profiles/flux-pricing/memories": 0,
+    "profiles/flux-pricing/skills": 45,
+    "profiles/flux-qa/memories": 0,
+    "profiles/flux-qa/skills": 45,
+    "profiles/flux-rq-lead/memories": 0,
+    "profiles/flux-rq-lead/skills": 45,
+    "profiles/flux-security/memories": 0,
+    "profiles/flux-security/skills": 45,
+    "profiles/fred/memories": 0,
+    "profiles/fred/skills": 45
+  },
+  "kind": "hermes"
+}

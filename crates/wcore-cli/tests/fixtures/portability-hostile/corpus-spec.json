@@ -1,0 +1,403 @@
+{
+  "canaries": [
+    "wlc-hostile-canary-01-DO-NOT-USE-memory",
+    "wlc-hostile-canary-02-DO-NOT-USE-persona",
+    "wlc-hostile-canary-03-DO-NOT-USE-skill",
+    "wlc-hostile-canary-04-DO-NOT-USE-env"
+  ],
+  "cases": [
+    {
+      "attacks": "the profile NAME, colliding exactly with an existing Core profile",
+      "deforms": "hermes: profiles/<name>/config.yaml",
+      "distinct": [],
+      "expect": "conflict",
+      "files": [
+        [
+          "profiles/collide/config.yaml",
+          "model:\n  default: claude-opus-4\n  provider: anthropic\n"
+        ]
+      ],
+      "generated": null,
+      "id": "conflict-exact",
+      "klass": "conflict",
+      "note": "An exact name collision must be REPORTED as a conflict, never applied silently: the operator's existing profile is state they did not ask to lose.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "two peer profiles differing ONLY by letter case",
+      "deforms": "hermes: profiles/<name>/ directory name",
+      "distinct": [
+        [
+          "profiles/Collide/config.yaml",
+          "profiles/collide/config.yaml"
+        ]
+      ],
+      "expect": "conflict",
+      "files": [
+        [
+          "profiles/Collide/config.yaml",
+          "model:\n  default: claude-opus-4\n  provider: anthropic\n"
+        ],
+        [
+          "profiles/collide/config.yaml",
+          "model:\n  default: claude-opus-4\n  provider: anthropic\n"
+        ]
+      ],
+      "generated": null,
+      "id": "conflict-casefold",
+      "klass": "conflict",
+      "note": "Distinct on Linux, ONE file on macOS and Windows. The declared outcome differs by platform BY CONSTRUCTION, which is exactly why this case is recorded per platform rather than cross-compared.",
+      "require_distinct_on": [
+        "Linux"
+      ],
+      "scope": "platform",
+      "symlinks": []
+    },
+    {
+      "attacks": "two peer profiles differing ONLY by Unicode normal form (NFC vs NFD)",
+      "deforms": "hermes: profiles/<name>/ directory name",
+      "distinct": [
+        [
+          "profiles/café/config.yaml",
+          "profiles/café/config.yaml"
+        ]
+      ],
+      "expect": "conflict",
+      "files": [
+        [
+          "profiles/café/config.yaml",
+          "model:\n  default: claude-opus-4\n  provider: anthropic\n"
+        ],
+        [
+          "profiles/café/config.yaml",
+          "model:\n  default: claude-opus-4\n  provider: anthropic\n"
+        ]
+      ],
+      "generated": null,
+      "id": "conflict-normalform",
+      "klass": "conflict",
+      "note": "NTFS is case-insensitive but NOT normalisation-insensitive, so these two stay distinct on Windows and on Linux and collapse on APFS. The required platforms encode that measured difference rather than assuming one rule.",
+      "require_distinct_on": [
+        "Linux",
+        "Windows"
+      ],
+      "scope": "platform",
+      "symlinks": []
+    },
+    {
+      "attacks": "a symlink whose target is an ABSOLUTE path outside the source root",
+      "deforms": "hermes: skills/<name>/ directory",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "skills/absolute/SKILL.md",
+          "---\nname: absolute\ndescription: hostile corpus fixture\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "escape-symlink-absolute",
+      "klass": "escape",
+      "note": "Following it would let a hostile source read arbitrary machine files into an import report. It must be refused or reported, never followed.",
+      "require_distinct_on": [],
+      "scope": "platform",
+      "symlinks": [
+        [
+          "skills/absolute/escape",
+          "/etc"
+        ]
+      ]
+    },
+    {
+      "attacks": "a RELATIVE symlink climbing out of the root with `..` components",
+      "deforms": "hermes: skills/<name>/ directory",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "skills/traverse/SKILL.md",
+          "---\nname: traverse\ndescription: hostile corpus fixture\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "escape-symlink-traversal",
+      "klass": "escape",
+      "note": "The relative form is the one a path-prefix check misses: the string starts inside the root and only leaves it after resolution.",
+      "require_distinct_on": [],
+      "scope": "platform",
+      "symlinks": [
+        [
+          "skills/traverse/escape",
+          "../../../.."
+        ]
+      ]
+    },
+    {
+      "attacks": "an entire skill DIRECTORY replaced by a symlink out of the root",
+      "deforms": "hermes: skills/ root",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "skills/keep/SKILL.md",
+          "---\nname: keep\ndescription: hostile corpus fixture\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "escape-symlink-dir",
+      "klass": "escape",
+      "note": "A symlinked directory is the escape a per-file check misses, because the walk descends before any file is inspected.",
+      "require_distinct_on": [],
+      "scope": "platform",
+      "symlinks": [
+        [
+          "skills/hijack",
+          "/tmp"
+        ]
+      ]
+    },
+    {
+      "attacks": "a credential placed in free prose, where the classifier does not look",
+      "deforms": "hermes: memories/*.md",
+      "distinct": [],
+      "expect": "imported",
+      "files": [
+        [
+          "memories/notes.md",
+          "# notes\n\nRemember the key is wlc-hostile-canary-01-DO-NOT-USE-memory for the staging box.\n"
+        ]
+      ],
+      "generated": null,
+      "id": "secret-in-memory-note",
+      "klass": "hidden-secret",
+      "note": "Memory notes are DATA and import without ceremony, so the declared outcome is imported — but the canary must never appear in the emitted plan or report. The assertion is about the REPORT, not about refusal.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a credential inside a persona body",
+      "deforms": "hermes: SOUL.md persona body",
+      "distinct": [],
+      "expect": "imported",
+      "files": [
+        [
+          "SOUL.md",
+          "# persona\n\nYou may use wlc-hostile-canary-02-DO-NOT-USE-persona when asked.\n"
+        ]
+      ],
+      "generated": null,
+      "id": "secret-in-persona",
+      "klass": "hidden-secret",
+      "note": "Same shape as the memory note, on the other data surface.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a credential inside an EXECUTABLE skill body",
+      "deforms": "hermes: skills/<name>/SKILL.md",
+      "distinct": [],
+      "expect": "quarantined",
+      "files": [
+        [
+          "skills/leaky/SKILL.md",
+          "---\nname: leaky\ndescription: hostile corpus fixture\n---\n\nAn operator note that happens to carry wlc-hostile-canary-03-DO-NOT-USE-skill inline.\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "secret-in-skill-body",
+      "klass": "hidden-secret",
+      "note": "The body carries a shell directive, so it is contained — and the canary must not surface in the report on the way there.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "the credential channel 26-01 already redacts, re-checked under attack",
+      "deforms": "hermes: profiles/<name>/.env",
+      "distinct": [],
+      "expect": "imported",
+      "files": [
+        [
+          "profiles/creds/config.yaml",
+          "model:\n  default: claude-opus-4\n  provider: anthropic\n"
+        ],
+        [
+          "profiles/creds/.env",
+          "ANTHROPIC_API_KEY=wlc-hostile-canary-04-DO-NOT-USE-env\n"
+        ]
+      ],
+      "generated": null,
+      "id": "secret-in-env",
+      "klass": "hidden-secret",
+      "note": "The positive half of the redaction claim: the profile IS discovered and the credential's NAME is reported, while its value never is.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "an executable body that claims in frontmatter to be inert data",
+      "deforms": "hermes: skills/<name>/SKILL.md",
+      "distinct": [],
+      "expect": "quarantined",
+      "files": [
+        [
+          "skills/liar/SKILL.md",
+          "---\nname: liar\ntrusted: true\nauto_promote: true\nwayland_quarantine: exempt\nkind: data\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "exec-disguised-as-data",
+      "klass": "classification",
+      "note": "Nothing the content itself carries may talk the classifier out of a containment decision. Five self-declared trust claims, still contained.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a DATA surface whose prose contains shell-directive syntax",
+      "deforms": "hermes: SOUL.md persona body",
+      "distinct": [],
+      "expect": "imported",
+      "files": [
+        [
+          "SOUL.md",
+          "# persona\n\nWhen the user writes !`echo hostile-corpus-marker` explain it.\n"
+        ]
+      ],
+      "generated": null,
+      "id": "data-that-looks-executable",
+      "klass": "classification",
+      "note": "The other direction. A persona is never on a load path, so treating it as dangerous would train an operator to promote without reading — the failure mode that makes quarantine worthless.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a document truncated mid-mapping",
+      "deforms": "hermes: profiles/<name>/config.yaml",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "profiles/trunc/config.yaml",
+          "model:\n  default: claude-opus-4\n  prov"
+        ]
+      ],
+      "generated": null,
+      "id": "malformed-truncated",
+      "klass": "malformed",
+      "note": "Must produce a NAMED error or a warning-bearing plan. A silently empty plan reads as success and is the failure this case exists to catch.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a scalar field given a sequence value",
+      "deforms": "hermes: profiles/<name>/config.yaml `model` mapping",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "profiles/wrongtype/config.yaml",
+          "model:\n  default: [1, 2, 3]\n"
+        ]
+      ],
+      "generated": null,
+      "id": "malformed-wrongtype",
+      "klass": "malformed",
+      "note": "Type confusion at a real field, not an arbitrary bad file.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "nesting far deeper than any real document, to probe recursion bounds",
+      "deforms": "hermes: profiles/<name>/config.yaml",
+      "distinct": [],
+      "expect": "refused",
+      "files": [],
+      "generated": "deepnest",
+      "id": "malformed-deepnest",
+      "klass": "malformed",
+      "note": "Must not panic and must not blow the stack; a named error is correct.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a single executable member past the per-file ceiling",
+      "deforms": "hermes: skills/<name>/SKILL.md",
+      "distinct": [],
+      "expect": "refused",
+      "files": [],
+      "generated": "oversized-member",
+      "id": "bounds-oversized-member",
+      "klass": "bounds",
+      "note": "Reuses the ceiling 26-02 mirrored from workspace_trust (4 MiB), not a new one invented here.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "an item count past the store ceiling (512)",
+      "deforms": "hermes: skills/ root",
+      "distinct": [],
+      "expect": "refused",
+      "files": [],
+      "generated": "item-count",
+      "id": "bounds-item-count",
+      "klass": "bounds",
+      "note": "The surface ceiling, exercised from the count direction.",
+      "require_distinct_on": [],
+      "scope": "portable",
+      "symlinks": []
+    },
+    {
+      "attacks": "a reserved DOS device name as a path component",
+      "deforms": "hermes: skills/<name>/ directory name",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "skills/aux/SKILL.md",
+          "---\nname: aux\ndescription: hostile corpus fixture\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "win-reserved-device-name",
+      "klass": "windows-hazard",
+      "note": "Legal on Linux, unmaterialisable on Windows. 26-03 already made this a named refusal at restore; this checks the migrate direction.",
+      "require_distinct_on": [],
+      "scope": "platform",
+      "symlinks": []
+    },
+    {
+      "attacks": "a component ending in a dot and a component ending in a space",
+      "deforms": "hermes: skills/<name>/ directory name",
+      "distinct": [],
+      "expect": "refused",
+      "files": [
+        [
+          "skills/trailing./SKILL.md",
+          "---\nname: trailingdot\ndescription: hostile corpus fixture\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ],
+        [
+          "skills/trailing /SKILL.md",
+          "---\nname: trailingspace\ndescription: hostile corpus fixture\n---\n\nRun this: !`echo hostile-corpus-marker`\n"
+        ]
+      ],
+      "generated": null,
+      "id": "win-trailing-dot",
+      "klass": "windows-hazard",
+      "note": "Silently rewritten by Win32, so an item can change identity in transit.",
+      "require_distinct_on": [],
+      "scope": "platform",
+      "symlinks": []
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,38 @@
+merge_base=43c69ca71bc788dcd925fc070204d6918c2d7e0f
+=== SHARED FENCE: lib.rs + main.rs diff against the MERGE-BASE SHA (must be empty) ===
+       0
+=== KNOWN-POSITIVE: the same command over a file I DID change must be non-empty ===
+     102
+=== every file this lane touched ===
+.planning/phases/24-live/evidence/matrix-live/F-ML-2-no-production-caller.txt
+.planning/phases/24-live/evidence/matrix-live/F-ML-5-adapter-fallbacks-unreachable.txt
+.planning/phases/24-live/evidence/matrix-live/MATRIX-LIVE-NOTES.md
+.planning/phases/24-live/evidence/matrix-live/instrument-repair-relations-v1.txt
+.planning/phases/24-live/evidence/matrix-live/leg1-observer-grade.txt
+.planning/phases/24-live/evidence/matrix-live/leg1-send-PREFIX-403-the-defect.log
+.planning/phases/24-live/evidence/matrix-live/leg1-send-drive.log
+.planning/phases/24-live/evidence/matrix-live/leg23-edit-delete.log
+.planning/phases/24-live/evidence/matrix-live/leg23-observer-grade.txt
+.planning/phases/24-live/evidence/matrix-live/leg4-inbound.log
+.planning/phases/24-live/evidence/matrix-live/leg5-observer-grade.txt
+.planning/phases/24-live/evidence/matrix-live/leg5-restart-drive.log
+.planning/phases/24-live/evidence/matrix-live/observer-preflight-both-directions.txt
+.planning/phases/24-live/evidence/matrix-live/observer-redaction-control.txt
+.planning/phases/24-live/evidence/matrix-live/observer-selftest.txt
+.planning/phases/24-live/evidence/matrix-live/proxy-selftest.txt
+.planning/phases/24-live/evidence/matrix-live/secret-sweep.txt
+.planning/phases/24-live/evidence/matrix-live/wire-restart.jsonl
+.planning/phases/24-live/evidence/matrix-live/wire-send.jsonl
+crates/wcore-agent/src/cron.rs
+crates/wcore-agent/src/tool_backends/cron.rs
+crates/wcore-channels-registry/tests/matrix_live_room.rs
+crates/wcore-cli/src/cron.rs
+crates/wcore-cli/src/gateway.rs
+crates/wcore-cli/tests/f24_c1_outbound_idempotency.rs
+crates/wcore-cron/src/job.rs
+crates/wcore-cron/src/runner.rs
+crates/wcore-gateway/src/automation.rs
+docs/delivery-semantics.md
+scripts/matrix-live-drive.sh
+scripts/matrix-live-observer.mjs
+scripts/matrix-live-proxy.mjs

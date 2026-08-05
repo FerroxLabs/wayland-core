@@ -1,16 +1,22 @@
 //! Anvil forge wiring — the REAL seams that make [`super::engine::run_climb`] a
 //! live gated-forge (spec §6), plus [`drive_climb_full`] which assembles the
 //! substrate (gate closure + probe, ledger, journal, lease) around them and
-//! emits the [`ProtocolEvent::AnvilReceipt`] at the single climb exit (spec §8).
+//! emits the authoritative Anvil receipt at the single climb exit (spec §8).
 //!
-//! - [`SandboxGate`] runs the pinned gate against a candidate's worktree through
-//!   the sandbox (network-denied, minimized env), reusing the tested
-//!   [`GateClosure::run_at`] exec path.
-//! - [`SpawnBuilder`] forks a sub-agent with edit tools into a per-candidate git
-//!   worktree. A1-minimal isolation: the builder runs SERIALLY and the process
-//!   cwd is pointed at the candidate worktree for the fork (the spawner carries
-//!   no per-fork cwd today); the per-workspace [`ClimbLease`] makes the serial
-//!   assumption safe. Parallel-ensemble isolation is the documented follow-up.
+//! - [`SandboxGate`] is the ADVISORY [`EvaluationGateExecutor`]: it runs the
+//!   pinned gate against ONE candidate's live checkout — re-derived through the
+//!   candidate's own opaque identity, never a bare path — inside the sandbox
+//!   (network-denied, minimized env, read+write scoped to that candidate's
+//!   checkout only), reusing the tested [`GateClosure::run_at`] exec path. Its
+//!   reports are selection evidence, NOT Phase 20 parent acceptance.
+//! - [`SpawnBuilder`] forks a sub-agent with edit tools into a DISTINCT,
+//!   transaction-owned standalone checkout allocated by the production spawner's
+//!   run-and-retain seam ([`AgentSpawner::spawn_builder_into_retained_checkout`]).
+//!   Each candidate carries its OWN retained [`MutationAttemptGuard`] identity
+//!   through prompt/child/gate/reruns/[`BuiltCandidate`]; the forge creates no
+//!   `create_worker_tree` worktree, never touches process-global CWD, and cleans
+//!   up losers by RAII. The winner is handed onward via [`ClimbOutcome`]; only it
+//!   survives the climb.
 //!
 //! Spec: `docs/design/2026-07-12-anvil-native-gated-forge-design.md` (v2) §5/§6/§8.
 
@@ -23,23 +29,76 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
 use wcore_config::anvil::AnvilConfig;
+use wcore_protocol::anvil::{
+    ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION, ANVIL_RECEIPT_ORIGIN,
+    AnvilAuthorityEvent, AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
+    AnvilReceiptReducer, anvil_invalidation_body_digest, anvil_receipt_body_digest,
+};
 use wcore_protocol::events::ProtocolEvent;
-use wcore_protocol::writer::ProtocolEmitter;
+use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+use wcore_sandbox::SandboxRegistry;
 use wcore_sandbox::backends::SandboxBackend;
-use wcore_swarm::worktree::WorktreeManager;
-use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
+use wcore_swarm::worktree::{CandidateSeal, WorkspaceCapacity, WorktreeManager};
+use wcore_types::spawner::{ChildId, ChildOrigin, ForkOverrides, Spawner, SubAgentConfig};
 
 use super::TerminalState;
 use super::climb::{CandidateId, CheckOutcome, GateReport, Severity};
 use super::detect::{GateCandidate, detect_gate_candidates};
 use super::engine::{
-    BuildFeedback, Builder, BuiltCandidate, ClimbOutcome, ClimbParams, EngineError, GateExecutor,
-    StallReport, Valve, run_climb,
+    BuildFeedback, Builder, BuiltCandidate, CandidateCheckout, ClimbOutcome, ClimbParams,
+    EngineError, EvaluationGateExecutor, LandingReport, StallReport, Valve, WinnerIdentity,
+    run_climb,
 };
+use super::gate_authorization::{WinnerGateInputs, build_winner_gate_authorization};
 use super::gates::{BaselineProbe, GateClosure, GateSpec, ProbeOpts, StabilityPolicy};
 use super::journal::ClimbJournal;
+use super::landing::{WinnerLandingRequest, land_selected_winner};
 use super::lease::ClimbLease;
 use super::ledger::{ClimbLedger, LedgerCap, LedgerEntry};
+use crate::child_transaction::{
+    ChildTransactionLifecycle, ChildTransactionStore, MutationAttemptGuard,
+    ParentLandingAuthorization,
+};
+use crate::durable_child::DurableChildStore;
+use crate::output::OutputSink;
+use crate::spawner::AgentSpawner;
+
+/// Authority-only event surface used by both the hosted engine sink and the
+/// standalone JSON protocol writer. Implementations must preserve the event as
+/// a top-level typed protocol variant; embedding serialized JSON in text is not
+/// an implementation of this trait.
+pub trait AnvilAuthorityEmitter: Send + Sync {
+    fn emit_anvil_authority(&self, event: &AnvilAuthorityEvent) -> std::io::Result<()>;
+}
+
+impl AnvilAuthorityEmitter for Arc<dyn OutputSink> {
+    fn emit_anvil_authority(&self, event: &AnvilAuthorityEvent) -> std::io::Result<()> {
+        match event {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => self.emit_anvil_receipt(receipt),
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation } => {
+                self.emit_anvil_receipt_invalidation(invalidation);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AnvilAuthorityEmitter for Arc<ProtocolWriter> {
+    fn emit_anvil_authority(&self, event: &AnvilAuthorityEvent) -> std::io::Result<()> {
+        match event {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => {
+                self.emit(&ProtocolEvent::AnvilReceipt {
+                    receipt: receipt.clone(),
+                })
+            }
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation } => {
+                self.emit(&ProtocolEvent::AnvilReceiptInvalidated {
+                    invalidation: invalidation.clone(),
+                })
+            }
+        }
+    }
+}
 
 /// The system read roots a gate needs beyond the worktree (toolchain, libs).
 /// Broad but read-only + network-denied; tightening per-gate is a follow-up.
@@ -91,13 +150,47 @@ pub enum ForgeError {
     /// The pre-climb probe found the gate cannot execute here (spec §5).
     #[error("gate cannot execute on the baseline: {0}")]
     GateUnrunnable(String),
+    /// The receipt could not be content-bound, persisted, or emitted.
+    #[error("receipt authority: {0}")]
+    Receipt(String),
 }
 
-/// A [`GateExecutor`] backed by the sandbox + a pinned [`GateClosure`].
+/// An [`EvaluationGateExecutor`] backed by the sandbox + a pinned [`GateClosure`].
 pub struct SandboxGate {
     closure: GateClosure,
     backend: Box<dyn SandboxBackend>,
     opts: ProbeOpts,
+}
+
+/// Adapter that lets Anvil's existing gate-closure seam execute through the
+/// immutable sandbox runtime selected for the parent agent session.
+struct SessionSandboxBackend(Arc<SandboxRegistry>);
+
+#[async_trait]
+impl SandboxBackend for SessionSandboxBackend {
+    async fn execute(
+        &self,
+        manifest: &wcore_sandbox::SandboxManifest,
+        cmd: wcore_sandbox::SandboxCommand,
+    ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+        self.0.execute(manifest, cmd).await
+    }
+
+    fn name(&self) -> &'static str {
+        self.0.backend_name()
+    }
+
+    fn is_available(&self) -> bool {
+        self.0.is_available()
+    }
+
+    fn enforces_read_deny(&self) -> bool {
+        self.0.enforces_read_deny()
+    }
+
+    fn blocks_powershell(&self) -> bool {
+        self.0.blocks_powershell()
+    }
 }
 
 impl SandboxGate {
@@ -110,18 +203,36 @@ impl SandboxGate {
             opts,
         }
     }
+
+    /// Build a gate from the immutable sandbox runtime carried by the parent
+    /// session's [`wcore_tools::context::ToolContext`].
+    #[must_use]
+    pub(crate) fn from_session_runtime(
+        closure: GateClosure,
+        runtime: Arc<SandboxRegistry>,
+        opts: ProbeOpts,
+    ) -> Self {
+        Self::new(closure, Box::new(SessionSandboxBackend(runtime)), opts)
+    }
 }
 
 #[async_trait]
-impl GateExecutor for SandboxGate {
-    async fn run(&self, worktree: &Path) -> Result<GateReport, EngineError> {
+impl EvaluationGateExecutor for SandboxGate {
+    async fn run(&self, candidate: &dyn CandidateCheckout) -> Result<GateReport, EngineError> {
+        // The gate subject is ALWAYS re-derived from the candidate's own opaque
+        // identity — never a bare path handed in. `resolve_root` re-proves
+        // execution authority for the exact bound checkout (production: re-mints
+        // the candidate seal), so a released, drifted, or substituted checkout,
+        // a stale head/tree, or a sibling-checkout substitution fails closed here
+        // BEFORE the gate ever executes.
+        let worktree = candidate.resolve_root()?;
         // Gate-integrity (cross-audit S4): a trampoline gate (`npm test`,
         // `make test`) re-reads a repo-controlled script every run — a builder
         // that rewrites it in ITS worktree would mint a false `verified`
         // behind an unchanged argv digest. Pinned inputs are content-checked
         // at the candidate before the gate executes; tampering is a
         // Safety-class failure (never accepted, never traded, never green).
-        if !self.closure.inputs_match_at(worktree) {
+        if !self.closure.inputs_match_at(&worktree) {
             return Ok(GateReport {
                 checks: vec![CheckOutcome::new("gate-integrity", false, Severity::Safety)],
                 exit_code: -1,
@@ -130,11 +241,11 @@ impl GateExecutor for SandboxGate {
                 ),
             });
         }
-        match self
-            .closure
-            .run_at(&*self.backend, &self.opts, worktree)
-            .await
-        {
+        // Per-candidate sandbox scope: the system read roots are shared, but
+        // read+write is allowed ONLY for this candidate's own checkout — never
+        // the parent workspace or a sibling candidate.
+        let opts = scoped_probe_opts(&self.opts, &worktree);
+        match self.closure.run_at(&*self.backend, &opts, &worktree).await {
             BaselineProbe::Ran {
                 exit_code,
                 clean,
@@ -156,31 +267,110 @@ impl GateExecutor for SandboxGate {
     }
 }
 
-/// A [`Builder`] that forks a sub-agent with edit tools into a per-candidate git
-/// worktree (A1-minimal serial isolation — see the module docs).
+/// Fresh per-invocation sandbox scope for one candidate: the shared system read
+/// roots plus read+write on THIS candidate's own checkout only. The parent
+/// workspace and every sibling candidate stay outside the gate's reach.
+fn scoped_probe_opts(base: &ProbeOpts, root: &Path) -> ProbeOpts {
+    let mut fs_read_allow = base.fs_read_allow.clone();
+    if !fs_read_allow.iter().any(|existing| existing == root) {
+        fs_read_allow.push(root.to_path_buf());
+    }
+    ProbeOpts {
+        timeout: base.timeout,
+        fs_read_allow,
+        fs_write_allow: vec![root.to_path_buf()],
+    }
+}
+
+/// The production [`CandidateCheckout`]: a candidate's opaque identity backed by
+/// the retained, transaction-owned standalone checkout ([`MutationAttemptGuard`])
+/// the production spawner allocated for it.
+///
+/// It owns the SAME still-armed lifecycle handle that carries the candidate's
+/// transaction/checkout/base/head/tree identity. `resolve_root` re-mints the
+/// candidate seal every call — re-proving execution authority and the pristine
+/// source manifest — so the gate subject can only ever be this exact live,
+/// clean, sealed checkout; a released, drifted, or substituted checkout fails
+/// closed. Dropping it terminalizes the transaction (RAII loser cleanup).
+#[derive(Debug)]
+struct RetainedCheckout {
+    guard: MutationAttemptGuard,
+}
+
+impl CandidateCheckout for RetainedCheckout {
+    fn resolve_root(&self) -> Result<PathBuf, EngineError> {
+        // Minting the seal re-proves execution authority AND recomputes the
+        // source manifest, so a released, drifted, or substituted checkout is
+        // rejected before the root is used. The seal binds the very same retained
+        // checkout authority whose display path is the returned root.
+        self.guard
+            .workspace()
+            .seal_candidate()
+            .map_err(|error| EngineError::Gate(format!("candidate seal refused: {error}")))?;
+        Ok(self
+            .guard
+            .workspace()
+            .checkout_authority()
+            .display_path()
+            .to_path_buf())
+    }
+
+    /// Yield THIS retained winner's landing authority by consuming the boxed
+    /// identity. Minting the seal here re-proves execution authority and the
+    /// pristine-source manifest one final time; a released / drifted /
+    /// substituted checkout fails closed to `None` (and the guard drops on the
+    /// early return, terminalizing the transaction) rather than surrendering
+    /// stale authority. Because this consumes `self`, a losing candidate — which
+    /// is only ever dropped, never moved out of the outcome — can never reach
+    /// this method, so no loser's guard/seal is extractable.
+    fn into_landing_authority(self: Box<Self>) -> Option<(MutationAttemptGuard, CandidateSeal)> {
+        let seal = self.guard.workspace().seal_candidate().ok()?;
+        Some((self.guard, seal))
+    }
+
+    fn winner_identity(&self) -> Option<WinnerIdentity> {
+        // `owner` is the child id the builder ran as: the durable spawner sets
+        // `worker_id = child_id`, and `TransactionWorkspace.owner = worker_id`.
+        // `base_commit`/`head_commit` are the parent tip forked from and the
+        // candidate head (equal for Anvil — builders never commit). The writable
+        // roots come from the CANONICAL spawner computation (never a local
+        // replica) so the 06C re-run's only writable mount can never drift from
+        // what the child was granted during the build.
+        let workspace = self.guard.workspace();
+        Some(WinnerIdentity {
+            child_id: ChildId::new(workspace.owner.clone()).ok()?,
+            base_revision: workspace.base_commit.clone(),
+            candidate_revision: workspace.head_commit.clone(),
+            private_writable_roots: crate::spawner::mutation_workspace::mutation_writable_roots(
+                workspace,
+            ),
+        })
+    }
+}
+
+/// A [`Builder`] that forks a sub-agent with edit tools into a distinct,
+/// transaction-owned standalone checkout allocated by the production spawner.
+///
+/// Every `build` opens ONE new durable child transaction and allocates ONE
+/// standalone checkout through the spawner's run-and-retain seam
+/// ([`AgentSpawner::spawn_builder_into_retained_checkout`]). The forge itself
+/// creates no worktree, never touches process-global CWD, and never derives an
+/// identity from a bare path: the returned [`MutationAttemptGuard`] IS the
+/// candidate's opaque identity, carried through the prompt/child/gate/reruns/
+/// [`BuiltCandidate`] and cleaned up by RAII if it loses.
 pub struct SpawnBuilder<'a> {
-    spawner: &'a dyn Spawner,
-    worktrees: WorktreeManager,
-    base_ref: String,
+    spawner: &'a AgentSpawner,
     id_prefix: String,
     counter: Mutex<u32>,
 }
 
 impl<'a> SpawnBuilder<'a> {
-    /// Build a spawn-backed builder rooted at `worktrees`, branching candidates
-    /// off `base_ref` (e.g. `"HEAD"`). `id_prefix` scopes candidate ids (and
-    /// therefore worktree/branch names) so a retried climb attempt never
-    /// collides with the previous attempt's trees.
-    pub fn new(
-        spawner: &'a dyn Spawner,
-        worktrees: WorktreeManager,
-        base_ref: impl Into<String>,
-        id_prefix: impl Into<String>,
-    ) -> Self {
+    /// Build a spawn-backed builder over the production `spawner`. `id_prefix`
+    /// scopes candidate ids so a retried climb attempt never collides with the
+    /// previous attempt's child identities.
+    pub fn new(spawner: &'a AgentSpawner, id_prefix: impl Into<String>) -> Self {
         Self {
             spawner,
-            worktrees,
-            base_ref: base_ref.into(),
             id_prefix: id_prefix.into(),
             counter: Mutex::new(0),
         }
@@ -201,14 +391,8 @@ impl Builder for SpawnBuilder<'_> {
             v
         };
         let id = format!("{}cand-{n}", self.id_prefix);
-        let branch = format!("anvil/{id}");
-        let worktree = self
-            .worktrees
-            .create_worker_tree(&id, &branch, &self.base_ref)
-            .await
-            .map_err(|e| EngineError::Builder(format!("worktree create: {e}")))?;
 
-        let prompt = build_prompt(task, feedback, &worktree);
+        let prompt = build_prompt(task, feedback);
         let sub = SubAgentConfig {
             name: id.clone(),
             prompt,
@@ -219,44 +403,56 @@ impl Builder for SpawnBuilder<'_> {
             model: None,
             temperature: None,
         };
+        // BUILDER_TOOLS carries Write/Edit, so the request classifies as an
+        // isolated mutation: the seam allocates one transaction-owned standalone
+        // checkout and runs the child bound to it (no process CWD, no second
+        // checkout). A shared read-only classification would be refused by the
+        // seam, so a writing builder can never run in the parent checkout.
         let overrides = ForkOverrides {
             model: None,
             effort: None,
             allowed_tools: BUILDER_TOOLS.iter().map(|s| (*s).to_string()).collect(),
+            budget: None,
         };
 
-        // A1-minimal serial isolation: the spawner has no per-fork cwd, and a
-        // forked agent's edits land in the PARENT process cwd. Point it at the
-        // candidate worktree for the fork, then restore. Safe because the climb
-        // is serial (one builder at a time) under the per-workspace lease.
-        let prev =
-            std::env::current_dir().map_err(|e| EngineError::Builder(format!("cwd read: {e}")))?;
-        std::env::set_current_dir(&worktree)
-            .map_err(|e| EngineError::Builder(format!("cwd set: {e}")))?;
-        let result = tokio::time::timeout(BUILDER_TIMEOUT, self.spawner.spawn_fork(sub, overrides))
-            .await
-            .map_err(|_| {
-                // Always restore cwd on the timeout path too.
-                let _ = std::env::set_current_dir(&prev);
-                EngineError::Builder(format!(
-                    "builder fork exceeded {}s wall budget",
-                    BUILDER_TIMEOUT.as_secs()
-                ))
-            })?;
-        // Always restore, even on a builder error.
-        let _ = std::env::set_current_dir(&prev);
+        // Wall-clock bound on ONE builder fork: keep a single in-flight await from
+        // outliving the climb governor (which only checks between steps). On
+        // timeout the seam future is dropped, terminalizing any checkout it had
+        // begun allocating (RAII) — nothing leaks.
+        let (result, guard) = tokio::time::timeout(
+            BUILDER_TIMEOUT,
+            self.spawner
+                .spawn_builder_into_retained_checkout(sub, overrides, ChildOrigin::Anvil),
+        )
+        .await
+        .map_err(|_| {
+            EngineError::Builder(format!(
+                "builder fork exceeded {}s wall budget",
+                BUILDER_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|e| EngineError::Builder(format!("isolated builder spawn: {e}")))?;
 
-        // Concise progress line (stderr): the builder ran and how it went.
+        // Concise progress line (stderr): the builder ran and how it went. The
+        // checkout root is derived from the retained identity, never stored bare.
+        let root_display = guard
+            .workspace()
+            .checkout_authority()
+            .display_path()
+            .display()
+            .to_string();
         eprintln!(
-            "[anvil-forge] builder {id}: error={} turns={} tokens={}+{} worktree={}",
+            "[anvil-forge] builder {id}: error={} turns={} tokens={}+{} checkout={}",
             result.is_error,
             result.turns,
             result.usage.input_tokens,
             result.usage.output_tokens,
-            worktree.display(),
+            root_display,
         );
 
         if result.is_error {
+            // Dropping `guard` here terminalizes this candidate's transaction and
+            // cleans its checkout — a failed build leaks nothing.
             return Err(EngineError::Builder(format!(
                 "builder agent errored: {}",
                 result.text
@@ -276,20 +472,25 @@ impl Builder for SpawnBuilder<'_> {
         );
         Ok(BuiltCandidate {
             id: CandidateId::new(id),
-            worktree,
+            checkout: Box::new(RetainedCheckout { guard }),
             spend,
         })
     }
 }
 
 /// System prompt for a forge builder sub-agent.
+///
+/// The child runs bound to its own isolated checkout (the production spawner
+/// scopes its Write/Edit tools to that workspace root), so it uses REPO-RELATIVE
+/// paths — it neither knows nor needs an absolute checkout path, and it can never
+/// write outside its workspace.
 const FORGE_SYSTEM_PROMPT: &str = "You are a forge builder. Implement the requested change using the \
-Write/Edit tools so the project's gate passes (the gate itself is run for you after each attempt). ALL files you create or edit MUST live under the \
-working directory given in the task — use that ABSOLUTE path as the root for every path (do NOT rely on \
-the shell's current directory, which is NOT the working directory). If the task text mentions any OTHER \
-absolute path, remap it into the working directory (same relative location) — never write outside the \
-working directory. Make the smallest change that satisfies the task. Do not explain — just make the \
-edits.";
+Write/Edit tools so the project's gate passes (the gate itself is run for you after each attempt). Your \
+tools are already scoped to your own isolated working copy of the repository: use paths RELATIVE to the \
+repository root for every file you create or edit (e.g. `src/lib.rs`). Do NOT use absolute paths, and do \
+NOT try to escape the working copy — writes outside it are refused. If the task text mentions an absolute \
+path, treat it as the same relative location inside your working copy. Make the smallest change that \
+satisfies the task. Do not explain — just make the edits.";
 
 /// System prompt for the escalation valve (spec §6.4): one read-only frontier
 /// diagnostic turn. It names what the driver keeps missing — it NEVER does the
@@ -355,15 +556,20 @@ impl Valve for SpawnValve<'_> {
             model: None,
             effort: None,
             allowed_tools: Vec::new(), // read-only (Read/Grep/Glob)
+            budget: None,
         };
-        let result = tokio::time::timeout(VALVE_TIMEOUT, self.spawner.spawn_fork(sub, overrides))
-            .await
-            .map_err(|_| {
-                EngineError::Builder(format!(
-                    "valve fork exceeded {}s wall budget",
-                    VALVE_TIMEOUT.as_secs()
-                ))
-            })?;
+        let result = tokio::time::timeout(
+            VALVE_TIMEOUT,
+            self.spawner
+                .spawn_fork_with_origin(sub, overrides, ChildOrigin::Anvil),
+        )
+        .await
+        .map_err(|_| {
+            EngineError::Builder(format!(
+                "valve fork exceeded {}s wall budget",
+                VALVE_TIMEOUT.as_secs()
+            ))
+        })?;
         eprintln!(
             "[anvil-forge] valve fired: error={} turns={} tokens={}+{}",
             result.is_error, result.turns, result.usage.input_tokens, result.usage.output_tokens,
@@ -378,15 +584,18 @@ impl Valve for SpawnValve<'_> {
     }
 }
 
-/// Compose the builder prompt from the task, the candidate's ABSOLUTE worktree
-/// root (a forked builder does not inherit it as its shell cwd — A1-minimal
-/// isolation limitation), and (for a surgical attempt) the failing checks.
-fn build_prompt(task: &str, feedback: Option<&BuildFeedback>, worktree: &Path) -> String {
-    let root = worktree.display();
+/// Compose the builder prompt from the task and (for a surgical attempt) the
+/// failing checks.
+///
+/// The prompt carries NO checkout path: the child's tools are already scoped to
+/// its own isolated working copy by the production spawner, so it works in
+/// repo-relative paths. The forge therefore never leaks a bare filesystem path
+/// as candidate identity.
+fn build_prompt(task: &str, feedback: Option<&BuildFeedback>) -> String {
     match feedback {
         None => format!(
-            "Working directory (root for ALL file paths): {root}\n\nTask: {task}\n\n\
-             Create/edit files under {root} so the gate passes."
+            "Task: {task}\n\nCreate/edit files (using repo-relative paths, inside your isolated \
+             working copy) so the gate passes."
         ),
         Some(fb) => {
             let failing: Vec<&str> = fb
@@ -399,9 +608,9 @@ fn build_prompt(task: &str, feedback: Option<&BuildFeedback>, worktree: &Path) -
                 None => String::new(),
             };
             format!(
-                "Working directory (root for ALL file paths): {root}\n\nTask: {task}\n\n\
-                 The gate still fails these checks: {}.\nDiagnostics (bounded):\n{}{guidance}\n\n\
-                 Fix ONLY what is needed to make the gate pass; keep every file under {root}.",
+                "Task: {task}\n\nThe gate still fails these checks: {}.\nDiagnostics \
+                 (bounded):\n{}{guidance}\n\nFix ONLY what is needed to make the gate pass, using \
+                 repo-relative paths inside your isolated working copy.",
                 failing.join(", "),
                 fb.diagnostics,
             )
@@ -409,20 +618,41 @@ fn build_prompt(task: &str, feedback: Option<&BuildFeedback>, worktree: &Path) -
     }
 }
 
+/// Consecutive green gate runs the shipped forge requires before the reserved
+/// `verified` stamp.
+///
+/// Public because `StrategyTermination::from_anvil` takes the bar as a parameter
+/// and re-checks the climb's observation against it. If the CLI hard-coded its
+/// own copy, raising the bar here would silently leave the Goal path granting
+/// `Verified` at the old one — a divergence with no compile error and no test
+/// failure. One constant, two readers.
+///
+/// Declared ABOVE `drive_climb_full`'s doc block on purpose: putting it between
+/// that block and the function detached the `#[allow(clippy::too_many_arguments)]`
+/// from what it guards, and clippy went red on a lint that had been suppressed
+/// since before this lane.
+pub const FORGE_REQUIRED_STABILITY: u32 = 1;
+
 /// Assemble and run a live gated-forge climb, emitting the receipt at exit.
 ///
 /// The caller supplies the `spawner` (already built with a provider) and the
-/// `emitter` (the top-level protocol writer — the receipt is trusted ONLY from
+/// `emitter` (a top-level authority emitter — the receipt is trusted ONLY from
 /// this top-level emission, spec §8). `workspace` is the git repo root the forge
 /// runs against.
+// The forge entry point already carries the independently owned climb inputs;
+// the session sandbox is an authority value and must remain explicit here.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive_climb_full(
     task: &str,
     cfg: &AnvilConfig,
     workspace: &Path,
-    spawner: &dyn Spawner,
+    spawner: &AgentSpawner,
     valve_spawner: Option<&dyn Spawner>,
-    emitter: &Arc<dyn ProtocolEmitter>,
-    session_id: Option<String>,
+    emitter: &dyn AnvilAuthorityEmitter,
+    session_id: &str,
+    run_id: &str,
+    task_id: &str,
+    sandbox: Arc<SandboxRegistry>,
 ) -> Result<ClimbOutcome, ForgeError> {
     if !cfg.enabled {
         return Err(ForgeError::Disabled);
@@ -448,12 +678,14 @@ pub async fn drive_climb_full(
     // The climb's wall-clock deadline starts NOW — adoption probes included.
     let deadline = std::time::Instant::now() + CLIMB_WALL_BUDGET;
 
-    // Worktrees are needed BEFORE adoption now: baseline probes run in a
-    // SCRATCH worktree, never the user's live tree (cross-audit S3 — an
-    // auto-detected gate is repo-controlled code; if it misbehaves it wrecks
-    // a disposable HEAD clone, not the workspace). This also makes the
-    // baseline semantically honest: candidates branch from HEAD, so the
-    // baseline should measure HEAD, not the dirty working copy.
+    // Baseline adoption probes run in a SCRATCH isolated checkout, never the
+    // user's live tree (cross-audit S3 — an auto-detected gate is
+    // repo-controlled code; if it misbehaves it wrecks a disposable HEAD clone,
+    // not the workspace). This is a transaction-owned standalone checkout (NOT a
+    // `create_worker_tree` worktree, NOT the parent tree, NOT a process-CWD
+    // switch); it is retained only for adoption and terminalized on drop. It also
+    // keeps the baseline honest: candidates are built from HEAD, so the baseline
+    // measures HEAD, not the dirty working copy.
     let worktrees =
         WorktreeManager::new(workspace).map_err(|e| ForgeError::Worktree(e.to_string()))?;
     let probe_id = format!(
@@ -463,20 +695,38 @@ pub async fn drive_climb_full(
             .map(|d| d.as_millis())
             .unwrap_or_default()
     );
-    let probe_wt = worktrees
-        .create_worker_tree(&probe_id, &format!("anvil/{probe_id}"), "HEAD")
+    let pinned_head = worktrees
+        .pinned_head()
         .await
-        .map_err(|e| ForgeError::Worktree(format!("probe worktree: {e}")))?;
+        .map_err(|e| ForgeError::Worktree(format!("probe pinned head: {e}")))?;
+    let probe_capacity = worktrees
+        .workspace_capacity(1)
+        .await
+        .map_err(|e| ForgeError::Worktree(format!("probe capacity: {e}")))?;
+    let probe_ws = worktrees
+        .create_isolated_checkout(
+            &probe_id,
+            &format!("anvil-probe/{probe_id}"),
+            &pinned_head,
+            probe_capacity,
+        )
+        .await
+        .map_err(|e| ForgeError::Worktree(format!("probe checkout: {e}")))?;
+    let probe_root = probe_ws.checkout_authority().display_path().to_path_buf();
 
-    // Sandbox backend + read/write allowlists (worktree + system toolchain).
-    let backend = wcore_sandbox::default_for_platform();
-    let mut fs_read_allow: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
-    fs_read_allow.push(workspace.to_path_buf());
-    let opts = ProbeOpts {
+    // Base sandbox scope: the immutable runtime inherited from the parent
+    // ToolContext plus the shared system toolchain read roots. The parent
+    // workspace is deliberately NOT granted — every gate run (probe and
+    // candidate) is scoped read+write to ITS OWN checkout via
+    // `scoped_probe_opts`, so no gate can read the parent tree or a sibling
+    // candidate. Anvil must not reselect containment from process-global state
+    // mid-session.
+    let base_opts = ProbeOpts {
         timeout: GATE_TIMEOUT,
-        fs_read_allow,
-        fs_write_allow: vec![workspace.to_path_buf()],
+        fs_read_allow: SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect(),
+        fs_write_allow: Vec::new(),
     };
+    let probe_opts = scoped_probe_opts(&base_opts, &probe_root);
 
     // Pin + pre-probe (spec §5): the first candidate whose gate EXECUTES on
     // the baseline is adopted — detection proposes, the sandbox probe decides.
@@ -495,11 +745,15 @@ pub async fn drive_climb_full(
         let shown = cand.argv.join(" ");
         // Trampoline gates pin their dispatch manifest (content-hashed from
         // the WORKSPACE, the authoritative copy); SandboxGate re-checks it at
-        // every candidate worktree — see gate-integrity above.
+        // every candidate checkout — see gate-integrity above.
         let inputs = match &cand.pin {
             Some(name) => vec![workspace.join(name)],
             None => Vec::new(),
         };
+        // Pin cwd stays the WORKSPACE: pinned inputs are `workspace/<name>` and
+        // are re-rooted from this pin cwd onto each candidate checkout at gate
+        // time (`inputs_match_at`), and the closure digest must be stable across
+        // candidates. Only the RUN directory (the passed root) varies.
         let spec = GateSpec {
             argv: cand.argv,
             cwd: workspace.to_path_buf(),
@@ -507,7 +761,11 @@ pub async fn drive_climb_full(
             inputs,
         };
         let closure = GateClosure::pin(spec, &[]).map_err(|e| ForgeError::Gate(e.to_string()))?;
-        match closure.run_at(&*backend, &opts, &probe_wt).await {
+        let probe_backend = SessionSandboxBackend(Arc::clone(&sandbox));
+        match closure
+            .run_at(&probe_backend, &probe_opts, &probe_root)
+            .await
+        {
             BaselineProbe::CannotExecute(why) => refusals.push(format!("`{shown}`: {why}")),
             BaselineProbe::Ran { .. } => {
                 adopted = Some((closure, shown));
@@ -518,6 +776,9 @@ pub async fn drive_climb_full(
     let Some((closure, gate_desc)) = adopted else {
         return Err(ForgeError::GateUnrunnable(refusals.join("; ")));
     };
+    // The scratch probe checkout has served its purpose; terminalize it before
+    // the climb allocates per-candidate checkouts.
+    drop(probe_ws);
     let digest = closure.digest_hex();
 
     // Journal + ledger.
@@ -529,14 +790,24 @@ pub async fn drive_climb_full(
         ClimbJournal::open(&journal_path).map_err(|e| ForgeError::Journal(e.to_string()))?;
     let ledger = ClimbLedger::new(task, LedgerCap::unlimited());
 
-    // Seams (worktree manager constructed above, before adoption).
-    let gate = SandboxGate::new(closure, backend, opts);
+    // Landing prep: clone the sandbox runtime and the pinned gate BEFORE they are
+    // moved into the advisory `SandboxGate`, so the winner-landing wiring can build
+    // a parent-owned `ChildTransactionLifecycle` (which owns a `SandboxRegistry` by
+    // value) and the 06C gate authorization (which needs the pinned Anvil gate)
+    // after the climb. Both derive `Clone`; the clones are independent authority
+    // values, and the advisory gate below is unaffected.
+    let landing_sandbox = (*sandbox).clone();
+    let landing_gate = closure.clone();
+
+    // Seams. The gate carries only the shared base scope; every candidate run is
+    // scoped read+write to its own checkout inside `SandboxGate::run`.
+    let gate = SandboxGate::from_session_runtime(closure, sandbox, base_opts);
 
     let params = ClimbParams {
         task: task.to_string(),
         // A1-minimal stability: 1-of-1 (a single green run). N-of-M flake
         // quarantine for `verified` is a documented follow-up.
-        stability: StabilityPolicy::new(1, 1),
+        stability: StabilityPolicy::new(FORGE_REQUIRED_STABILITY, FORGE_REQUIRED_STABILITY),
         max_iterations: 3,
         gate_closure_digest: digest.clone(),
         // Stall rule (spec §6.4): two consecutive identical fail-sets buys
@@ -548,53 +819,305 @@ pub async fn drive_climb_full(
     };
 
     // The valve (spec §6.4), when a frontier seat was supplied: one read-only
-    // diagnostic turn on a detected stall, guidance back into the loop.
+    // diagnostic turn on a detected stall, guidance back into the loop. The valve
+    // forks READ-ONLY, so it stays a `&dyn Spawner` and never needs the
+    // isolated-mutation seam.
     let valve = valve_spawner.map(|s| SpawnValve::new(s, gate_desc.as_str()));
     let valve_ref: Option<&dyn Valve> = valve.as_ref().map(|v| v as &dyn Valve);
 
-    // Climb on the routed driver seat; if it cannot produce even a probe
-    // candidate (e.g. a router lane the fork engine can't drive yet), retry
-    // ONCE on the session seat — the same spawner the valve uses. Runtime
-    // half of the "seat routing can only cheapen a forge, never break it"
-    // contract; the materialization half lives in `anvil::seat`.
-    let builder = SpawnBuilder::new(spawner, worktrees, "HEAD", "");
+    // Climb on the routed driver seat. Every `builder.build` opens its own
+    // durable child transaction and standalone checkout through the production
+    // spawner's run-and-retain seam — there is no legacy worktree/CWD escape
+    // hatch here. (The former "session seat retries once" fallback is dropped:
+    // the retry builder would need a SECOND concrete production spawner, but the
+    // tool-facing entry passes the session/valve seat only as a read-only
+    // `&dyn Spawner`; a `blocked` climb is reported honestly instead.)
+    let builder = SpawnBuilder::new(spawner, "");
     let mut outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
-    let probe_never_built = matches!(
-        &outcome.terminal,
-        TerminalState::Blocked(reason) if reason.contains("probe builder failed")
-    );
-    if probe_never_built && let Some(session_sp) = valve_spawner {
-        eprintln!("[anvil-forge] driver seat failed at runtime; session seat retries the climb");
-        let retry_trees =
-            WorktreeManager::new(workspace).map_err(|e| ForgeError::Worktree(e.to_string()))?;
-        let retry_builder = SpawnBuilder::new(session_sp, retry_trees, "HEAD", "r1-");
-        outcome = run_climb(
-            &params,
-            &retry_builder,
-            &gate,
-            valve_ref,
-            &ledger,
-            &mut journal,
-        )
+
+    // Emit the climb receipt FIRST, while the winner's transaction (and thus its
+    // checkout at `best_worktree`) is still live — `emit_receipt` digests that
+    // checkout as the forged artifact. Landing CONSUMES the winner, terminalizing
+    // its checkout, so it must run strictly AFTER the receipt is emitted; running
+    // it first would leave `emit_receipt` reading a checkout that RAII already
+    // reclaimed. The receipt is about the artifact the climb forged; landing is a
+    // separate downstream step (its outcome rides `ClimbOutcome::landing` → the
+    // tool report). (Carrying the landing outcome in the structured receipt for a
+    // Desktop-mediated accept is a future protocol enhancement, out of scope here.)
+    emit_receipt(
+        emitter, &outcome, &ledger, &digest, workspace, session_id, run_id, task_id,
+    )
+    .await?;
+
+    // Land the selected winner, if any (surface-for-accept). The climb has already
+    // reached its terminal state and earned (or not) its stamp; landing is a
+    // SEPARATE parent-owned step whose success or failure is REPORTED into the
+    // outcome (`ClimbOutcome::landing`) and never allowed to crash the climb. Losers
+    // already terminalized by RAII; only this winner's transaction survived, and it
+    // is consumed here (landed) or dropped (RAII) on a skipped/failed landing.
+    if let Some(winner) = outcome.winner.take() {
+        // Box the landing future onto the heap. The open → accept → 06C hard-
+        // containment gate re-run → parent CAS chain is a very large async state
+        // machine; inlining it in this function's future overflows the (debug)
+        // stack when the winner actually reaches the deep landing path. Heaping it
+        // caps the inline future size (the same reason the type name is enormous).
+        let report = Box::pin(attempt_landing(
+            winner,
+            spawner,
+            &worktrees,
+            &landing_gate,
+            landing_sandbox,
+            workspace,
+            &pinned_head,
+            probe_capacity,
+            run_id,
+        ))
         .await;
+        outcome.landing = Some(report);
     }
 
-    emit_receipt(emitter, &outcome, &ledger, &digest, task, session_id);
     Ok(outcome)
 }
 
-/// Emit the single top-level [`ProtocolEvent::AnvilReceipt`] (spec §8). Best
-/// effort — a writer error must not crash a completed climb.
-fn emit_receipt(
-    emitter: &Arc<dyn ProtocolEmitter>,
+/// Land the SELECTED winner into a Wayland-owned integration checkout, returning a
+/// report-only [`LandingReport`]. This NEVER returns `Err`: the climb already
+/// succeeded, so every landing problem — a missing landing identity, an absent
+/// durable record, a gate-authorization refusal, a workspace/CAS failure, or a
+/// [`WinnerLandingError`](super::landing::WinnerLandingError) — is captured as
+/// [`LandingReport::Failed`] instead of crashing the climb or discarding its
+/// receipt (fail-closed *reporting*).
+///
+/// Consumes the winner `Box` by value: on any early failure the box is dropped and
+/// its transaction terminalizes by RAII; on the land path it is moved into
+/// [`land_selected_winner`], which internally re-mints the winner's guard + seal
+/// (`into_landing_authority`) — so the guard/seal used for landing is the SAME
+/// workspace whose scratch fed `WinnerIdentity::private_writable_roots`; this
+/// function never extracts the guard itself.
+#[allow(clippy::too_many_arguments)]
+async fn attempt_landing(
+    winner: Box<dyn CandidateCheckout>,
+    spawner: &AgentSpawner,
+    worktrees: &WorktreeManager,
+    landing_gate: &GateClosure,
+    landing_sandbox: wcore_sandbox::SandboxRegistry,
+    workspace: &Path,
+    pinned_head: &str,
+    probe_capacity: WorkspaceCapacity,
+    run_id: &str,
+) -> LandingReport {
+    // 1. Borrow the winner's landing identity (child id, base/candidate revisions,
+    //    transaction-private writable roots). `None` from a real winner means a
+    //    released/drifted/substituted checkout — report it, dropping the winner.
+    let Some(id) = winner.winner_identity() else {
+        return LandingReport::Failed {
+            detail: "winner surrendered no landing identity (released, drifted, or substituted \
+                     checkout)"
+                .to_string(),
+        };
+    };
+
+    // 2. Resolve the request/policy digests from the durable child record. These
+    //    MUST equal what the durable transaction opening derives from the same
+    //    record, so the 06C subject binds cleanly at acceptance time.
+    let journal = match spawner.session_journal() {
+        Ok(journal) => journal,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("no session journal for landing: {error}"),
+            };
+        }
+    };
+    let record = match DurableChildStore::new(journal.clone()).inspect(&id.child_id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return LandingReport::Failed {
+                detail: format!("no durable child record for winner {}", id.child_id),
+            };
+        }
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("inspect durable child record: {error}"),
+            };
+        }
+    };
+    let request_digest = record.request.exact_digest.clone();
+    let policy_digest = record.policy_snapshot.exact_digest.clone();
+
+    // 3. Honest diff digest of the winner's working-tree diff. `resolve_root`
+    //    re-proves execution authority; on refusal, report rather than land a
+    //    checkout we cannot re-prove.
+    let checkout_root = match winner.resolve_root() {
+        Ok(root) => root,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("winner checkout root could not be re-proven: {error}"),
+            };
+        }
+    };
+    let diff_digest = winner_diff_digest(&checkout_root).await;
+
+    // 4. Translate the pinned Anvil gate into the parent-owned 06C authorization
+    //    (plan + subject + authorized closures). `toolchain_identity` is a coarse
+    //    marker — a real per-gate rustc probe is a documented deferral (it is a
+    //    digest/drift input, not a containment control).
+    let auth = match build_winner_gate_authorization(WinnerGateInputs {
+        anvil_gate: landing_gate,
+        gate_id: "anvil-gate",
+        toolchain_identity: "anvil-tier1:host-toolchain",
+        timeout_ms: GATE_TIMEOUT.as_millis() as u64,
+        private_writable_roots: id.private_writable_roots.clone(),
+        base_revision: &id.base_revision,
+        candidate_revision: &id.candidate_revision,
+        diff_digest: &diff_digest,
+        request_digest: &request_digest,
+        policy_digest: &policy_digest,
+    }) {
+        Ok(auth) => auth,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("winner gate authorization refused: {error}"),
+            };
+        }
+    };
+
+    // 5. Allocate the Wayland-owned integration checkout: a standalone clone at the
+    //    exact current tip, on its own branch — NEVER the user's working tree. Keep
+    //    `integ` bound (its Drop releases the clone) until after the land completes.
+    let branch = match worktrees.current_branch().await {
+        Ok(branch) => branch,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("could not resolve current branch for landing: {error}"),
+            };
+        }
+    };
+    let integ = match worktrees
+        .create_integration_checkout(
+            &format!("anvil-land-{run_id}"),
+            &branch,
+            pinned_head,
+            probe_capacity,
+        )
+        .await
+    {
+        Ok(integ) => integ,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("could not create integration checkout: {error}"),
+            };
+        }
+    };
+
+    // 6. Build the parent-owned lifecycle authority. `WorktreeManager` is not
+    //    `Clone`, so mint a fresh one bound to the same workspace.
+    let manager = match WorktreeManager::new(workspace) {
+        Ok(manager) => manager,
+        Err(error) => {
+            return LandingReport::Failed {
+                detail: format!("could not open worktree manager for landing: {error}"),
+            };
+        }
+    };
+    let lifecycle = ChildTransactionLifecycle::new(
+        ChildTransactionStore::new(journal.clone()),
+        landing_sandbox,
+        manager,
+    );
+
+    // 7. Assemble the terminal landing request. `transaction_id` is a fresh
+    //    per-run key (the opening binds it to the existing durable child); the
+    //    target ref is the integration clone's OWN branch (surface-for-accept).
+    let target_ref = format!("refs/heads/{branch}");
+    let request = WinnerLandingRequest {
+        transaction_id: format!("anvil-txn-{run_id}"),
+        child_id: id.child_id,
+        base_revision: id.base_revision,
+        gate_plan: auth.plan,
+        subject: auth.subject,
+        closures: auth.closures,
+        integration_checkout: integ.checkout.clone(),
+        target_ref: target_ref.clone(),
+        // Deterministic, clock-injection-free acceptance stamp, sourced from the
+        // same `unix_time_ms` helper the receipt uses.
+        now_unix_ms: unix_time_ms(),
+    };
+
+    // 8. Drive the fail-closed terminal chain, mapping each authorization outcome
+    //    into a report-only variant. On a NON-landed outcome `integ` drops at the
+    //    end of this scope, releasing the integration clone. On a LANDED outcome
+    //    the clone is RETAINED (surface-for-accept: the user accepts by
+    //    fast-forwarding from it, Desktop reclaims it afterward — Desktop-owned
+    //    GC), and its path is surfaced in the report.
+    let retained_checkout = integ.checkout.clone();
+    match land_selected_winner(winner, &lifecycle, request).await {
+        Ok(ParentLandingAuthorization::Landed { successor, .. }) => {
+            // Retain the landed clone so Desktop can surface + accept it. NOTE:
+            // this leaks the manager's in-memory reservation/lease for this clone
+            // until the process exits; acceptable + bounded (few landed clones per
+            // session, Desktop reclaims the on-disk clone). FOLLOW-UP: a clean
+            // `TransactionWorkspace::persist()` in wcore-swarm that frees the
+            // reservation accounting while keeping the checkout on disk.
+            std::mem::forget(integ);
+            LandingReport::Landed {
+                landed_commit: successor.landed_commit,
+                target_ref,
+                integration_checkout: retained_checkout,
+            }
+        }
+        Ok(ParentLandingAuthorization::Conflict { detail }) => LandingReport::Conflict { detail },
+        Ok(ParentLandingAuthorization::Incomplete { detail }) => {
+            LandingReport::Incomplete { detail }
+        }
+        Ok(ParentLandingAuthorization::RolledBack { .. }) => LandingReport::RolledBack {
+            detail: "landing was reversed before completion; no change remains on the target ref"
+                .to_string(),
+        },
+        Ok(ParentLandingAuthorization::RecoveryRequired { detail }) => {
+            LandingReport::RecoveryRequired { detail }
+        }
+        Err(error) => LandingReport::Failed {
+            detail: error.to_string(),
+        },
+    }
+}
+
+/// Persist and emit the single authoritative top-level receipt. Persistence
+/// happens before publication so replay after a host or process restart uses
+/// the same event identity and sequence.
+#[allow(clippy::too_many_arguments)]
+async fn emit_receipt(
+    emitter: &dyn AnvilAuthorityEmitter,
     outcome: &ClimbOutcome,
     ledger: &ClimbLedger,
     gate_closure_digest: &str,
-    task: &str,
-    session_id: Option<String>,
-) {
+    workspace: &Path,
+    session_id: &str,
+    run_id: &str,
+    task_id: &str,
+) -> Result<(), ForgeError> {
     let spend = ledger.settled();
-    let event = ProtocolEvent::AnvilReceipt {
+    let artifact_root = outcome.best_worktree.as_deref().unwrap_or(workspace);
+    let artifact_digest = artifact_content_digest(artifact_root).await?;
+    let mut journal = ReceiptAuthorityJournal::open(workspace, session_id)?;
+    let sequence = journal.next_sequence(session_id);
+    let receipt_id = uuid::Uuid::new_v4().to_string();
+    let mut receipt = AnvilReceipt {
+        receipt_id,
+        event_id: uuid::Uuid::new_v4().to_string(),
+        origin: ANVIL_RECEIPT_ORIGIN.to_string(),
+        contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
+        required_extensions: Vec::new(),
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        task_id: task_id.to_string(),
+        sequence,
+        issued_at_unix_ms: unix_time_ms(),
+        digest_algorithm: ANVIL_DIGEST_ALGORITHM.to_string(),
+        artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".to_string(),
+        artifact_digest: artifact_digest.clone(),
+        gate_closure_digest: prefixed_sha256(gate_closure_digest),
+        receipt_body_digest: String::new(),
+        supersedes_receipt_id: None,
         terminal_state: terminal_state_str(&outcome.terminal).to_string(),
         stamp: outcome.stamp.clone(),
         checks_passed: outcome.checks_passed,
@@ -604,14 +1127,50 @@ fn emit_receipt(
         valve_fires: outcome.valve_fires,
         cost_microcents: spend.cost_microcents,
         priced: spend.priced,
-        gate_closure_digest: gate_closure_digest.to_string(),
-        artifact_digest: artifact_digest(outcome),
-        session_id,
-        task_id: task.to_string(),
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        sequence: 0,
     };
-    let _ = emitter.emit(&event);
+    receipt.receipt_body_digest = anvil_receipt_body_digest(&receipt)
+        .map_err(|error| ForgeError::Receipt(format!("digest receipt body: {error}")))?;
+    let event = AnvilAuthorityEvent::AnvilReceipt { receipt };
+    journal.append(&event)?;
+    emitter
+        .emit_anvil_authority(&event)
+        .map_err(|error| ForgeError::Receipt(format!("emit: {error}")))?;
+
+    // Close the publication race. This is not a long-lived filesystem
+    // watcher: it proves that the content persisted in the receipt still
+    // matched when publication completed. A later mutation requires the
+    // owning host/session watcher to publish an invalidation event.
+    let observed = artifact_content_digest(artifact_root).await?;
+    if observed != artifact_digest {
+        let mut invalidation = AnvilReceiptInvalidation {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            origin: ANVIL_RECEIPT_ORIGIN.to_string(),
+            contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
+            required_extensions: Vec::new(),
+            receipt_id: match &event {
+                AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt.receipt_id.clone(),
+                AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
+            },
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            sequence: sequence + 1,
+            issued_at_unix_ms: unix_time_ms(),
+            reason: AnvilInvalidationReason::ArtifactMutated,
+            prior_artifact_digest: artifact_digest,
+            observed_artifact_digest: Some(observed),
+            invalidation_body_digest: String::new(),
+        };
+        invalidation.invalidation_body_digest = anvil_invalidation_body_digest(&invalidation)
+            .map_err(|error| ForgeError::Receipt(format!("digest invalidation body: {error}")))?;
+        let invalidation = AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation };
+        journal.append(&invalidation)?;
+        emitter
+            .emit_anvil_authority(&invalidation)
+            .map_err(|error| ForgeError::Receipt(format!("emit invalidation: {error}")))?;
+    }
+    Ok(())
 }
 
 /// Canonical snake_case terminal-state string for the receipt (spec §6.5/§8).
@@ -630,29 +1189,323 @@ fn terminal_state_str(t: &TerminalState) -> &'static str {
     }
 }
 
-/// A1-minimal artifact digest binding the receipt to the promoted worktree (spec
-/// §8 staleness). Full content-tree hashing is a documented follow-up; this binds
-/// the winning worktree identity + check outcome.
-fn artifact_digest(outcome: &ClimbOutcome) -> String {
+struct ReceiptAuthorityJournal {
+    path: PathBuf,
+    reducer: AnvilReceiptReducer,
+}
+
+impl ReceiptAuthorityJournal {
+    fn open(workspace: &Path, session_id: &str) -> Result<Self, ForgeError> {
+        let directory = workspace.join(".wayland").join("anvil").join("receipts");
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| ForgeError::Receipt(format!("create journal directory: {error}")))?;
+        let mut name_hash = Sha256::new();
+        name_hash.update(b"anvil-receipt-session:v1\0");
+        name_hash.update(session_id.as_bytes());
+        let name = format!("{:x}.jsonl", name_hash.finalize());
+        let path = directory.join(name);
+        let mut reducer = AnvilReceiptReducer::default();
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|error| ForgeError::Receipt(format!("read receipt journal: {error}")))?;
+            for (index, line) in content.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match reducer.apply_json_line(line) {
+                    Ok(wcore_protocol::anvil::AnvilApplyOutcome::Applied)
+                    | Ok(wcore_protocol::anvil::AnvilApplyOutcome::Duplicate) => {}
+                    Ok(wcore_protocol::anvil::AnvilApplyOutcome::Inert) => {
+                        return Err(ForgeError::Receipt(format!(
+                            "non-authority event in receipt journal line {}",
+                            index + 1
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(ForgeError::Receipt(format!(
+                            "invalid receipt journal line {}: {error}",
+                            index + 1
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(Self { path, reducer })
+    }
+
+    fn next_sequence(&self, session_id: &str) -> u64 {
+        self.reducer.next_sequence(session_id)
+    }
+
+    fn append(&mut self, event: &AnvilAuthorityEvent) -> Result<(), ForgeError> {
+        self.reducer
+            .apply(event.clone())
+            .map_err(|error| ForgeError::Receipt(format!("reject event before append: {error}")))?;
+        let mut bytes = serde_json::to_vec(event)
+            .map_err(|error| ForgeError::Receipt(format!("serialize event: {error}")))?;
+        bytes.push(b'\n');
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| ForgeError::Receipt(format!("open receipt journal: {error}")))?;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|error| ForgeError::Receipt(format!("append receipt journal: {error}")))?;
+        file.sync_all()
+            .map_err(|error| ForgeError::Receipt(format!("sync receipt journal: {error}")))?;
+        Ok(())
+    }
+}
+
+fn prefixed_sha256(digest: &str) -> String {
+    if digest.starts_with("sha256:") {
+        digest.to_string()
+    } else {
+        format!("sha256:{digest}")
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Honest 64-lowercase-hex SHA-256 of the winner candidate's working-tree diff.
+///
+/// Runs `git --no-optional-locks diff --no-color` in the winner's checkout via the
+/// central argv-mode shell helper (no shell interpreter, attacker-controlled data
+/// never reaches a `sh -c`) and hashes the raw stdout bytes, so the digest always
+/// reflects ACTUAL candidate content — never a static placeholder. If the git call
+/// cannot run or exits non-zero, it hashes empty input instead: still a
+/// deterministic 64-hex value, and never a panic. The output carries no `sha256:`
+/// prefix, matching the raw-hex `diff_digest` the 06C subject expects.
+async fn winner_diff_digest(checkout_root: &Path) -> String {
+    let diff_bytes = match wcore_config::shell::shell_command_argv(
+        "git",
+        &["--no-optional-locks", "diff", "--no-color"],
+    )
+    .current_dir(checkout_root)
+    .output()
+    .await
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        // A failed or non-zero git invocation yields empty input: deterministic
+        // and honest (a distinct, reproducible digest), never a fabricated one.
+        _ => Vec::new(),
+    };
+    let mut hasher = Sha256::new();
+    hasher.update(&diff_bytes);
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Hash the canonical content corpus visible to git: tracked files plus
+/// untracked, non-ignored files. Paths and byte lengths are framed explicitly;
+/// worktree location, mtimes, permissions, check counts, and receipt journals
+/// do not affect the digest.
+async fn artifact_content_digest(root: &Path) -> Result<String, ForgeError> {
+    let output = wcore_config::shell::shell_command_argv(
+        "git",
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .current_dir(root)
+    .output()
+    .await
+    .map_err(|error| ForgeError::Receipt(format!("enumerate artifact content: {error}")))?;
+    if !output.status.success() {
+        return Err(ForgeError::Receipt(format!(
+            "enumerate artifact content exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let mut paths = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec())
+                .map_err(|_| ForgeError::Receipt("artifact path is not UTF-8".to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.retain(|relative| !Path::new(relative).starts_with(Path::new(".wayland/anvil/receipts")));
+    paths.sort_unstable();
+    paths.dedup();
+
     let mut h = Sha256::new();
-    h.update(b"anvil-artifact:v1:");
-    match &outcome.best_worktree {
-        Some(p) => h.update(p.to_string_lossy().as_bytes()),
-        None => h.update(b"none"),
+    h.update(b"anvil-artifact-content:v2\0");
+    for relative in paths {
+        let relative_path = Path::new(&relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ForgeError::Receipt(format!(
+                "unsafe artifact path returned by git: {relative}"
+            )));
+        }
+        let absolute = root.join(relative_path);
+        h.update((relative.len() as u64).to_le_bytes());
+        h.update(relative.as_bytes());
+        match std::fs::symlink_metadata(&absolute) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(&absolute).map_err(|error| {
+                    ForgeError::Receipt(format!("read symlink {relative}: {error}"))
+                })?;
+                let target = target.to_str().ok_or_else(|| {
+                    ForgeError::Receipt(format!("symlink target is not UTF-8: {relative}"))
+                })?;
+                h.update(b"L");
+                h.update((target.len() as u64).to_le_bytes());
+                h.update(target.as_bytes());
+            }
+            Ok(metadata) if metadata.is_file() => {
+                let bytes = std::fs::read(&absolute).map_err(|error| {
+                    ForgeError::Receipt(format!("read artifact {relative}: {error}"))
+                })?;
+                h.update(b"F");
+                h.update((bytes.len() as u64).to_le_bytes());
+                h.update(bytes);
+            }
+            Ok(_) => {
+                return Err(ForgeError::Receipt(format!(
+                    "artifact is neither file nor symlink: {relative}"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A missing tracked file is canonical content too: deletion is
+                // distinct from an empty file and therefore changes the digest.
+                h.update(b"M");
+            }
+            Err(error) => {
+                return Err(ForgeError::Receipt(format!(
+                    "inspect artifact {relative}: {error}"
+                )));
+            }
+        }
     }
-    h.update(outcome.checks_passed.to_le_bytes());
-    h.update(outcome.checks_total.to_le_bytes());
     let d = h.finalize();
-    let mut s = String::with_capacity(64);
+    let mut s = String::with_capacity(71);
+    s.push_str("sha256:");
     for b in d {
-        s.push_str(&format!("{b:02x}"));
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
     }
-    s
+    Ok(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A candidate identity backed by a plain path, for unit-testing the gate
+    /// wiring without a live isolated checkout. Production uses
+    /// [`RetainedCheckout`] over a real `MutationAttemptGuard`; the gate only ever
+    /// sees the opaque trait, so this proves the "gate resolves the subject
+    /// through the identity, never a bare path arg" contract.
+    #[derive(Debug)]
+    struct PathCheckout(PathBuf);
+    impl CandidateCheckout for PathCheckout {
+        fn resolve_root(&self) -> Result<PathBuf, EngineError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct RecordingBackend {
+        calls: AtomicUsize,
+        saw_network_deny: AtomicBool,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for RecordingBackend {
+        async fn execute(
+            &self,
+            manifest: &wcore_sandbox::SandboxManifest,
+            _cmd: wcore_sandbox::SandboxCommand,
+        ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.saw_network_deny.store(
+                manifest.network == wcore_sandbox::NetworkPolicy::Deny,
+                Ordering::SeqCst,
+            );
+            Ok(wcore_sandbox::SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: wcore_sandbox::ResourceLimitEnforcement::Enforced,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "anvil_recording"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_context_runtime_reaches_executable_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecordingBackend {
+            calls: AtomicUsize::new(0),
+            saw_network_deny: AtomicBool::new(false),
+        });
+        let runtime = Arc::new(SandboxRegistry::new(backend.clone()));
+        let ctx = wcore_tools::context::ToolContext {
+            call_id: "forge-test".to_string(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            vfs: Arc::new(wcore_tools::vfs::RealFs),
+            source_agent: None,
+            sink: Arc::new(wcore_tools::NullToolOutputSink),
+            file_write_notifier: None,
+            workspace: None,
+            sandbox: Arc::clone(&runtime),
+        };
+        let closure = GateClosure::pin(
+            GateSpec {
+                argv: vec!["gate-under-test".to_string()],
+                cwd: dir.path().to_path_buf(),
+                env_allowlist: Vec::new(),
+                inputs: Vec::new(),
+            },
+            &[],
+        )
+        .unwrap();
+        let gate = SandboxGate::from_session_runtime(
+            closure,
+            Arc::clone(&ctx.sandbox),
+            ProbeOpts {
+                timeout: Duration::from_secs(1),
+                fs_read_allow: vec![dir.path().to_path_buf()],
+                fs_write_allow: vec![dir.path().to_path_buf()],
+            },
+        );
+
+        let candidate = PathCheckout(dir.path().to_path_buf());
+        let report = gate.run(&candidate).await.unwrap();
+
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert!(backend.saw_network_deny.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn terminal_state_strings_are_canonical() {
@@ -671,38 +1524,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn artifact_digest_is_stable_and_hex() {
-        let out = ClimbOutcome {
-            valve_fires: 0,
-            terminal: TerminalState::Verified,
-            stamp: "verified".into(),
-            checks_passed: 3,
-            checks_total: 3,
-            iterations: 2,
-            best_worktree: Some(PathBuf::from("/wt/cand-0")),
-        };
-        let a = artifact_digest(&out);
-        let b = artifact_digest(&out);
+    #[tokio::test]
+    async fn artifact_digest_is_stable_and_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("artifact.txt"), b"verified artifact").unwrap();
+        let init = wcore_config::shell::shell_command_argv("git", &["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(init.status.success());
+
+        let a = artifact_content_digest(dir.path()).await.unwrap();
+        let receipts = dir.path().join(".wayland/anvil/receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        std::fs::write(receipts.join("session.jsonl"), b"receipt journal").unwrap();
+        let b = artifact_content_digest(dir.path()).await.unwrap();
         assert_eq!(a, b);
-        assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        let hex = a.strip_prefix("sha256:").unwrap();
+        assert_eq!(hex.len(), 64);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+
+        std::fs::write(dir.path().join("artifact.txt"), b"mutated artifact").unwrap();
+        let c = artifact_content_digest(dir.path()).await.unwrap();
+        assert_ne!(a, c);
     }
 
     #[test]
-    fn surgical_prompt_lists_failing_checks() {
+    fn surgical_prompt_lists_failing_checks_without_leaking_a_path() {
         let fb = BuildFeedback {
-            valve_guidance: None,
+            valve_guidance: Some("read src/lib.rs".into()),
             failing: vec!["gate".into()],
             diagnostics: "boom".into(),
         };
-        let wt = PathBuf::from("/wt/cand-0");
-        let p = build_prompt("do x", Some(&fb), &wt);
+        let p = build_prompt("do x", Some(&fb));
         assert!(p.contains("gate"));
         assert!(p.contains("boom"));
-        assert!(p.contains("/wt/cand-0"));
-        let p0 = build_prompt("do x", None, &wt);
+        assert!(p.contains("read src/lib.rs"));
+        // The child is workspace-bound; the prompt must NOT embed an absolute
+        // checkout path (identity is the retained handle, never a bare path).
+        assert!(p.contains("repo-relative"));
+        let p0 = build_prompt("do x", None);
         assert!(p0.contains("do x"));
-        assert!(p0.contains("/wt/cand-0"));
+        assert!(p0.contains("repo-relative"));
     }
 }

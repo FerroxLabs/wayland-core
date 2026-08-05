@@ -16,7 +16,7 @@ wcore-egress = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "io-util", "process"] }
 tracing = { workspace = true }
 rand = { workspace = true }
 
@@ -26,4 +26,5 @@ wcore-config = { workspace = true }
 [dev-dependencies]
 mockito = "1"
 toml = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "process"] }

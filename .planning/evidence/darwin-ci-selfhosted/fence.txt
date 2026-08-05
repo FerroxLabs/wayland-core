@@ -1,0 +1,30 @@
+MERGE_BASE=4caaa31c891c0d606e5de1e91cdcd3e5a79ab767
+=== FENCE: shared files (must be empty) ===
+[end fence diff]
+=== KNOWN-POSITIVE CONTROL: same command on a path I DID change ===
+ .../DARWIN-CI-SELFHOSTED-NOTES.md                  | 199 +++++++++++++++++++++
+ .planning/evidence/darwin-ci-selfhosted/arch2.txt  |  40 +++++
+ .planning/evidence/darwin-ci-selfhosted/duty.txt   |  39 ++++
+ .planning/evidence/darwin-ci-selfhosted/duty2.txt  |  12 ++
+ .../evidence/darwin-ci-selfhosted/machjobs.tsv     |  14 ++
+ .../evidence/darwin-ci-selfhosted/machjobs2.tsv    |  25 +++
+ .../evidence/darwin-ci-selfhosted/panel-codex.txt  | 106 +++++++++++
+ .../evidence/darwin-ci-selfhosted/panel-gemini.txt |  12 ++
+ .../evidence/darwin-ci-selfhosted/panel-kimi.txt   |   0
+ .../evidence/darwin-ci-selfhosted/runcase.txt      |  13 ++
+ .../evidence/darwin-ci-selfhosted/winwait.txt      |   8 +
+ 11 files changed, 468 insertions(+)
+=== ALL paths changed by this lane ===
+.planning/evidence/darwin-ci-selfhosted/DARWIN-CI-SELFHOSTED-NOTES.md
+.planning/evidence/darwin-ci-selfhosted/arch2.txt
+.planning/evidence/darwin-ci-selfhosted/duty.txt
+.planning/evidence/darwin-ci-selfhosted/duty2.txt
+.planning/evidence/darwin-ci-selfhosted/machjobs.tsv
+.planning/evidence/darwin-ci-selfhosted/machjobs2.tsv
+.planning/evidence/darwin-ci-selfhosted/panel-codex.txt
+.planning/evidence/darwin-ci-selfhosted/panel-gemini.txt
+.planning/evidence/darwin-ci-selfhosted/panel-kimi.txt
+.planning/evidence/darwin-ci-selfhosted/runcase.txt
+.planning/evidence/darwin-ci-selfhosted/winwait.txt
+=== any file under crates/ or .github/ changed? (expect none) ===
+0

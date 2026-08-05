@@ -3,25 +3,63 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use wcore_config::config::Config;
+use wcore_config::config::{Config, TransportType};
 use wcore_mcp::manager::McpManager;
+use wcore_mcp::transport::stdio_readiness::McpStdioExecutableReadiness;
 use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
-use wcore_providers::{CircuitConfig, LlmProvider, ResilientProvider};
+use wcore_providers::{
+    CandidateCapabilities, CircuitConfig, FailoverCandidateMetadata, FailoverRoutingPolicy,
+    LlmProvider, PricingEvidence, ResilientProvider,
+};
+use wcore_types::execution_policy::{
+    ApprovalPolicy, BaselineExecutionPolicy, DangerousSessionGrant, EffectiveExecutionPolicy,
+    PolicySource,
+};
 // E-H2: `CircuitReporter` / `NoOpCircuitReporter` are referenced by
 // fully-qualified path in the resilience wiring below.
 
 use crate::budget::{ExecutionBudget, ExecutionBudgetView};
-use crate::cancel::{BudgetGuard, CancellationToken, budget_linked_with_callback};
+use crate::cancel::{CancellationToken, SessionControl, SessionRuntimeGuard};
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
-use crate::session::Session;
+use crate::session::ActiveSession;
+
+fn approval_policy_to_session_mode(
+    policy: ApprovalPolicy,
+) -> wcore_protocol::commands::SessionMode {
+    match policy {
+        ApprovalPolicy::Prompt => wcore_protocol::commands::SessionMode::Default,
+        ApprovalPolicy::AutoEdit => wcore_protocol::commands::SessionMode::AutoEdit,
+        ApprovalPolicy::Bypass => wcore_protocol::commands::SessionMode::Force,
+    }
+}
 
 /// Result of bootstrapping an agent engine with all features initialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMcpDeclaration {
+    pub name: String,
+    pub transport: TransportType,
+    pub executable_readiness: Option<McpStdioExecutableReadiness>,
+}
+
 pub struct BootstrapResult {
     pub engine: AgentEngine,
+    /// Host-facing durable child control plane backed by the exact canonical
+    /// spawner installed into the bootstrapped engine's child-capable tools.
+    pub host_children: crate::spawner::HostChildController,
     pub provider: Arc<dyn LlmProvider>,
+    /// F07: immutable launch authority snapshot for host/TUI/ACP reporting.
+    pub effective_execution_policy: EffectiveExecutionPolicy,
+    /// F08: output-only trust/capability receipt for the exact session policy.
+    pub workspace_policy_receipt: wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    /// F05: deterministic construction truth for the audited capability set.
+    /// Hosts emit these additive events only after their `Ready` boundary.
+    pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
     pub mcp_managers: Vec<Arc<McpManager>>,
+    /// Redacted declarations retained even when a plugin MCP connection fails.
+    /// Command arguments, environment, and URLs never cross this boundary.
+    pub plugin_mcp_declarations: Vec<PluginMcpDeclaration>,
     pub has_mcp: bool,
     /// #537/#141 — correlation bridge for host-delegated `send_message`.
     /// Always constructed (cheap empty map); only populated when the engine
@@ -48,21 +86,18 @@ pub struct BootstrapResult {
     /// `Config.budget` via `ExecutionBudget::from(&BudgetConfig)`. All
     /// per-tool `ToolContext.budget` views are sub-budgets of this root.
     pub budget: ExecutionBudgetView,
-    /// W8a A.6: session-root cancellation handle. Linked to `budget`
+    /// W8a A.6: session-root cancellation authority. Linked to `budget`
     /// via `budget_linked` so any cap trip fires the wrapped token
     /// (which propagates to in-flight tools through
-    /// `ToolContext.cancel`). Cancel the session by calling
-    /// `cancel_root.cancel()`; orchestration races every tool dispatch
-    /// against this token (A.4 dispatcher route through
+    /// `ToolContext.cancel`). Cancel the session through this control;
+    /// use `child_token()` for read-only observation. Orchestration races
+    /// every tool dispatch against a descendant token (A.4 route through
     /// `execute_with_ctx`).
     ///
-    /// Wave RC (audit MAJOR #8) — this is now a [`BudgetGuard`] RAII
-    /// handle rather than a bare `CancellationToken`. Dropping the
-    /// `BootstrapResult` aborts the per-session budget-watcher tokio
-    /// task. The guard derefs to the underlying token so existing
-    /// `.is_cancelled()` / `.cancel()` / `.cancelled()` calls keep
-    /// working without churn.
-    pub cancel_root: BudgetGuard,
+    /// The engine owns the budget watcher and terminal session lifetime;
+    /// this clone is the explicit host authority. Dropping `BootstrapResult`
+    /// after moving out `engine` cannot disable budget cancellation.
+    pub cancel_root: SessionControl,
     /// v0.8.1 U5 — channel runtime. `ChannelManager` is constructed
     /// at boot and seeded by
     /// `wcore_channels_registry::auto_register_from_user_config`,
@@ -104,6 +139,21 @@ pub struct BootstrapResult {
         tokio::task::JoinHandle<()>,
         tokio::sync::watch::Sender<bool>,
     )>,
+    /// F24-CL/F24-CS — this session's INBOUND POLLING participation.
+    ///
+    /// **Hold this for the session lifetime.** Dropping it releases the OS
+    /// lock and hands inbound polling to whatever process asks next, so an
+    /// early drop would silently re-open the two-poller race the lease exists
+    /// to close.
+    ///
+    /// `Some` whenever channels were not skipped, in BOTH roles — an observer
+    /// is supervised too, it simply is not the owner. Ask
+    /// [`channel_lease::ChannelPollSupervisor::is_owner`] rather than testing
+    /// for `Some`, and note that the answer CHANGES over the session's life:
+    /// a session that started before the installed service yields to it, and a
+    /// session that outlives the service takes over from it. `None` only on
+    /// the per-session / sub-agent path, which never touches channels at all.
+    pub channel_poll_lease: Option<crate::channel_lease::ChannelPollSupervisor>,
     /// Servers dropped by a pre-connect gate (e.g. an unreachable stdio
     /// command). They never reached connect_all/health(), so they are
     /// carried here so the boot snapshot can render a skipped (⊘) row.
@@ -122,6 +172,209 @@ pub struct BootstrapResult {
 pub type PluginProviderRouter =
     Box<dyn Fn(&str, &[Arc<dyn PluginProvider>]) -> Option<Arc<dyn LlmProvider>> + Send + Sync>;
 
+/// One F11 session envelope shared by the parent engine and every child
+/// spawner created for that session. Keeping config-to-budget translation in
+/// one constructor prevents early-return CLI modes from silently falling back
+/// to `AgentSpawner::new`'s legacy unbounded defaults.
+struct SessionBudgetEnvelope {
+    authority: crate::budget_authority::SharedBudgetAuthorityCoordinator,
+    authority_seed: crate::budget_authority::BudgetAuthoritySeed,
+}
+
+/// Subject bucket used by the single-tenant CLI/daemon shape.
+///
+/// Each OS user already has their own profile home, so one bucket per profile
+/// is the correct partition today. The store is keyed by subject so a
+/// multi-tenant host can debit per end-user without a schema change.
+const DEFAULT_DAILY_SPEND_SUBJECT: &str = "default";
+
+/// Path of the durable cross-session daily ledger for this profile.
+///
+/// Deliberately NOT the diagnostics cost ledger: that one is prunable, so
+/// enforcing on it would either fail open the moment a prune lands or brick
+/// every launch after one. This file holds only the current UTC day's spend
+/// authority and is never a pruning target.
+pub fn daily_spend_ledger_path() -> std::path::PathBuf {
+    wcore_config::config::wayland_config_dir()
+        .join("budget")
+        .join("daily-spend.json")
+}
+
+/// Bind the durable daily ceiling when — and only when — the operator
+/// configured `max_daily_cost_usd`. Absent that field this returns `None` and
+/// nothing about the existing per-session behaviour changes.
+fn daily_spend_authority(
+    effective_budget: &wcore_budget::BudgetConfig,
+) -> Option<wcore_budget::DailyAuthority> {
+    effective_budget.max_daily_cost_usd?;
+    Some(wcore_budget::DailyAuthority::new(
+        std::sync::Arc::new(wcore_budget::DailySpendStore::at(daily_spend_ledger_path())),
+        DEFAULT_DAILY_SPEND_SUBJECT,
+    ))
+}
+
+impl SessionBudgetEnvelope {
+    fn from_config(config: &Config) -> Self {
+        Self::from_config_for_session(config, uuid::Uuid::new_v4().to_string())
+    }
+
+    fn from_config_for_session(config: &Config, session_id: String) -> Self {
+        let effective_budget = wcore_budget::BudgetConfig::effective_session_envelope(
+            &config.budget,
+            config.session_cap.as_ref(),
+        );
+        let cap: wcore_budget::BudgetCap = (&effective_budget).into();
+
+        // Provider tokens/cost have one authoritative, reservable ledger.
+        // ExecutionBudget owns only orthogonal operational axes; duplicating
+        // token/cost caps there would leave Continue widening one authority
+        // while another immutable watcher remained exhausted.
+        let mut operational_budget = ExecutionBudget::from(&effective_budget);
+        operational_budget.max_tokens_in = None;
+        operational_budget.max_tokens_out = None;
+        operational_budget.max_cost_usd = None;
+
+        let authority_seed = crate::budget_authority::BudgetAuthoritySeed {
+            provider_caps: cap.clone(),
+            preserve_committed_session_extensions: !config.execution_policy.is_managed(),
+            execution_policy: operational_budget.clone(),
+            wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+            process_cleanup_proof: None,
+            daily_authority: daily_spend_authority(&effective_budget),
+        };
+        let authority = authority_seed
+            .detached(session_id.clone())
+            .expect("resolved budget policy produces a valid detached authority");
+        Self {
+            authority,
+            authority_seed,
+        }
+    }
+
+    fn govern_spawner(
+        &self,
+        spawner: crate::spawner::AgentSpawner,
+        cancel: CancellationToken,
+    ) -> crate::spawner::AgentSpawner {
+        spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::from_authority(
+            Arc::clone(&self.authority),
+            cancel,
+        ))
+    }
+}
+
+/// Apply the canonical F11 session envelope to a one-shot CLI spawner.
+///
+/// Ordinary bootstrap and early-return modes use the same constructor, Smart
+/// defaults, provider ledger, execution root, stable session identity, and
+/// cancellation lineage. Every child created from the returned spawner shares
+/// these handles for the lifetime of the one-shot invocation.
+///
+/// F21-02-01 — this is one of the three seams through which EVERY production
+/// `AgentSpawner` passes, and it declares the child tool authority for the
+/// standalone lane (`wcore-cli/src/crucible.rs`, `wcore-cli/src/workflow.rs`,
+/// `orchestration/anvil/seat.rs`). See
+/// [`crate::spawner::AgentSpawner::declare_root_parent_tool_authority`] for why
+/// a root CLI process declares the complete set rather than leaving the field
+/// at its default.
+pub fn govern_standalone_spawner(
+    spawner: crate::spawner::AgentSpawner,
+    config: &Config,
+) -> anyhow::Result<crate::spawner::AgentSpawner> {
+    let spawner = spawner.with_session_authority_config(config);
+    let cwd = std::env::current_dir()?;
+    let manager = crate::session::SessionManager::new(
+        config.session.directory.clone().into(),
+        config.session.max_sessions,
+    );
+    let active = manager.create_for_run(
+        &config.provider_label,
+        &config.model,
+        &cwd.to_string_lossy(),
+        None,
+    )?;
+    let session_id = active.session.id.clone();
+    let envelope = SessionBudgetEnvelope::from_config_for_session(config, session_id.clone());
+    let execution_budget = envelope
+        .authority
+        .lock()
+        .current_execution_view()
+        .expect("resolved standalone budget authority is healthy");
+    let guard = Arc::new(crate::cancel::budget_linked(
+        CancellationToken::new(),
+        execution_budget,
+    ));
+    let governance = crate::spawner::SpawnerBudgetGovernance::from_authority(
+        envelope.authority,
+        guard.token_clone(),
+    )
+    .with_budget_guard(guard);
+    let durable_authority = crate::durable_spawner::DurableSessionAuthority::new();
+    let spawner = spawner
+        .with_budget_governance(governance)
+        // Standalone/one-shot spawners resolve child workspaces against the same
+        // parent repository identity as the full bootstrap path — never a global
+        // temporary-directory fallback.
+        .with_parent_workspace(&cwd)?
+        .with_durable_session_authority(
+            durable_authority.clone(),
+            EffectiveExecutionPolicy::baseline(&config.execution_policy),
+        )?;
+    // F21-02-01 — a one-shot CLI process has no enclosing agent session, so it
+    // is the root of the authority chain and holds every child-eligible
+    // built-in. State that here rather than letting the constructor default
+    // stand: a stated root position is reviewable and is what the enumeration
+    // guard checks for, whereas an omission is indistinguishable from an
+    // unwired site. `declare_root_parent_tool_authority` cannot widen, so a
+    // spawner that arrives here already narrowed keeps its tighter envelope.
+    spawner.declare_root_parent_tool_authority();
+    durable_authority.bind_fresh(active.journal, &session_id)?;
+    Ok(spawner)
+}
+
+/// Load the channel configs the inbound subscriber derives its ACCESS POLICY
+/// and TOOL POSTURE from.
+///
+/// Named and public so the invariant it carries is testable: this must resolve
+/// the SAME directory the adapters are registered from
+/// ([`wcore_channels_registry::channels_dir`], which honors `WAYLAND_HOME`).
+/// It previously used `ChannelConfigLoader::default_root()`, which joins
+/// `$HOME/.wayland/channels` unconditionally — see F24-C3-H1 at the call site
+/// for what that broke, in both directions.
+pub fn load_channel_policy_configs() -> Vec<wcore_channels::config::ChannelConfig> {
+    try_load_channel_policy_configs().unwrap_or_default()
+}
+
+/// The same load, with the error kept.
+///
+/// F24-C3-H5. The two loaders over `<home>/channels` disagree about a
+/// malformed file, and the disagreement is dangerous once a reload can
+/// re-install policies at runtime:
+///
+/// - [`wcore_channels_registry::auto_register_from_dir`] SKIPS an unparseable
+///   file with a warning and returns `Ok`, so the other adapters still
+///   register;
+/// - [`wcore_channels::config::ChannelConfigLoader::load_all`] stops at the
+///   first failure and returns `Err`, which
+///   [`load_channel_policy_configs`]'s `unwrap_or_default` turns into an
+///   EMPTY policy set.
+///
+/// At startup that combination is merely visible (`policies=0` in the gateway's
+/// own log). At RELOAD it would be destructive: one newly-typo'd file would
+/// swap every running channel's policy out for the fail-closed default and
+/// convert a working gateway into universal denial — reintroducing the exact
+/// defect this lane is repairing, by a different route.
+///
+/// So the reload path uses this function and **refuses to swap** on `Err`,
+/// keeping the policies it already has. The startup path keeps its historical
+/// lossy behaviour via [`load_channel_policy_configs`] so this change cannot
+/// alter how an existing deployment boots.
+pub fn try_load_channel_policy_configs()
+-> Result<Vec<wcore_channels::config::ChannelConfig>, wcore_channels::ChannelError> {
+    wcore_channels::config::ChannelConfigLoader::new(wcore_channels_registry::channels_dir())
+        .load_all()
+}
+
 /// Builder for creating a fully-initialized `AgentEngine`.
 ///
 /// Encapsulates the complete initialization pipeline so all consumers
@@ -136,7 +389,7 @@ pub struct AgentBootstrap {
     workspace: String,
     output: Arc<dyn OutputSink>,
     provider: Option<Arc<dyn LlmProvider>>,
-    resume_session: Option<Session>,
+    resume_session: Option<ActiveSession>,
     extra_skill_dirs: Vec<PathBuf>,
     /// Wave OL: optional resolver invoked after plugin init to route
     /// model strings like `ollama:llama3` through a plugin-supplied
@@ -193,13 +446,77 @@ pub struct AgentBootstrap {
     /// marked `only_for_assistant` is EXCLUDED (fail-closed). The json-stream
     /// host (desktop) threads the active assistant here via `--assistant`.
     active_assistant: Option<String>,
+    /// Trusted, resolver-produced local Dangerous lease. No config, wire,
+    /// environment, TUI, or ACP surface populates this field.
+    dangerous_grant: Option<DangerousSessionGrant>,
+    /// Explicit trusted baseline selected by a local launch/config resolver.
+    /// Lower-trust callers may narrow it but cannot construct Managed or
+    /// Dangerous authority directly.
+    baseline_policy: Option<BaselineExecutionPolicy>,
+    /// Shared live posture authority for TUI/protocol hosts. When installed,
+    /// bootstrap binds both the parent approval flow and future child configs
+    /// to this same manager.
+    approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
+    /// F09: egress policy owned by this bootstrap/session. Clients created
+    /// during build capture this policy instead of consulting process-global
+    /// mutable state.
+    session_egress_policy: Option<crate::egress::AgentEgressPolicy>,
+}
+
+/// Build the bundled/plugin catalog owned by one bootstrap invocation.
+///
+/// Keeping this constructor at the production call boundary makes reuse of a
+/// prior session's mutable catalog impossible: every call starts from a fresh
+/// embedded catalog and consumes only that invocation's plugin specs.
+fn build_session_bundled_catalog(
+    plugin_skills: Vec<wcore_plugin_api::BundledSkillSpec>,
+) -> wcore_skills::bundled::BundledSkillCatalog {
+    let mut catalog = wcore_skills::bundled::init_bundled_skills();
+    for skill_spec in plugin_skills {
+        let name = skill_spec.name.clone();
+        catalog.register(crate::plugins::skill_delivery::spec_to_bundled_entry(
+            skill_spec,
+        ));
+        tracing::debug!(skill = %name, "plugin skill registered into session catalog");
+    }
+    catalog
+}
+
+/// The single ingress point that fixes the SPELLING of a session's workspace.
+///
+/// The same directory reaches us under two different pathnames depending on who
+/// supplied it: `--project-dir` keeps whatever the caller typed, while
+/// `std::env::current_dir()` returns the getcwd-RESOLVED form. On macOS `/var`,
+/// `/tmp` and `/etc` are symlinks into `/private`, so those two sources disagree
+/// for any workspace under them; on Windows an 8.3 short name and its long form
+/// disagree the same way. Linux has no such alias, which is why this only ever
+/// bites on the other two platforms.
+///
+/// The workspace string is not merely a path here: it is embedded verbatim in
+/// the system prompt (`Working directory: {cwd}`, see [`crate::context`]), and
+/// the system prompt is digested into the session's recovery authority. Two
+/// spellings therefore mint two authorities for one workspace, and a crashed
+/// session refuses to resume with `changed: system_prompt`. Canonicalizing once,
+/// here, is what makes `self.workspace` identity-stable for every consumer
+/// instead of each of them re-deriving a spelling.
+///
+/// `dunce::simplified` keeps Windows on the ordinary `C:\…` form rather than the
+/// verbatim `\\?\C:\…` one `canonicalize` returns, so the prompt text stays
+/// readable. A workspace that does not exist yet, or cannot be resolved, is left
+/// exactly as given — the same fail-soft contract `WorkspacePolicy`'s `canon`
+/// uses, so this can never turn a working session into a failing one.
+fn canonical_workspace(workspace: String) -> String {
+    let Ok(canonical) = std::fs::canonicalize(&workspace) else {
+        return workspace;
+    };
+    dunce::simplified(&canonical).to_string_lossy().into_owned()
 }
 
 impl AgentBootstrap {
     pub fn new(config: Config, workspace: impl Into<String>, output: Arc<dyn OutputSink>) -> Self {
         Self {
             config,
-            workspace: workspace.into(),
+            workspace: canonical_workspace(workspace.into()),
             output,
             provider: None,
             resume_session: None,
@@ -212,6 +529,10 @@ impl AgentBootstrap {
             persona_tool_allowlist: None,
             defer_config_mcp: false,
             active_assistant: None,
+            dangerous_grant: None,
+            baseline_policy: None,
+            approval_manager: None,
+            session_egress_policy: None,
         }
     }
 
@@ -268,6 +589,42 @@ impl AgentBootstrap {
         self
     }
 
+    /// Install an already validated local Dangerous lease. Build rechecks that
+    /// its Managed provenance matches the selected baseline before use.
+    pub fn with_dangerous_grant(mut self, grant: DangerousSessionGrant) -> Self {
+        self.dangerous_grant = Some(grant);
+        self
+    }
+
+    /// Select the typed Smart approval posture for this session. Smart always
+    /// retains the required sandbox; only a resolver-produced Dangerous grant
+    /// can bypass containment.
+    pub fn with_smart_execution_policy(
+        mut self,
+        approvals: ApprovalPolicy,
+        source: PolicySource,
+    ) -> Self {
+        self.baseline_policy = Some(BaselineExecutionPolicy::smart(approvals, source));
+        self
+    }
+
+    /// Install a resolver-produced Smart or Managed baseline.
+    pub fn with_execution_policy(mut self, policy: BaselineExecutionPolicy) -> Self {
+        self.baseline_policy = Some(policy);
+        self
+    }
+
+    /// Install the host session's live approval manager before child-capable
+    /// tools are built. This keeps runtime mode changes authoritative for both
+    /// the parent and subsequently spawned children.
+    pub fn with_approval_manager(
+        mut self,
+        manager: Arc<wcore_protocol::ToolApprovalManager>,
+    ) -> Self {
+        self.approval_manager = Some(manager);
+        self
+    }
+
     /// Phase 1B-2 — skip the entire channel block (registration, start_all,
     /// transport upgrade, inbound subscriber). Set by per-session engines
     /// built by `ChannelTurnDispatcher` so they don't re-register channels
@@ -316,7 +673,7 @@ impl AgentBootstrap {
     }
 
     /// Resume from a previously saved session.
-    pub fn resume(mut self, session: Session) -> Self {
+    pub fn resume(mut self, session: ActiveSession) -> Self {
         self.resume_session = Some(session);
         self
     }
@@ -334,8 +691,64 @@ impl AgentBootstrap {
 
     /// Build the fully-initialized engine.
     pub async fn build(mut self) -> anyhow::Result<BootstrapResult> {
+        let policy = crate::egress::policy_from_config(&self.config);
+        self.session_egress_policy = Some(policy.clone());
+        let shared: wcore_egress::SharedPolicy = Arc::new(policy);
+        wcore_egress::with_default_policy(shared, self.build_scoped()).await
+    }
+
+    async fn build_scoped(mut self) -> anyhow::Result<BootstrapResult> {
         let cwd = &self.workspace;
         let cwd_path = std::path::Path::new(cwd);
+        // Mint the immutable session root before any child-capable tools are
+        // built. The budget watcher is attached later, after engine creation,
+        // but the spawner and engine then share this exact token lineage.
+        let session_cancel_root = CancellationToken::new();
+        let mut session_guard = SessionRuntimeGuard::new(session_cancel_root);
+        let session_runtime = session_guard.observer();
+        let cancel_root = session_guard.control();
+        let baseline_policy = self
+            .baseline_policy
+            .take()
+            .unwrap_or_else(|| self.config.execution_policy.clone());
+        let dangerous_grant = self.dangerous_grant.take();
+        if let Some(grant) = dangerous_grant.as_ref() {
+            anyhow::ensure!(
+                !matches!(
+                    baseline_policy.managed_dangerous_policy(),
+                    Some(wcore_types::execution_policy::ManagedDangerousPolicy::Deny)
+                ),
+                "Dangerous grant conflicts with the selected Managed deny policy"
+            );
+            anyhow::ensure!(
+                grant.managed_floor_active() == baseline_policy.is_managed(),
+                "Dangerous grant provenance does not match the selected execution baseline"
+            );
+        }
+        let effective_execution_policy = match dangerous_grant.as_ref() {
+            Some(grant) => EffectiveExecutionPolicy::dangerous(grant),
+            None => EffectiveExecutionPolicy::baseline(&baseline_policy),
+        };
+        self.config.execution_policy = baseline_policy.clone();
+        if dangerous_grant.is_some() {
+            // Dangerous is one typed authority bundle: its resolver-produced
+            // lease bypasses both interactive approvals and the sandbox. Set
+            // this before any confirmer, skill checker, spawner, or engine is
+            // built so every execution path observes the same posture.
+            self.config
+                .set_smart_approval_policy(ApprovalPolicy::Bypass);
+        } else {
+            // An explicit typed launch selection is authoritative over both
+            // legacy approval fields. Normalizing them also carries the exact
+            // posture into every child Config clone and transient spawner.
+            self.config
+                .set_smart_approval_policy(baseline_policy.approvals());
+        }
+        if let Some(manager) = self.approval_manager.as_ref() {
+            let managed_floor = (baseline_policy.is_managed() && dangerous_grant.is_none())
+                .then(|| approval_policy_to_session_mode(baseline_policy.approvals()));
+            manager.set_managed_floor(managed_floor);
+        }
 
         // Wave OL: provider construction is now DEFERRED until after
         // plugin init, so the `plugin_provider_router` (if any) can
@@ -345,7 +758,12 @@ impl AgentBootstrap {
         // plugin runner has settled (see post-init block below). The
         // original ResilientProvider wrap also moves after that point.
 
-        let memory_dir = wcore_memory::paths::auto_memory_dir(cwd_path);
+        let memory_dir = self
+            .config
+            .memory
+            .enabled
+            .then(|| wcore_memory::paths::auto_memory_dir(cwd_path))
+            .flatten();
 
         let file_cache = if self.config.file_cache.enabled {
             let cache = Arc::new(std::sync::RwLock::new(
@@ -375,14 +793,27 @@ impl AgentBootstrap {
         let file_cache_for_engine = file_cache.clone();
 
         let mut registry = wcore_tools::registry::ToolRegistry::new();
+        // D004 — install the session's read-only posture on the registry, which
+        // the orchestration dispatcher consults before it does anything else
+        // with a tool call. Set here, at the point of construction, so no
+        // later registration path can produce a registry that carries tools
+        // but not the posture that governs them.
+        registry.set_read_only(self.config.read_only);
 
-        // W2.5: plugin discovery + initialization. PluginsConfig is
-        // intentionally empty this wave; full ~/.wayland-core/plugins.toml
-        // load lands in W4 alongside the permission-grant UX. Built-in
-        // plugins discovered via inventory work today regardless. Per
-        // design spec §5.17: one bad plugin must not crash session boot —
-        // every plugin error logs via tracing::warn and continues.
-        let plugins_config = wcore_config::plugins_config::PluginsConfig::default();
+        // Plugin discovery + initialization, driven by the operator's
+        // `plugins.toml` (beside `config.toml`; see
+        // `wcore_config::plugins_config::plugins_config_path`). This load is
+        // what makes `enabled = false`, `plugin_signature_verification` and
+        // `trusted_plugin_keys` mean anything — the engine used to boot from
+        // `PluginsConfig::default()`, so every setting in that file, and every
+        // error string and doc telling operators to edit it, was inert.
+        //
+        // A missing file is normal and yields the defaults. A malformed one is
+        // fatal: it is a policy the engine cannot enforce, and booting on
+        // default policy instead is precisely the silent-ignore this replaces.
+        // Per design spec §5.17 one bad *plugin* must not crash session boot —
+        // that still holds; every plugin error below logs and continues.
+        let plugins_config = wcore_config::plugins_config::PluginsConfig::load()?;
         let mut plugin_loader = crate::plugins::PluginLoader::discover(&plugins_config);
         let captured = plugin_loader.validate_all().unwrap_or_else(|e| {
             tracing::warn!(error = %e, "plugin validation failed; continuing without plugins");
@@ -436,11 +867,10 @@ impl AgentBootstrap {
             )
             .await;
         let mut plugin_runtime_keepalives: Vec<crate::plugins::LoadedRuntimeHandle> = Vec::new();
-        // A4c: declarative stdio MCP servers dropped by the pre-connect
-        // reachability gate are collected here (name, reason) so the boot
-        // snapshot can render a skipped (⊘) row in /mcp and /doctor instead
-        // of dropping them silently into an info-log.
-        let mut skipped_mcp_servers: Vec<(String, String)> = Vec::new();
+        // Declarative MCP servers now remain visible through connection and
+        // readiness diagnostics instead of being dropped by a preflight.
+        // Preserve the existing result field as an empty compatibility value.
+        let skipped_mcp_servers: Vec<(String, String)> = Vec::new();
         for record in plugin_loader.take_on_disk_dispatches() {
             if let Err(reason) = &record.load_result {
                 tracing::warn!(
@@ -451,6 +881,15 @@ impl AgentBootstrap {
                 );
                 continue;
             }
+            // F25-04: the positive half of the approval gate has to be
+            // observable too. Without this line an operator can see a REFUSED
+            // plugin (the warn above) but has no CLI-visible evidence that an
+            // APPROVED one actually loaded — and "no error" is not evidence.
+            tracing::info!(
+                plugin = %record.plugin_name,
+                manifest = %record.manifest_path.display(),
+                "on-disk plugin loaded"
+            );
             let crate::plugins::loader::OnDiskDispatchRecord {
                 plugin_name,
                 tool_namespace,
@@ -525,26 +964,13 @@ impl AgentBootstrap {
                                 );
                                 crate::plugins::var_subst::substitute_spec(&mut spec, &ctx);
                             }
-                            // Reachability gate mirroring the compiled-in IJFW
-                            // plugin: a stdio server whose command isn't launchable
-                            // is skipped (info-log) so boot never hangs. SSE/HTTP
-                            // transports can't be cheaply probed locally — trust
-                            // them and let wcore-mcp surface connect-time errors.
-                            if declarative_mcp_server_is_reachable(&spec) {
-                                plugin_outcome.mcp_servers.push(spec);
-                            } else {
-                                tracing::info!(
-                                    plugin = %plugin_name,
-                                    server = %spec.name,
-                                    "declarative plugin MCP server did not start cleanly — \
-                                     skipping registration (hooks stay log-only)"
-                                );
-                                // A4c: surface the pre-connect skip as a ⊘ row.
-                                skipped_mcp_servers.push((
-                                    spec.name.clone(),
-                                    "stdio command not launchable — skipped before connect (check the plugin command/PATH)".to_string(),
-                                ));
-                            }
+                            // Readiness is inspected later through the same
+                            // sanitized launch context as the real MCP
+                            // transport. Never execute third-party code as a
+                            // preflight: the old `<command> --help` probe used
+                            // the ambient parent environment, leaked secrets,
+                            // and disagreed with Windows PATHEXT semantics.
+                            plugin_outcome.mcp_servers.push(spec);
                         }
                     }
                 }
@@ -580,8 +1006,16 @@ impl AgentBootstrap {
                 )
             })
             .collect();
+        // 27-C2(b): `from_verified` answers "is the plugin present and
+        // genuine?" — necessary for the capability, not sufficient. Narrow the
+        // result to what can actually START on this host, so the desktop app
+        // stops rendering a capability whose first operation dies with
+        // `spawn camoufox: No such file or directory`. Clears flags only; the
+        // identity guarantee above is untouched.
         let plugin_capabilities =
-            crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins);
+            crate::output::protocol_sink::PluginCapabilitySet::from_verified(&verified_plugins)
+                .narrowed_to_live()
+                .await;
         // Backwards-compat alias for any consumer that still expects
         // the raw name list (handler-side log lines etc.).
         let loaded_plugin_names: Vec<String> =
@@ -620,6 +1054,37 @@ impl AgentBootstrap {
         // The wrap carries no fallback chain — a single configured provider
         // has no alternate — but fail-fast circuit-breaking is live for all.
         let injected_or_routed = self.provider.take().or(routed_provider);
+
+        // 27-C2: the paired half of the config-layer local-model exemption.
+        //
+        // `Config::resolve` no longer demands a remote credential when the
+        // model carries the `ollama:` prefix, because a local model has none.
+        // That exemption is only safe if the local route is guaranteed to be
+        // taken. If nothing claimed it -- the plugin is disabled, the router
+        // was never installed (a non-CLI embedder), or the downcast failed --
+        // then falling through to `build_native_or_chatgpt_provider` would
+        // construct a REMOTE provider holding an empty API key, and the user
+        // would learn about it as an opaque 401 from api.anthropic.com several
+        // seconds later.
+        //
+        // Refuse here instead, naming the cause and the remedy. This is the
+        // "deliver it or refuse loudly" rule: the credential-free local path is
+        // either genuinely available or explicitly unavailable, never silently
+        // redirected to a remote provider that cannot work.
+        if injected_or_routed.is_none()
+            && wcore_types::model_aliases::is_local_model(&self.config.model)
+        {
+            anyhow::bail!(
+                "model `{}` requests the local inference route, but no provider \
+                 claimed it. The `wayland-ollama` plugin supplies that route and \
+                 is enabled by default -- check that it is not disabled in \
+                 `plugins.toml`. Refusing to fall back to a remote provider: \
+                 no remote credential was required for a local model, so there \
+                 is none to use.",
+                self.config.model
+            );
+        }
+
         let primary_provider: Arc<dyn LlmProvider> = match injected_or_routed {
             Some(p) => p,
             None => build_native_or_chatgpt_provider(&self.config)?,
@@ -639,43 +1104,67 @@ impl AgentBootstrap {
             } else {
                 Arc::new(wcore_providers::NoOpCircuitReporter)
             };
-        // Rank 20: feed the fallback chain. Each configured `fallback_models`
-        // entry that resolves to the SAME provider as the primary (a cheaper /
-        // alternate model on the same endpoint) is built via the same
-        // `create_native_provider` path and handed to `ResilientProvider`, so
-        // the failover machinery is reachable instead of dead. Cross-provider
-        // entries (a different `<provider>:` prefix) are skipped with a warning
-        // — they need their own credential/base-url resolution (follow-up).
-        // No fallbacks configured → empty Vec, identical to prior behaviour.
-        let fallbacks = build_fallback_providers(&self.config);
-        let provider: Arc<dyn LlmProvider> = Arc::new(ResilientProvider::new(
+        // Rank 20: feed the fallback chain. Every configured candidate is
+        // paired with its independently resolved provider configuration, then
+        // admitted by semantic compatibility, policy, health, and budget.
+        // No fallbacks configured means an empty chain, preserving the prior
+        // circuit-breaker-only behavior.
+        refresh_pricing_cache_if_enabled(&self.config, &self.output).await;
+        // F05-TRUTH-1 (`CONT-*` cache economics). This was
+        // `self.config.provider_chain.enabled` read at the report site — a
+        // *configuration* value assigned to a `*_constructed` field, against
+        // `StartupCapabilityInputs`'s own contract that keeping the two apart is
+        // what "prevents configured from becoming ready by implication".
+        // `build_fallback_providers` now sets it on the line that actually
+        // constructs the refresher, so the report cannot drift from the path it
+        // describes.
+        let mut pricing_refresher_constructed = false;
+        let fallbacks = build_fallback_providers(&self.config, &mut pricing_refresher_constructed)?;
+        let policy = failover_routing_policy(&self.config);
+        let resilient = ResilientProvider::new_with_policy(
             self.config.provider_label.clone(),
             primary_provider,
             fallbacks,
             cfg,
             reporter,
-        ));
+            policy,
+        );
+        // F05-TRUTH-3. This was the literal `true` at the report site, which made
+        // the `NoProductionConstructor` arm unreachable from production — a gate
+        // with no fail state proves as little as one with no pass state. Read off
+        // the constructed object instead. It is still structurally true on this
+        // path today (the wrap is unconditional); what changes is that the fact
+        // now follows the code if that ever stops being so.
+        let cooldown_tracker_constructed = resilient.cooldown_tracker_count() > 0;
+        let provider: Arc<dyn LlmProvider> = Arc::new(resilient);
 
         // #182: honor `[tools] windows_shell` for the BashTool interpreter on
         // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
         wcore_config::shell::set_bash_shell_config(self.config.tools.windows_shell.clone());
 
-        // #325: install the config-sourced env passthrough allowlist so
-        // `[tools] env_passthrough` actually forwards the named vars into
-        // sandboxed tool children (the sandbox secret filter still drops
-        // secret-shaped names). Skill-declared passthroughs are additive.
-        wcore_tools::env_passthrough::set_config_passthrough(
-            self.config.tools.env_passthrough.iter(),
+        // F07: resolve one immutable sandbox runtime for this session. A
+        // persisted config or environment may select another real backend,
+        // but cannot disable containment; only a resolver-produced local
+        // Dangerous launch grant can construct that runtime.
+        if let Some(grant) = dangerous_grant.as_ref() {
+            session_guard.arm_dangerous_lease(grant)?;
+        }
+        let sandbox_runtime = Arc::new(
+            match dangerous_grant.as_ref() {
+                Some(grant) => wcore_sandbox::SandboxRegistry::dangerous(grant),
+                None => wcore_sandbox::SandboxRegistry::required_for_session(
+                    self.config.tools.sandbox.as_deref(),
+                )?,
+            }
+            .with_env_passthrough(self.config.tools.env_passthrough.iter()),
         );
-
-        // #327: install the config-sourced sandbox toggle so `[tools]
-        // sandbox` / `[tools] allow_no_sandbox` are honored by
-        // `wcore_sandbox::default_for_platform`. The `WAYLAND_SANDBOX` /
-        // `WAYLAND_ALLOW_NO_SANDBOX` env vars still take precedence.
-        wcore_sandbox::set_config_sandbox(
-            self.config.tools.sandbox.clone(),
-            self.config.tools.allow_no_sandbox,
-        );
+        if self.config.tools.allow_no_sandbox == Some(true) {
+            tracing::warn!(
+                target: "wcore_agent::bootstrap",
+                "[tools] allow_no_sandbox is ignored for hosted sessions; use an explicit local Dangerous launch"
+            );
+        }
+        registry.set_sandbox_runtime(sandbox_runtime);
 
         registry.register(Box::new(wcore_tools::read::ReadTool::new(
             file_cache.clone(),
@@ -905,11 +1394,41 @@ impl AgentBootstrap {
         // arg defaults to `false` (opt-in only); a future config field at
         // `builtin_tools.image_gen.allow_pollinations_fallback` will surface
         // it to users without recompiling.
+        // 27-C3 — ONE session-scoped media cost ledger, shared by every
+        // billable media backend registered below.
+        //
+        // Before this, `with_cost_ledger` had zero production call sites: the
+        // ledger type existed, was tested, and was never constructed outside a
+        // test, so `MediaCostSummary` could not be computed for a real session
+        // at all. The rate card was bound to image generation and to nothing
+        // else, so an operator who filled in `[tools.media_pricing]` had it
+        // silently ignored for transcription, vision and speech — every
+        // billable shape except the one it was wired to.
+        //
+        // Sharing one ledger across backends is what makes `video_analyze`
+        // legible: its nine provider calls land in the same place as
+        // everything else, and a session total is the sum of what was actually
+        // spent rather than of what one backend happened to be wired for.
+        let media_cost_ledger = wcore_tools::media_cost::MediaCostLedger::shared();
+        let media_accounting = wcore_tools::media_cost::MediaAccounting::new(
+            std::sync::Arc::clone(&media_cost_ledger),
+            wcore_tools::media_cost::MediaRateCard::new(self.config.tools.media_pricing.clone()),
+        );
         if let Some(b) =
             crate::tool_backends::image_gen::build_image_gen_backend(&self.config, false)
         {
+            // F27-C3 — bind the media cost record. Image generation is
+            // billable; before this the call produced no cost record at all
+            // because the product's only cost sink is a provider
+            // reserve→settle keyed to token counts, which a media call has
+            // none of. The rate card comes from `[tools.media_pricing]` and
+            // is empty unless the operator filled it in, in which case the
+            // resolved figure is stamped `local_rate_card` and never
+            // presented as the provider's own number.
             registry.register(Box::new(
-                wcore_tools::image_generation_tool::ImageGenerationTool::with_backend(b),
+                wcore_tools::image_generation_tool::ImageGenerationTool::with_backend(b)
+                    .with_rate_card(media_accounting.rate_card.clone())
+                    .with_cost_ledger(std::sync::Arc::clone(&media_cost_ledger)),
             ));
         }
         // `web` tool — wired to a real search backend so the model
@@ -928,16 +1447,23 @@ impl AgentBootstrap {
         // (Anthropic preferred, OpenAI / Gemini auto-fallback). If
         // NONE of the three keys is set the resolver returns None and
         // the tool stays hidden via `Tool::is_available() == false`.
-        if let Some(vision_backend) = crate::tool_backends::build_vision_backend() {
+        if let Some(vision_backend) = crate::tool_backends::build_vision_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        ) {
             registry.register(Box::new(wcore_tools::vision_tools::VisionAnalyzeTool::new(
                 vision_backend,
                 crate::tool_backends::build_image_fetcher(),
             )));
         }
-        // `transcribe_audio` — Groq Whisper free tier preferred,
-        // OpenAI Whisper fallback. If neither key is set the tool
-        // hides itself via `Tool::is_available()`.
-        if let Some(stt_backend) = crate::tool_backends::build_transcription_backend() {
+        // `transcribe_audio` — Groq Whisper free tier preferred, OpenAI
+        // Whisper next, then the active OpenAI-wire provider (Flux Router /
+        // OpenAI) resolved from config, then `FLUX_API_KEY`. If none resolves
+        // the tool hides itself via `Tool::is_available()`.
+        if let Some(stt_backend) = crate::tool_backends::build_transcription_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        ) {
             registry.register(Box::new(
                 wcore_tools::transcription_tools::TranscribeAudioTool::new(
                     stt_backend,
@@ -948,7 +1474,10 @@ impl AgentBootstrap {
         // v0.9.0 W1 B2 — tts: OpenAI > ElevenLabs > (feature-gated piper).
         // Resolver returns None when no provider is configured; tool is then
         // hidden via `is_available() == false`.
-        if let Some(b) = crate::tool_backends::tts::build_tts_backend(&self.config) {
+        if let Some(b) = crate::tool_backends::tts::build_tts_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        ) {
             registry.register(Box::new(wcore_tools::tts_tool::TtsTool::with_backend(b)));
         }
         // v0.9.0 W1 B10 — voice_mode: cpal-backed recorder + STT bridge.
@@ -962,15 +1491,41 @@ impl AgentBootstrap {
         // default binary ships without cpal so it does not hard-link
         // libasound.so.2 (ALSA) on Linux.
         #[cfg(feature = "voice")]
-        if let Some(vm) = crate::tool_backends::voice_mode::build_voice_mode_backend() {
-            registry.register(Box::new(wcore_tools::voice_mode::VoiceModeTool::new(vm)));
+        if let Some(vm) = crate::tool_backends::voice_mode::build_voice_mode_backend(&self.config) {
+            // The readiness report is computed ONCE, here, and handed to
+            // the tool, which refuses `start` / `toggle_record` when the
+            // seams cannot complete a capture → transcribe cycle. This
+            // is `check_requirements`' only production call site; before
+            // it, the function was advertised (by this file's own doc on
+            // `build_voice_mode_backend`) and dead, so a keyless user got
+            // the silent failure that comment says they were spared.
+            // Non-destructive: the recorder probe is `is_wired()`, so
+            // nothing opens the microphone at startup.
+            let requirements = vm.check_requirements().await;
+            if !requirements.available {
+                tracing::warn!(
+                    "voice_mode readiness: {} (capture={}, stt={})",
+                    requirements.details.join("; "),
+                    requirements.audio_capture_available,
+                    requirements.stt_available
+                );
+            }
+            registry.register(Box::new(
+                wcore_tools::voice_mode::VoiceModeTool::with_requirements(vm, requirements),
+            ));
         }
         // v0.9.0 W1 B5 — video_analyze: async ffmpeg probe + LLM vision
         // backend. Resolver is `pub async fn build_video_analyze_backend()`
         // because the ffmpeg probe spawns a child process cached in a
         // tokio::sync::OnceCell; `.await` is legal here because `build()`
         // is async.
-        if let Some(b) = crate::tool_backends::video_analyze::build_video_analyze_backend().await {
+        if let Some(b) =
+            crate::tool_backends::video_analyze::build_video_analyze_backend_with_accounting(
+                &self.config,
+                &media_accounting,
+            )
+            .await
+        {
             registry.register(Box::new(
                 wcore_tools::video_analyze_tool::VideoAnalyzeTool::with_backend(b),
             ));
@@ -1012,6 +1567,12 @@ impl AgentBootstrap {
             )));
         }
 
+        // Reserve ToolSearch in the live registry before plugin and MCP tool
+        // delivery. The final refresh below replaces this early snapshot after
+        // every boot-time tool is present. Seeding it here makes collision
+        // handling deterministic for any extension exporting `ToolSearch` and
+        // prevents the final replacement from silently deleting that tool.
+        registry.refresh_tool_search_catalog(&self.config.builtin_tools.defer_cold);
         let builtin_names: Vec<String> = registry.tool_names();
 
         // v0.6.4 Task 1.7 — deliver every captured plugin capability.
@@ -1024,8 +1585,8 @@ impl AgentBootstrap {
         //     `builtin_names` snapshot above is the pure-builtin set.
         //   - agents: returned in `applied.agent_registry`, threaded into
         //     `SpawnTool` + the engine after construction.
-        //   - skills: `applied.plugin_skills` registered via
-        //     `register_bundled_skill` BEFORE `load_catalog` (below).
+        //   - skills: `applied.plugin_skills` appended to the session-local
+        //     bundled catalog BEFORE `load_catalog_with_bundled` (below).
         //   - rules: `applied.plugin_rules` passed to `build_system_prompt`.
         //   - hooks: `applied.plugin_hooks` handed to the engine setter
         //     after construction.
@@ -1046,12 +1607,10 @@ impl AgentBootstrap {
         // `[browser.policy]` in their config.toml. v0.8.4's fix wired the
         // schema; this completes the loop by feeding it through to the
         // reify step.
-        let policy = &self.config.browser.policy;
-        for spec in &mut plugin_runner.browser.specs {
-            spec.policy.default_action = policy.default_action.clone();
-            spec.policy.allowed_origins = policy.allowed_origins.clone();
-            spec.policy.denied_origins = policy.denied_origins.clone();
-        }
+        crate::plugins::adapters::browser_adapter::apply_config_policy(
+            &self.config.browser.policy,
+            &mut plugin_runner.browser.specs,
+        );
 
         // v0.6.5 Task 1.4 — browser/cua plugin tools now reify INSIDE
         // `apply_initialize_outcome` (see `apply.rs::deliver_browser_tools`
@@ -1087,16 +1646,24 @@ impl AgentBootstrap {
             // against the credentials store at the connect boundary, on a clone.
             // The long-lived `self.config` keeps the literal `${cred:...}` so the
             // token never round-trips back to config.toml. If the store can't be
-            // opened, connect with the literals (each referencing server then
-            // fails its own connect, in isolation).
+            // opened, omit reference-bearing servers before any transport sees
+            // a literal credential placeholder.
             let resolved_servers = match self.config.open_credentials_store() {
                 Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
                     &scoped_servers,
                     &*store,
                 ),
-                Err(_) => scoped_servers.clone(),
+                Err(_) => {
+                    wcore_config::mcp_cred_refs::without_credential_references(&scoped_servers)
+                }
             };
-            match McpManager::connect_all(&resolved_servers).await {
+            let egress_policy: wcore_egress::SharedPolicy = Arc::new(
+                self.session_egress_policy
+                    .as_ref()
+                    .expect("session egress policy is installed before scoped bootstrap")
+                    .clone(),
+            );
+            match McpManager::connect_all_with_policy(&resolved_servers, egress_policy).await {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
                     wcore_mcp::tool_proxy::register_mcp_tools(
@@ -1104,6 +1671,7 @@ impl AgentBootstrap {
                         &mgr,
                         &builtin_names,
                         &resolved_servers,
+                        &self.config.builtin_tools.defer_cold,
                     );
                     mcp_managers.push(mgr.clone());
                     Some(mgr)
@@ -1123,13 +1691,37 @@ impl AgentBootstrap {
         // pre-MCP `builtin_names` snapshot for collision detection. Non-fatal:
         // a failed plugin MCP connect logs and returns `None` (one bad plugin
         // cannot crash boot).
-        if let Some(plugin_mcp_mgr) = crate::plugins::mcp_delivery::connect_plugin_mcp_servers(
-            &applied.plugin_mcp_servers,
-            &mut registry,
-            &builtin_names,
-        )
-        .await
-        {
+        let plugin_egress_policy: wcore_egress::SharedPolicy = Arc::new(
+            self.session_egress_policy
+                .as_ref()
+                .expect("session egress policy is installed before scoped bootstrap")
+                .clone(),
+        );
+        let plugin_mcp_manager =
+            crate::plugins::mcp_delivery::connect_plugin_mcp_servers_with_policy(
+                &applied.plugin_mcp_servers,
+                &mut registry,
+                &builtin_names,
+                plugin_egress_policy,
+                &self.config.builtin_tools.defer_cold,
+            )
+            .await;
+        let plugin_mcp_declarations = applied
+            .plugin_mcp_servers
+            .iter()
+            .map(|server| PluginMcpDeclaration {
+                name: server.name.clone(),
+                transport: match &server.transport {
+                    wcore_plugin_api::McpTransport::Stdio { .. } => TransportType::Stdio,
+                    wcore_plugin_api::McpTransport::Sse { .. } => TransportType::Sse,
+                    wcore_plugin_api::McpTransport::Http { .. } => TransportType::StreamableHttp,
+                },
+                executable_readiness: plugin_mcp_manager
+                    .as_ref()
+                    .and_then(|manager| manager.executable_readiness().get(&server.name).copied()),
+            })
+            .collect();
+        if let Some(plugin_mcp_mgr) = plugin_mcp_manager {
             mcp_managers.push(plugin_mcp_mgr);
         }
 
@@ -1231,7 +1823,23 @@ impl AgentBootstrap {
         // flag is observability-only). When only `memory.enabled` is on we
         // open `Memory` + spawn the scheduler. When neither is on we stay
         // on `NullMemory`.
-        let want_memory = self.config.memory.enabled || self.config.observability.skills_lifecycle;
+        let smart_compaction_enabled = self.config.compact.smart_enabled;
+        let smart_handoff_enabled = self.config.compact.smart_handoff_to_memory;
+        // #170 — `want_memory` used to be `memory.enabled ||
+        // skills_lifecycle`, and `skills_lifecycle` defaults ON. So a user who
+        // set the advertised `[memory] enabled = false` still got a real
+        // `Memory` opened on disk, the durable memory WRITE tools registered
+        // below, a procedural telemetry sink feeding it, and auto-memorize
+        // running at every session end. The opt-out changed nothing it claims
+        // to change.
+        //
+        // `skills_lifecycle_enabled()` now folds `memory.enabled` in, so the
+        // `||` collapses to the opt-out itself. Written as `memory.enabled`
+        // directly rather than left as an OR that is only *incidentally*
+        // correct: this is the gate the user is promised, and it should read
+        // that way at the site that enforces it.
+        let skills_lifecycle_enabled = self.config.skills_lifecycle_enabled();
+        let want_memory = self.config.memory.enabled;
         let mut decay_handle: Option<tokio::task::JoinHandle<()>> = None;
         // v0.8.1 U1 — capture the `Arc<Db>` handle from the opened
         // `Memory` so we can hand it to `wcore_evolve::PromptStore::new`
@@ -1377,43 +1985,33 @@ impl AgentBootstrap {
         } else {
             Arc::new(wcore_memory::NullMemory)
         };
+        let memory_constructed = mem_db_for_router.is_some();
+        if !memory_constructed {
+            // F05: configured-but-unconstructed memory capabilities fail closed.
+            // NullMemory intentionally returns successful no-ops, which would
+            // otherwise let runtime code falsely emit `outcome_changed`.
+            self.config.compact.smart_handoff_to_memory = false;
+            self.config.observability.skills_lifecycle = false;
+        }
 
-        // F-036 (HIGH, Aud-2b/Aud-10): call `init_bundled_skills` in
-        // production bootstrap. Previously this was only called in tests, so
-        // fresh installs had zero invokable native skills (the `hello` skill
-        // was invisible). Must run BEFORE plugin registration below so the
-        // global registry is cleared+initialised before plugin skills are
-        // appended. `init_bundled_skills` is idempotent (clear+register).
-        wcore_skills::bundled::init_bundled_skills();
+        // Build one catalog for this bootstrap. Embedded definitions are
+        // inserted first, then plugin definitions are appended in discovery
+        // order, preserving the existing bundled/plugin precedence.
+        let bundled_catalog = build_session_bundled_catalog(applied.plugin_skills);
         tracing::debug!(
             target: "wcore_agent::bootstrap",
-            "F-036: bundled skills initialised (hello registered)"
+            "bundled skill catalog initialised for session"
         );
-
-        // v0.6.4 Task 1.6/1.7 — register plugin-contributed skills into the
-        // process-global bundled-skill registry BEFORE `load_catalog` runs.
-        // `load_catalog` reads `bundled::get_bundled_skills()` first
-        // (highest priority), so a skill registered here surfaces in the
-        // catalog and, transitively, in the system prompt. Each spec is
-        // leaked to `&'static str` fields via `spec_to_static_definition`
-        // (plugin lifetime == process lifetime — leak is correct, see
-        // `skill_delivery.rs`).
-        for skill_spec in applied.plugin_skills {
-            let name = skill_spec.name.clone();
-            wcore_skills::bundled::register_bundled_skill(
-                crate::plugins::skill_delivery::spec_to_static_definition(skill_spec),
-            );
-            tracing::debug!(skill = %name, "plugin skill registered into bundled-skill registry");
-        }
 
         // X1 (Task 5): load the catalog lazily. Bodies are NOT pinned in
         // memory — SkillCatalog::resolve() reads them on demand on first
         // activation, with a 32-entry LRU thereafter.
-        let mut skill_refs = wcore_skills::loader::load_catalog(
+        let mut skill_refs = wcore_skills::loader::load_catalog_with_bundled(
             cwd_path,
             &self.extra_skill_dirs,
             false,
             mcp_manager.as_deref(),
+            &bundled_catalog,
         )
         .await;
 
@@ -1463,11 +2061,11 @@ impl AgentBootstrap {
         // NOTE: to flip precedence, add `skills.user_overrides_bundled = true` to wcore.toml
         // and change the splice order in `wcore_skills::loader::load_catalog` (W3-G crate).
         {
-            let bundled_names: std::collections::HashSet<String> =
-                wcore_skills::bundled::get_bundled_skills()
-                    .iter()
-                    .map(|d| d.name.to_string())
-                    .collect();
+            let bundled_names: std::collections::HashSet<String> = bundled_catalog
+                .get_bundled_skills()
+                .iter()
+                .map(|d| d.name.to_string())
+                .collect();
             if !bundled_names.is_empty() {
                 // Scan disk skill dirs for any directory whose name matches a bundled skill.
                 let mut dirs_to_check: Vec<std::path::PathBuf> = Vec::new();
@@ -1563,7 +2161,26 @@ impl AgentBootstrap {
         // before. The `honcho` path round-trips through a live Honcho
         // deployment. Failures degrade silently — telemetry is best-effort,
         // never blocks bootstrap.
-        let user_id = "default";
+        // The identity every user-model bucket on this session is keyed by —
+        // READ here and WRITTEN by the engine's per-turn `observe`.
+        //
+        // This used to be a hardcoded `"default"` while every write path used
+        // `resolve_user_model_user_id()` (which reads `WAYLAND_USER_ID`). On
+        // any host that sets that variable — which is the entire reason it
+        // exists — the model was written under the real id and read back from
+        // `"default"`, so nothing the layer learned ever reached the prompt.
+        // An advertised surface that is dead in exactly the deployment it was
+        // built for.
+        //
+        // It was also a CROSS-USER READ, which is the worse half: with the
+        // render pinned to `"default"`, a process running with `WAYLAND_USER_ID`
+        // UNSET wrote its inferred brief into the one bucket that every OTHER
+        // user's prompt rendered from. Two processes sharing a memory base with
+        // different values for the variable therefore leaked one user's
+        // inferred traits into another user's system prompt — and onward to the
+        // provider. Resolving both ends from the same function closes it by
+        // construction rather than by two call sites agreeing.
+        let user_id = crate::engine::resolve_user_model_user_id();
         // v0.8.0 Task M — hoist the `UserModelBackend` out of the
         // `user_ctx_block` scope so it can ALSO be installed on the
         // engine for per-turn write-back. v0.7.0 read-only at
@@ -1647,12 +2264,57 @@ impl AgentBootstrap {
             } else {
                 None
             };
+        // 23B-C3 (user-model half) — the user-authored correction layer.
+        //
+        // Opened independently of `want_memory` and of the backend choice: a
+        // correction is the user's own statement about themselves, so it must
+        // survive both "memory is off" and a swap from the local backend to
+        // Honcho. It lives in its own file for the reason given in
+        // `wcore_user_model::correction` — `user-model.json` is rewritten
+        // wholesale by the inference fold.
+        //
+        // A failure to OPEN the store is logged and degrades to no
+        // corrections. A failure to WRITE one propagates to the user at the
+        // slash-command surface — telling someone their correction was saved
+        // when it was not is the defect this layer exists to prevent.
+        let correction_store: Option<wcore_user_model::CorrectionStore> = {
+            let path = wcore_memory::paths::auto_memory_dir(cwd_path)
+                .map(|d| d.join("user-corrections.json"))
+                .unwrap_or_else(|| cwd_path.join(".wayland").join("user-corrections.json"));
+            match wcore_user_model::CorrectionStore::with_persistence(&path) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "wcore_agent::bootstrap",
+                        error = %e,
+                        "user-model correction store unavailable; \
+                         corrections will NOT reach the prompt this session"
+                    );
+                    None
+                }
+            }
+        };
+        let corrections = match correction_store.as_ref() {
+            Some(s) => s.corrections(&user_id).await,
+            None => wcore_user_model::Corrections::default(),
+        };
+        // Corrections render even when no user-model backend is installed:
+        // an explicit statement about oneself should not be conditional on
+        // the inference machinery being switched on.
         let user_ctx_block = if let Some(b) = user_model_backend.as_ref() {
-            let brief = b.brief(user_id).await.unwrap_or_default();
-            let prefs = b.preferences(user_id).await.unwrap_or_default();
-            crate::user_context::render_user_context_block(&brief, &prefs)
+            let brief = b.brief(&user_id).await.unwrap_or_default();
+            let prefs = b.preferences(&user_id).await.unwrap_or_default();
+            crate::user_context::render_user_context_block_with_corrections(
+                &brief,
+                &prefs,
+                &corrections,
+            )
         } else {
-            None
+            crate::user_context::render_user_context_block_with_corrections(
+                &wcore_user_model::UserBrief::default(),
+                &wcore_user_model::Preferences::default(),
+                &corrections,
+            )
         };
         let mut system_prompt = system_prompt;
         if let Some(block) = user_ctx_block {
@@ -1719,7 +2381,7 @@ impl AgentBootstrap {
         // construction below.
         let skill_router_to_install: wcore_skills::SkillRouter = {
             let mut sk_router = wcore_skills::SkillRouter::new();
-            let candidate_names: Vec<String> = catalog.refs().map(|r| r.name.clone()).collect();
+            let candidate_names: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
             // Layer 1 — GEPA winners. Requires a real Db handle; the
             // `NullMemory` fallback skips this branch entirely.
             if let Some(db_arc) = mem_db_for_router.clone() {
@@ -1744,20 +2406,23 @@ impl AgentBootstrap {
                 // in session 1; here in session 2 the router consumes it so
                 // the freshly-learned skill is preferred. Idempotent against
                 // the `bench` pass above — a real GEPA winner keeps priority.
-                match store.seed_pairs_for(&candidate_names, "auto_drafter", 1) {
-                    Ok(pairs) => {
-                        let n = sk_router.restore_seeds(pairs);
-                        tracing::debug!(
+                if self.config.observability.skills_lifecycle {
+                    match store.seed_pairs_for(&candidate_names, "auto_drafter", 1) {
+                        Ok(pairs) => {
+                            let pairs = drop_revoked_auto_draft_seeds(pairs);
+                            let n = sk_router.restore_seeds(pairs);
+                            tracing::debug!(
+                                target: "wcore_agent::bootstrap",
+                                seeded = n,
+                                "skill_router: hydrated auto-drafted skills (auto_drafter scorer)"
+                            );
+                        }
+                        Err(e) => tracing::warn!(
                             target: "wcore_agent::bootstrap",
-                            seeded = n,
-                            "skill_router: hydrated auto-drafted skills (auto_drafter scorer)"
-                        );
+                            error = %e,
+                            "skill_router: auto-draft seed hydration failed (continuing)"
+                        ),
                     }
-                    Err(e) => tracing::warn!(
-                        target: "wcore_agent::bootstrap",
-                        error = %e,
-                        "skill_router: auto-draft seed hydration failed (continuing)"
-                    ),
                 }
             }
             // Layer 2 — prioritizer-based head-start. Always runs; the
@@ -1771,14 +2436,22 @@ impl AgentBootstrap {
             self.config.tools.skills.deny.clone(),
             self.config.tools.skills.allow.clone(),
             self.config.tools.auto_approve,
+        )
+        .with_project_execution_trust_snapshot(
+            std::path::Path::new(cwd),
+            &self.config.workspace_trust,
         );
-        // F-013: capture permission-checker config for the cron skill_sink
-        // closure before self.config moves into AgentEngine::new_with_provider
-        // below (~line 1147). The cron sink builds a fresh SkillPermissionChecker
-        // from these values for each fire — identical policy to the session sink.
+        // F-013: capture the static skill rules plus the live host authority
+        // for the cron skill_sink before self.config moves below. The manager
+        // is consulted at each fire; no boot-time Force snapshot survives a
+        // host downgrade to Default or AutoEdit.
         let cron_skill_deny_rules = self.config.tools.skills.deny.clone();
         let cron_skill_allow_rules = self.config.tools.skills.allow.clone();
         let cron_skill_auto_approve = self.config.tools.auto_approve;
+        let cron_read_only = self.config.read_only;
+        let cron_workspace_trust = self.config.workspace_trust.clone();
+        let cron_workspace = std::path::PathBuf::from(cwd);
+        let cron_skill_approval_manager = self.approval_manager.as_ref().cloned();
         // v0.7.0 1.D.5 — wire ProceduralSkillTelemetrySink when memory
         // is enabled so SkillTool invocations feed the procedural-memory
         // loop (M3.5). Without this, the prior wiring path had a sink
@@ -1793,12 +2466,26 @@ impl AgentBootstrap {
             } else {
                 Arc::new(wcore_skills::telemetry::NullTelemetrySink)
             };
+        let mut skill_tool =
+            crate::skill_tool::SkillTool::new(Arc::clone(&catalog), cwd.to_string(), skill_checker);
+        // The resolved skill may hide writes, shell, hooks, or elevated tools
+        // behind the default-allow-listed `Skill` tool name. A host-backed
+        // session consults its live authority for those capabilities; a
+        // standalone session retains the normalized typed launch posture.
+        if let Some(manager) = self.approval_manager.as_ref() {
+            skill_tool = skill_tool.with_live_approval_manager(Arc::clone(manager));
+        }
         registry.register(Box::new(
-            crate::skill_tool::SkillTool::new(Arc::clone(&catalog), cwd.to_string(), skill_checker)
+            skill_tool
                 .with_telemetry_sink(skill_telemetry_sink)
                 // GHSA-8r7g H-1: gate project/legacy skill frontmatter hooks
                 // behind the operator's global opt-in (default-deny otherwise).
-                .with_trust_project_hooks(self.config.hooks.trust_project_hooks),
+                .with_trust_project_hooks(self.config.hooks.trust_project_hooks)
+                // A read-only session must not reach the skill body's artifact
+                // writes or its embedded `!` shell. The dispatcher refuses
+                // `Skill` too; this is the same refusal enforced inside the
+                // tool, for the entry points that do not go through it.
+                .with_read_only(self.config.read_only),
         ));
 
         // T3-3.1.7: SessionSearchTool — cross-session conversation recall via
@@ -1833,6 +2520,26 @@ impl AgentBootstrap {
         // background-task vec so `Drop for AgentEngine` aborts it on
         // session shutdown.
         let agent_bus = Arc::new(crate::agents::bus::AgentBus::new(256));
+        // F11 — resolve one finite session envelope before constructing either
+        // the parent engine or its spawner. Explicit values win, while omitted
+        // fields retain Smart defaults. The shared tracker identity prevents
+        // children with session persistence disabled from receiving a fresh
+        // provider budget under `session-unknown`.
+        let session_budget = SessionBudgetEnvelope::from_config(&self.config);
+        let span_sink_for_budget = self.span_sink.clone();
+        if let Some(sink) = span_sink_for_budget.as_ref() {
+            let bridge = Arc::new(
+                wcore_observability::sink::ObservabilityBudgetEventBridge::new(sink.clone()),
+            );
+            session_budget.authority.lock().install_event_sink(bridge)?;
+        }
+        let budget_authority = Arc::clone(&session_budget.authority);
+        let budget_authority_seed = session_budget.authority_seed.clone();
+        // Tool construction precedes the canonical session journal. Share one
+        // initially-unbound cell with every spawner clone, then let the engine
+        // bind it after fresh/resume session authority exists.
+        let durable_session_authority = crate::durable_spawner::DurableSessionAuthority::new();
+        let sink_for_budget = self.output.clone();
         // Crucible cost governance — a cap-less per-user/day spend ACCUMULATOR for
         // council members, built whenever the council has a daily or per-run cap
         // configured (independent of [session_cap], which governs the per-turn
@@ -1848,9 +2555,43 @@ impl AgentBootstrap {
                 wcore_budget::BudgetCap::default(),
             )))
         });
-        let mut spawner_builder =
-            crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
-                .with_bus(Arc::clone(&agent_bus));
+        // F21-02-03 RECONCILIATION — no separate authority cell is created here.
+        // The spawner's own `ParentToolAuthority` (F21-02-01) already exists from
+        // `AgentSpawner::new`, is shared by `Arc` across every clone taken below,
+        // and is narrowed once the registry is final. It is the single source
+        // both child-authority layers read. See the narrowing call further down.
+        // Phase 22 (22-02 Task 3) — the sub-agent learned-policy pre-filter
+        // source. See `load_learned_policy`: a missing file yields `None`, NOT
+        // an empty policy, so the F05 capability report cannot advertise
+        // `ready` on a construction that would narrow nothing.
+        let learned_policy = load_learned_policy();
+        let mut spawner_builder = session_budget
+            .govern_spawner(
+                crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
+                session_runtime.active_turn_token(),
+            )
+            .with_durable_session_authority(
+                durable_session_authority.clone(),
+                effective_execution_policy.clone(),
+            )?
+            .with_sandbox_runtime(registry.sandbox_runtime())
+            .with_learned_policy(learned_policy.clone())
+            // Bind the parent repository identity so every child launch resolves
+            // its shared/isolated workspace against this exact session root
+            // instead of a process-global cwd. Mutating children allocate their
+            // standalone checkout relative to this authority.
+            .with_parent_workspace(cwd)?
+            .with_egress_policy(Arc::new(
+                self.session_egress_policy
+                    .as_ref()
+                    .expect("session egress policy is installed before scoped bootstrap")
+                    .clone(),
+            ))
+            .with_session_runtime(session_runtime.clone())
+            .with_bus(Arc::clone(&agent_bus));
+        if let Some(manager) = self.approval_manager.as_ref() {
+            spawner_builder = spawner_builder.with_approval_manager(Arc::clone(manager));
+        }
         if let Some(tracker) = council_budget_tracker.as_ref() {
             // TODO(stage3): use the live per-conversation session id.
             spawner_builder = spawner_builder
@@ -1858,6 +2599,7 @@ impl AgentBootstrap {
                 .with_budget_identity("session", crate::engine::resolve_user_model_user_id());
         }
         let spawner = Arc::new(spawner_builder);
+        let host_children = crate::spawner::HostChildController::new(Arc::clone(&spawner));
         // Lane D3 (G2/G4): register agents copied into installed marketplace
         // plugins (`<plugins-root>/<plugin>@<marketplace>/agents/*.yaml`),
         // namespaced `<marketplace>/<plugin>:<agent>` so agents from different
@@ -1941,7 +2683,9 @@ impl AgentBootstrap {
         // agents + OutputSink relay. Both share AgentSpawner via the
         // `wcore_types::spawner::Spawner` trait so wcore-tools stays
         // below wcore-agent in the dep graph.
-        registry.register(Box::new(wcore_tools::delegate::DelegateTool::new(spawner)));
+        registry.register(Box::new(wcore_tools::delegate::DelegateTool::new(
+            spawner.clone(),
+        )));
 
         // A1.9 — Forge: the session-level Anvil gated-forge tool (smart-loop
         // front door; the tool description carries the routing law so the
@@ -1956,6 +2700,14 @@ impl AgentBootstrap {
             registry.register(Box::new(crate::orchestration::anvil::tool::ForgeTool::new(
                 cf.anvil,
                 self.config.clone(),
+                Arc::new(
+                    self.session_egress_policy
+                        .as_ref()
+                        .expect("session egress policy is installed before tool registration")
+                        .clone(),
+                ),
+                Arc::clone(&spawner),
+                Arc::clone(&self.output),
             )));
         }
 
@@ -1998,15 +2750,10 @@ impl AgentBootstrap {
         // it when the runtime shuts down.
         let _reaper_handle = approval_bridge.spawn_reaper(crate::approval::DEFAULT_REAP_INTERVAL);
 
-        // B2.5 — attach the consent doorbell to the process-global egress policy
-        // (if one was installed at CLI entry). The policy rings this on an `Ask`
-        // verdict (a data-less read to a new domain) to prompt once/always/no
-        // through the same approval bridge + output sink the ScriptTool HITL
-        // path uses. `installed_policy()` is `None` in tests / headless / when
-        // security is off, so this is a cheap no-op there (no allocation, no
-        // boot-cost — unlike the policy *install*, which is deliberately kept at
-        // CLI entry, not here).
-        if let Some(policy) = crate::egress::installed_policy() {
+        // F09: attach the consent doorbell only to this session's policy. A
+        // later ACP/Desktop session therefore cannot repoint an earlier
+        // session's approval bridge.
+        if let Some(policy) = self.session_egress_policy.as_ref() {
             let doorbell = std::sync::Arc::new(crate::egress::BridgeConsentDoorbell::new(
                 approval_bridge.clone(),
                 self.output.clone(),
@@ -2033,7 +2780,7 @@ impl AgentBootstrap {
                 crate::channel_tools::apply_posture(
                     &mut dispatch_reg,
                     scope,
-                    wcore_tools::bash::platform_enforces_read_deny(),
+                    registry.sandbox_runtime().enforces_read_deny(),
                 );
             }
             let shared = Arc::new(tokio::sync::RwLock::new(dispatch_reg));
@@ -2098,42 +2845,15 @@ impl AgentBootstrap {
             self.config.advertised_capabilities.online_evolution = true;
         }
 
-        let mut tool_defs_snapshot = registry.to_tool_defs();
-        // Layer D1 (token-opt): mark cold tools deferred in the snapshot so
-        // ToolSearch can find and hydrate them — it only searches defs with
-        // `deferred == true`. Same pure config-driven split the engine
-        // applies to every outbound tools[] array.
-        if self.config.builtin_tools.defer_cold.enabled {
-            wcore_tools::registry::apply_cold_deferral(
-                &mut tool_defs_snapshot,
-                &self.config.builtin_tools.defer_cold.hot_allowlist,
-            );
-        }
-        registry.register(Box::new(wcore_tools::tool_search::ToolSearchTool::new(
-            tool_defs_snapshot,
-        )));
+        // Layer D1 (token-opt): seed ToolSearch from the same live-registry
+        // refresh used by post-boot MCP registration. The helper reapplies the
+        // configured cold split before replacing the catalog snapshot.
+        registry.refresh_tool_search_catalog(&self.config.builtin_tools.defer_cold);
 
         // M3.6.2: memory_api + decay_handle are constructed earlier in this
         // function (before skill_refs) so the SkillPrioritizer can use them.
         // See the M3.6.2 block above. The engine setters below consume the
         // values from that earlier block.
-
-        // W8a A.6: capture the BudgetConfig before self.config is moved
-        // into AgentEngine. The BudgetConfig is Clone, so a one-time copy
-        // here is cheap; the ExecutionBudgetView is built after the engine
-        // is fully wired so plugin/MCP boot-time failures don't allocate
-        // a watcher task that would then need teardown. Clone the
-        // OutputSink Arc too so the budget watcher's emit callback can
-        // hold a handle after `self.output` is moved into the engine.
-        let budget_cfg = self.config.budget.clone();
-        let sink_for_budget = self.output.clone();
-
-        // M5.bootstrap-wiring — capture session_cap + span_sink BEFORE
-        // self.config is moved into AgentEngine so we can install a
-        // BudgetTracker after engine construction. None ⇒ skip install
-        // and leave engine.budget_tracker = None (pre-M5.3 behaviour).
-        let session_cap_cfg = self.config.session_cap.clone();
-        let span_sink_for_budget = self.span_sink.clone();
 
         // v0.8.1 U5 — open the credentials store BEFORE self.config is
         // moved into AgentEngine so the channel auto-registration block
@@ -2179,7 +2899,7 @@ impl AgentBootstrap {
             // Bash from the Workspace schema so the LLM isn't offered a
             // tool that would always refuse at exec time. The exec-time
             // gate in bash.rs remains the authoritative boundary.
-            let enforces = wcore_tools::bash::platform_enforces_read_deny();
+            let enforces = registry.sandbox_runtime().enforces_read_deny();
             crate::channel_tools::apply_posture(&mut registry, scope, enforces);
             tracing::info!(
                 target: "wcore_agent::bootstrap",
@@ -2203,57 +2923,140 @@ impl AgentBootstrap {
             );
         }
 
+        // F21-02-01 — bind the session spawner's parent tool authority to what
+        // the parent registry ACTUALLY holds, now that both narrowing passes
+        // above have run. Derived from the live registry rather than re-deriving
+        // the posture/persona predicates, so the two can never disagree.
+        //
+        // Placement is load-bearing: this must run AFTER `apply_posture` and the
+        // persona `retain`, and it works despite the spawner already being
+        // `Arc`-wrapped and shared into `SpawnTool`/`DelegateTool` (line ~2225)
+        // because `ParentToolAuthority` is a shared, narrow-only cell. Without
+        // this, a `Full` channel-remote parent — which has Grep/Glob/Git dropped
+        // precisely because their recursive scan escapes the jail — would hand a
+        // delegated child Grep and Glob straight back through the read-only
+        // spawn floor, reopening the exfiltration path the drop closes.
+        //
+        // F21-02-03 RECONCILIATION — this ONE call now feeds BOTH child-authority
+        // layers. F21-02-03 originally published a second, independent authority
+        // here (an `Arc<OnceLock<PolicyGate>>` built from `registry.tool_names()`)
+        // for the dispatch-time gate. That is deleted: two authorities derived
+        // from the same registry at the same line are two things that can drift,
+        // and the `OnceLock` was wired at THIS seam only, leaving the transient
+        // and standalone seams with no gate at all. `AgentSpawner` now derives the
+        // gate from this same `ParentToolAuthority` cell at child launch, so the
+        // gate inherits all three declaring seams and the enumeration guard for
+        // free. See `AgentSpawner::execute_resolved_launch`.
+        spawner.narrow_parent_tool_authority(registry.tool_names());
+        tracing::debug!(
+            target: "wcore_agent::bootstrap",
+            "child tool authority bound to the parent session registry"
+        );
+
         // Every session gets a workspace policy so BashTool's OS sandbox is
-        // rooted at the workspace (fixes the empty-allowlist / cwd:None pain
-        // that broke local + desktop builds). A channel `Workspace` posture
-        // already installed a `Contained` policy via `apply_posture`; for
-        // every other path (local CLI / TUI / json-stream / ACP / `Full`
-        // channel) install a `Trusted` policy derived from this session's
-        // working directory.
+        // rooted at the workspace. Only a fingerprint-trusted, non-Managed,
+        // genuinely-local session receives the capability-aware Trusted
+        // profile. Untrusted repositories and every remote session stay in
+        // the Contained profile; repository content cannot select this branch.
+        let is_channel_remote = self.channel_tool_posture.is_some();
         if registry.workspace_policy().is_none() {
-            // #657 (Overwatch ruling, Sean-confirmed): grant Bash network egress
-            // (`Inherit`) only for a genuinely-local session — no channel posture
-            // attached. Any channel path (including `Full`) is a remote sender and
-            // stays on the fail-safe Deny default that `trusted_local` seeds.
-            let is_channel_remote = self.channel_tool_posture.is_some();
-            let network = wcore_tools::workspace_policy::local_bash_network(is_channel_remote);
-            let mut policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
-                std::path::PathBuf::from(&self.workspace),
-            )
-            .with_network(network);
-            // #667 (Overwatch ruling, Sean-confirmed): a `Full`-posture channel /
-            // remote session lands on a `Trusted` policy but keeps host
-            // filesystem/shell tools, so it must still be denied the PROJECT's own
-            // committed secrets. A genuinely-local keyboard session (posture None)
-            // is EXEMPT: it may read its own `.env`.
-            //   * `with_project_secret_deny` adds the project secrets to
-            //     `secret_deny_paths()` → Bash's OS sandbox refuses them (bash.rs).
-            //   * the `SecretDenyFs` read-path guard (installed below, WITHOUT a
-            //     `SandboxedFs` jail so Full stays unconfined for non-secrets)
-            //     refuses `Read`/`Write`/`Edit` of the same project secrets.
-            // Gated on `Full` specifically (F6): `Workspace` posture already
-            // installed a `Contained` policy above; `Conversational` is stripped of
-            // every filesystem/shell tool, so its per-message workspace walk +
-            // guard would be dead weight with nothing to protect.
-            let is_full_posture = matches!(
-                self.channel_tool_posture.as_ref().map(|s| s.posture),
-                Some(wcore_channels::ChannelToolPosture::Full)
-            );
-            if is_full_posture {
-                policy = policy.with_project_secret_deny();
-            }
+            let strict_workspace = is_channel_remote
+                || self.config.execution_policy.is_managed()
+                || !self.config.workspace_trust.is_trusted();
+            let workspace = std::path::PathBuf::from(&self.workspace);
+            let policy = if strict_workspace {
+                wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
+            } else {
+                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
+                    .with_network(wcore_tools::workspace_policy::local_bash_network(false))
+            };
             let policy = std::sync::Arc::new(policy);
-            if is_full_posture {
-                registry.set_tool_vfs(std::sync::Arc::new(wcore_tools::vfs::SecretDenyFs::new(
-                    wcore_tools::vfs::RealFs,
-                    std::sync::Arc::clone(&policy),
-                )));
+            if strict_workspace {
+                let jail = wcore_tools::vfs::SandboxedFs::new(
+                    wcore_tools::vfs::SecretDenyFs::new(
+                        wcore_tools::vfs::RealFs,
+                        std::sync::Arc::clone(&policy),
+                    ),
+                    workspace,
+                );
+                registry.set_tool_vfs(std::sync::Arc::new(jail));
             }
             registry.set_workspace_policy(policy);
         }
 
+        let effective_workspace_trust = if is_channel_remote {
+            wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
+                wcore_types::workspace_trust::AuthoritySource::Remote,
+                self.config.workspace_trust.fingerprint(),
+                "remote sessions always use the strict workspace profile",
+            )
+        } else {
+            self.config.workspace_trust.clone()
+        };
+        let workspace_policy = registry
+            .workspace_policy()
+            .expect("bootstrap installs one workspace policy per session");
+        let workspace_policy_receipt = wcore_types::workspace_trust::WorkspacePolicyReceipt {
+            profile: if workspace_policy.trust() == wcore_tools::WorkspaceTrust::Trusted {
+                wcore_types::workspace_trust::WorkspaceSandboxProfile::TrustedLocalSmart
+            } else {
+                wcore_types::workspace_trust::WorkspaceSandboxProfile::Strict
+            },
+            trust: effective_workspace_trust,
+            backend: registry.sandbox_runtime().backend_name().to_string(),
+            writable_roots: workspace_policy
+                .writable_roots()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            readable_roots: workspace_policy
+                .readable_roots()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            capabilities: workspace_policy.developer_capabilities(),
+        };
+
+        // Resolved BEFORE `self.config` is moved into the engine below. The
+        // channel media enricher (further down) needs the same STT backend the
+        // tool registry got, and the resolver is now config-aware so it cannot
+        // be called after the move. `Option<Arc<_>>` is cheap to clone.
+        // 27-C3: the channel media enricher transcribes inbound audio and
+        // analyses inbound images on the user's paid account exactly as the
+        // tool surface does, so it shares the same session ledger. Media that
+        // arrives over a channel costs the same money as media the model asks
+        // for.
+        let media_transcription = crate::tool_backends::build_transcription_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        );
+        // Same constraint, same reason, for vision: `build_vision_backend` became
+        // config-aware closing BL-F24-C3-H7, so it too must be resolved before
+        // `self.config` moves into the engine.
+        let media_vision = crate::tool_backends::build_vision_backend_with_accounting(
+            &self.config,
+            &media_accounting,
+        );
+
+        // HIGH-1. The single chokepoint for every RESUME surface: all three
+        // `main.rs` launch modes and `channel_dispatch` reach an engine through
+        // `AgentBootstrap::resume`, and this is the last point before the
+        // engine exists — so a refusal here reaches a `--json-stream` host as
+        // one `init_failed` frame with NO `ready` before it, which is the whole
+        // point: the false continuity claim was the `ready` frame.
+        //
+        // Scoped to this session by construction. Nothing here can refuse a
+        // launch that did not ask to resume something.
+        if let Some(session) = self.resume_session.as_ref() {
+            crate::recovery::admit_session_resume(
+                &self.config,
+                &session.journal,
+                crate::engine::default_recovery_request_protection().as_ref(),
+            )?;
+        }
+
         let mut engine = if let Some(session) = self.resume_session {
-            AgentEngine::resume_with_provider(
+            AgentEngine::resume_active_with_provider(
                 provider.clone(),
                 self.config,
                 registry,
@@ -2263,6 +3066,17 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
+        engine.install_durable_session_authority(
+            durable_session_authority,
+            effective_execution_policy.clone(),
+        )?;
+        if let Some(policy) = self.session_egress_policy.as_ref() {
+            let policy: wcore_egress::SharedPolicy = Arc::new(policy.clone());
+            engine.set_egress_policy(policy);
+        }
+        if let Some(manager) = self.approval_manager.take() {
+            engine.set_approval_manager(manager);
+        }
         engine.set_plan_active_flag(plan_active_flag);
         // Token-opt (diff-resend): give the engine the shared file cache so it
         // can bump the compaction generation after each compaction pass,
@@ -2337,7 +3151,7 @@ impl AgentBootstrap {
         // `Db` is available — without one we have no PromptStore and the
         // closed-loop seed pathway is dead. The bucketer itself is always
         // live on the engine; without a drafter it just observes.
-        if let Some(db_arc) = mem_db_for_router.clone() {
+        if skills_lifecycle_enabled && let Some(db_arc) = mem_db_for_router.clone() {
             // `$WAYLAND_HOME` resolution: prefer the explicit env var,
             // fall back to `~/.wayland`. Matches the pattern used elsewhere
             // in the project for user-facing on-disk artifacts.
@@ -2365,12 +3179,40 @@ impl AgentBootstrap {
         if let Some(backend) = user_model_backend {
             engine.set_user_model_backend(backend);
         }
+        // 23B-C3 — install the correction store so `/usermodel correct` can
+        // reach the same store this bootstrap just rendered from. The block
+        // above is built once per session, so a correction made mid-session
+        // reaches the provider on the NEXT session's prompt; the slash
+        // command says exactly that rather than implying it took effect now.
+        if let Some(store) = correction_store {
+            engine.set_user_correction_store(store, user_id);
+        }
         // M3.2: hand the decay-scheduler handle (if any) to the engine so
         // its `Drop` impl aborts the task on shutdown. No-op when memory
         // is disabled.
         if let Some(handle) = decay_handle {
             engine.push_decay_handle(handle);
         }
+
+        // Install the pre-filter source on the engine BEFORE the capability
+        // report is computed, so the report reads the engine's real state
+        // rather than the intent that produced it.
+        if let Some(policy) = learned_policy.as_ref() {
+            engine.set_learned_policy(Arc::clone(policy));
+        }
+        let capability_activations = crate::capability_activation::startup_activations(
+            crate::capability_activation::StartupCapabilityInputs {
+                smart_compaction_enabled,
+                smart_handoff_enabled,
+                skills_lifecycle_enabled,
+                memory_constructed,
+                legacy_drafter_constructed: engine.skill_drafter().is_some(),
+                midflight_monitor_constructed: engine.midflight_monitor_constructed(),
+                learned_policy_constructed: engine.learned_policy_constructed(),
+                pricing_refresher_constructed,
+                cooldown_tracker_constructed,
+            },
+        );
 
         // v0.8.1 U2 — spawn the production subscriber for `AgentBus`
         // lifecycle events. Forwards every `Spawned` / `FirstMessage` /
@@ -2515,45 +3357,41 @@ impl AgentBootstrap {
         // and never unblock the awaiting script step.
         engine.set_approval_bridge(approval_bridge);
 
-        // M5.bootstrap-wiring — install a per-session engine `BudgetTracker`
-        // when `Config.session_cap` is set. This governs the PER-TURN engine
-        // charge in `engine.rs::run` — a SEPARATE concern from the council's
-        // cap-less spend accumulator (built above and attached to the spawner),
-        // which governs council spend via `crucible.daily_cap_usd`. The two do
-        // NOT share one envelope. When the bootstrap also has a `SpanSink`
-        // installed, wire `ObservabilityBudgetEventBridge` so
-        // `BudgetEvent::{Charge, CapWarn, CapBlock}` reach the JSON span
-        // channel. Without `session_cap`, the engine's `budget_tracker` stays
-        // `None` and the per-turn charge is a no-op (matches pre-M5.3 behaviour).
-        if let Some(cap_cfg) = session_cap_cfg.as_ref() {
-            let cap: wcore_budget::BudgetCap = cap_cfg.into();
-            let mut tracker = wcore_budget::BudgetTracker::new(cap);
-            if let Some(sink) = span_sink_for_budget.as_ref() {
-                let bridge = Arc::new(
-                    wcore_observability::sink::ObservabilityBudgetEventBridge::new(sink.clone()),
-                );
-                tracker.set_event_sink(bridge);
-            }
-            engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(tracker)));
-        }
+        // F11/F14 — install the session's sole durable budget authority.
+        // An explicit `session_cap` keeps its legacy role; otherwise the same
+        // effective Smart envelope supplies the provider token/cost admission
+        // cap. This governs per-dispatch reservations and settlement in
+        // `engine.rs::run` and remains separate from the council's cap-less
+        // spend accumulator governed by `crucible.daily_cap_usd`. When the
+        // bootstrap also has a `SpanSink`, the authority owns the
+        // `ObservabilityBudgetEventBridge` so Charge, CapWarn, and CapBlock
+        // events reach the JSON span channel.
+        let budget_authority_for_view = Arc::clone(&budget_authority);
+        engine.install_budget_authority(budget_authority, budget_authority_seed)?;
+        let session_execution_budget = budget_authority_for_view
+            .lock()
+            .current_execution_view()
+            .map_err(anyhow::Error::msg)?;
 
-        // W8a A.6/A.7: build the session-root ExecutionBudgetView from
-        // config and pair it with a cancellation token. The
+        // W8a A.6/A.7: pair the restored session-root execution view with a
+        // cancellation token. The
         // `budget_linked_with_callback` form additionally emits
         // `BudgetExceeded` over the protocol sink the instant the first
         // cap trips — singular per session, host-tolerated per audit F5.
-        // Default-config sessions have every cap = None and the
-        // watcher's callback never fires.
-        let exec_budget: ExecutionBudget = (&budget_cfg).into();
-        let budget = exec_budget.start_root();
-        let cancel_root =
-            budget_linked_with_callback(CancellationToken::new(), budget.clone(), move |payload| {
+        // Omitted fields inherit the finite Smart envelope above. The watcher,
+        // parent engine, and embedded spawner now observe the same restored
+        // coordinator-backed root.
+        session_guard.attach_budget_with_callback(
+            session_execution_budget.clone(),
+            move |payload| {
                 sink_for_budget.emit_budget_exceeded(
                     &payload.reason,
                     &payload.observed,
                     &payload.limit,
                 );
-            });
+            },
+        );
+        engine.install_session_cancel_guard(session_guard);
 
         // F-014 (CRIT, Aud-4/Aud-11): construct ChannelManager, auto-register
         // adapters, lift the manager to Arc<RwLock<ChannelManager>>, (optionally)
@@ -2582,6 +3420,8 @@ impl AgentBootstrap {
             tokio::task::JoinHandle<()>,
             tokio::sync::watch::Sender<bool>,
         )>;
+        // F24-CL/F24-CS. Held for the session lifetime via `BootstrapResult`.
+        let channel_poll_lease: Option<crate::channel_lease::ChannelPollSupervisor>;
 
         if !self.without_channels {
             // Register adapters on the inner manager.
@@ -2643,42 +3483,53 @@ impl AgentBootstrap {
                 // per-session engines). A channel absent from these maps uses
                 // the fail-closed access default and the safe Conversational
                 // tool posture respectively.
-                let channel_configs = wcore_channels::config::ChannelConfigLoader::new(
-                    wcore_channels::config::ChannelConfigLoader::default_root(),
-                )
-                .load_all()
-                .unwrap_or_default();
+                //
+                // F24-C3-H1. This resolves through
+                // `wcore_channels_registry::channels_dir()` — the SAME
+                // directory the adapters were registered from a few lines
+                // above — and not through
+                // `ChannelConfigLoader::default_root()`, which joins
+                // `$HOME/.wayland/channels` and ignores `WAYLAND_HOME`.
+                //
+                // The divergence was not cosmetic and it broke in both
+                // directions. Under an isolated profile (every gateway unit,
+                // every `--profile`, the desktop host) the registration read
+                // `$WAYLAND_HOME/channels` while the policy read the host
+                // user's home, found nothing, and every channel silently took
+                // the fail-closed default: the adapter registered, started,
+                // polled and reported healthy while DENYING every inbound
+                // message the operator had allowlisted. Measured live at
+                // 15ad7b0e — `inbound denied … reason=sender not in dm
+                // allowlist` for a sender named in that profile's own
+                // `dm_allowlist`.
+                //
+                // In the other direction, on a host whose `$HOME/.wayland/
+                // channels` DOES hold configs, an isolated profile applied the
+                // host user's allowlists and tool posture — including
+                // `tools = "full"` — to a different profile's channels. That
+                // is the same cross-profile leak F-019 closed for
+                // registration; `channels_dir`'s own doc comment already
+                // asserts the two loaders "never diverge", and they did.
+                let channel_configs = load_channel_policy_configs();
 
-                // Resolve each channel's tool posture into a concrete scope.
-                // `Workspace` jails to the channel's `tool_workspace_root`
-                // when set, else this engine's working directory.
-                let postures: std::collections::HashMap<
-                    String,
-                    crate::channel_tools::ChannelToolScope,
-                > = channel_configs
-                    .iter()
-                    .map(|c| {
-                        let root = c
-                            .inbound
-                            .tool_workspace_root
-                            .clone()
-                            .map(std::path::PathBuf::from)
-                            .unwrap_or_else(|| std::path::PathBuf::from(&self.workspace));
-                        (
-                            c.name.clone(),
-                            crate::channel_tools::ChannelToolScope {
-                                posture: c.inbound.tools,
-                                workspace_root: root,
-                            },
-                        )
-                    })
-                    .collect();
-
-                let policies: std::collections::HashMap<String, wcore_channels::InboundPolicy> =
-                    channel_configs
-                        .into_iter()
-                        .map(|c| (c.name, c.inbound))
-                        .collect();
+                // Resolve each channel's access policy AND tool posture into
+                // one shared registry. `Workspace` jails to the channel's
+                // `tool_workspace_root` when set, else this engine's working
+                // directory.
+                //
+                // F24-C3-H5: this derivation used to be open-coded here and
+                // again in `channel_inbound_host::spawn`. Two copies of the
+                // same three-line map-build is how the access policy and the
+                // tool posture became separately forgettable — and forgetting
+                // the posture while refreshing the policy is the failure mode
+                // that is WORSE than the original bug, because it is not
+                // fail-closed. One derivation, one object, one swap.
+                let policies = std::sync::Arc::new(
+                    crate::channel_policy::ChannelPolicyRegistry::from_configs(
+                        channel_configs,
+                        std::path::Path::new(&self.workspace),
+                    ),
+                );
 
                 // Inbound-media enricher: resolve image/audio attachments to
                 // derived text (description/transcript) before the turn prompt
@@ -2692,8 +3543,8 @@ impl AgentBootstrap {
                 // image; set a key") into the attachment so the model never
                 // answers an unseen image blind from a bare URL.
                 let media_enricher = {
-                    let vision = crate::tool_backends::build_vision_backend();
-                    let transcription = crate::tool_backends::build_transcription_backend();
+                    let vision = media_vision.clone();
+                    let transcription = media_transcription.clone();
                     let source = Arc::new(crate::channel_media::ManagerMediaSource::new(
                         std::sync::Arc::clone(&lifted),
                     ));
@@ -2709,7 +3560,7 @@ impl AgentBootstrap {
                         config_for_dispatch,
                         self.workspace.clone(),
                         provider.clone(),
-                        postures,
+                        std::sync::Arc::clone(&policies),
                         media_enricher,
                     ));
                 let subscriber = crate::channel_inbound::InboundSubscriber::new(
@@ -2732,28 +3583,81 @@ impl AgentBootstrap {
                 None
             };
 
-            // Call start_all to arm inbound poll tasks (now that the subscriber
-            // is listening). Best-effort: if start_all returns an error we warn
-            // and continue (session still works, channels just won't deliver
-            // inbound messages).
-            if let Err(e) = lifted.write().await.start_all().await {
-                tracing::warn!(
-                    target: "wcore_agent::bootstrap",
-                    error = %e,
-                    "F-014: channel_manager.start_all() failed; inbound polling may be partial"
-                );
+            // F24-CL. Take the single-owner INBOUND POLLING lease before arming
+            // any poller.
+            //
+            // F24-C3-H4 stopped ONE process starting two managers. It could not
+            // stop TWO processes each starting one, and every ordinary session
+            // reaches this line — `without_channels` is set only in tests and in
+            // the per-session recursion guard. Polling is a destructive read, so
+            // a session that polls beside the installed service does not
+            // duplicate its messages, it DELETES them: measured at 8 of 8 at
+            // startup on the shipped binary, silently.
+            //
+            // An observer still gets a fully working session and can still SEND;
+            // it just does not poll. It says so loudly — see `channel_lease`.
+            let poll_lease = crate::channel_lease::attempt(
+                &wcore_config::config::wayland_config_dir(),
+                "session",
+            );
+
+            if poll_lease.is_owner() {
+                // Call start_all to arm inbound poll tasks (now that the
+                // subscriber is listening). Best-effort: if start_all returns an
+                // error we warn and continue (session still works, channels just
+                // won't deliver inbound messages).
+                if let Err(e) = lifted.write().await.start_all().await {
+                    tracing::warn!(
+                        target: "wcore_agent::bootstrap",
+                        error = %e,
+                        "F-014: channel_manager.start_all() failed; inbound polling may be partial"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "wcore_agent::bootstrap",
+                        "F-014: channel_manager.start_all() complete — inbound polling active"
+                    );
+                }
             } else {
                 tracing::info!(
                     target: "wcore_agent::bootstrap",
-                    "F-014: channel_manager.start_all() complete — inbound polling active"
+                    owner_pid = ?poll_lease.owner_pid(),
+                    "F24-CL: another process owns inbound polling; start_all NOT called"
                 );
             }
+            // F24-CS. Supervise the role for the session's lifetime rather than
+            // deciding it once here.
+            //
+            // Deciding once was first-come, and first-come made the INSTALLED
+            // SERVICE the observer whenever a session happened to start first —
+            // for as long as that session lived. A session is transient and the
+            // service is the always-on role the user installed, so the session
+            // stands down when the service claims, and takes over again if the
+            // service goes away. `session` is the lowest rank, so this process
+            // preempts nobody.
+            channel_poll_lease = Some(crate::channel_lease::ChannelPollSupervisor::spawn(
+                &wcore_config::config::wayland_config_dir(),
+                "session",
+                poll_lease,
+                crate::channel_lease::ChannelManagerPollControl::new(std::sync::Arc::clone(
+                    &lifted,
+                )),
+            ));
 
             // Inbound webhook host — when enabled, bind an HTTP listener that
-            // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS) to
-            // each channel's signature-verifying `ingest_webhook`. Off by
-            // default; only the signature-verified connectors override the
-            // trait method, so msteams' unauthenticated parse stays unexposed.
+            // routes platform webhook POSTs (Slack / WhatsApp / Twilio SMS /
+            // MS Teams) to each channel's authenticating `ingest_webhook`. Off
+            // by default. The host holds no per-platform allow-list: it routes
+            // `/webhooks/:channel` by name, and safety comes from the trait
+            // default, which returns `Rejected` so a connector that has NOT
+            // implemented an authenticated ingest is never exposed.
+            //
+            // msteams DOES implement one (Bot Framework JWT: signature,
+            // issuer, audience, expiry, plus a serviceUrl claim/Activity
+            // binding), so it is exposed and authenticated. This comment
+            // previously said the opposite; the regression test that pins it is
+            // `manager_dispatch_reaches_msteams_authenticated_ingest_not_the_default_impl`
+            // in `wcore-channel-msteams`.
             inbound_webhook =
                 crate::inbound_webhook::spawn(std::sync::Arc::clone(&lifted), &inbound_webhook_cfg);
             if inbound_webhook.is_some() {
@@ -2817,6 +3721,10 @@ impl AgentBootstrap {
             channels_auto_registered = 0;
             inbound_subscriber = None;
             inbound_webhook = None;
+            // No channels on this path, so no polling and nothing to exclude.
+            // Taking a lease here would let a per-session engine deny the real
+            // session its own polling — the recursion guard must stay inert.
+            channel_poll_lease = None;
         }
 
         // v0.8.1 U7 — spawn the cron runner. Errors resolving the
@@ -2843,6 +3751,10 @@ impl AgentBootstrap {
             let deny_rules = cron_skill_deny_rules;
             let allow_rules = cron_skill_allow_rules;
             let auto_approve = cron_skill_auto_approve;
+            let read_only = cron_read_only;
+            let workspace_trust = cron_workspace_trust;
+            let workspace = cron_workspace;
+            let approval_manager = cron_skill_approval_manager;
             let cwd_for_cron = cwd.to_string();
             Arc::new(move |skill_name: String, args: serde_json::Value| {
                 let catalog = Arc::clone(&catalog_for_cron);
@@ -2850,7 +3762,9 @@ impl AgentBootstrap {
                     deny_rules.clone(),
                     allow_rules.clone(),
                     auto_approve,
-                );
+                )
+                .with_project_execution_trust_snapshot(&workspace, &workspace_trust);
+                let approval_manager = approval_manager.clone();
                 let cwd = cwd_for_cron.clone();
                 Box::pin(async move {
                     // Aud-12 / M-18 (+ B8 follow-up): the cron runner's
@@ -2895,7 +3809,15 @@ impl AgentBootstrap {
                             }
                         }
                     }
-                    let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                    let mut tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker)
+                        // No dispatcher in this path — the sink calls
+                        // `execute()` directly — so the read-only posture has
+                        // to travel on the tool itself or an unattended cron
+                        // fire would run skill shell in a read-only session.
+                        .with_read_only(read_only);
+                    if let Some(manager) = approval_manager {
+                        tool = tool.with_live_approval_manager(manager);
+                    }
                     let input = serde_json::json!({ "skill": skill_name, "args": args });
                     let result = wcore_tools::Tool::execute(&tool, input).await;
                     if result.is_error {
@@ -2922,22 +3844,76 @@ impl AgentBootstrap {
                         // skill_sink: wired — F-013 fix (skill arm)
                         Some(cron_skill_sink),
                     ));
-                // F-065: use spawn_with_history so every fire is recorded
-                // in history.jsonl (parallel to jobs.json). The history
-                // file is the backing store for `cron history` and
+                // F-065: use the history-writing spawn so every fire is
+                // recorded in history.jsonl (parallel to jobs.json). The
+                // history file is the backing store for `cron history` and
                 // `cron logs` subcommands.
-                match wcore_cron::default_history_path() {
-                    Some(hp) => Some(wcore_cron::CronRunner::spawn_with_history(
-                        store,
-                        handler,
-                        wcore_cron::runner::TICK_INTERVAL,
-                        hp,
-                    )),
-                    None => Some(wcore_cron::CronRunner::spawn(
-                        store,
-                        handler,
-                        wcore_cron::runner::TICK_INTERVAL,
-                    )),
+                //
+                // Phase 24 plan 24-02, Task 1 — SCHEDULE OWNERSHIP IS LEASED,
+                // NOT ASSUMED. This runner attempts the lease and degrades to
+                // OBSERVING when something else already holds it (a running
+                // gateway, or a `cron daemon` started against the same home).
+                // Before the lease, this spawn and that daemon both fired
+                // against one store, and the only thing between that and a
+                // duplicated job was the store's advance-on-fire bookkeeping —
+                // a read-then-write race, not a guarantee.
+                //
+                // With NO other owner this session takes the lease itself and
+                // behaves exactly as it did before, so a plain interactive
+                // session with no gateway installed is unchanged.
+                let history_path = wcore_cron::default_history_path();
+                match wcore_cron::default_lease_dir() {
+                    Some(dir) => match wcore_cron::ScheduleLease::attempt(&dir, "session") {
+                        Ok(attempt) => {
+                            if !attempt.is_owner() {
+                                tracing::info!(
+                                    target: "wcore_agent::bootstrap",
+                                    dir = %dir.display(),
+                                    "another process owns the schedule; this session observes and will not fire"
+                                );
+                            }
+                            Some(wcore_cron::CronRunner::spawn_leased(
+                                store,
+                                handler,
+                                wcore_cron::runner::TICK_INTERVAL,
+                                history_path,
+                                attempt,
+                            ))
+                        }
+                        Err(e) => {
+                            // Ownership could not be evaluated at all. Fail
+                            // CLOSED — observe rather than fire. An unprovable
+                            // claim is exactly the case the lease exists to
+                            // refuse, and firing anyway would reinstate the
+                            // double-fire under a worse name.
+                            tracing::warn!(
+                                target: "wcore_agent::bootstrap",
+                                dir = %dir.display(),
+                                error = %e,
+                                "schedule ownership could not be evaluated; observing without firing"
+                            );
+                            Some(wcore_cron::CronRunner::spawn_leased(
+                                store,
+                                handler,
+                                wcore_cron::runner::TICK_INTERVAL,
+                                history_path,
+                                wcore_cron::LeaseAttempt::Observer { holder_pid: None },
+                            ))
+                        }
+                    },
+                    None => match history_path {
+                        Some(hp) => Some(wcore_cron::CronRunner::spawn_with_history(
+                            store,
+                            handler,
+                            wcore_cron::runner::TICK_INTERVAL,
+                            hp,
+                        )),
+                        None => Some(wcore_cron::CronRunner::spawn(
+                            store,
+                            handler,
+                            wcore_cron::runner::TICK_INTERVAL,
+                        )),
+                    },
                 }
             }
             Err(e) => {
@@ -2952,20 +3928,26 @@ impl AgentBootstrap {
 
         Ok(BootstrapResult {
             engine,
+            host_children,
             provider,
+            effective_execution_policy,
+            workspace_policy_receipt,
+            capability_activations,
             mcp_managers,
+            plugin_mcp_declarations,
             has_mcp,
             host_send_bridge,
             has_plugins,
             plugin_capabilities,
             loaded_plugin_names,
-            budget,
+            budget: session_execution_budget,
             cancel_root,
             channel_manager,
             channels_auto_registered,
             cron_runner,
             inbound_subscriber,
             inbound_webhook,
+            channel_poll_lease,
             skipped_mcp_servers,
         })
     }
@@ -3011,65 +3993,6 @@ impl AgentBootstrap {
         let mut engine = AgentEngine::new_with_provider(provider, config, registry, sink_arc);
         engine.set_test_sink_handle(handle.clone());
         (engine, handle)
-    }
-}
-
-/// Path B step 1 — reachability probe for a declarative plugin's MCP server.
-///
-/// Mirrors the compiled-in IJFW plugin's `mcp_server_is_reachable`: a stdio
-/// server is launchable iff (a) for `node`/`python`/`deno` with an absolute
-/// first arg, the script file exists, or (b) for any other command, a fast
-/// `--help` spawn with a 2-second cap at least *starts* the process. SSE/HTTP
-/// transports can't be cheaply probed and are trusted (connect-time errors
-/// surface in wcore-mcp). Non-fatal: a `false` here only skips registration.
-fn declarative_mcp_server_is_reachable(spec: &wcore_plugin_api::McpServerSpec) -> bool {
-    use wcore_plugin_api::McpTransport;
-    let (command, args) = match &spec.transport {
-        McpTransport::Stdio { command, args } => (command, args),
-        // SSE / HTTP: trust the registration.
-        McpTransport::Sse { .. } | McpTransport::Http { .. } => return true,
-    };
-
-    // Fast path: interpreter + absolute script path → check the file exists.
-    if matches!(command.as_str(), "node" | "python3" | "python" | "deno")
-        && args
-            .first()
-            .map(|a| std::path::Path::new(a).is_absolute())
-            .unwrap_or(false)
-    {
-        return std::path::Path::new(&args[0]).exists();
-    }
-
-    // Smoke-test path: spawn `<command> <args...> --help`, give it 2 seconds.
-    // The process merely STARTING (even if `--help` exits non-zero) proves the
-    // binary is present and executable.
-    let mut probe_args: Vec<&str> = args.iter().map(String::as_str).collect();
-    probe_args.push("--help");
-    let mut cmd = std::process::Command::new(command);
-    cmd.args(&probe_args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-
-    match cmd.spawn() {
-        Err(_) => false,
-        Ok(mut child) => {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => return true,
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    Ok(None) => {
-                        // Still running after 2 s — a real server. Reachable.
-                        let _ = child.kill();
-                        return true;
-                    }
-                    Err(_) => return false,
-                }
-            }
-        }
     }
 }
 
@@ -3257,22 +4180,30 @@ fn xai_oauth_available() -> bool {
     if crate::oauth::xai::read_grok_cli_tokens().is_some() {
         return true;
     }
-    crate::oauth::OAuthStorage::from_home()
-        .ok()
-        .and_then(|s| s.load(crate::oauth::xai::PROVIDER).ok().flatten())
-        .is_some()
+    let Ok(storage) = crate::oauth::OAuthStorage::from_home() else {
+        return false;
+    };
+    match storage.load(crate::oauth::xai::PROVIDER) {
+        Ok(tokens) => tokens.is_some(),
+        // "This profile IS signed in and the secure store cannot produce the
+        // token right now" is not the same as "there is no login". Treating it
+        // as absent routes the user to the static-key provider, which then
+        // fails with a generic missing-API-key error instead of the store's own
+        // message naming the locked vault or the stopped Secret Service.
+        Err(crate::oauth::OAuthStorageError::SecureStoreUnavailable { .. }) => true,
+        Err(_) => false,
+    }
 }
 
 /// OAuth-aware analogue of [`wcore_providers::create_provider`].
 ///
 /// Builds the inner provider via [`build_native_or_chatgpt_provider`] (so the
 /// `OpenAIChatGpt` OAuth case is handled instead of panicking in the factory),
-/// then wraps it in a [`ResilientProvider`] with the SAME configuration
-/// `create_provider` applies: an empty fallback chain and a
-/// [`NoOpCircuitReporter`], with circuit thresholds read from
-/// `config.provider_chain`. For every non-OAuth provider the result is
-/// byte-for-byte what `create_provider` returned — the only difference is the
-/// chatgpt arm no longer hits the `create_native_provider` panic.
+/// then wraps it in a [`ResilientProvider`] with resolved fallback candidates,
+/// the configured routing policy, and a [`NoOpCircuitReporter`]. Callers that
+/// own an output sink construct the wrapper directly so failover receipts are
+/// emitted on that sink. For every non-OAuth provider, only the OAuth-aware
+/// construction seam differs from the native factory.
 ///
 /// This is the entry point the CLI runtime rebind path
 /// (`/provider`, `/profile`, post-onboarding + disk re-resolve) calls in place
@@ -3285,66 +4216,527 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
         window: Duration::from_secs(config.provider_chain.recovery_timeout_secs),
         cooldown: Duration::from_secs(config.provider_chain.recovery_timeout_secs),
     };
-    Ok(Arc::new(ResilientProvider::new(
+    // This is the runtime rebind path (`/provider`, `/profile`), which does not
+    // produce a startup capability report, so the construction fact is
+    // discarded here rather than plumbed to a reader that does not exist.
+    let mut pricing_refresher_constructed = false;
+    Ok(Arc::new(ResilientProvider::new_with_policy(
         config.provider_label.clone(),
         inner,
-        Vec::new(),
+        build_fallback_providers(config, &mut pricing_refresher_constructed)?,
         cfg,
         Arc::new(wcore_providers::NoOpCircuitReporter),
+        failover_routing_policy(config),
     )))
 }
 
 /// Rank 20: build the fallback provider chain fed to `ResilientProvider`.
 ///
-/// Each `provider_chain.fallback_models` entry is turned into a concrete
-/// `(label, Arc<dyn LlmProvider>)` by cloning the primary's `Config` with only
-/// the `model` field swapped, then routing it through the SAME
-/// `create_native_provider` path as the primary. The clone keeps the primary's
-/// resolved provider type, credentials, and base URL, so a fallback is a
-/// cheaper / alternate model on the SAME endpoint.
-///
-/// A fallback string carrying a `<provider>:<role>` short-form whose provider
-/// prefix names a DIFFERENT provider than the primary (e.g. primary
-/// `anthropic`, fallback `openai:gpt4o`) is skipped with a warning —
-/// cross-provider failover needs its own credential / base-url resolution and
-/// is reserved for a follow-up. A bare literal (no recognised prefix) or a
-/// prefix matching the primary is treated as same-provider.
+/// Each `provider_chain.fallback_models` entry is paired with the independently
+/// resolved config produced by `Config::resolve`: same-provider entries retain
+/// the active endpoint and credentials, while cross-provider entries use that
+/// provider's own credentials, compatibility profile, organization and region.
+/// Every candidate is constructed through the same OAuth-aware provider path
+/// as the primary and carries typed admission metadata.
 ///
 /// No `fallback_models` configured → empty `Vec`, byte-for-byte the prior
 /// (circuit-breaker-only) behaviour.
-fn build_fallback_providers(config: &Config) -> Vec<(String, Arc<dyn LlmProvider>)> {
-    let primary_label = config.provider_label.as_str();
-    let mut fallbacks = Vec::new();
-    for entry in &config.provider_chain.fallback_models {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        // Detect a cross-provider short-form: a `<prefix>:<role>` whose prefix
-        // is a recognised provider name that differs from the primary's.
-        if let Some((prefix, _role)) = entry.split_once(':')
-            && wcore_types::model_aliases::known_providers().contains(&prefix)
-            && prefix != primary_label
-        {
-            tracing::warn!(
-                fallback = %entry,
-                primary = %primary_label,
-                "skipping cross-provider fallback model: only same-provider \
-                 fallbacks are wired today (needs separate credential resolution)"
-            );
-            continue;
-        }
-        // Expand a same-provider short-form to its canonical id; a bare literal
-        // flows through unchanged.
-        let model = wcore_types::model_aliases::expand_short_form(entry)
-            .map(str::to_string)
-            .unwrap_or_else(|| entry.to_string());
-        let mut fb_config = config.clone();
-        fb_config.model = model;
-        let provider = wcore_providers::create_native_provider(&fb_config);
-        fallbacks.push((entry.to_string(), provider));
+///
+/// `pricing_refresher_constructed` is an out-parameter, not a return value,
+/// because the caller needs the fact even on the early-return path. It is set
+/// at exactly one place — immediately after the `PricingRefresher` is built —
+/// so it is a record of what ran rather than a second copy of the predicate
+/// that decides whether it runs. See `StartupCapabilityInputs`.
+fn build_fallback_providers(
+    config: &Config,
+    pricing_refresher_constructed: &mut bool,
+) -> anyhow::Result<Vec<(FailoverCandidateMetadata, Arc<dyn LlmProvider>)>> {
+    if !config.provider_chain.enabled {
+        return Ok(Vec::new());
     }
-    fallbacks
+
+    let labels: Vec<&str> = config
+        .provider_chain
+        .fallback_models
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    anyhow::ensure!(
+        labels.len() == config.resolved_fallbacks.len(),
+        "fallback configuration resolution mismatch: {} labels, {} resolved configs",
+        labels.len(),
+        config.resolved_fallbacks.len()
+    );
+
+    let refresher = wcore_pricing::PricingRefresher::default();
+    *pricing_refresher_constructed = true;
+    let fallback_source = if std::env::var_os("WAYLAND_PRICING_PATH").is_some() {
+        wcore_pricing::PricingSnapshotSource::Configured
+    } else {
+        wcore_pricing::PricingSnapshotSource::Bundled
+    };
+    let live_cache_enabled = pricing_auto_refresh_enabled();
+    let snapshot = refresher.resolve_snapshot_at(
+        wcore_pricing::PricingCatalog::load_default()?,
+        fallback_source,
+        &wcore_pricing::default_cache_path(),
+        chrono::Utc::now(),
+        live_cache_enabled,
+    );
+    let source = match snapshot.source {
+        wcore_pricing::PricingSnapshotSource::Bundled => "bundled",
+        wcore_pricing::PricingSnapshotSource::Configured => "configured",
+        wcore_pricing::PricingSnapshotSource::CachedLive => "cached_live",
+    };
+    let age_seconds = snapshot.fetched_at.map(|fetched_at| {
+        chrono::Utc::now()
+            .signed_duration_since(fetched_at)
+            .num_seconds()
+            .max(0) as u64
+    });
+
+    let mut fallbacks = Vec::new();
+    for (entry, fallback) in labels.into_iter().zip(&config.resolved_fallbacks) {
+        let provider_name = fallback.compat.provider_type().to_string();
+        let status = snapshot
+            .catalog
+            .estimate_cost_status(&provider_name, &fallback.model, 0, 0)
+            .ok();
+        let metadata = FailoverCandidateMetadata {
+            label: entry.to_string(),
+            provider: provider_name.clone(),
+            model: fallback.model.clone(),
+            organization: fallback.provider_organization.clone(),
+            region: fallback.provider_region.clone(),
+            capabilities: CandidateCapabilities {
+                tools: fallback.compat.supports_tools(),
+                vision: fallback.compat.supports_vision(),
+                structured_output: fallback.compat.supports_structured_output(),
+                context_window: wcore_config::limits::model_output_ceiling(
+                    &provider_name,
+                    &fallback.model,
+                )
+                .map(|(_, window)| u64::from(window)),
+            },
+            pricing: PricingEvidence {
+                source: source.into(),
+                age_seconds,
+                stale: snapshot.stale,
+                priced: status.is_some_and(|status| status.priced),
+                estimated_microcents: status.map(|status| status.microcents),
+            },
+        };
+        fallbacks.push((metadata, build_native_or_chatgpt_provider(fallback)?));
+    }
+    Ok(fallbacks)
+}
+
+/// Refresh the opt-in live pricing cache before failover candidates snapshot
+/// their cost evidence. A fresh cache avoids network work; any fetch or write
+/// failure degrades to the trusted configured/bundled catalog in
+/// `build_fallback_providers` and is never treated as fresh live evidence.
+///
+/// F05-TRUTH-1 runtime outcome proof is emitted here and nowhere else. The
+/// capability's real side effect is **publishing a fresh live snapshot to the
+/// cache** — that is the moment the refresher changes what a later cost
+/// estimate will read. Constructing a `PricingRefresher`, loading the bundled
+/// catalog, or reading an already-fresh cache are all reads, not outcomes, so
+/// none of them emits. A fetch that fails, or a save that fails, emits nothing
+/// either: the run degrades to the trusted catalog and nothing changed.
+async fn refresh_pricing_cache_if_enabled(config: &Config, output: &Arc<dyn OutputSink>) {
+    if !config.provider_chain.enabled || !pricing_auto_refresh_enabled() {
+        return;
+    }
+    let refresher = wcore_pricing::PricingRefresher::default();
+    let cache_path = wcore_pricing::default_cache_path();
+    if matches!(refresher.load_cached(&cache_path), Ok(Some(_))) {
+        return;
+    }
+    match refresher.fetch_live().await {
+        Ok(catalog) => {
+            if let Err(error) = refresher.save_snapshot(&cache_path, &catalog) {
+                tracing::warn!(%error, "live pricing fetched but cache publication failed; using trusted fallback catalog");
+            } else {
+                for activation in crate::capability_activation::successful_occurrence(
+                    wcore_protocol::events::CapabilityId::PricingRefresher,
+                ) {
+                    output.emit_capability_activation(&activation);
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "live pricing refresh failed; using trusted fallback catalog");
+        }
+    }
+}
+
+fn pricing_auto_refresh_enabled() -> bool {
+    std::env::var("WAYLAND_PRICING_AUTO_REFRESH")
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "on" | "true"))
+}
+
+fn failover_routing_policy(config: &Config) -> FailoverRoutingPolicy {
+    FailoverRoutingPolicy {
+        allowed_providers: config
+            .provider_policy
+            .allowed_providers
+            .iter()
+            .cloned()
+            .collect(),
+        denied_providers: config
+            .provider_policy
+            .denied_providers
+            .iter()
+            .cloned()
+            .collect(),
+        allowed_regions: config
+            .provider_policy
+            .allowed_regions
+            .iter()
+            .cloned()
+            .collect(),
+        organization: config.provider_policy.organization.clone(),
+        require_fresh_pricing: config.provider_policy.require_fresh_pricing,
+        require_priced: config.provider_policy.require_priced,
+    }
+}
+
+/// Drop router seeds belonging to skills the user has revoked (`F23A-C1-M1`).
+///
+/// # Why this exists, and why it cannot live in `wcore-skills::govern`
+///
+/// `GovernanceStore::revoke()` is filesystem-only: it deletes the skill directory and writes a
+/// tombstone. It does **not** remove the `evolved_prompts` row the drafter wrote
+/// (`auto_skill/drafter.rs`), because it structurally cannot — `prompt_store.rs` records that
+/// "`wcore-skills` cannot depend on `wcore-evolve` (the dep already runs the other way)". So the
+/// row outlives the revocation, and the only place the two can meet is here, at the bridge
+/// point that already owns both dependencies.
+///
+/// # The hazard
+///
+/// Layer 1b hydrates `auto_drafter` rows for every name in `catalog.visible()`. Today
+/// `visible()` excludes auto-drafts (`loader.rs:448` quarantines them via
+/// `disable_model_invocation`), so this filter is inert. It stops being inert the moment
+/// governed promotion lifts that quarantine — which is work in flight — at which point a
+/// retained row starts seeding the router for content the user explicitly revoked.
+///
+/// There is a second variant that needs **no** promotion at all. `PromptStore::seed_pairs_for`
+/// matches on `WHERE skill_name = ?1` — name alone, no signature, no provenance. So a user who
+/// revokes auto-skill `foo` and later hand-writes their own unrelated skill named `foo` would
+/// have the revoked skill's simulated-success prior hydrated onto the new one.
+///
+/// # Why it filters the seeds and not the candidate list
+///
+/// Filtering `candidate_names` up front would be simpler and is wrong: it would strip the
+/// user's own legitimately-named skill out of Layer 1 and Layer 2 seeding as well, penalising
+/// them for a name collision with something they deleted. Only the stale `auto_drafter` prior
+/// is dropped; everything else about that skill is treated normally.
+///
+/// # Failure posture
+///
+/// An unresolvable or unreadable governance root yields `None`/`Err`, and this returns the
+/// pairs unfiltered rather than dropping every seed. That matches `GovernanceStore::is_revoked`,
+/// which documents the same choice: failing closed would let one bad file silently disable the
+/// learn loop. The drop is logged so it is never silent.
+fn drop_revoked_auto_draft_seeds(pairs: Vec<(String, u64)>) -> Vec<(String, u64)> {
+    match wcore_skills::govern::GovernanceStore::open_default() {
+        Ok(store) => drop_revoked_auto_draft_seeds_with(pairs, &store),
+        Err(e) => {
+            tracing::debug!(
+                target: "wcore_agent::bootstrap",
+                error = %e,
+                "no governance root resolved; auto-draft seeds hydrated unfiltered"
+            );
+            pairs
+        }
+    }
+}
+
+/// Testable core of [`drop_revoked_auto_draft_seeds`], with the store injected so tests can
+/// point at a tempdir instead of the process-global user root (bug #564 in this subsystem).
+fn drop_revoked_auto_draft_seeds_with(
+    pairs: Vec<(String, u64)>,
+    store: &wcore_skills::govern::GovernanceStore,
+) -> Vec<(String, u64)> {
+    // Read the tombstone set ONCE. `is_revoked` re-reads the directory per call, which would be
+    // O(drafts x revocations) file reads on every boot.
+    //
+    // Name-only matching here is not a weakening of `is_revoked`: the router knows skill names
+    // and has no drafter signature to offer, so `is_revoked(name, None)` reduces to exactly the
+    // name comparison this performs.
+    let revoked: std::collections::HashSet<String> = match store.live_revocations() {
+        Ok(live) => live.into_iter().map(|r| r.skill_name).collect(),
+        Err(e) => {
+            tracing::error!(
+                target: "wcore_agent::bootstrap",
+                error = %e,
+                "could not read revocations; auto-draft seeds hydrated unfiltered"
+            );
+            return pairs;
+        }
+    };
+    if revoked.is_empty() {
+        return pairs;
+    }
+    pairs
+        .into_iter()
+        .filter(|(name, _)| {
+            let blocked = revoked.contains(name);
+            if blocked {
+                tracing::info!(
+                    target: "wcore_agent::bootstrap",
+                    skill = %name,
+                    "skill_router: dropped auto-draft seed for a revoked skill"
+                );
+            }
+            !blocked
+        })
+        .collect()
+}
+
+/// Phase 22 (22-02 Task 3) — resolve the sub-agent learned-policy pre-filter
+/// source from disk.
+///
+/// **A missing file returns `None`, not an empty policy, and that distinction
+/// is the whole reason this is a function.** `LearnedPolicy::load_from`
+/// deliberately treats a missing file as an empty policy (a reasonable API
+/// choice), but an empty policy narrows nothing — so constructing one
+/// unconditionally would let the F05 capability report advertise
+/// `learned_policy: ready` on every machine on earth, including every machine
+/// where the pre-filter can never deny anything. That is precisely the
+/// advertised-but-dead shape this task exists to remove, so the readiness
+/// claim is bound to a policy that actually exists.
+///
+/// A file that exists but does not parse is a WARN and `None`: an operator who
+/// wrote a malformed permissions file must not silently get "no restrictions".
+fn load_learned_policy() -> Option<Arc<wcore_permissions::LearnedPolicy>> {
+    let path = match wcore_permissions::LearnedPolicy::default_path() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::debug!(
+                target: "wcore_agent::permissions",
+                %error,
+                "no home directory; sub-agent learned policy not loaded"
+            );
+            return None;
+        }
+    };
+    if !path.exists() {
+        return None;
+    }
+    match wcore_permissions::LearnedPolicy::load_from(&path) {
+        Ok(policy) => {
+            tracing::info!(
+                target: "wcore_agent::permissions",
+                path = %path.display(),
+                "sub-agent learned-policy pre-filter loaded"
+            );
+            Some(Arc::new(policy))
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "wcore_agent::permissions",
+                path = %path.display(),
+                %error,
+                "sub-agent learned policy failed to parse; pre-filter NOT installed"
+            );
+            None
+        }
+    }
+}
+
+/// `F23A-C1-M1` — the auto-draft router-seed resurrection guard.
+///
+/// Structured as a known-positive, a known-negative, and a **one-variable control**, because the
+/// two obvious ways to fake a pass here are both invisible in a single assertion: a filter that
+/// dropped every seed would satisfy "the revoked seed is gone", and a test whose revocation was
+/// never actually created would satisfy "the surviving seed is present".
+#[cfg(test)]
+mod revoked_auto_draft_seed_tests {
+    use super::drop_revoked_auto_draft_seeds_with;
+    use wcore_skills::govern::GovernanceStore;
+
+    /// Build a governance store on a tempdir root, never the process-global user root
+    /// (bug #564 in this subsystem is exactly that race).
+    fn store_with_revocations(revoke: &[&str]) -> (tempfile::TempDir, GovernanceStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = GovernanceStore::new(tmp.path().join("governance"));
+        for name in revoke {
+            let dir = tmp.path().join("skills").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), b"# revoked\n").unwrap();
+            store.revoke(&dir).unwrap();
+        }
+        (tmp, store)
+    }
+
+    fn seeds() -> Vec<(String, u64)> {
+        vec![
+            ("auto-revoked-one".to_string(), 4),
+            ("hand-written-keeper".to_string(), 3),
+        ]
+    }
+
+    #[test]
+    fn a_revoked_skill_loses_its_seed_and_an_unrevoked_one_keeps_its_own() {
+        let (_tmp, store) = store_with_revocations(&["auto-revoked-one"]);
+
+        // Guard against a vacuous run: the revocation must actually be live. If `revoke()`
+        // silently no-opped, the drop below would pass for the wrong reason.
+        assert!(
+            store.is_revoked("auto-revoked-one", None),
+            "precondition: the revocation must be live before the filter is meaningful"
+        );
+
+        let kept = drop_revoked_auto_draft_seeds_with(seeds(), &store);
+
+        // known-negative: the revoked skill's retained prior is gone.
+        assert!(
+            !kept.iter().any(|(n, _)| n == "auto-revoked-one"),
+            "a revoked skill must not hydrate a router seed, got {kept:?}"
+        );
+        // known-positive: and the filter is not universal denial. Without this, a filter that
+        // returned an empty vec unconditionally would pass the assertion above.
+        assert_eq!(
+            kept,
+            vec![("hand-written-keeper".to_string(), 3)],
+            "an unrevoked skill must keep its seed unchanged"
+        );
+    }
+
+    #[test]
+    fn the_control_one_variable_changed_no_revocation_means_nothing_is_dropped() {
+        // THE ASSERTION THAT PROVES THE OTHER TEST MEASURES ANYTHING. Same input, same code
+        // path, same store type -- the only difference is that no revocation exists. If this
+        // ever fails, the drop above was caused by something other than the revocation and the
+        // guard is not doing what it claims.
+        let (_tmp, store) = store_with_revocations(&[]);
+        assert_eq!(
+            drop_revoked_auto_draft_seeds_with(seeds(), &store),
+            seeds(),
+            "with no revocation in force every seed must survive untouched"
+        );
+    }
+
+    #[test]
+    fn revocation_is_matched_by_name_which_is_the_variant_that_needs_no_promotion() {
+        // `PromptStore::seed_pairs_for` matches on `WHERE skill_name = ?1` alone. So a user who
+        // revokes `foo` and later hand-writes an unrelated skill also called `foo` would
+        // otherwise inherit the revoked skill's simulated-success prior. This pins that the
+        // guard keys on the same field the query does.
+        let (_tmp, store) = store_with_revocations(&["collides"]);
+        let kept = drop_revoked_auto_draft_seeds_with(vec![("collides".to_string(), 5)], &store);
+        assert!(
+            kept.is_empty(),
+            "a name collision with a revoked skill must not inherit its prior, got {kept:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fallback_pricing_identity_tests {
+    use super::*;
+
+    #[test]
+    fn same_provider_fallback_keeps_provider_and_canonical_model_identity() {
+        let mut config = Config {
+            provider_label: "anthropic".into(),
+            compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            ..Default::default()
+        };
+        config.provider_chain.enabled = true;
+        config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+        let mut fallback = config.clone();
+        fallback.model = "claude-haiku-4-5".into();
+        fallback.resolved_fallbacks.clear();
+        config.resolved_fallbacks = vec![fallback];
+
+        let mut pricing_refresher_constructed = false;
+        let fallbacks =
+            build_fallback_providers(&config, &mut pricing_refresher_constructed).unwrap();
+
+        assert_eq!(fallbacks.len(), 1);
+        let (metadata, _) = &fallbacks[0];
+        assert_eq!(metadata.label, "claude-haiku-4-5");
+        assert_eq!(metadata.provider, "anthropic");
+        assert_eq!(metadata.model, "claude-haiku-4-5");
+        assert!(metadata.capabilities.tools);
+    }
+
+    #[test]
+    fn fallback_resolution_mismatch_fails_closed() {
+        let mut config = Config::default();
+        config.provider_chain.enabled = true;
+        config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+
+        let mut pricing_refresher_constructed = false;
+        let error = build_fallback_providers(&config, &mut pricing_refresher_constructed)
+            .err()
+            .expect("unresolved fallback must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("fallback configuration resolution mismatch")
+        );
+        // The construction fact must record what actually ran. The mismatch
+        // check fires BEFORE the refresher is built, so a run that failed there
+        // never constructed one — and a report claiming otherwise would be the
+        // "configured implies ready" error this out-param exists to prevent.
+        assert!(
+            !pricing_refresher_constructed,
+            "a run that failed before constructing the refresher still reported \
+             it constructed"
+        );
+    }
+
+    /// F05-TRUTH-1: the construction fact, in BOTH directions, one variable.
+    ///
+    /// The old code read `config.provider_chain.enabled` at the report site.
+    /// That is a second copy of the predicate, not a record of the event, and
+    /// it would keep reporting `ready` if the construction ever moved behind a
+    /// further condition. These two halves share an instrument, so neither is
+    /// self-passing.
+    #[test]
+    fn pricing_refresher_construction_is_recorded_in_both_directions() {
+        let base = || {
+            let mut config = Config {
+                provider_label: "anthropic".into(),
+                compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
+                ..Default::default()
+            };
+            config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+            let mut fallback = config.clone();
+            fallback.model = "claude-haiku-4-5".into();
+            fallback.resolved_fallbacks.clear();
+            config.resolved_fallbacks = vec![fallback];
+            config
+        };
+
+        // ---- CAN-PASS: the chain is on, so the refresher is built. ----
+        let mut on = base();
+        on.provider_chain.enabled = true;
+        let mut constructed_on = false;
+        build_fallback_providers(&on, &mut constructed_on).unwrap();
+        assert!(
+            constructed_on,
+            "the chain is enabled and fallbacks resolved, so a PricingRefresher was \
+             built and the fact must say so"
+        );
+
+        // ---- CAN-FAIL: one variable, the chain flag. ----
+        let mut off = base();
+        off.provider_chain.enabled = false;
+        let mut constructed_off = false;
+        build_fallback_providers(&off, &mut constructed_off).unwrap();
+        assert!(
+            !constructed_off,
+            "the early return ran, so nothing was constructed, yet the fact claimed \
+             it was. `disabled_by_config` is the honest report here."
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3436,8 +4828,87 @@ mod consent_gate_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use wcore_plugin_api::{McpServerSpec, McpTransport};
+    use wcore_plugin_api::BundledSkillSpec;
+
+    fn bootstrap_skill(name: &str) -> BundledSkillSpec {
+        BundledSkillSpec {
+            name: name.into(),
+            description: format!("{name} fixture"),
+            when_to_use: None,
+            argument_hint: None,
+            allowed_tools: Vec::new(),
+            model: None,
+            disable_model_invocation: false,
+            user_invocable: true,
+            context: None,
+            agent: None,
+            files: Vec::new(),
+            content: name.into(),
+        }
+    }
+
+    /// R2: two spellings of one workspace must reach the engine as ONE string,
+    /// or the system prompt they are baked into digests differently and a
+    /// crashed session refuses to resume.
+    ///
+    /// macOS's `/var` -> `/private/var` is exactly this shape, but it cannot be
+    /// staged on Linux, so the alias is built explicitly with a symlink. That
+    /// makes the property testable on every unix host rather than only where the
+    /// bug happens to reproduce.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_spelled_through_a_symlink_normalizes_to_one_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize fixture root");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir(&real).expect("real workspace");
+        std::os::unix::fs::symlink(&real, &alias).expect("alias symlink");
+
+        let via_alias = canonical_workspace(alias.to_string_lossy().into_owned());
+        let via_real = canonical_workspace(real.to_string_lossy().into_owned());
+        assert_eq!(
+            via_alias, via_real,
+            "the two spellings must collapse to one workspace identity"
+        );
+        assert_eq!(
+            via_alias,
+            real.to_string_lossy(),
+            "the surviving spelling must be the resolved one"
+        );
+    }
+
+    /// Fail-soft: a workspace that cannot be resolved keeps the caller's string.
+    /// Canonicalization must never be able to turn a working session into a
+    /// failing one.
+    #[test]
+    fn unresolvable_workspace_is_passed_through_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("not-created-yet");
+        let given = missing.to_string_lossy().into_owned();
+        assert_eq!(canonical_workspace(given.clone()), given);
+    }
+
+    #[test]
+    fn production_bootstrap_catalog_constructor_is_fresh_per_call() {
+        let first = build_session_bundled_catalog(vec![bootstrap_skill("first-only")]);
+        let second = build_session_bundled_catalog(vec![bootstrap_skill("second-only")]);
+        let first_names: Vec<_> = first
+            .get_bundled_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        let second_names: Vec<_> = second
+            .get_bundled_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+
+        assert!(first_names.iter().any(|name| name == "first-only"));
+        assert!(!first_names.iter().any(|name| name == "second-only"));
+        assert!(second_names.iter().any(|name| name == "second-only"));
+        assert!(!second_names.iter().any(|name| name == "first-only"));
+    }
 
     /// MF2 (auditor): the ScriptTool dispatcher mini-registry must obey the SAME
     /// channel posture as the main registry — otherwise `Script([{tool:Grep}])` /
@@ -3471,22 +4942,6 @@ mod tests {
         );
     }
 
-    /// A4c: a declarative stdio MCP server whose command cannot be launched
-    /// must fail the reachability gate. This is the only pre-connect skip on
-    /// this branch, and a `false` here is what feeds the skipped (⊘) row.
-    #[test]
-    fn unreachable_stdio_command_is_not_reachable() {
-        let spec = McpServerSpec {
-            name: "bogus-server".to_string(),
-            transport: McpTransport::Stdio {
-                command: "wayland-nonexistent-mcp-command-xyz".to_string(),
-                args: Vec::new(),
-            },
-            env: HashMap::new(),
-        };
-        assert!(!declarative_mcp_server_is_reachable(&spec));
-    }
-
     /// Task 5.1: the OAuth bearer closure bootstrap builds for the chatgpt
     /// provider must pull the seeded access token + account id out of a live
     /// `ChatGptTokenManager`. We can't point `build_native_or_chatgpt_provider`
@@ -3508,7 +4963,11 @@ mod tests {
         let access_token = format!("hdr.{seg}.sig");
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .unwrap();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -3580,10 +5039,21 @@ mod tests {
     /// FIX 1 regression: building the `openai-chatgpt` provider through the
     /// runtime builder must NOT hit the `create_native_provider` panic — the
     /// exact path the `/provider openai-chatgpt` rebind now takes. We seed a
-    /// tempdir-rooted `~/.wayland` token (via HOME) so `OAuthStorage::from_home`
-    /// resolves into the tempdir, then assert the build returns `Ok` (a working
-    /// provider Arc) rather than panicking. Serial + HOME-scoped because
-    /// `from_home` is not otherwise redirectable.
+    /// tempdir-rooted login through the REAL `OAuthStorage::from_home` (an
+    /// end-to-end exercise of the production write path, into a real encrypted
+    /// vault), then assert the build returns `Ok` (a working provider Arc)
+    /// rather than panicking.
+    ///
+    /// Env scoping, all three of them, and each is load-bearing:
+    /// * `HOME` — the legacy oauth dir.
+    /// * `WAYLAND_HOME` — the credentials root AND the switch that suppresses
+    ///   the OS keyring rung. Without it this test would write a token into the
+    ///   developer's real Keychain / Credential Manager on any host that has
+    ///   one, because the keyring service name is process-global.
+    /// * `WAYLAND_VAULT_PASSPHRASE` — mounts the in-home encrypted vault, the
+    ///   only secure rung a headless runner has. Without it the store fails
+    ///   closed, which is correct behaviour and would make this test unable to
+    ///   seed anything.
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]
@@ -3596,11 +5066,15 @@ mod tests {
         use wcore_config::config::ProviderType;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        // Point HOME at the tempdir so `from_home` writes under it, not the
-        // real home. Restore the prior value before returning.
         let saved = std::env::var_os("HOME");
-        // SAFETY: serial test; HOME reverted before exit.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let saved_wh = std::env::var_os("WAYLAND_HOME");
+        let saved_pass = std::env::var_os("WAYLAND_VAULT_PASSPHRASE");
+        // SAFETY: serial test; all three reverted before exit.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+            std::env::set_var("WAYLAND_HOME", tmp.path().join("wayland-home"));
+            std::env::set_var("WAYLAND_VAULT_PASSPHRASE", "test-vault-passphrase");
+        }
 
         // Seed a valid token so the store the provider's bearer source reads is
         // present (the build itself does not load it, but this mirrors a real
@@ -3629,6 +5103,23 @@ mod tests {
             )
             .expect("seed token");
 
+        // The PRODUCTION writer just ran against a real on-disk encrypted
+        // vault. Assert what it left behind: a login that reads back through a
+        // freshly opened store, and no cleartext token file anywhere.
+        let oauth_dir = wcore_config::config::profile_home().join("oauth");
+        assert!(
+            !oauth_dir.join("chatgpt.json").exists(),
+            "from_home().store() must not write a cleartext token file"
+        );
+        assert!(
+            OAuthStorage::from_home()
+                .expect("reopen")
+                .load(PROVIDER)
+                .expect("load")
+                .is_some(),
+            "the seeded login must read back out of the vault"
+        );
+
         let config = Config {
             provider_label: "openai-chatgpt".into(),
             provider: ProviderType::OpenAIChatGpt,
@@ -3643,9 +5134,16 @@ mod tests {
         let inner = build_native_or_chatgpt_provider(&config);
         let wrapped = create_provider_with_oauth(&config);
 
-        match saved {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
+        for (key, prior) in [
+            ("HOME", saved),
+            ("WAYLAND_HOME", saved_wh),
+            ("WAYLAND_VAULT_PASSPHRASE", saved_pass),
+        ] {
+            // SAFETY: serial test; restoring what we saved above.
+            match prior {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
 
         let inner = inner.expect("chatgpt inner build must not panic and must succeed");

@@ -78,37 +78,61 @@ async fn read_procedure_status(
     procs.into_iter().find(|p| p.id == id).map(|p| p.status)
 }
 
+/// 23A-C1. Governed promotion **binds** a reviewed procedure to an artifact; it does
+/// not invent one. A procedure with no installed artifact at its name must therefore
+/// refuse, and refuse without touching anything.
+///
+/// This test was written when promotion was an unconditional `bail!`. Every assertion
+/// it made is preserved — fail closed, no procedure-state change, no bulk copy of
+/// unrelated drafts — because those properties are still exactly what must hold on a
+/// refusal. Only the expected diagnostic changed, from "suspended" to the specific
+/// reason.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn skills_promote_transitions_staged_to_active() {
+async fn skills_promote_refuses_a_procedure_with_no_installed_artifact() {
     let (project, memory_root, id) =
         fixture_with_staged_procedure("auto-grep-glob-grep-glob-grep").await;
+    let wayland_home = TempDir::new().unwrap();
+    let unrelated = wayland_home
+        .path()
+        .join("skills")
+        .join("auto")
+        .join("auto-unrelated");
+    fs::create_dir_all(&unrelated).unwrap();
+    fs::write(unrelated.join("SKILL.md"), "# generated draft\n").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_wayland-core");
     let out = std::process::Command::new(bin)
         .args(["--skills-promote", &id.0.to_string()])
         .current_dir(project.path())
         .env("WCORE_MEMORY_DIR", memory_root.path())
+        .env("WAYLAND_HOME", wayland_home.path())
         .output()
         .expect("run cli");
     assert!(
-        out.status.success(),
-        "CLI exit: {}\nstderr: {}\nstdout: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout),
+        !out.status.success(),
+        "promotion of a procedure with no artifact must fail closed"
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("promoted procedure") && stdout.contains("staged → active"),
-        "expected promotion confirmation in stdout; got: {stdout}"
+        stderr.contains("no installed artifact"),
+        "expected the specific binding diagnostic; got: {stderr}"
     );
 
     let status = read_procedure_status(project.path(), id).await;
     assert_eq!(
         status,
-        Some(ProcedureStatus::Active),
-        "procedure must be Active after promote"
+        Some(ProcedureStatus::Staged),
+        "a refused promotion must not change procedure state"
+    );
+    assert!(
+        !wayland_home
+            .path()
+            .join("skills")
+            .join("auto-unrelated")
+            .join("SKILL.md")
+            .exists(),
+        "a refused promotion must not bulk-copy unrelated drafts"
     );
 }
 
@@ -170,16 +194,21 @@ async fn skills_promote_unknown_id_exits_nonzero() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no procedure with id") || stderr.contains("not found"),
-        "expected not-found diagnostic; got stderr: {stderr}"
+        stderr.contains("no procedure with id"),
+        "expected the unknown-id diagnostic from the procedure lookup; got stderr: {stderr}"
     );
 }
 
+/// A non-UUID argument is now a **skill name**, not a malformed id: `--skills-govern`
+/// prints names, so requiring users to translate a name into a UUID would be a worse
+/// surface. An unknown name must still exit nonzero — the property this test has always
+/// guarded is that promotion never silently no-ops.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn skills_promote_rejects_non_uuid() {
+async fn skills_promote_rejects_an_unknown_skill_name() {
     let project = TempDir::new().unwrap();
     let memory_root = TempDir::new().unwrap();
+    let wayland_home = TempDir::new().unwrap();
     fs::create_dir(project.path().join(".git")).unwrap();
 
     let bin = env!("CARGO_BIN_EXE_wayland-core");
@@ -187,16 +216,17 @@ async fn skills_promote_rejects_non_uuid() {
         .args(["--skills-promote", "not-a-uuid"])
         .current_dir(project.path())
         .env("WCORE_MEMORY_DIR", memory_root.path())
+        .env("WAYLAND_HOME", wayland_home.path())
         .output()
         .expect("run cli");
     assert!(
         !out.status.success(),
-        "expected nonzero exit for bad UUID; stdout: {}",
+        "expected nonzero exit for an unknown skill name; stdout: {}",
         String::from_utf8_lossy(&out.stdout)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("invalid procedure id"),
-        "expected UUID-parse diagnostic; got stderr: {stderr}"
+        stderr.contains("no skill named 'not-a-uuid'"),
+        "expected the unknown-skill diagnostic; got stderr: {stderr}"
     );
 }

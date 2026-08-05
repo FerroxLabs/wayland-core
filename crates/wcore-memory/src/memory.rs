@@ -280,6 +280,53 @@ impl MemoryApi for Memory {
     async fn search(&self, q: Query, tok: AccessToken) -> Result<Vec<Hit>> {
         self.dispatcher.search(q, tok).await
     }
+    // F23-03. These MUST delegate rather than inherit the trait defaults:
+    // `Memory` is the type the CLI actually holds, so a default `controls()`
+    // returning None here would leave every operator control refusing with
+    // "this backend exposes no operator controls" on the one backend that has
+    // them. A slash-surface test caught exactly that.
+    fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        self.dispatcher.controls()
+    }
+    // 23B-C3 — these three MUST be forwarded, not left on the trait default.
+    // `Memory` wraps the dispatcher, so an unforwarded default would silently
+    // route the production control path around the dispatcher's override: the
+    // fact-correction re-embed would be replaced by a refusal, and
+    // `nudge_budget` would report `None` for a backend that has one.
+    async fn forget_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::ForgetReceipt> {
+        self.dispatcher.forget_recalled(tier, id, actor, tok).await
+    }
+    async fn correct_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        corrected: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::CorrectionReceipt> {
+        self.dispatcher
+            .correct_recalled(tier, id, corrected, actor, tok)
+            .await
+    }
+    fn nudge_budget(&self) -> Option<std::sync::Arc<crate::provenance::NudgeBudget>> {
+        self.dispatcher.nudge_budget()
+    }
+    fn activation_log(&self) -> Option<std::sync::Arc<crate::activation::ActivationLog>> {
+        self.dispatcher.activation_log()
+    }
+    async fn search_with_provenance(
+        &self,
+        q: Query,
+        tok: AccessToken,
+    ) -> Result<(Vec<Hit>, crate::provenance::RecallReport)> {
+        self.dispatcher.search_with_provenance(q, tok).await
+    }
     async fn get_episode(&self, id: &EpisodeId, tok: AccessToken) -> Result<Episode> {
         self.dispatcher.get_episode(id, tok).await
     }

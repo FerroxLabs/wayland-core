@@ -178,15 +178,47 @@ impl FinishReason {
     }
 }
 
-/// Token usage statistics
+/// Provider-neutral token usage statistics.
+///
+/// Input categories are disjoint: `input_tokens` contains only uncached input,
+/// while cache reads and cache creations are reported separately. Consumers
+/// may sum the three fields when they need the total input processed.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
+    /// Uncached input tokens (cache misses).
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens written to the provider's prompt cache.
     #[serde(default)]
     pub cache_creation_tokens: u64,
+    /// Input tokens read from the provider's prompt cache.
     #[serde(default)]
     pub cache_read_tokens: u64,
+}
+
+impl TokenUsage {
+    /// Sum disaggregated provider input counters without wrapping.
+    pub fn total_input_from(
+        input_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+    ) -> u64 {
+        input_tokens
+            .saturating_add(cache_read_tokens)
+            .saturating_add(cache_creation_tokens)
+    }
+
+    /// Total provider input processed across the three disjoint input classes.
+    ///
+    /// Saturation keeps telemetry and budget accounting monotonic even when a
+    /// malformed or synthetic provider response reports impossible counters.
+    pub fn total_input_tokens(&self) -> u64 {
+        Self::total_input_from(
+            self.input_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +476,27 @@ mod tests {
         assert_eq!(usage.output_tokens, 0);
         assert_eq!(usage.cache_creation_tokens, 0);
         assert_eq!(usage.cache_read_tokens, 0);
+        assert_eq!(usage.total_input_tokens(), 0);
+    }
+
+    #[test]
+    fn total_input_tokens_sums_disjoint_categories_with_saturation() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 99,
+            cache_creation_tokens: 20,
+            cache_read_tokens: 80,
+        };
+        assert_eq!(usage.total_input_tokens(), 200);
+
+        let overflow = TokenUsage {
+            input_tokens: u64::MAX,
+            output_tokens: 0,
+            cache_creation_tokens: 1,
+            cache_read_tokens: 1,
+        };
+        assert_eq!(overflow.total_input_tokens(), u64::MAX);
+        assert_eq!(TokenUsage::total_input_from(u64::MAX, 1, 1), u64::MAX);
     }
 
     // --- Message construction ---

@@ -1,0 +1,22 @@
+F27-01-SC1-Macos: NOT RUN — no macOS artifact exists for this SHA.
+
+The plan permits exactly two ways to run the macOS leg: fetch a prebuilt
+`wayland-core-aarch64-apple-darwin` from the CI `Build (aarch64-apple-darwin)`
+job for this SHA with `gh run download`, or use a release archive already
+present for this SHA. Neither exists.
+
+The SHA under measurement is `2ecdfdf54ff7fda920eec7d068337006e5da4ee4`, which
+is a local working-branch commit that has never been pushed and therefore has
+never been built by CI. This work was performed in an isolated worktree under
+an explicit instruction not to push, so no CI run for this SHA can exist. That
+is a consequence of the execution model, not of a missing capability, and the
+correct disposition is to say so rather than to substitute anything.
+
+NO LINUX RESULT IS PRESENTED AS A MACOS RESULT anywhere in this phase's
+evidence.
+
+To close it: push the branch, let CI build the macOS artifact for the exact
+SHA, `gh run download` it to the Mac, and re-run the host-path and
+standalone-path exercises from `.planning/scripts/f27-intake-observe.sh`
+against that artifact. Pushing is available to whoever integrates this work;
+it was not available to the agent that produced it.

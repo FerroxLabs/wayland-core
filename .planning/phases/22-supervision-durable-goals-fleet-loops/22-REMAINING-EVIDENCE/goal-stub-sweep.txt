@@ -1,0 +1,30 @@
+=== advertised-but-dead sweep of the Goal surface (the class this lane exists to close) ===
+
+-- (1) every goal subcommand the CLI advertises:
+head: illegal line count -- 0
+99:    Direct,
+100:    ForgeFlows,
+101:    Fleet,
+102:    Council,
+103:    Anvil,
+149:        Self {
+225:    Open {
+261:    Task {
+278:    Run {
+323:    Status {
+341:    Stream {
+358:    ExecTask {
+371:    Effects {
+
+-- (2) unconditional-bail patterns (the run_skills_promote precedent):
+   count: crates/wcore-cli/src/goal_cmd.rs:0,crates/wcore-agent/src/goal/fleet.rs:0,crates/wcore-agent/src/goal/kernel.rs:0,crates/wcore-agent/src/goal/ledger.rs:0,crates/wcore-agent/src/goal/mod.rs:0,crates/wcore-agent/src/goal/record.rs:0,crates/wcore-agent/src/goal/strategy.rs:0,crates/wcore-agent/src/goal/wire.rs:0
+
+-- (3) KNOWN-POSITIVE control: the same matcher against a file that DOES carry a TODO
+crates/wcore-agent/src/bin/tool_token_bench.rs
+crates/wcore-agent/src/bootstrap.rs
+crates/wcore-agent/src/hooks/mod.rs
+
+-- (4) capability registered honestly? durable_goals_v1 status:
+1174:            "durable_goals_v1".into(),
+1175-            ContractCapabilityStatus::ShapeOnly,
+1176-        ),

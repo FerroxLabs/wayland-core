@@ -1,0 +1,17 @@
+    Checking wcore-memory v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-memory)
+   Compiling wcore-cli v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-cli)
+    Checking wcore-cron v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-cron)
+    Checking wcore-tools v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-tools)
+    Checking wcore-swarm v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-swarm)
+    Checking wcore-mcp v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-mcp)
+    Checking wcore-cua v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-cua)
+    Checking wcore-browser v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-browser)
+    Checking wcore-skills v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-plugin-subprocess)
+    Checking wcore-eval-scenarios v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-eval-scenarios)
+    Checking wcore-eval v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-eval)
+    Checking wcore-evolve v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-evolve)
+    Checking wcore-agent v0.12.25 (/root/wayland-fix-clippy-gate/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 32.27s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

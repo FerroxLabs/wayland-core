@@ -1,0 +1,7 @@
+total 20
+drwxr-xr-x 2 root root 4096 Jul 29 04:08 .
+drwxr-xr-x 9 root root 4096 Jul 29 04:08 ..
+-rw-r--r-- 1 root root    4 Jul 29 04:07 imap-8ea2d80312c458a6.uid
+-rw-r--r-- 1 root root    3 Jul 29 04:08 matrix-5fbec553f4d71022.since
+-rw-r--r-- 1 root root    1 Jul 29 04:03 telegram-1a32a95a8f58812b.offset
+cursor=[s18]

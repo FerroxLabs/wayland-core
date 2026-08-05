@@ -21,7 +21,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use wcore_browser::backends::CamoufoxBackend;
 use wcore_browser::op::BrowserOp;
 use wcore_browser::policy::{BrowserPolicy, PolicyAction, PolicyOutcome};
-use wcore_browser::provider::{BrowserOpError, BrowserProvider, SessionCtx};
+use wcore_browser::provider::{BrowserOpError, BrowserProvider};
 use wcore_browser::supervisor::BrowserSupervisor;
 use wcore_browser::tool::BrowserTool;
 
@@ -198,20 +198,28 @@ fn dns_resolved_to_metadata_denied_even_on_first_resolve() {
     assert!(matches!(r, PolicyOutcome::Deny { .. }));
 }
 
-// -------- Camoufox backend `final_url` re-check  -------------------------
+// -------- Camoufox backend post-navigation `url` re-check ----------------
 
 #[tokio::test]
 async fn camoufox_final_url_metadata_refused() {
-    // Mocked sidecar returns a final_url that hits the metadata
+    // Mocked sidecar returns a post-navigation URL that hits the metadata
     // endpoint — the backend must refuse, even though the *initial*
     // URL passed the tool-layer pre-check. This is the BLOCKER #3
     // closing test (one-shot policy bypass via redirects).
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/sessions/sess-A/navigate"))
+        .and(path("/tabs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tabId": "tab-A",
+            "url": "about:blank"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-A/navigate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
-            "final_url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+            "url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
         })))
         .mount(&server)
         .await;
@@ -222,9 +230,10 @@ async fn camoufox_final_url_metadata_refused() {
         Vec::new(),
     );
     let backend = CamoufoxBackend::with_policy(server.uri(), policy);
+    let session = backend.open_session(false).await.unwrap();
     let r = backend
         .dispatch(
-            &SessionCtx::for_test("sess-A"),
+            &session.ctx,
             BrowserOp::Navigate {
                 url: "https://foo.allowed.example/redirect".into(),
                 wait_until_loaded: true,
@@ -250,10 +259,18 @@ async fn camoufox_final_url_metadata_refused() {
 async fn camoufox_final_url_allowed_when_in_allow_list() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/sessions/sess-B/navigate"))
+        .and(path("/tabs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "tabId": "tab-B",
+            "url": "about:blank"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tabs/tab-B/navigate"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
-            "final_url": "https://foo.allowed.example/landed"
+            "url": "https://foo.allowed.example/landed"
         })))
         .mount(&server)
         .await;
@@ -264,9 +281,10 @@ async fn camoufox_final_url_allowed_when_in_allow_list() {
         Vec::new(),
     );
     let backend = CamoufoxBackend::with_policy(server.uri(), policy);
+    let session = backend.open_session(false).await.unwrap();
     let r = backend
         .dispatch(
-            &SessionCtx::for_test("sess-B"),
+            &session.ctx,
             BrowserOp::Navigate {
                 url: "https://foo.allowed.example/start".into(),
                 wait_until_loaded: true,

@@ -1,0 +1,22 @@
+=== CONTROL REPAIR: my first known-positive 'cfg\.policy_gate' returned 0 because rustfmt
+    splits it as 'cfg
+        .policy_gate'. Dead control. Replacing with two live ones.
+
+-- control 1: '&cfg.tools' (read in dispatch_once, same struct, same fn):
+       3
+-- control 2: '.policy_gate' anywhere (proves the field-read pattern is greppable):
+       3
+
+-- THE MEASUREMENT: any read of the learned_policy field:
+   (a) 'cfg.learned_policy':
+       0
+   (b) '.learned_policy' in ANY form (incl. rustfmt-split):
+       0
+   (c) 'learned_policy' occurrences that are NOT (decl | ': None' | comment | test file):
+crates/wcore-agent/src/orchestration/node_executor.rs:132:    pub learned_policy: Option<Arc<LearnedPolicy>>,
+crates/wcore-agent/src/engine.rs:11433:                // `learned_policy` themselves.
+
+=== actor_acl_test.rs ignore census ===
+10
+-- #[tokio::test] / #[test] count:
+6

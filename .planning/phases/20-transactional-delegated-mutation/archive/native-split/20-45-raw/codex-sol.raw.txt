@@ -1,0 +1,9 @@
+BLOCK. The sealed SHA/tree match, but three non-deferred defects refute the candidate:
+
+- HIGH — `crates/wcore-sandbox/tests/hard_process_containment_windows.rs:140-160,365-371`: the post-close check re-discovers live tagged parent PIDs. Once the parent exits, `$parents` is empty and the helper returns zero even if detached `choice.exe` descendants leaked. This creates a false-green containment assertion.
+- MEDIUM — `crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs:144-151,263-277` and `process.rs:620-640`: `ends_with("cmd.exe")` misclassifies absolute executables such as `notcmd.exe`. Their `/c` or `/k` payload receives cmd-specific raw quoting instead of CRT quoting, violating the claimed argv discipline.
+- MEDIUM — `Cargo.lock:10183` and `.planning/phases/20-transactional-delegated-mutation/20-43-SUMMARY.md:67-70,93-121`: the alleged verbatim range omits `Cargo.lock` and 13 planning/evidence files. The sealed tree’s available repair summary binds to another SHA and reports 11508/1/48, not the claimed candidate-bound 11509/0/48 receipt. Evidence integrity is therefore unproven.
+
+Guardrail A passes: probe and parse failures propagate as `DispatchAdmission`; no unlimited fallback exists. Kimi watch-items are explicitly carried in `20-46-PLAN.md:23-24,61,83`.
+
+{"checks":{"all_severity":"FAIL","evidence_integrity":"FAIL","integration_authority":"FAIL"},"deferred":["native_macos","native_windows"],"findings":{"blocker":0,"critical":0,"high":1,"medium":2,"low":0},"guardrail_A_admission_budget":"PASS","guardrail_B_quoting_layer_only":"FAIL","kimi_watchitems_carried":"PASS","disposition":"BLOCK"}

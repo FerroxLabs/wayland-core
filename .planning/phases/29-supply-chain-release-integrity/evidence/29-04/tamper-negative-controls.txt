@@ -1,0 +1,60 @@
+=== 29-04 NEGATIVE-CONTROL CAMPAIGN — can this corpus go red? ===
+worktree: /root/wayland-29-04
+f6196a3275d41eaf769d4271b38d145e18739f26
+
+### BASELINE — the unmodified corpus must be GREEN
+--- BASELINE (no edit)
+rc=0
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.45s
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.45s
+
+### NC-1 — neuter one case's mutation (a no-op 'mutation')
+### expected: Paired::new refuses to build a pair whose halves are identical
+--- NC-1 no-op mutation
+rc=101
+thread 'every_tamper_case_has_a_pristine_control_that_is_accepted' (3561620) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:286:9:
+assertion `left != right` failed: a mutation that changes nothing is not a mutation, and a pair built from one would assert a refusal of the pristine subject itself
+thread 'every_tamper_case_is_accepted_pristine_then_refused_after_one_mutation' (3562108) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:286:9:
+assertion `left != right` failed: a mutation that changes nothing is not a mutation, and a pair built from one would assert a refusal of the pristine subject itself
+thread 'the_corpus_covers_every_f29_03_object_class' (3562109) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:286:9:
+assertion `left != right` failed: a mutation that changes nothing is not a mutation, and a pair built from one would assert a refusal of the pristine subject itself
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+error: test failed, to rerun pass `-p wcore-eval-scenarios --test supply_chain_tamper_corpus`
+
+### NC-2 — sign the pristine manifest with the WRONG role key
+### expected: every pristine control is REFUSED, so the corpus degenerates into
+### the rejection-only shape a verifier that refuses everything would pass
+--- NC-2 controls all refused
+rc=101
+thread 'every_tamper_case_has_a_pristine_control_that_is_accepted' (3562716) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:757:9:
+F29-03-BINARY-1: its pristine control must be accepted
+thread 'every_tamper_case_is_accepted_pristine_then_refused_after_one_mutation' (3563356) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:719:9:
+assertion `left == right` failed: F29-03-BINARY-1: the PRISTINE control must be ACCEPTED. A corpus whose controls are refused is passed trivially by a verifier that refuses everything, which is the whole hazard this file exists to remove. Re-examine the fixture, never the verifier.
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.47s
+error: test failed, to rerun pass `-p wcore-eval-scenarios --test supply_chain_tamper_corpus`
+
+### NC-3 — drop the SBOM class from the case table
+### expected: the class-coverage meta-assertion goes red
+--- NC-3 class dropped
+rc=101
+thread 'the_corpus_covers_every_f29_03_object_class' (3565906) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:775:5:
+assertion `left == right` failed: F29-03 names seven object classes and all seven must be represented
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.91s
+error: test failed, to rerun pass `-p wcore-eval-scenarios --test supply_chain_tamper_corpus`
+
+### NC-4 — replace one case's mutation with a change the verifier ignores
+### expected: the pair builds (the halves differ) but the REFUSAL assertion fires,
+### which proves the refusal half of every pair is live and not decorative
+--- NC-4 inert mutation
+rc=101
+thread 'every_tamper_case_is_accepted_pristine_then_refused_after_one_mutation' (3567099) panicked at crates/wcore-eval-scenarios/tests/supply_chain_tamper_corpus.rs:729:9:
+assertion `left == right` failed: F29-03-MANIFEST-2: the single mutation (the manifest schema_version raised to a version this verifier does not know) must be REFUSED
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.31s
+error: test failed, to rerun pass `-p wcore-eval-scenarios --test supply_chain_tamper_corpus`
+
+### RESTORE CHECK — the worktree must be byte-identical to the commit
+dirty_paths_under_crates=0
+### FINAL — the restored corpus must be GREEN again
+restored_rc=0
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.41s

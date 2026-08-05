@@ -1,0 +1,16 @@
+=== build the real wayland-release binary ===
+=== mint throwaway keys (trust-root-init writes seeds 0600, prints public only) ===
+=== package fake artifacts (content is irrelevant; the DIGESTS are the point) ===
+=== mint the corpus ===
+=== corpus ===
+=== SELF-CHECK: the signed control verifies through the real wayland-release too ===
+retired root refused as required: wayland-release: key is retired: release-acceptance-key
+=== drive the corpus through the SHIPPED verifier ===
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+=== anti-vacuity ===
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+=== NEGATIVE CONTROL: the drill must be able to go RED ===
+test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+negative control refused as required: 9 test(s) failed on a broken corpus
+DRILL PASSED: 10 tests executed against a CLI-minted corpus,
+captured at 2026-07-30T02:08:09Z, hetzner-dsm, source commit 2329be9b (worktree /root/wl-s2934-drill)

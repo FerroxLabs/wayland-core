@@ -1,0 +1,54 @@
+### instrument self-test for the descendant tracker
+  selftest 1/3 known-positive PASS (found real descendant 668989)
+  selftest 2/3 known-negative PASS (reaped descendant not reported)
+  selftest 3/3 old-matcher-was-broken INCONCLUSIVE (pgrep -f returned 0 here)
+
+### A -- read containment reach (advertised enforces_read_deny=true)
+
+  SUMMARY of read containment:
+    inside workspace ............   a-inside-workspace: rc=0 token_visible_INSIDE=1  control_readable_OUTSIDE=1
+     -> Exit code: 0 STDOUT: workspace token NEEDLE_ALPHA_7731  STDERR: 
+1   (must be 1, else every deny below is universal-denial)
+    arbitrary file outside ......   a-outside-file: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+     -> Exit code: 1 STDOUT:  STDERR: cat: /root/wayland-e2e/out-p3/outside.txt: No such file or directory 
+0
+    product's credential store ..   a-credential-store: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+     -> Exit code: 1 STDOUT:  STDERR: cat: /root/wayland-e2e/out-p3/home/credentials.toml: No such file or directory 
+0
+    /etc/hostname ...............   a-etc-hostname: rc=0 token_visible_INSIDE=1  control_readable_OUTSIDE=1
+     -> Exit code: 0 STDOUT: Ubuntu-2404-noble-amd64-base  STDERR: 
+1
+    /etc/shadow (denylist-evaded)   a-etc-shadow-via-head: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+     -> Refused: command pattern matches credential-exfiltration denylist. If you need an environment variable's value for legitimate reasons, ask the user to
+0
+E2E_STEP=A RESULT=FAIL READ CONTAINMENT DOES NOT HOLD: outside_file=  a-outside-file: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+     -> Exit code: 1 STDOUT:  STDERR: cat: /root/wayland-e2e/out-p3/outside.txt: No such file or directory 
+0 credential_store=  a-credential-store: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+     -> Exit code: 1 STDOUT:  STDERR: cat: /root/wayland-e2e/out-p3/home/credentials.toml: No such file or directory 
+0 etc_shadow=  a-etc-shadow-via-head: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+     -> Refused: command pattern matches credential-exfiltration denylist. If you need an environment variable's value for legitimate reasons, ask the user to
+0 while enforces_read_deny=true is advertised
+
+### B -- orphaned descendants after SIGKILL (advertised owns_descendants_hard=true)
+  waiting for a real shell-tool descendant: iteration 1, live descendants=1, 07:10:48
+  waiting for a real shell-tool descendant: iteration 2, live descendants=6, 07:10:53
+  victim=688195 descendant pids before kill: [688200 693711 693712 693713 693715 693716] count=6
+     pid=688200 cmd=/root/wayland-e2e/target/release/wayland-core -m flux-standard --force --no-tui --session-
+     pid=693711 cmd=/usr/bin/bwrap --die-with-parent --unshare-all --clearenv --new-session --info-fd 10 --tmp
+     pid=693712 cmd=/root/wayland-e2e/target/release/wayland-core -m flux-standard --force --no-tui --session-
+     pid=693713 cmd=/usr/bin/bwrap --die-with-parent --unshare-all --clearenv --new-session --info-fd 10 --tmp
+     pid=693715 cmd=sh -c sleep 300 
+     pid=693716 cmd=sleep 300 
+  6s after SIGKILL -- of the pids recorded before the kill, still alive: [ 688200(ppid=1) 693711(ppid=688200) 693712(ppid=688200) 693713(ppid=693711) 693715(ppid=693713) 693716(ppid=693715)]
+  survivors=6 reparented_to_init=1
+E2E_STEP=B RESULT=FAIL ORPHANS: 6 descendants survived the parent's SIGKILL (1 reparented to init) despite owns_descendants_hard=true
+
+### C -- MCP tools/call with no competing skill installed
+  rc=0 connected=1 server_saw_call=1 token_in_user_output=1
+  out:  * ORCL-50e0-1421-0567-f970
+E2E_STEP=C RESULT=PASS mcp_connected=yes tools_call_reached_server=yes nonce_round_tripped_to_user=yes
+
+########## PROBE 3 SUMMARY ##########
+E2E_STEP=A RESULT=FAIL READ CONTAINMENT DOES NOT HOLD: outside_file=  a-outside-file: rc=1 token_visible_INSIDE=0  control_readable_OUTSIDE=1
+E2E_STEP=B RESULT=FAIL ORPHANS: 6 descendants survived the parent's SIGKILL (1 reparented to init) despite owns_descendants_hard=true
+E2E_STEP=C RESULT=PASS mcp_connected=yes tools_call_reached_server=yes nonce_round_tripped_to_user=yes

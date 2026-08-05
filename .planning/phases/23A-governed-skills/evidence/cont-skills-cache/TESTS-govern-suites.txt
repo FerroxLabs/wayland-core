@@ -1,0 +1,41 @@
+b2ddf113681647221dc9e5bbfc7de79b1da90b54
+
+running 6 tests
+test field_matcher_selftest ... ok
+test an_empty_profile_lists_cleanly_and_exits_zero ... ok
+test rollback_of_an_unknown_id_fails_loudly ... ok
+test an_unknown_verb_is_rejected ... ok
+test revoking_an_unknown_skill_fails_loudly_rather_than_reporting_success ... ok
+test full_revoke_and_rollback_journey_through_the_real_binary ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/govern_revoke_rollback.rs (target/debug/deps/govern_revoke_rollback-d95855ca85d27806)
+
+running 15 tests
+test empty_state_reads_as_empty_rather_than_erroring ... ok
+test revoking_a_missing_directory_fails ... ok
+test rollback_of_an_unknown_id_fails_rather_than_succeeding_silently ... ok
+test a_symlink_inside_a_skill_directory_is_refused_not_followed ... ok
+test an_unrelated_skill_is_not_suppressed ... ok
+test an_unreadable_tombstone_does_not_un_suppress_the_others ... ok
+test revoke_removes_the_artifact_and_retains_every_byte ... ok
+test revocation_matches_on_signature_even_when_the_name_differs ... ok
+test revocation_matches_on_name_when_the_manifest_is_damaged_and_the_signature_is_unknown ... ok
+test rollback_refuses_to_overwrite_an_occupied_target ... ok
+test suppression_is_durable_before_the_artifact_is_removed ... ok
+test revoke_is_idempotent_across_a_crash_between_tombstone_and_removal ... ok
+test rollback_clears_the_suppression_so_the_tombstone_is_not_itself_irreversible ... ok
+test rollback_restores_the_exact_prior_state ... ok
+test the_journal_is_append_only_and_a_rollback_does_not_erase_the_revocation ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/govern_staging_discovery.rs (target/debug/deps/govern_staging_discovery-9b1d6504e3482c2e)
+
+running 2 tests
+test a_staging_tree_inside_the_skills_root_is_not_discovered_as_a_skill ... ok
+test a_failed_restore_of_a_namespaced_skill_stages_inside_the_skills_root ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

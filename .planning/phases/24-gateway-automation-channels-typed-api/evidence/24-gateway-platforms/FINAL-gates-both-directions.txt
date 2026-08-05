@@ -1,0 +1,21 @@
+=== VERIFY linux ===
+JOURNEY VERIFIED platform=linux commit=7c61079842346988f6d19d399b7d92b672dec680 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0 adapters=3/10 exercised=slack,sms,whatsapp
+linux_verify_rc=0
+=== VERIFY macos ===
+JOURNEY VERIFIED platform=macos commit=7c61079842346988f6d19d399b7d92b672dec680 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0 adapters=3/10 exercised=slack,sms,whatsapp
+macos_verify_rc=0
+=== VERIFY windows ===
+JOURNEY VERIFIED platform=windows commit=7c61079842346988f6d19d399b7d92b672dec680 steps=17 submitted=12 arrived=12 unique=12 duplicates=0 losses=0 adapters=3/10 exercised=slack,sms,whatsapp
+windows_verify_rc=0
+
+######## BIND — PASS DIRECTION (the state this gate has never been shown to reach) ########
+BOUND commit=7c61079842346988f6d19d399b7d92b672dec680 driver=13361302e6ebc32e90f2c503dcd0630e498e6211 receipts=3 platforms=linux,macos,windows adapters=3/10 exercised=slack,sms,whatsapp
+BIND_PASS_RC=0
+
+######## BIND — FAIL DIRECTION A: swap in the earlier windows receipt (different driver commit) ########
+wayland-journey: receipts disagree on the driver commit: ["13361302e6ebc32e90f2c503dcd0630e498e6211", "24143f95d54572188ab28b4a6d4217c86159eb6a"]
+BIND_FAILA_RC=1
+
+######## VERIFY — FAIL DIRECTION on REAL data: the duplicate-delivery windows receipt ########
+wayland-journey: per-adapter arrived sums to 24 but the receipt's top-level count is 12; the breakdown and the headline are describing different runs
+VERIFY_DUPRUN_RC=1

@@ -1,0 +1,1189 @@
+//! Phase 28 certification-receipt contract (F28-03 / F28-04).
+//!
+//! Deliberately a SEPARATE file from `receipt_contract.rs`. Plan 28-04 does not modify an
+//! existing test, and keeping the new rules together makes them readable as a set.
+//!
+//! Every rule below is proved in BOTH directions: a fixture that TRIPS it and a fixture that
+//! does not. A validator only ever shown valid input is untested, and a rule that only ever
+//! rejects is equally broken — this repository's own plan-gate linter shipped the disease it
+//! hunts four separate times by testing one direction only, and three of its live suites
+//! carried a zero-execution guard that was itself `#[ignore]`d.
+
+use std::collections::BTreeMap;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use ed25519_dalek::SigningKey;
+use sha2::{Digest, Sha256};
+use wcore_eval_scenarios::receipt::{
+    ArtifactBindingV2, CERT_PERMITTED_CLAIMS, CERT_RECEIPT_SCHEMA, CERT_RECEIPT_SCHEMA_VERSION,
+    CERT_SKIP_CLASSES, CandidateBinaryV2, CandidateBindingV2, CertAuthority, CertAuthorityClaimV2,
+    CertBindingsV2, CertFindingV2, CertificationBodyV2, CertificationReceiptV2,
+    CertificationVerifier, CorpusBindingV2, EnvironmentBindingV2, LogBindingV2, PlatformBindingV2,
+    PostureBindingV2, SkipPolicyV2, SkippedCellV2,
+};
+
+const KEY_ID: &str = "phase-28-certification";
+const SCOPE: &str = "phase-scoped: evidence assembly only. NOT a release trust root, NOT a seal.";
+
+fn key() -> SigningKey {
+    // Deterministic so a failure is reproducible; this is a test key and signs nothing real.
+    SigningKey::from_bytes(&[7u8; 32])
+}
+
+fn hex64(seed: u8) -> String {
+    format!("{:x}", Sha256::digest([seed]))
+}
+
+fn hex40(seed: u8) -> String {
+    hex64(seed)[..40].to_string()
+}
+
+fn claims(a: bool, b: bool, c: bool) -> BTreeMap<String, bool> {
+    let mut m = BTreeMap::new();
+    m.insert(CERT_PERMITTED_CLAIMS[0].to_string(), a);
+    m.insert(CERT_PERMITTED_CLAIMS[1].to_string(), b);
+    m.insert(CERT_PERMITTED_CLAIMS[2].to_string(), c);
+    m
+}
+
+fn finding(id: &str, sev: &str, criterion: &str, disposition: &str) -> CertFindingV2 {
+    let paper = matches!(disposition, "ACCEPTED" | "DEFERRED");
+    CertFindingV2 {
+        id: id.to_string(),
+        origin: "matrix".to_string(),
+        subject: "a subject".to_string(),
+        inherited_severity: "-".to_string(),
+        p28_severity: sev.to_string(),
+        contradicted_criterion: criterion.to_string(),
+        disposition: disposition.to_string(),
+        rationale: "a rationale".to_string(),
+        owner: if paper {
+            "an owner".into()
+        } else {
+            String::new()
+        },
+        backlog_id: if paper { "BL-1".into() } else { String::new() },
+        executable_check: if disposition == "FIXED" {
+            "a check".into()
+        } else {
+            String::new()
+        },
+        counter_evidence: if disposition == "DISPROVED" {
+            "counter evidence".into()
+        } else {
+            String::new()
+        },
+    }
+}
+
+fn bindings() -> CertBindingsV2 {
+    CertBindingsV2 {
+        candidate: vec![CandidateBindingV2 {
+            scope: "matrix".to_string(),
+            commit: hex40(1),
+            tree: hex40(2),
+            ledger_ref: "evidence/28-02/candidate.json".to_string(),
+            binaries: vec![CandidateBinaryV2 {
+                target: "x86_64-unknown-linux-gnu".to_string(),
+                sha256: hex64(3),
+                provenance: "CI release artifact".to_string(),
+            }],
+        }],
+        platform: vec![PlatformBindingV2 {
+            os_family: "linux".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            cells_total: 216,
+            cells_pass: 216,
+            cells_red: 0,
+            cells_skipped: 0,
+            critical_cells: 49,
+            evidence_ref: "evidence/28-02/results.json".to_string(),
+        }],
+        posture: vec![PostureBindingV2 {
+            name: "fail-closed-sandbox".to_string(),
+            description: "WAYLAND_SANDBOX=none is an error, not a downgrade".to_string(),
+            evidence_ref: "evidence/28-02/results.json".to_string(),
+        }],
+        fixture_corpus: vec![CorpusBindingV2 {
+            name: "e5".to_string(),
+            sha256: hex64(4),
+            item_count: 9,
+            source_ref: "crates/wcore-eval-scenarios/src/e5_cases.rs".to_string(),
+        }],
+        environment: vec![EnvironmentBindingV2 {
+            host: "hetzner-dsm".to_string(),
+            os_family: "linux".to_string(),
+            os_build: "x86_64".to_string(),
+            run_context: "ssh non-interactive".to_string(),
+            evidence_ref: "evidence/28-02/results.json".to_string(),
+        }],
+        artifacts: vec![ArtifactBindingV2 {
+            path: "evidence/28-02/results.json".to_string(),
+            sha256: hex64(5),
+            bytes: 100,
+        }],
+        logs: vec![LogBindingV2 {
+            path: "evidence/28-02/win-matrix.log".to_string(),
+            sha256: hex64(6),
+            bytes: 100,
+            produced_by: "f28-win-matrix.ps1".to_string(),
+        }],
+        skip_policy: SkipPolicyV2 {
+            classes: CERT_SKIP_CLASSES.iter().map(|c| c.to_string()).collect(),
+            skipped_cells: vec![],
+            skipped_critical_cases: 0,
+        },
+    }
+}
+
+/// The known-good fixture. Every negative case below is this, with exactly one field moved.
+fn body() -> CertificationBodyV2 {
+    CertificationBodyV2 {
+        certification_id: "f28-certification".to_string(),
+        phase: "28-native-cross-platform-certification".to_string(),
+        bindings: bindings(),
+        findings: vec![
+            finding("F-A", "HIGH", "1", "FIXED"),
+            finding("F-B", "MEDIUM", "-", "DEFERRED"),
+        ],
+        claims: claims(true, true, true),
+    }
+}
+
+fn verifier() -> CertificationVerifier {
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(KEY_ID, key().verifying_key());
+    v
+}
+
+fn code_of(body: CertificationBodyV2) -> String {
+    CertificationReceiptV2::unsigned(body)
+        .expect_err("expected this fixture to be rejected")
+        .code()
+}
+
+// ---------------------------------------------------------------------------------------
+// The direction that matters first: the KNOWN-GOOD fixture must be ACCEPTED.
+// A validator that rejects everything passes every rejection test and is worthless.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn known_good_receipt_is_accepted_and_verifies_under_a_trusted_phase_key() {
+    let receipt = CertificationReceiptV2::unsigned(body())
+        .expect("the known-good fixture must be accepted")
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    assert_eq!(receipt.schema, CERT_RECEIPT_SCHEMA);
+    assert_eq!(receipt.schema_version, CERT_RECEIPT_SCHEMA_VERSION);
+
+    let verified = verifier().verify(&receipt).expect("must verify");
+    assert_eq!(verified.authority, CertAuthority::PhaseScopedSigned);
+    assert!(verified.acceptance_gate_passed);
+}
+
+#[test]
+fn authority_is_derived_from_an_externally_configured_key_not_from_the_body() {
+    // The v1 property this schema must not lose. A receipt is not authoritative because it
+    // says so; it is authoritative because a verifier YOU configured trusts the signing key.
+    let receipt = CertificationReceiptV2::unsigned(body())
+        .unwrap()
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+
+    let stranger = CertificationVerifier::new();
+    assert_eq!(
+        stranger.verify(&receipt).unwrap_err().code(),
+        "F28R-KEY",
+        "a verifier with no configured key must not derive authority from the receipt"
+    );
+
+    let mut wrong = CertificationVerifier::new();
+    wrong.trust_phase_key(KEY_ID, SigningKey::from_bytes(&[9u8; 32]).verifying_key());
+    assert_eq!(wrong.verify(&receipt).unwrap_err().code(), "F28R-KEY");
+
+    assert_eq!(
+        verifier().verify(&receipt).unwrap().authority,
+        CertAuthority::PhaseScopedSigned
+    );
+}
+
+#[test]
+fn an_unsigned_receipt_is_structurally_valid_but_carries_no_authority() {
+    let receipt = CertificationReceiptV2::unsigned(body()).unwrap();
+    assert!(matches!(receipt.authority, CertAuthorityClaimV2::Unsigned));
+    let verified = verifier().verify(&receipt).unwrap();
+    assert_eq!(verified.authority, CertAuthority::UnverifiedProvenance);
+}
+
+// ---------------------------------------------------------------------------------------
+// The eight F28-03 bindings, each with its OWN failure code.
+// ---------------------------------------------------------------------------------------
+
+/// One binding removed from an otherwise-valid fixture. Named rather than `#[allow]`ed —
+/// suppressing a lint to reach a gate is exactly what this phase is not permitted to do.
+type BindingMutation = Box<dyn Fn(&mut CertBindingsV2)>;
+
+#[test]
+fn each_missing_binding_is_rejected_with_its_own_code() {
+    let cases: Vec<(&str, BindingMutation)> = vec![
+        (
+            "F28R-B01",
+            Box::new(|b: &mut CertBindingsV2| b.candidate.clear()),
+        ),
+        (
+            "F28R-B02",
+            Box::new(|b: &mut CertBindingsV2| b.platform.clear()),
+        ),
+        (
+            "F28R-B03",
+            Box::new(|b: &mut CertBindingsV2| b.posture.clear()),
+        ),
+        (
+            "F28R-B04",
+            Box::new(|b: &mut CertBindingsV2| b.fixture_corpus.clear()),
+        ),
+        (
+            "F28R-B05",
+            Box::new(|b: &mut CertBindingsV2| b.environment.clear()),
+        ),
+        (
+            "F28R-B06",
+            Box::new(|b: &mut CertBindingsV2| b.artifacts.clear()),
+        ),
+        (
+            "F28R-B07",
+            Box::new(|b: &mut CertBindingsV2| b.logs.clear()),
+        ),
+        (
+            "F28R-B08",
+            Box::new(|b: &mut CertBindingsV2| b.skip_policy.classes.clear()),
+        ),
+    ];
+    assert_eq!(cases.len(), 8, "F28-03 names exactly eight bindings");
+    for (expected, mutate) in cases {
+        let mut b = body();
+        mutate(&mut b.bindings);
+        assert_eq!(
+            code_of(b),
+            expected,
+            "removing the binding behind {expected} must be rejected with that exact code"
+        );
+    }
+    // And the negative direction: with all eight present, the same fixture is accepted.
+    assert!(CertificationReceiptV2::unsigned(body()).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------
+// Skip policy — the four classes, and no fifth.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_skip_class_outside_the_four_is_rejected_and_each_of_the_four_is_accepted() {
+    let mut b = body();
+    b.bindings.skip_policy.classes.push("harness-bound".into());
+    assert_eq!(code_of(b), "F28R-SKIPCLASS");
+
+    let mut b = body();
+    b.bindings.skip_policy.skipped_cells.push(SkippedCellV2 {
+        cell_id: "cell-x".into(),
+        class: "convenient".into(),
+        criticality: "normal".into(),
+        required_evidence: "none".into(),
+    });
+    assert_eq!(code_of(b), "F28R-SKIPCLASS");
+
+    for class in CERT_SKIP_CLASSES {
+        let mut b = body();
+        b.bindings.skip_policy.skipped_cells.push(SkippedCellV2 {
+            cell_id: format!("cell-{class}"),
+            class: class.to_string(),
+            criticality: "normal".into(),
+            required_evidence: "the class's required evidence".into(),
+        });
+        assert!(
+            CertificationReceiptV2::unsigned(b).is_ok(),
+            "{class} is one of the four contract classes and must be accepted"
+        );
+    }
+}
+
+#[test]
+fn a_skipped_cell_with_no_required_evidence_is_rejected() {
+    let mut b = body();
+    b.bindings.skip_policy.skipped_cells.push(SkippedCellV2 {
+        cell_id: "cell-y".into(),
+        class: "platform-inapplicability".into(),
+        criticality: "normal".into(),
+        required_evidence: "   ".into(),
+    });
+    assert_eq!(code_of(b), "F28R-SKIPEVID");
+}
+
+#[test]
+fn a_skipped_critical_case_is_rejected_two_ways_because_criterion_1_forbids_one() {
+    let mut b = body();
+    b.bindings.skip_policy.skipped_cells.push(SkippedCellV2 {
+        cell_id: "sandbox-probes-windows-acp".into(),
+        class: "observation-blocked".into(),
+        criticality: "critical".into(),
+        required_evidence: "a directional control".into(),
+    });
+    assert_eq!(code_of(b), "F28R-SKIPCRIT");
+
+    // The declared count is checked independently of the cell list, so a receipt cannot
+    // declare a nonzero count while listing no cells.
+    let mut b = body();
+    b.bindings.skip_policy.skipped_critical_cases = 1;
+    assert_eq!(code_of(b), "F28R-SKIPCRIT");
+
+    // Negative: a skipped NON-critical case is legal.
+    let mut b = body();
+    b.bindings.skip_policy.skipped_cells.push(SkippedCellV2 {
+        cell_id: "long-paths-linux-unc".into(),
+        class: "platform-inapplicability".into(),
+        criticality: "normal".into(),
+        required_evidence: "UNC paths do not exist on linux".into(),
+    });
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------
+// The finding ledger — Criterion 4 as the panel implemented it, plus A1 and A2.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn an_unrecognised_disposition_is_rejected_and_all_five_recognised_ones_are_accepted() {
+    for unrecognised in ["", "PENDING", "WONTFIX", "RESOLVED"] {
+        let mut b = body();
+        b.findings[1].disposition = unrecognised.to_string();
+        b.claims = claims(false, true, true);
+        assert_eq!(
+            code_of(b),
+            "F28R-NODISP",
+            "{unrecognised:?} is not a recognised disposition"
+        );
+    }
+    for terminal in ["FIXED", "DISPROVED", "ACCEPTED", "DEFERRED"] {
+        let mut b = body();
+        b.findings[1] = finding("F-B", "MEDIUM", "-", terminal);
+        assert!(
+            CertificationReceiptV2::unsigned(b).is_ok(),
+            "{terminal} is terminal and must be accepted at MEDIUM with no contradiction"
+        );
+    }
+}
+
+#[test]
+fn an_open_finding_is_recordable_and_forces_the_receipt_to_report_its_gate_as_not_passed() {
+    // The honest outcome must be SAYABLE. An executor holding a HIGH it can neither fix nor
+    // disprove must be able to produce a valid receipt that says so, or the schema itself
+    // becomes pressure to launder the finding.
+    let mut b = body();
+    b.findings[1] = finding("F-B", "HIGH", "-", "OPEN");
+    b.claims = claims(false, true, false);
+    let receipt = CertificationReceiptV2::unsigned(b)
+        .expect("a receipt reporting an open HIGH must be valid")
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    let verified = verifier().verify(&receipt).unwrap();
+    assert_eq!(verified.authority, CertAuthority::PhaseScopedSigned);
+    assert!(
+        !verified.acceptance_gate_passed,
+        "an open HIGH must leave the acceptance gate not passed"
+    );
+
+    // And it may NOT claim otherwise: both affected claims are recomputed against the ledger.
+    let mut b = body();
+    b.findings[1] = finding("F-B", "HIGH", "-", "OPEN");
+    b.claims = claims(true, true, false);
+    assert_eq!(code_of(b), "F28R-CLAIMFALSE");
+
+    let mut b = body();
+    b.findings[1] = finding("F-B", "HIGH", "-", "OPEN");
+    b.claims = claims(false, true, true);
+    assert_eq!(code_of(b), "F28R-CLAIMFALSE");
+
+    // An open MEDIUM does not touch the CRITICAL/HIGH claim, only the disposition claim.
+    let mut b = body();
+    b.findings[1] = finding("F-B", "MEDIUM", "-", "OPEN");
+    b.claims = claims(false, true, true);
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+#[test]
+fn accept_and_defer_are_unreachable_at_critical_and_high() {
+    for severity in ["CRITICAL", "HIGH"] {
+        for disposition in ["ACCEPTED", "DEFERRED"] {
+            let mut b = body();
+            b.findings[1] = finding("F-B", severity, "-", disposition);
+            assert_eq!(
+                code_of(b),
+                "F28R-PAPERSEV",
+                "{disposition} must not be reachable at {severity}"
+            );
+        }
+        // Negative: the two dispositions that ARE available at those severities.
+        for disposition in ["FIXED", "DISPROVED"] {
+            let mut b = body();
+            b.findings[1] = finding("F-B", severity, "-", disposition);
+            assert!(CertificationReceiptV2::unsigned(b).is_ok());
+        }
+    }
+}
+
+#[test]
+fn a2_closes_the_paper_path_on_a_contradicted_criterion_at_any_recorded_severity() {
+    // The load-bearing case: A2 must fire on the CONTRADICTED CRITERION even when the row's
+    // severity has been mis-scored downward, so a bad score cannot reopen the accept path.
+    for severity in ["MEDIUM", "LOW"] {
+        for disposition in ["ACCEPTED", "DEFERRED"] {
+            let mut b = body();
+            b.findings[1] = finding("F-B", severity, "2", disposition);
+            assert_eq!(
+                code_of(b),
+                "F28R-PAPERA2",
+                "A2 must fire on a contradicted criterion at {severity} recorded severity"
+            );
+        }
+    }
+    // Negative: the same row with NO contradicted criterion is legal at MEDIUM.
+    let mut b = body();
+    b.findings[1] = finding("F-B", "MEDIUM", "-", "ACCEPTED");
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+#[test]
+fn an_empty_contradicted_criterion_is_rejected_so_an_omission_cannot_read_as_a_none() {
+    let mut b = body();
+    b.findings[1].contradicted_criterion = String::new();
+    assert_eq!(code_of(b), "F28R-FIELD");
+
+    let mut b = body();
+    b.findings[1].contradicted_criterion = "5".to_string();
+    assert_eq!(code_of(b), "F28R-FIELD");
+
+    let mut b = body();
+    b.findings[1].contradicted_criterion = "-".to_string();
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+#[test]
+fn a1_requires_the_inherited_severity_as_provenance_and_the_p28_score_as_the_operative_value() {
+    let mut b = body();
+    b.findings[1].inherited_severity = String::new();
+    assert_eq!(code_of(b), "F28R-PROV");
+
+    let mut b = body();
+    b.findings[1].p28_severity = "known-red/non-gating".to_string();
+    assert_eq!(
+        code_of(b),
+        "F28R-SEV",
+        "an inherited label is not a Phase 28 severity"
+    );
+
+    // Negative: provenance recorded, operative score valid.
+    let mut b = body();
+    b.findings[1].inherited_severity = "known-red/non-gating".to_string();
+    b.findings[1].p28_severity = "MEDIUM".to_string();
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+#[test]
+fn the_paper_path_requires_an_owner_and_a_backlog_id_and_the_repair_path_requires_evidence() {
+    let mut b = body();
+    b.findings[1] = finding("F-B", "LOW", "-", "ACCEPTED");
+    b.findings[1].owner = String::new();
+    assert_eq!(code_of(b), "F28R-PAPEREVID");
+
+    let mut b = body();
+    b.findings[1] = finding("F-B", "LOW", "-", "DEFERRED");
+    b.findings[1].backlog_id = String::new();
+    assert_eq!(code_of(b), "F28R-PAPEREVID");
+
+    let mut b = body();
+    b.findings[0].executable_check = String::new();
+    assert_eq!(
+        code_of(b),
+        "F28R-REPAIREVID",
+        "a repair is proved by a check, not asserted"
+    );
+
+    let mut b = body();
+    b.findings[1] = finding("F-B", "HIGH", "-", "DISPROVED");
+    b.findings[1].counter_evidence = String::new();
+    assert_eq!(code_of(b), "F28R-REPAIREVID");
+}
+
+// ---------------------------------------------------------------------------------------
+// AMENDMENT A3 — the one place an over-claim would be signed and consumed downstream.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_receipt_asserting_zero_known_defects_or_zero_findings_is_rejected_under_a3() {
+    for over_claim in [
+        "zero_known_defects",
+        "zero_findings",
+        "no_open_defects",
+        "release_approved",
+    ] {
+        let mut b = body();
+        b.claims.insert(over_claim.to_string(), true);
+        assert_eq!(
+            code_of(b),
+            "F28R-OVERCLAIM",
+            "{over_claim:?} is outside the three claims A3 permits"
+        );
+    }
+    // Even asserting it FALSE is an over-claim: the vocabulary itself is the problem, because
+    // a reader who sees the key infers the certification reasoned about it.
+    let mut b = body();
+    b.claims.insert("zero_known_defects".to_string(), false);
+    assert_eq!(code_of(b), "F28R-OVERCLAIM");
+}
+
+#[test]
+fn all_three_permitted_claims_must_be_stated_and_exactly_three_exist() {
+    assert_eq!(CERT_PERMITTED_CLAIMS.len(), 3);
+    for claim in CERT_PERMITTED_CLAIMS {
+        let mut b = body();
+        b.claims.remove(claim);
+        assert_eq!(
+            code_of(b),
+            "F28R-CLAIMMISS",
+            "{claim} must be stated, true or false"
+        );
+    }
+    // Negative: all three stated FALSE is a perfectly legal receipt. A certification that
+    // reports its own gate as not passed is the honest outcome, not a rejected one.
+    let mut b = body();
+    b.claims = claims(false, false, false);
+    b.findings[1] = finding("F-B", "HIGH", "2", "FIXED");
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+#[test]
+fn a_claim_asserted_true_is_recomputed_against_the_ledger_and_rejected_if_it_disagrees() {
+    // This is the in-receipt half of "recompute, do not copy". The independent Python
+    // verifier recomputes the same three from the RAW evidence, and BOTH must agree for the
+    // receipt to stand.
+
+    // zero_undispositioned_findings, contradicted by an OPEN row.
+    let mut b = body();
+    b.findings[1].disposition = "OPEN".to_string();
+    b.findings[1].backlog_id = String::new();
+    b.findings[1].owner = String::new();
+    b.claims = claims(true, true, true);
+    assert_eq!(code_of(b), "F28R-CLAIMFALSE");
+
+    // zero_unresolved_critical_or_high, contradicted by an OPEN HIGH.
+    let mut b = body();
+    b.findings[1] = finding("F-B", "HIGH", "-", "OPEN");
+    b.claims = claims(false, true, true);
+    assert_eq!(code_of(b), "F28R-CLAIMFALSE");
+
+    // zero_skipped_critical_cases is enforced even harder: the skip rule rejects the cell
+    // outright, so the claim can never be signed over a contradicting ledger by any route.
+    let mut b = body();
+    b.bindings.skip_policy.skipped_critical_cases = 3;
+    assert_eq!(code_of(b), "F28R-SKIPCRIT");
+
+    // Negative direction: a ledger that genuinely supports all three is accepted.
+    assert!(CertificationReceiptV2::unsigned(body()).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------
+// Tamper detection — a verifier nobody has seen say no is a verifier nobody should believe.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn flipping_any_byte_of_the_body_breaks_verification() {
+    let receipt = CertificationReceiptV2::unsigned(body())
+        .unwrap()
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    let json = receipt.to_json().unwrap();
+    let v = verifier();
+    assert!(v.parse_and_verify(json.as_bytes()).is_ok());
+
+    // 1. Body mutated, digest left stale -> digest mismatch.
+    let tampered = json.replace("f28-certification", "f28-certificatioX");
+    assert_ne!(tampered, json);
+    assert_eq!(
+        v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
+        "F28R-DIGEST"
+    );
+
+    // 2. Body AND digest both recomputed by an attacker, but the signature is over the old
+    //    digest -> signature failure. This is the case a naive "does the digest match?"
+    //    check would wave through.
+    let mut forged = receipt.clone();
+    forged.body.certification_id = "forged".to_string();
+    forged.body_sha256 = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&forged.body).unwrap())
+    );
+    assert_eq!(v.verify(&forged).unwrap_err().code(), "F28R-SIG");
+}
+
+#[test]
+fn a_signature_over_a_different_body_does_not_verify() {
+    let a = CertificationReceiptV2::unsigned(body())
+        .unwrap()
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    let mut other = body();
+    other.certification_id = "a-different-certification".to_string();
+    let mut b = CertificationReceiptV2::unsigned(other).unwrap();
+    b.authority = a.authority.clone();
+    assert_eq!(verifier().verify(&b).unwrap_err().code(), "F28R-SIG");
+}
+
+#[test]
+fn a_recorded_public_half_that_disagrees_with_its_fingerprint_is_rejected() {
+    let receipt = CertificationReceiptV2::unsigned(body())
+        .unwrap()
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    let CertAuthorityClaimV2::PhaseScoped {
+        key_id,
+        public_key_base64,
+        signature_base64,
+        scope,
+        ..
+    } = receipt.authority.clone()
+    else {
+        panic!("expected a phase-scoped claim");
+    };
+    let mut broken = receipt.clone();
+    broken.authority = CertAuthorityClaimV2::PhaseScoped {
+        key_id,
+        public_key_base64,
+        fingerprint_sha256: format!("{:x}", Sha256::digest([0u8])),
+        signature_base64,
+        scope,
+    };
+    assert_eq!(
+        verifier().verify(&broken).unwrap_err().code(),
+        "F28R-FINGERPRINT"
+    );
+}
+
+#[test]
+fn the_recorded_public_half_is_really_the_key_that_is_checked() {
+    // Guards against a receipt that records key A, is trusted as key B, and is signed by B —
+    // a reader taking the recorded half at face value would be verifying the wrong thing.
+    let receipt = CertificationReceiptV2::unsigned(body())
+        .unwrap()
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    let stranger = SigningKey::from_bytes(&[3u8; 32]).verifying_key();
+    let CertAuthorityClaimV2::PhaseScoped {
+        key_id,
+        signature_base64,
+        scope,
+        ..
+    } = receipt.authority.clone()
+    else {
+        panic!("expected a phase-scoped claim");
+    };
+    let mut swapped = receipt.clone();
+    swapped.authority = CertAuthorityClaimV2::PhaseScoped {
+        key_id,
+        public_key_base64: BASE64.encode(stranger.to_bytes()),
+        fingerprint_sha256: format!("{:x}", Sha256::digest(stranger.as_bytes())),
+        signature_base64,
+        scope,
+    };
+    assert_eq!(verifier().verify(&swapped).unwrap_err().code(), "F28R-KEY");
+}
+
+// ---------------------------------------------------------------------------------------
+// Fail-closed schema versioning.
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn an_unknown_schema_or_version_fails_closed_rather_than_ignoring_the_new_sections() {
+    let mut r = CertificationReceiptV2::unsigned(body()).unwrap();
+    r.schema_version = CERT_RECEIPT_SCHEMA_VERSION + 1;
+    assert_eq!(verifier().verify(&r).unwrap_err().code(), "F28R-SCHEMA");
+
+    let mut r = CertificationReceiptV2::unsigned(body()).unwrap();
+    r.schema = "wayland.eval.receipt".to_string();
+    assert_eq!(verifier().verify(&r).unwrap_err().code(), "F28R-SCHEMA");
+}
+
+#[test]
+fn an_unknown_field_anywhere_in_the_body_is_rejected_rather_than_silently_dropped() {
+    let receipt = CertificationReceiptV2::unsigned(body())
+        .unwrap()
+        .sign_phase_scoped(KEY_ID, &key(), SCOPE);
+    let json = receipt.to_json().unwrap();
+    let with_extra = json.replacen(
+        "\"certification_id\":",
+        "\"future_section\": {\"x\": 1},\n    \"certification_id\":",
+        1,
+    );
+    assert_ne!(with_extra, json);
+    assert_eq!(
+        verifier()
+            .parse_and_verify(with_extra.as_bytes())
+            .unwrap_err()
+            .code(),
+        "F28R-JSON",
+        "a reader must fail closed on a section it does not understand"
+    );
+}
+
+#[test]
+fn platform_cell_counts_must_sum_so_a_red_cannot_be_dropped_from_the_arithmetic() {
+    let mut b = body();
+    b.bindings.platform[0].cells_red = 24;
+    assert_eq!(
+        code_of(b),
+        "F28R-FIELD",
+        "24 reds with the total unchanged must not balance"
+    );
+
+    let mut b = body();
+    b.bindings.platform[0].cells_pass = 192;
+    b.bindings.platform[0].cells_red = 24;
+    assert!(CertificationReceiptV2::unsigned(b).is_ok());
+}
+
+// ---------------------------------------------------------------------------------------
+// THE REAL ARTIFACT. Everything above proves the schema behaves; this proves the schema was
+// actually applied to the receipt this phase produced.
+//
+// Without this, the Rust verifier and the produced receipt could drift apart forever while
+// both halves stayed green — the Rust side passing its fixtures, the Python side passing its
+// recomputation, and nobody checking that the Rust verifier can read the real file at all.
+// ---------------------------------------------------------------------------------------
+
+fn phase_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.planning/phases/28-native-cross-platform-certification")
+}
+
+/// Locate the produced receipt, and FAIL rather than skip when it ought to exist.
+///
+/// The first version of this helper early-returned into a green whenever the file was
+/// absent. That is flavour B — the exact self-passing shape this phase inventoried across 16
+/// binaries and then found again in three "zero-execution guards" that were themselves
+/// `#[ignore]`d. A checkout carrying no `.planning/` at all (a consumer crate, a sparse
+/// clone) legitimately has nothing to check; a checkout that DOES carry the phase directory
+/// and does not carry its receipt is a real failure, and now says so instead of passing.
+fn real_receipt_path() -> Option<std::path::PathBuf> {
+    let dir = phase_dir();
+    if !dir.is_dir() {
+        return None;
+    }
+    let path = dir.join("28-04-CERTIFICATION-RECEIPT.json");
+    assert!(
+        path.is_file(),
+        "the Phase 28 directory exists at {} but carries no certification receipt; run \
+         `python3 .planning/scripts/f28-build-receipt.py`. Skipping here would let the Rust \
+         verifier and the produced artifact drift apart while both halves stayed green.",
+        dir.display()
+    );
+    Some(path)
+}
+
+#[test]
+fn the_produced_phase_28_receipt_parses_and_verifies_under_the_rust_verifier() {
+    let Some(path) = real_receipt_path() else {
+        eprintln!("no .planning phase directory in this checkout; nothing to check");
+        return;
+    };
+    let bytes = std::fs::read(&path).expect("read the produced receipt");
+
+    // Trust the key the receipt itself records. That is legitimate ONLY because this test
+    // asserts integrity — that the body has not been altered since it was signed — and NOT
+    // authority. A caller deriving authority this way would be trusting the artifact to
+    // vouch for itself, which is the tautology the whole schema exists to prevent, so the
+    // preceding tests prove a stranger verifier rejects this same receipt with F28R-KEY.
+    let receipt: CertificationReceiptV2 =
+        serde_json::from_slice(&bytes).expect("the produced receipt must parse under v2");
+    let CertAuthorityClaimV2::PhaseScoped {
+        ref key_id,
+        ref public_key_base64,
+        ref scope,
+        ..
+    } = receipt.authority
+    else {
+        panic!("the produced receipt must carry a phase-scoped signature");
+    };
+    let raw = BASE64
+        .decode(public_key_base64)
+        .expect("recorded public half must be base64");
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(
+        &<[u8; 32]>::try_from(raw.as_slice()).expect("32-byte ed25519 public key"),
+    )
+    .expect("recorded public half must be a valid ed25519 key");
+
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(key_id.clone(), verifying);
+    let (parsed, verified) = v
+        .parse_and_verify(&bytes)
+        .expect("the produced receipt must verify under the Rust verifier");
+
+    assert_eq!(verified.authority, CertAuthority::PhaseScopedSigned);
+    assert_eq!(parsed.schema, CERT_RECEIPT_SCHEMA);
+    assert_eq!(parsed.schema_version, CERT_RECEIPT_SCHEMA_VERSION);
+
+    // The scope must say what it is NOT, inside the artifact, for a reader who never sees
+    // the verdict.
+    let lower = scope.to_lowercase();
+    for phrase in ["not a release trust root", "not a seal"] {
+        assert!(
+            lower.contains(phrase),
+            "the phase-scoped signature must state {phrase:?} in its own scope text"
+        );
+    }
+
+    // The A3 claim set must be exactly the three, on the real artifact.
+    let mut keys: Vec<&str> = parsed.body.claims.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut expected: Vec<&str> = CERT_PERMITTED_CLAIMS.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        keys, expected,
+        "the real receipt asserts exactly the three A3 claims"
+    );
+
+    // And the acceptance gate the receipt reports must agree with its own ledger, computed
+    // here rather than read out of the claims.
+    let unresolved: Vec<&str> = parsed
+        .body
+        .findings
+        .iter()
+        .filter(|f| {
+            ["CRITICAL", "HIGH"].contains(&f.p28_severity.as_str())
+                && !["FIXED", "DISPROVED"].contains(&f.disposition.as_str())
+        })
+        .map(|f| f.id.as_str())
+        .collect();
+    assert_eq!(
+        parsed.body.claims["zero_unresolved_critical_or_high"],
+        unresolved.is_empty(),
+        "the receipt's own claim disagrees with its own ledger; unresolved = {unresolved:?}"
+    );
+    assert_eq!(
+        verified.acceptance_gate_passed,
+        parsed.body.claims.values().all(|v| *v),
+        "the verifier's gate verdict must follow the three claims and nothing else"
+    );
+
+    eprintln!(
+        "verified {} findings, gate_passed={}, unresolved CRITICAL/HIGH = {:?}",
+        parsed.body.findings.len(),
+        verified.acceptance_gate_passed,
+        unresolved
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// SUPERSESSION. A signed receipt is never edited, so when the ledger moves under one a new
+// receipt is issued beside it. Both must remain verifiable, and the NEW one must name the
+// OLD one in a way a machine can check — otherwise "supersedes" is prose and a later reader
+// has to take it on trust.
+// ---------------------------------------------------------------------------------------
+
+/// Every superseding receipt on disk, in issue order.
+///
+/// This used to name `SUPERSEDING-001` as a constant, which meant `SUPERSEDING-002` was
+/// covered by nothing the moment it was issued — a supersession chain that grows past the
+/// length its test hardcoded is untested from its second link onward. Discovering the chain
+/// makes the test cover whatever exists, including links not yet written.
+fn superseding_receipt_paths() -> Vec<std::path::PathBuf> {
+    let dir = phase_dir();
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with("28-04-CERTIFICATION-RECEIPT-SUPERSEDING-") && n.ends_with(".json")
+            })
+        })
+        .collect();
+    // Deliberately NOT an assert on non-emptiness. Unlike the original receipt, a supersession
+    // exists only once something has been superseded; a checkout that legitimately has none
+    // must not fail here. The tests below FAIL rather than skip once a file is present, which
+    // is the half that matters.
+    out.sort();
+    out
+}
+
+/// The receipt a given superseding receipt claims to supersede, resolved FROM THE RECEIPT
+/// rather than assumed to be the original. `-002` supersedes `-001`, not the original, and a
+/// test that assumed otherwise would compare the wrong pair and still look green.
+fn superseded_path_for(
+    receipt: &CertificationReceiptV2,
+    own: &std::path::Path,
+) -> std::path::PathBuf {
+    let own_name = own.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let bound = receipt
+        .body
+        .bindings
+        .artifacts
+        .iter()
+        .find(|a| {
+            let name = a.path.rsplit('/').next().unwrap_or(&a.path);
+            name.starts_with("28-04-CERTIFICATION-RECEIPT") && name != own_name
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{own_name} must bind, as an artifact, the receipt it supersedes; \
+                 without that the supersession is prose"
+            )
+        });
+    phase_dir().join(&bound.path)
+}
+
+#[test]
+fn the_superseding_receipt_verifies_and_names_what_it_supersedes() {
+    let paths = superseding_receipt_paths();
+    if paths.is_empty() || real_receipt_path().is_none() {
+        eprintln!("no superseding receipt in this checkout; nothing to check");
+        return;
+    }
+    eprintln!("supersession chain: {} link(s)", paths.len());
+    for p in &paths {
+        check_one_supersession(p);
+    }
+}
+
+fn check_one_supersession(new_path: &std::path::Path) {
+    let new_bytes = std::fs::read(new_path).expect("read the superseding receipt");
+    let probe: CertificationReceiptV2 =
+        serde_json::from_slice(&new_bytes).expect("the superseding receipt must parse under v2");
+    let old_path = superseded_path_for(&probe, new_path);
+    let old_bytes = std::fs::read(&old_path).expect("read the superseded receipt");
+
+    let new_receipt: CertificationReceiptV2 =
+        serde_json::from_slice(&new_bytes).expect("the superseding receipt must parse under v2");
+    let old_receipt: CertificationReceiptV2 =
+        serde_json::from_slice(&old_bytes).expect("the superseded receipt must parse under v2");
+
+    let CertAuthorityClaimV2::PhaseScoped {
+        key_id: ref new_key_id,
+        public_key_base64: ref new_pk,
+        scope: ref new_scope,
+        ..
+    } = new_receipt.authority
+    else {
+        panic!("the superseding receipt must carry a phase-scoped signature");
+    };
+    let CertAuthorityClaimV2::PhaseScoped {
+        key_id: ref old_key_id,
+        public_key_base64: ref old_pk,
+        ..
+    } = old_receipt.authority
+    else {
+        panic!("the superseded receipt must carry a phase-scoped signature");
+    };
+
+    // A supersession issued under the SAME key would be indistinguishable from a rewrite of
+    // the original, which is the exact thing supersession exists to avoid.
+    assert_ne!(
+        new_key_id, old_key_id,
+        "the superseding receipt must carry its own key id"
+    );
+    assert_ne!(
+        new_pk, old_pk,
+        "the superseding receipt must carry its own key, not re-use the superseded one"
+    );
+    assert_ne!(
+        new_receipt.body_sha256, old_receipt.body_sha256,
+        "a supersession that digests identically to what it supersedes is a no-op"
+    );
+
+    // It must VERIFY, under its own recorded key. Integrity, not authority — the stranger and
+    // wrong-key tests above prove possession of the artifact confers nothing.
+    let raw = BASE64
+        .decode(new_pk)
+        .expect("recorded public half must be base64");
+    let verifying = ed25519_dalek::VerifyingKey::from_bytes(
+        &<[u8; 32]>::try_from(raw.as_slice()).expect("32-byte ed25519 public key"),
+    )
+    .expect("recorded public half must be a valid ed25519 key");
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(new_key_id.clone(), verifying);
+    let (parsed, verified) = v
+        .parse_and_verify(&new_bytes)
+        .expect("the superseding receipt must verify under the Rust verifier");
+    assert_eq!(verified.authority, CertAuthority::PhaseScopedSigned);
+
+    // The scope must still disclaim release authority. A superseding receipt is the artifact
+    // most likely to be mistaken for a re-seal, so this matters more here, not less.
+    let lower = new_scope.to_lowercase();
+    for phrase in ["not a release trust root", "not a seal"] {
+        assert!(
+            lower.contains(phrase),
+            "the superseding receipt's scope must state {phrase:?}"
+        );
+    }
+
+    // THE SUPERSESSION ITSELF, MACHINE-CHECKED. The posture statement must name the exact
+    // body digest and key id of the receipt on disk that it claims to supersede. Comparing
+    // against `old_receipt` rather than against a constant is what makes this a check instead
+    // of a restatement: if either file is swapped, this stops holding.
+    let posture = parsed
+        .body
+        .bindings
+        .posture
+        .iter()
+        .find(|p| p.name.contains("supersede"))
+        .expect("a superseding receipt must carry a posture statement recording the supersession");
+    assert!(
+        posture.description.contains(&old_receipt.body_sha256),
+        "the supersession must name the body_sha256 it supersedes ({}); it said: {}",
+        old_receipt.body_sha256,
+        posture.description
+    );
+    assert!(
+        posture.description.contains(old_key_id.as_str()),
+        "the supersession must name the key_id it supersedes ({old_key_id})"
+    );
+
+    // And it must bind the superseded receipt's BYTES, so editing that file is detectable.
+    let old_name = old_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("superseded receipt has a name");
+    let bound = parsed
+        .body
+        .bindings
+        .artifacts
+        .iter()
+        .find(|a| a.path.ends_with(old_name))
+        .expect("the superseding receipt must bind the superseded receipt as an artifact");
+    let actual = format!("{:x}", Sha256::digest(&old_bytes));
+    assert_eq!(
+        bound.sha256, actual,
+        "the bound digest of the superseded receipt disagrees with the file on disk"
+    );
+    assert_eq!(bound.bytes as usize, old_bytes.len());
+
+    // Amendment A3 is about what a receipt may CLAIM; it does not license silence about known
+    // defects. Findings opened after the ledger closed live in posture, and a superseding
+    // receipt whose claims are all true must still carry that disclosure.
+    if parsed.body.claims.values().all(|v| *v) {
+        assert!(
+            parsed
+                .body
+                .bindings
+                .posture
+                .iter()
+                .any(|p| p.name.contains("known-open-findings")),
+            "a receipt asserting all three claims true must disclose known findings that are \
+             outside its ledger, or three trues read as 'zero known defects'"
+        );
+    }
+
+    eprintln!(
+        "superseding receipt verified: {} ({} findings, gate_passed={}) supersedes {} ({}) under {}",
+        new_path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+        parsed.body.findings.len(),
+        verified.acceptance_gate_passed,
+        old_name,
+        old_receipt.body_sha256,
+        old_key_id
+    );
+}
+
+#[test]
+fn the_superseding_receipt_rejects_a_single_flipped_byte() {
+    let paths = superseding_receipt_paths();
+    if paths.is_empty() {
+        return;
+    }
+    for path in &paths {
+        let text = std::fs::read_to_string(path).expect("read the superseding receipt");
+        let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
+        let CertAuthorityClaimV2::PhaseScoped {
+            ref key_id,
+            ref public_key_base64,
+            ..
+        } = receipt.authority
+        else {
+            panic!("expected a phase-scoped claim");
+        };
+        let raw = BASE64.decode(public_key_base64).unwrap();
+        let verifying =
+            ed25519_dalek::VerifyingKey::from_bytes(&<[u8; 32]>::try_from(raw.as_slice()).unwrap())
+                .unwrap();
+        let mut v = CertificationVerifier::new();
+        v.trust_phase_key(key_id.clone(), verifying);
+
+        // Flip one byte INSIDE the supersession statement — the field this artifact exists to
+        // carry. A digest that covered the receipt but not its supersession clause would let
+        // the superseded identity be rewritten under a valid signature.
+        //
+        // The target key id is READ OUT OF THE SUPERSEDED RECEIPT rather than hardcoded. The
+        // hardcoded form (`phase-28-certification-2026-07-28`) is the ORIGINAL's key id, and
+        // it appears nowhere in `-002`, whose posture names `-001`'s key. `replacen` would
+        // have found nothing, `tampered == text`, and the assertion would fire on the
+        // "must actually mutate" line — a confusing failure standing in for no coverage.
+        let old_path = superseded_path_for(&receipt, path);
+        let old_bytes = std::fs::read(&old_path).expect("read the superseded receipt");
+        let old: CertificationReceiptV2 = serde_json::from_slice(&old_bytes).unwrap();
+        let CertAuthorityClaimV2::PhaseScoped {
+            key_id: ref old_key_id,
+            ..
+        } = old.authority
+        else {
+            panic!("the superseded receipt must carry a phase-scoped claim");
+        };
+        let mutated_key_id = format!("{old_key_id}-TAMPERED");
+        let tampered = text.replacen(old_key_id.as_str(), &mutated_key_id, 1);
+        assert_ne!(
+            tampered,
+            text,
+            "the mutation must actually mutate {}: the superseded key id {old_key_id} was not \
+             found in its body, so the supersession clause is not what this test thinks it is",
+            path.display()
+        );
+        assert_eq!(
+            v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
+            "F28R-DIGEST",
+            "rewriting the superseded key id in {} must break verification",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn the_produced_receipt_rejects_a_single_flipped_byte() {
+    let Some(path) = real_receipt_path() else {
+        return;
+    };
+    let text = std::fs::read_to_string(&path).expect("read the produced receipt");
+    let receipt: CertificationReceiptV2 = serde_json::from_str(&text).unwrap();
+    let CertAuthorityClaimV2::PhaseScoped {
+        ref key_id,
+        ref public_key_base64,
+        ..
+    } = receipt.authority
+    else {
+        panic!("expected a phase-scoped claim");
+    };
+    let raw = BASE64.decode(public_key_base64).unwrap();
+    let verifying =
+        ed25519_dalek::VerifyingKey::from_bytes(&<[u8; 32]>::try_from(raw.as_slice()).unwrap())
+            .unwrap();
+    let mut v = CertificationVerifier::new();
+    v.trust_phase_key(key_id.clone(), verifying);
+
+    // Flip one byte of the body: a single character inside the phase name.
+    let tampered = text.replacen(
+        "\"phase\": \"28-native-cross-platform-certification\"",
+        "\"phase\": \"28-native-cross-platform-certificatioN\"",
+        1,
+    );
+    assert_ne!(tampered, text, "the mutation must actually mutate");
+    assert_eq!(
+        v.parse_and_verify(tampered.as_bytes()).unwrap_err().code(),
+        "F28R-DIGEST",
+        "one flipped byte in the real receipt must break verification"
+    );
+}

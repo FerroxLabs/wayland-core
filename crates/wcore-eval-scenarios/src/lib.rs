@@ -36,27 +36,90 @@
 //! and prevents future `todo!()` rot in T4/T5/T6+ surfaces.
 #![deny(clippy::todo)]
 
+pub mod artifact;
 pub mod assertions;
+mod candidate_stdout;
+mod capability_honesty;
+pub mod catalog;
+mod child_env;
+/// Phase 30 claims register, checker and renderer (F30-04): a claim carrying no resolving
+/// evidence pointer, no bounds, or a scope its evidence does not contain cannot be rendered,
+/// and the published documents are produced only by this module's renderer.
+pub mod claims;
 pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
 pub mod cross_session;
+/// Phase 30 per-tool dialect compilation (SR-30-3): one canonical SEMANTIC script compiled into
+/// each harness's own tool dialect, so a 0/30 means the harness failed the task rather than failed
+/// to parse it. Identity-blind by type; selection is a filter, not a ranking.
+pub mod dialect;
+/// Phase 30 dialect discovery: capture a harness's own declared `tools` array off the wire, in a
+/// SEPARATE instrument, because the shared meter retains digests rather than bodies and is a hard
+/// scope fence.
+pub mod dialect_discovery;
+/// Phase 30 dialect EXECUTION seam (SR-30-3, second half): verify a compiled translation, bind it
+/// to the harness whose discovery manifest declared its corpus, and lower it to fixture steps.
+///
+/// Before this module a `TranslationV1` was written by `dialect compile` and read back only by
+/// `dialect verify`; no code path carried one into a trial, so protocol v2 could meet all four of
+/// its execution preconditions and still replay v1's `write_file` script.
+pub mod dialect_exec;
+/// Phase 28 E5 black-box probe definitions (F28-01), one per dimension plus one per
+/// mandatory cell. Executed by `scripts/f28-native-matrix.mjs`.
+pub mod e5_cases;
+/// Phase 28 E5 certification matrix generator (F28-01).
+pub mod e5_matrix;
+/// Phase 28 E5 soak definitions, VOID rules and verdicts (F28-02). Executed by
+/// `scripts/f28-native-soak.mjs`.
+pub mod e5_soak;
+mod egress_evidence;
+mod filesystem_evidence;
+pub mod fixtures;
+/// Phase 30 frontier comparative trial harness (F30-03): bounded measurements with no
+/// unbounded representation, comparative results that cannot be built without every peer,
+/// and a verdict rule that refuses a direction on an interval containing zero.
+pub mod frontier_trials;
 pub mod hook_scenarios;
+pub mod journey;
 pub mod judge;
 pub mod mcp_scenarios;
 pub mod personas;
+mod process_tree;
 pub mod protocol_scenarios;
 pub mod providers;
 #[cfg(unix)]
 pub mod pty_capture;
 pub mod qa;
+pub mod receipt;
+pub mod receipt_policy;
+// Made public for Phase 24 Success Criterion 5: the journey driver promises
+// exact-secret redaction before any capture reaches a planning document, and a
+// mitigation reachable by nothing is not a mitigation. `wayland-journey redact`
+// is the entry point; see `journey.rs`.
+pub mod redaction;
+/// Phase 29 signed release manifest + role-scoped trust root (F29-01/F29-04).
+pub mod release_integrity;
+/// Phase 29 closed four-state release ledger (F29-04).
+pub mod release_states;
 pub mod report;
+/// Phase 30 reserved authority (F30-05): the nine actions reserved to Sean as a CLOSED enum,
+/// a principal enum with exactly one member that is not the agent, per-action signature
+/// domains, and a bundled all-zeros trust root that fails closed exactly as
+/// `IndexVerifier::bundled()` does — so frontier positioning is structurally unreachable here.
+pub mod reserved_authority;
 pub mod runner;
+/// Phase 29 deterministic CycloneDX SBOM transform (F29-01, closes F29-CEN-05).
+pub mod sbom;
 pub mod scenario;
+/// Phase 30 scorecard types (F30-01, F30-02): the closed maturity and criterion
+/// verdict enums, the seven-truth surface row, and the asymmetric verifier.
+pub mod scorecard;
 pub mod stderr_capture;
 pub mod tempenv;
 pub mod trace;
 pub mod usability;
+mod workspace_evidence;
 
 // Public API re-exports — the surface external callers (scenario tests,
 // the wayland-eval binary, future T6-T8 dispatch agents) import.
@@ -67,9 +130,12 @@ pub use judge::{Judge, Verdict};
 pub use providers::{ProviderChoice, ProviderConfig, ProviderId};
 pub use report::Report;
 pub use runner::run;
-pub use scenario::{Category, Scenario, Turn, TurnCommand};
+pub use scenario::{
+    ApprovalPolicy, Category, Platform, PlatformDisposition, Scenario, Turn, TurnCommand,
+    UnsupportedPlatform,
+};
 pub use trace::{ToolTrace, TraceEntry};
 
 // The runner produces a `ScenarioResult` — promoted to the crate root
 // so callers don't need to know which sub-module owns the shape.
-pub use runner::{Failure, ScenarioResult, TurnResult};
+pub use runner::{ExecutionEvidence, Failure, ScenarioResult, TurnResult};

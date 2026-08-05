@@ -1,0 +1,88 @@
+=== git.rs is_concurrency_safe ctx ===
+  116|             "properties": {
+  117|                 "op": { "type": "string" },
+  118|                 "path": { "type": "string" },
+  119|                 "staged": { "type": "boolean" },
+  120|                 "limit": { "type": "integer" },
+  121|                 "line": { "type": "integer" },
+  122|                 "paths": { "type": "array", "items": { "type": "string" } },
+  123|                 "message": { "type": "string" },
+  124|                 "name": { "type": "string" },
+  125|                 "create": { "type": "boolean" },
+  126|                 "cwd": { "type": "string" }
+  127|             },
+  128|             "required": ["op"]
+  129|         })
+  130|     }
+  131| 
+  132|     fn is_concurrency_safe(&self, input: &Value) -> bool {
+  133|         matches!(
+  134|             input.get("op").and_then(|v| v.as_str()),
+  135|             Some("status")
+  136|                 | Some("diff")
+  137|                 | Some("log")
+  138|                 | Some("blame")
+  139|                 | Some("branch_current")
+  140|                 | Some("branch_list")
+  141|         )
+  142|     }
+  143| 
+  144|     async fn execute(&self, input: Value) -> ToolResult {
+  145|         let op = match input.get("op").and_then(|v| v.as_str()) {
+  146|             Some(s) => s,
+  147|             None => {
+  148|                 return ToolResult {
+  149|                     content: "Git: missing 'op' field".to_string(),
+  150|                     is_error: true,
+  151|                 };
+  152|             }
+  153|         };
+  154|         let cwd = input.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
+  155|         match op {
+  156|             "status" => run_git(cwd, &["status", "--porcelain=v1", "--branch"]).await,
+  157|             "diff" => {
+  158|                 let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+  159|                 let staged = input
+  160|                     .get("staged")
+  161|                     .and_then(|v| v.as_bool())
+  162|                     .unwrap_or(false);
+  163|                 // Build argv: `git diff [--staged] [-- <path>]`. Each
+  164|                 // element is a separate process arg; the `--` sentinel
+  165|                 // makes `git` treat any subsequent values as paths even
+  166|                 // if they begin with `-`.
+  167|                 let mut args: Vec<&str> = vec!["diff"];
+  168|                 if staged {
+  169|                     args.push("--staged");
+  170|                 }
+  171|                 if !path.is_empty() {
+  172|                     args.push("--");
+  173|                     args.push(path);
+  174|                 }
+  175|                 run_git(cwd, &args).await
+=== git.rs struct/new ===
+  68: pub struct GitTool;
+
+=== ContentBlock::ToolUse definition ===
+crates/wcore-types/src/message.rs
+enum ContentBlock {
+    /// Plain text content
+    #[serde(rename = "text")]
+    Text { text: String },
+
+    /// A tool invocation from the assistant
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: ToolUseId,
+        name: String,
+        input: Value,
+        /// Opaque provider-specific metadata (e.g. Gemini thought_signature).
+        /// Round-tripped verbatim so the provider can include it in follow-up requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra: Option<Value>,
+    },
+
+    /// Result of a tool execution, sent back as user message
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: ToolUseId,
+        conten

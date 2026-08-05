@@ -1,0 +1,96 @@
+{
+  "schema": "wayland.execution-backend-receipt",
+  "schema_version": 1,
+  "body_sha256": "37328ce90493b4b946dfd72bcd7c47a3cf435a54997b276a7ee48b6d0839584e",
+  "body": {
+    "protocol_version": 1,
+    "backend": {
+      "backend_id": "ssh",
+      "instance_id": "37f314c11f1b4dd48e9189ccb1d0b8a2",
+      "version": "0.12.25",
+      "key_id": "63b113fe020b9fcb7810b3c0310d33ff1f6694343887c1413aaf1aeb95bc8b13"
+    },
+    "transport": {
+      "kind": "ssh",
+      "endpoint": "f25-ssh-target"
+    },
+    "task": {
+      "task_id": "f25-reference",
+      "workspace_sha256": "9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4",
+      "input_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+      "resources": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "wall_time_ms": 60000,
+        "output_bytes": 1048576
+      }
+    },
+    "limits": {
+      "cpu_millis": 30000,
+      "memory_bytes": 268435456,
+      "wall_time_ms": 60000,
+      "output_bytes": 1048576
+    },
+    "events_sha256": "5eef830031771cc103b8b59172f29c6a8434d16818ed15cb7d8b12f60c8df88c",
+    "events": [
+      {
+        "sequence": 1,
+        "event": {
+          "kind": "task_accepted",
+          "task_id": "f25-reference",
+          "backend_id": "ssh",
+          "workspace_sha256": "9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4",
+          "input_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6"
+        }
+      },
+      {
+        "sequence": 2,
+        "event": {
+          "kind": "output",
+          "channel": "stdout",
+          "text_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+          "bytes": 32
+        }
+      },
+      {
+        "sequence": 3,
+        "event": {
+          "kind": "artifact_published",
+          "name": "stdout.bin",
+          "sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+          "bytes": 32
+        }
+      },
+      {
+        "sequence": 4,
+        "event": {
+          "kind": "succeeded",
+          "artifact_sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6"
+        }
+      }
+    ],
+    "artifact": {
+      "name": "stdout.bin",
+      "sha256": "55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6",
+      "bytes": 32
+    },
+    "terminal": {
+      "kind": "success"
+    },
+    "timing": {
+      "started_unix_ms": 1785083678731,
+      "finished_unix_ms": 1785083678937,
+      "wall_ms": 206
+    },
+    "hibernation": {
+      "kind": "not_applicable"
+    },
+    "secrets_exposed": [],
+    "egress_decision": "allow-all-default-no-policy-installed"
+  },
+  "attestation": {
+    "algorithm": "ed25519",
+    "key_id": "63b113fe020b9fcb7810b3c0310d33ff1f6694343887c1413aaf1aeb95bc8b13",
+    "signature_base64": "7y/VOdCbujAoViIB+Q7s/cov3kX3XBhiR86pKBMC+J4NNmYDp823akCOzJy5Huj0+6LqoOIMBRTcEHGIJk1IBQ=="
+  }
+}

@@ -1,0 +1,11 @@
+﻿F28H2 MUTATION2 m2 started=2026-07-29T00:33:08.3169278+07:00
+APPLIED=m2
+TARGET_SHA256=8a72b30e7153275a7a0c5377146e254e97b56815057692166f53a0ca43669619
+MUT_COMPILED=True
+MUT2=dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever;result=ok;passed=1;failed=0
+MUT2=live_owner_unreconcilable_lease_is_honoured_not_reclaimed;result=FAILED;passed=0;failed=1
+MUT2=quarantine_directory_does_not_become_a_second_wedge;result=ok;passed=1;failed=0
+MUT2=reclamation_reports_grants_it_could_not_revoke;result=ok;passed=1;failed=0
+RESTORED_SHA256=bc6bdac1ff3f59459f05aaa81883f53b68480bacb73bae7696af6e493dc50de9
+RESTORED_DIRTY=0
+finished=2026-07-29T00:33:13.2840260+07:00

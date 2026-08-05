@@ -1,0 +1,25 @@
+WLRC=0
+OUT_LINES=48
+INFO {"type": "info", "msg_id": "m1", "message": "Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0."}
+PROVIDER_ATTEMPT {"type": "provider_attempt"}
+INFO {"type": "info", "msg_id": "m1", "message": "Tool call: ToolSearch"}
+TOOL_RUNNING {"type": "tool_running", "msg_id": "m1", "call_id": "toolu_01GgC2NvNAxsTWTYCGNnFVc9", "tool_name": "ToolSearch"}
+TOOL_RESULT {"type": "tool_result", "msg_id": "m1", "call_id": "toolu_01GgC2NvNAxsTWTYCGNnFVc9", "tool_name": "ToolSearch", "status": "success", "output": "[\n  {\n    \"description\": \"Generate an image on a paid arm (Phase 27 deterministic fixture). Always fails the way an uncleared credential fails.\",\n    \"name\": \"media_generate_locked\",\n    \"parameters\": {\n      \"properties\": {\n        \"prompt\": {\n          \"description\": \"The image prompt\",\n          \"type\": \"string\"\n        }\n      },\n      \"required\": [\n        \"prompt\"\n      ],\n      \"type\": \"object\"\n    }\n  }\n]", "output_type": "text"}
+INFO {"type": "info", "msg_id": "m1", "message": "[ToolSearch success] [\n  {\n    \"description\": \"Generate an image on a paid arm (Phase 27 deterministic fixture). Always fails the way an uncleared credential fails.\",\n    \"name\": \"media_generate_locked\",\n    \"parameters\": {\n      \"properties\": {\n        \"prompt\": {\n          \"description\": \"The image prompt\",\n          \"type\": \"string\"\n        }\n      },\n      \"required\": [\n        \"prompt\"\n      ],\n      \"type\": \"object\"\n    }\n  }\n]"}
+INFO {"type": "info", "msg_id": "m1", "message": "Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0."}
+PROVIDER_ATTEMPT {"type": "provider_attempt"}
+INFO {"type": "info", "msg_id": "m1", "message": "Tool call: media_generate_locked"}
+TOOL_RUNNING {"type": "tool_running", "msg_id": "m1", "call_id": "toolu_01E85EpJWCfYMkXavWuaYL25", "tool_name": "media_generate_locked"}
+TOOL_RESULT {"type": "tool_result", "msg_id": "m1", "call_id": "toolu_01E85EpJWCfYMkXavWuaYL25", "tool_name": "media_generate_locked", "status": "error", "output": "premium_locked: image generation on this arm is a paid-only capability. No credential is cleared for it. Set F27_FIXTURE_PAID_KEY to a cleared key. No image was produced and no charge was made.", "output_type": "text"}
+INFO {"type": "info", "msg_id": "m1", "message": "[media_generate_locked error] premium_locked: image generation on this arm is a paid-only capability. No credential is cleared for it. Set F27_FIXTURE_PAID_KEY to a cleared key. No image was produced and no charge was made."}
+INFO {"type": "info", "msg_id": "m1", "message": "Pricing unavailable for flux-router/flux-fast; the call remains bounded by the token envelope and cost is unpriced, not $0."}
+PROVIDER_ATTEMPT {"type": "provider_attempt"}
+ERROR {"type": "error", "error": {"code": "engine_error", "message": "Provider returned an empty response \u2014 no content and no tool calls. The endpoint or model may be incompatible (verify it speaks the OpenAI chat-completions streaming format and that the model name is valid).", "retryable": false}}
+SESSION_COST {"type": "session_cost", "session_id": "a12e5a38bee7", "total_cost_usd": 0.0, "per_turn": [{"turn": 0, "model": "flux-fast", "provider": "flux-router", "cost_usd": 0.0, "priced": false}, {"turn": 1, "model": "flux-fast", "provider": "flux-router", "cost_usd": 0.0, "priced": false}, {"turn": 2, "model": "flux-fast", "provider": "flux-router", "cost_usd": 0.0, "priced": false}]}
+STREAM_END {"type": "stream_end", "msg_id": "m1", "finish_reason": "stop", "usage": {"input_tokens": 12100, "output_tokens": 126, "active_window_percent": 3}, "usage_delta": {"input_tokens": 12100, "output_tokens": 126}, "agent_run_id": "agent-run-f979ba6c-9cbc-4687-a0c5-d2b1a4248a63"}
+--- fixture log ---
+2026-07-28T23:53:12.294Z method=initialize
+2026-07-28T23:53:12.295Z method=notifications/initialized
+2026-07-28T23:53:12.295Z method=tools/list
+2026-07-28T23:53:16.065Z method=tools/call
+WLDONE_DIAG2

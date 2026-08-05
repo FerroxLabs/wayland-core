@@ -1,0 +1,61 @@
+HOST=Ubuntu-2404-noble-amd64-base COMMIT=5bbb0fbc DATE=2026-07-29T13:07:28Z
+
+  stderr ───
+    BASE_PRIVACY_CONTROL_REPORTED=ok
+
+    thread 'privacy_at_base_reports_success_and_changes_nothing' (3276240) panicked at crates/wcore-agent/tests/c3_redproof.rs:282:5:
+    EXPECTED FAILURE AT BASE: privacy scope reported success but the value is still sent
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.460s] (3/5) wcore-agent::c3_redproof retention_at_base_reports_success_and_changes_nothing
+  stdout ───
+
+    running 1 test
+    test retention_at_base_reports_success_and_changes_nothing ... FAILED
+
+    failures:
+
+    failures:
+        retention_at_base_reports_success_and_changes_nothing
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.44s
+
+  stderr ───
+    F24_CHANNEL_LEASE=observer owner_pid=3276235 holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+    BASE_RETENTION_CONTROL_REPORTED=ok
+    F24_CHANNEL_LEASE=observer owner_pid=3276235 holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+
+    thread 'retention_at_base_reports_success_and_changes_nothing' (3276239) panicked at crates/wcore-agent/tests/c3_redproof.rs:323:5:
+    EXPECTED FAILURE AT BASE: retention reported success but the expired value is still sent
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.461s] (4/5) wcore-agent::c3_redproof forget_at_base_leaves_the_value_in_the_outbound_body
+  stdout ───
+
+    running 1 test
+    test forget_at_base_leaves_the_value_in_the_outbound_body ... FAILED
+
+    failures:
+
+    failures:
+        forget_at_base_leaves_the_value_in_the_outbound_body
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.44s
+
+  stderr ───
+    F24_CHANNEL_LEASE=observer owner_pid=unknown holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+    BASE_FORGET_OUTCOME=Some("memory item not found: partition=episodic tier=project id=367a69b3-6ff2-480d-94d7-e996c80dce3a")
+    F24_CHANNEL_LEASE=observer owner_pid=3276235 holder=session: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+
+    thread 'forget_at_base_leaves_the_value_in_the_outbound_body' (3276237) panicked at crates/wcore-agent/tests/c3_redproof.rs:245:5:
+    EXPECTED FAILURE AT BASE: the forgotten value is still in the outbound body
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.584s] (5/5) wcore-agent::c3_redproof the_probe_can_fail
+────────────
+     Summary [   0.585s] 5 tests run: 1 passed, 4 failed, 0 skipped
+        FAIL [   0.035s] (1/5) wcore-agent::c3_redproof provenance_at_base_says_nothing_about_the_facts_in_the_prompt
+        FAIL [   0.449s] (2/5) wcore-agent::c3_redproof privacy_at_base_reports_success_and_changes_nothing
+        FAIL [   0.460s] (3/5) wcore-agent::c3_redproof retention_at_base_reports_success_and_changes_nothing
+        FAIL [   0.461s] (4/5) wcore-agent::c3_redproof forget_at_base_leaves_the_value_in_the_outbound_body
+error: test run failed

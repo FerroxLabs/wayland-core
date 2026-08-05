@@ -1,0 +1,22 @@
+• This is a decision panel question. The user wants a verdict. Let me think.
+
+  The contract: imported executable content must be inert, promotable only by explicit operator action that content cannot perform. Judged on six things:
+
+  1. Counts balance: 13+541+0=554. Yes.
+  2. Promotion at 540 usable: PROMOTE-COST 1 and 256 both invocations=1, bounded. Yes — set promotion in one invocation, collision resolved not fatal.
+  3. Not over-broad: CLASSIFY-DATA-QUARANTINED: 0 — data items imported without ceremony. Yes.
+  4. Not under-broad: CLASSIFY-EXEC-UNCONTAINED: 0. Yes.
+  5. Positive control fired: yes, re-run at commit.
+  6. Ceilings not raised: CEILING-REFUSES-REALISTIC: yes, constants unchanged.
+
+  The ceiling refusing 29 of 541 is a finding but the constraint says raising the ceiling is forbidden and a refusing ceiling is "a finding with a severity, not a limit to widen." Refusals are named, counted, quarantined — none dropped silently. So containment still holds; the refused items are reported and can be handled (re-run? presumably re-import after promoting/trimming). The contract stands.
+
+  The ergonomics amendment option: is promotion usable at real scale? Yes — one invocation for 256 items. The earlier linear cost was fixed. So contract-accept.
+
+  Potential concern: ceiling refusing 29 items — but they remain quarantined, named, counted; containment holds. The constraint explicitly frames this as acceptable.
+
+  So verdict: contract-accept.
+
+  Format: exactly one line PANEL-VERDICT, one line PANEL-BASIS, then up to 250 words.
+
+To resume this session: kimi -r session_7a9a94a3-6bb7-4bbb-8653-3180e5ae51b6

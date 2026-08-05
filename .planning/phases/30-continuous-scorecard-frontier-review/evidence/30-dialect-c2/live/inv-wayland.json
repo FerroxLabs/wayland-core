@@ -1,0 +1,11 @@
+{
+  "tool": "wayland",
+  "program": "/root/wayland-30c2/target/debug/wayland-core",
+  "args": ["--yolo","--provider","openai","--model","fixture-chat-v1",
+           "Create a file named TRIAL-ARTIFACT.txt containing the text frontier-trial-oracle-v1"],
+  "base_url_env": "BASE_URL",
+  "base_url_suffix": "",
+  "extra_env": {"API_KEY":"wayland-frontier-trial-not-a-secret",
+                "WAYLAND_VAULT_PASSPHRASE":"frontier-trial-not-a-secret"},
+  "workspace_seed_files": {".config/wayland-core/config.toml":"[credentials]\nbackend = \"encrypted-file\"\n"}
+}

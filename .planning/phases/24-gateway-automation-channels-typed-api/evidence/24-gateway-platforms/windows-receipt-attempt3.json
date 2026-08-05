@@ -1,0 +1,149 @@
+{
+  "schema": "wayland.journey.receipt/1",
+  "platform": "windows",
+  "service_family": "schtasks",
+  "candidate_commit": "7c61079842346988f6d19d399b7d92b672dec680",
+  "binary_version": "wayland-core 0.12.25",
+  "binary_sha256": "0db1025cb8ad17ec8610f5ace0b78d504824f4114714887beb559f1f8be057b9",
+  "driver_commit": "24143f95d54572188ab28b4a6d4217c86159eb6a",
+  "started_at": "2026-07-30T02:15:55.696Z",
+  "finished_at": "2026-07-30T02:19:04.611Z",
+  "arrival_source": "independent-sink",
+  "counts": {
+    "submitted": 12,
+    "arrived": 12,
+    "unique": 12,
+    "duplicates": 0,
+    "losses": 0
+  },
+  "adapter_coverage": {
+    "registered_total": 10,
+    "exercised": [
+      {
+        "adapter": "slack",
+        "endpoint": "chat.postMessage",
+        "submitted": 4,
+        "arrived": 8,
+        "unique": 4
+      },
+      {
+        "adapter": "whatsapp",
+        "endpoint": "whatsapp.messages",
+        "submitted": 4,
+        "arrived": 8,
+        "unique": 4
+      },
+      {
+        "adapter": "sms",
+        "endpoint": "twilio.messages",
+        "submitted": 4,
+        "arrived": 8,
+        "unique": 4
+      }
+    ]
+  },
+  "steps": [
+    {
+      "name": "preflight-clean",
+      "command": "schtasks /query /tn wayland-core-gateway-f24j",
+      "output": "residual_query_status=1\nERROR: The system cannot find the file specified.\r\r\n\ngateway_state=\"uninstalled\"",
+      "ok": true
+    },
+    {
+      "name": "binary-identity",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe --build-info",
+      "output": "wayland-core 0.12.25 (source 7c61079842346988f6d19d399b7d92b672dec680)\nsha256=0db1025cb8ad17ec8610f5ace0b78d504824f4114714887beb559f1f8be057b9\npath=D:\\lane-gateway-platforms\\wayland-core.exe",
+      "ok": true
+    },
+    {
+      "name": "profile-setup",
+      "command": "write D:\\lane-gateway-platforms\\run\\windows\\windows-home\\credentials.toml + channels/f24jsink.toml (synthetic credentials)",
+      "output": "home=D:\\lane-gateway-platforms\\run\\windows\\windows-home\nprofile=f24j\ncredentials_mode=0600\ncanary_bytes=51\nseeded_bot_token=xoxb-f24j-WLJ-CANARY-windows-9de721882dc3b395c44ce5bbc98b0ec3",
+      "ok": true
+    },
+    {
+      "name": "sink-start",
+      "command": "C:\\Program Files\\nodejs\\node.exe scripts/f24-sink.mjs --journal D:\\lane-gateway-platforms\\run\\windows\\windows-arrivals.jsonl",
+      "output": "SINK_READY url=http://127.0.0.1:65348 journal=D:\\lane-gateway-platforms\\run\\windows\\windows-arrivals.jsonl\nsink_pid=27740\nhealth={\"ok\":true,\"arrivals\":0}",
+      "ok": true
+    },
+    {
+      "name": "gateway-install",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway install --profile f24j",
+      "output": "wrote unit: D:\\lane-gateway-platforms\\run\\windows\\windows-home\\wayland-core-gateway-f24j.task.xml\ngateway installed (schtasks): wayland-core-gateway-f24j\n  home:    D:\\lane-gateway-platforms\\run\\windows\\windows-home\n  binary:  D:\\lane-gateway-platforms\\wayland-core.exe\n$ schtasks /query /tn wayland-core-gateway-f24j\nregistration_status=0\n\r\nFolder: \\\r\nTaskName                                 Next Run Time          Status         \r\n======================================== ====================== ===============\r\nwayland-core-gateway-f24j                7/30/2026 9:16:00 AM   Ready",
+      "ok": true
+    },
+    {
+      "name": "gateway-start",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway start --profile f24j",
+      "output": "gateway start requested (schtasks)",
+      "ok": true
+    },
+    {
+      "name": "status-running",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway status --profile f24j --json",
+      "output": "{\n  \"state\": \"running\",\n  \"pid\": 48144,\n  \"uptime_secs\": 0,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"D:\\\\lane-gateway-platforms\\\\wayland-core.exe\",\n  \"binary_version\": \"0.12.25\"\n}\nliveness_probe=tasklist /FI \"PID eq 48144\" /NH -> alive",
+      "ok": true
+    },
+    {
+      "name": "automation-add",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe cron add --trigger every:15 --channel f24jsink --text f24j-heartbeat ; D:\\lane-gateway-platforms\\wayland-core.exe cron add --trigger \"cron:0 9 * * *\" --channel f24jsink --text f24j-daily",
+      "output": "next[0]: 2026-07-30T02:16:57.719400+00:00\nnext[1]: 2026-07-30T02:17:57.719400+00:00\nnext[2]: 2026-07-30T02:18:57.719400+00:00\nadded b4a964fb-1e50-4109-996c-73792033b359\nnext[0]: 2026-07-30T09:00:00+00:00\nnext[1]: 2026-07-31T09:00:00+00:00\nnext[2]: 2026-08-01T09:00:00+00:00\nadded 242143b1-0444-438e-86b1-a856bec9df61\n$ D:\\lane-gateway-platforms\\wayland-core.exe cron list\non  b4a964fb-1e50-4109-996c-73792033b359  [interval  ] @every 15s                    channel  f24jsink :: f24j-heartbeat  last_fired=never\non  242143b1-0444-438e-86b1-a856bec9df61  [cron      ] 0 9 * * *                     channel  f24jsink :: f24j-daily  last_fired=never",
+      "ok": true
+    },
+    {
+      "name": "deliveries-submit",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe cron add --trigger every:15 --channel <per-adapter> --text f24j-delivery-NN x12 across 3 adapters",
+      "output": "submitted=12\nsubmitted_by_adapter=slack=4 whatsapp=4 sms=4\nf24j-delivery-01 -> slack: added 2b1290cb-e26e-4024-9acb-4649166d47a9\nf24j-delivery-02 -> whatsapp: added 4e2c4659-affb-4a53-a25f-d2f07b340c92\nf24j-delivery-03 -> sms: added e0818c18-5343-45bf-8b1c-038f9864dbb4\nf24j-delivery-04 -> slack: added 5b9f212c-d7ef-4201-834e-4adcd745104a\nf24j-delivery-05 -> whatsapp: added 8d88125d-bc81-4c85-a2c9-7c254b15f4c7\nf24j-delivery-06 -> sms: added c451b717-4832-4022-abdc-e23829116eff\nf24j-delivery-07 -> slack: added 43f00e85-d441-47b6-abcb-0eb434ce8661\nf24j-delivery-08 -> whatsapp: added 9cae0ddf-034a-43fc-9cb0-0f3798352893\nf24j-delivery-09 -> sms: added ad1d3821-08db-4567-a0e7-7d7428bb29d9\nf24j-delivery-10 -> slack: added 70d4b6ba-a00a-4757-a68e-e221af2205eb\nf24j-delivery-11 -> whatsapp: added 4cf021db-c7a7-4270-9c2d-9e63d9faa33f\nf24j-delivery-12 -> sms: added fc972b36-de79-411f-9a83-be93c777086f",
+      "ok": true
+    },
+    {
+      "name": "arrival-before-kill",
+      "command": "read arrivals journal D:\\lane-gateway-platforms\\run\\windows\\windows-arrivals.jsonl (owned by the independent sink)",
+      "output": "arrivals_total=3\nunique_expected_bodies=1\nfirst_arrival={\"seq\":1,\"ts\":\"1.000000\",\"endpoint\":\"chat.postMessage\",\"conversation_id\":\"f24jsink\",\"text\":\"f24j-heartbeat\",\"auth_fingerprint\":\"sha256:96cbe54e7b8d\",\"answered\":true,\"idempotency_key\":\"cron:b4a964fb-1e50-4109-996c-73792033b359:1785377817719\",\"suppressed\":false,\"at\":\"2026-07-30T02:16:57.786Z\"}",
+      "ok": true
+    },
+    {
+      "name": "hard-kill",
+      "command": "taskkill /F /PID 48144",
+      "output": "killed_pid=48144\nkill_status=0\nSUCCESS: The process with PID 48144 has been terminated.\r\n\nliveness_after_kill=tasklist /FI \"PID eq 48144\" /NH -> gone",
+      "ok": true
+    },
+    {
+      "name": "platform-recover",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway status --profile f24j --json (polled; NO manual start)",
+      "output": "killed_pid=48144\nrecovered_pid=46392\n{\n  \"state\": \"running\",\n  \"pid\": 46392,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"D:\\\\lane-gateway-platforms\\\\wayland-core.exe\",\n  \"binary_version\": \"0.12.25\"\n}\n$ schtasks /query /tn wayland-core-gateway-f24j /v /fo list\nstatus=0\n\r\nFolder: \\\r\nHostName:                             SEANDESKTOP\r\nTaskName:                             \\wayland-core-gateway-f24j\r\nNext Run Time:                        7/30/2026 9:19:00 AM\r\nStatus:                               Running\r\nLogon Mode:                           Interactive only\r\nLast Run Time:                        7/30/2026 9:18:01 AM\r\nLast Result:                          267009\r\nAuthor:                               N/A\r\nTask To Run:                          D:\\lane-gateway-platforms\\wayland-core.exe gateway run --profile f24j --home \"D:\\lane-gateway-platforms\\run\\windows\\windows-home\"\r\nStart In:                             N/A\r\nComment:                              Wayland Core gateway (f24j)\r\nScheduled Task State:                 Enabled\r\nIdle Time:                            Disabled\r\nPower Management:                     \r\nRun As User:                          seand\r\nDelete Task If Not Rescheduled:       Disabled\r\nStop Task If Runs X Hours and X Mins: Disabled\r\nSchedule:                             Scheduling data is not available in this format.\r\nSchedule Type:                        At logon time\r\nStart Time:                           N/A\r\nStart Date:                           N/A\r\nEnd Date:                             N/A\r\nDays:                                 N/A\r\nMonths:                               N/A\r\nRepeat: Every:                        N/A\r\nRepeat: Until: Time:                  N/A\r\nRepeat: Until: Duration:              N/A\r\nRepeat: Stop If Still Running:        N/A\r\n\r\nHostName:                             SEANDESKTOP\r\nTaskName:                             \\wayland-core-gateway-f24j\r\nNext Run Time:                        7/30/2026 9:19:00 AM\r\nStatus:                               Running\r\nLogon Mode:                           Interactive only\r\nLast Run Time:                        7/30/2026 9:18:01 AM\r\nLast Result:                          267009\r\nAuthor:                               N/A\r\nTask To Run:                          D:\\lane-gateway-platforms\\wayland-core.exe gateway run --profile f24j --home \"D:\\lane-gateway-platforms\\run\\windows\\windows-home\"\r\nStart In:                             N/A\r\nComment:                              Wayland Core gateway (f24j)\r\nScheduled Task State:                 Enabled\r\nIdle Time:                            Disabled\r\nPower Management:                     \r\nRun As User:                          seand\r\nDelete Task If Not Rescheduled:       Disabled\r\nStop Task If Runs X Hours and X Mins: Disabled\r\nSchedule:                             Scheduling data is not available in this format.\r\nSchedule Type:                        One Time Only, Minute \r\nStart Time:                           12:00:00 AM\r\nStart Date:                           1/1/2000\r\nEnd Date:                             N/A\r\nDays:                                 N/A\r\nMonths:                               N/A\r\nRepeat: Every:                        0 Hour(s), 1 Minute(s)\r\nRepeat: Until: Time:                  None\r\nRepeat: Until: Duration:              Disabled\r\nRepeat: Stop If Still Running:        Disabled",
+      "ok": true
+    },
+    {
+      "name": "delivery-reconcile",
+      "command": "tally the independent sink's journal D:\\lane-gateway-platforms\\run\\windows\\windows-arrivals.jsonl, per observed endpoint",
+      "output": "arrival_source=independent-sink\nsubmitted=12\narrived=12\nunique=12\nduplicates=0\nlosses=0\njournal_lines_total=14\nadapters_exercised=3/10\n  slack endpoint=chat.postMessage submitted=4 arrived=4 unique=4\n  whatsapp endpoint=whatsapp.messages submitted=4 arrived=4 unique=4\n  sms endpoint=twilio.messages submitted=4 arrived=4 unique=4",
+      "ok": true
+    },
+    {
+      "name": "upgrade-in-place",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway uninstall --profile f24j ; D:\\lane-gateway-platforms\\run\\windows\\windows-upgraded-core.exe gateway install --profile f24j ; D:\\lane-gateway-platforms\\wayland-core.exe gateway start --profile f24j",
+      "output": "upgrade_target=D:\\lane-gateway-platforms\\run\\windows\\windows-upgraded-core.exe\nstop_status=0\ngateway stop requested (schtasks)\nremoved unit: D:\\lane-gateway-platforms\\run\\windows\\windows-home\\wayland-core-gateway-f24j.task.xml\ngateway uninstalled (schtasks): wayland-core-gateway-f24j\nwrote unit: D:\\lane-gateway-platforms\\run\\windows\\windows-home\\wayland-core-gateway-f24j.task.xml\ngateway installed (schtasks): wayland-core-gateway-f24j\n  home:    D:\\lane-gateway-platforms\\run\\windows\\windows-home\n  binary:  D:\\lane-gateway-platforms\\run\\windows\\windows-upgraded-core.exe\ngateway start requested (schtasks)\nobserved_binary_path=D:\\lane-gateway-platforms\\run\\windows\\windows-upgraded-core.exe\nobserved_pid=42296\n{\n  \"state\": \"running\",\n  \"pid\": 42296,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"D:\\\\lane-gateway-platforms\\\\run\\\\windows\\\\windows-upgraded-core.exe\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "rollback",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway uninstall --profile f24j ; D:\\lane-gateway-platforms\\wayland-core.exe gateway install --profile f24j ; D:\\lane-gateway-platforms\\wayland-core.exe gateway start --profile f24j",
+      "output": "rollback_target=D:\\lane-gateway-platforms\\wayland-core.exe\nstop_status=0\ngateway stop requested (schtasks)\nremoved unit: D:\\lane-gateway-platforms\\run\\windows\\windows-home\\wayland-core-gateway-f24j.task.xml\ngateway uninstalled (schtasks): wayland-core-gateway-f24j\nwrote unit: D:\\lane-gateway-platforms\\run\\windows\\windows-home\\wayland-core-gateway-f24j.task.xml\ngateway installed (schtasks): wayland-core-gateway-f24j\n  home:    D:\\lane-gateway-platforms\\run\\windows\\windows-home\n  binary:  D:\\lane-gateway-platforms\\wayland-core.exe\ngateway start requested (schtasks)\nobserved_binary_path=D:\\lane-gateway-platforms\\wayland-core.exe\nobserved_pid=56104\n{\n  \"state\": \"running\",\n  \"pid\": 56104,\n  \"uptime_secs\": 1,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": \"D:\\\\lane-gateway-platforms\\\\wayland-core.exe\",\n  \"binary_version\": \"0.12.25\"\n}",
+      "ok": true
+    },
+    {
+      "name": "redaction-canary",
+      "command": "redact D:\\lane-gateway-platforms\\run\\windows\\windows-raw.txt -> D:\\lane-gateway-platforms\\run\\windows\\windows-redacted.md over 3 seeded secrets",
+      "output": "control=present published=absent secrets=3\nraw_bytes=11310\nredacted_bytes=11259\nredaction_markers=1",
+      "ok": true
+    },
+    {
+      "name": "drain-uninstall-clean",
+      "command": "D:\\lane-gateway-platforms\\wayland-core.exe gateway drain --profile f24j --budget-ms 15000 ; D:\\lane-gateway-platforms\\wayland-core.exe gateway uninstall --profile f24j",
+      "output": "drain requested (budget 15000ms); gateway pid 56104\ndrain complete: Drained (deliveries pending 0)\nremoved unit: D:\\lane-gateway-platforms\\run\\windows\\windows-home\\wayland-core-gateway-f24j.task.xml\ngateway uninstalled (schtasks): wayland-core-gateway-f24j\n$ schtasks /query /tn wayland-core-gateway-f24j\nresidual_status=1\nERROR: The system cannot find the file specified.\r\r\n\nresidual_pids_alive=0\nfinal_status={\n  \"state\": \"uninstalled\",\n  \"pid\": null,\n  \"uptime_secs\": null,\n  \"profile\": \"f24j\",\n  \"turns_in_flight\": 0,\n  \"deliveries_pending\": 0,\n  \"binary_path\": null,\n  \"binary_version\": null\n}",
+      "ok": true
+    }
+  ]
+}

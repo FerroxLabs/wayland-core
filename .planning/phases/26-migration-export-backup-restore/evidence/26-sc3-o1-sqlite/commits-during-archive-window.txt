@@ -1,0 +1,6 @@
+b1-base-concurrent.log:[b1-base-concurrent] commits during archive window: w0=+24260, w1=+24431, w2=+23833
+b2-base-concurrent.log:[b2-base-concurrent] commits during archive window: w0=+21558, w1=+21885, w2=+21853
+b3-base-concurrent.log:[b3-base-concurrent] commits during archive window: w0=+23356, w1=+23085, w2=+22895
+m1-merged-concurrent.log:[m1-merged-concurrent] commits during archive window: w0=+20403, w1=+19536, w2=+19921
+run1-base-concurrent.log:[run1-base-concurrent] commits during archive window: w0=+23131, w1=+23654, w2=+23776
+run3-fixed-concurrent.log:[run3-fixed-concurrent] commits during archive window: w0=+23359, w1=+23302, w2=+23492

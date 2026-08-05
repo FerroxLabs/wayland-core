@@ -464,6 +464,7 @@ mod tests {
                 LoadedFrom::Skills
             },
             file_path: std::path::PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            skill_root: None,
             content_length_hint: 0,
             user_invocable: true,
             disable_model_invocation: hidden,

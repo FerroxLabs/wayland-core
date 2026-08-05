@@ -1,0 +1,43 @@
+=== RENDERED SCREEN 120x40 ===
+          M5.2: replay a session trace JSON file. Validates schema + the version-skew guard (refuses traces recorded by
+a different wcore-core build unless --replay-force-version-skew is set). Prints the event count for the session. Combine
+ with --replay-diff to surface the first divergence against another trace
+
+      --replay-diff <OTHER_TRACE_PATH>
+          M5.2: compare the trace passed to --replay against this second trace and print the changed/added/removed entri
+es
+
+      --replay-force-version-skew
+          M5.2: skip the wcore-version guard in --replay (use only when inspecting traces from another release on purpos
+e)
+
+      --compaction <COMPACTION>
+          Output compaction level: off, safe (default), full
+
+      --toon
+          Enable TOON encoding for JSON arrays (session-level, cannot change mid-conversation)
+
+      --online-evolution
+          F-092 (W7-N): enable live online evolution. At session-end the engine emits one `evolution_event` and applies
+the Paraphrase mutator to successful trajectories (≥50% of turns had tool calls). Evolved system-prompt variants are per
+sisted to `$WAYLAND_HOME/evolved/`. Equivalent to `[observability] online_evolution = true` in config
+
+      --no-memory
+          Run a stateless session: disable long-term memory for this run. Sets `memory.enabled = false` before the engin
+e boots, so no MemoryManager is created — GEPA, SkillRouter seeds, SkillDrafter, and user-model write-back are all inert
+. Equivalent to `[memory] enabled = false` in wcore.toml, but scoped to this invocation only. Merge is one-directional:
+the flag can only turn memory off, never on
+
+      --search
+          FluxRouter web_search grounding (contract §5): attach a server-side `web_search` tool to every turn so Flux gr
+ounds the answer via Perplexity Sonar and renders citations. Only fires when the active model is a Flux tier alias (`flu
+x-auto` / `flux-fast` / `flux-standard` / `flux-reasoning`) — a no-op on other models. Paid-only on Flux
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+=== CURSOR x=0 y=39 hidden=False ===
+=== BYTES 17403  MARKS [[17347, "EOF"]] ===

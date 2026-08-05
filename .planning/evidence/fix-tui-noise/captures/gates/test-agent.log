@@ -1,0 +1,262 @@
+   Compiling getrandom v0.2.17
+   Compiling errno v0.3.14
+   Compiling lock_api v0.4.14
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling tracing-core v0.1.36
+   Compiling parking_lot_core v0.9.12
+   Compiling getrandom v0.4.2
+   Compiling dirs-sys v0.5.0
+   Compiling regex-automata v0.4.14
+   Compiling dbus v0.9.11
+   Compiling rtoolbox v0.0.5
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling parking_lot v0.12.5
+   Compiling ring v0.17.14
+   Compiling dirs v6.0.0
+   Compiling tempfile v3.27.0
+   Compiling uuid v1.23.2
+   Compiling crypto-common v0.1.7
+   Compiling rand_chacha v0.3.1
+   Compiling tracing v0.1.44
+   Compiling tokio v1.52.3
+   Compiling digest v0.10.7
+   Compiling cipher v0.4.4
+   Compiling universal-hash v0.5.1
+   Compiling rand v0.8.6
+   Compiling aead v0.5.2
+   Compiling sha2 v0.10.9
+   Compiling blake2 v0.10.6
+   Compiling poly1305 v0.8.0
+   Compiling chacha20 v0.9.1
+   Compiling password-hash v0.5.0
+   Compiling wcore-budget v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-budget)
+   Compiling rpassword v7.5.2
+   Compiling time v0.3.47
+   Compiling wcore-types v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-types)
+   Compiling argon2 v0.5.3
+   Compiling chacha20poly1305 v0.10.1
+   Compiling filetime v0.2.29
+   Compiling libseccomp v0.4.0
+   Compiling hmac v0.12.1
+   Compiling tar v0.4.46
+   Compiling getrandom v0.3.4
+   Compiling rand v0.10.1
+   Compiling rand_core v0.9.5
+   Compiling crypto-bigint v0.4.9
+   Compiling ff v0.12.1
+   Compiling rand_chacha v0.9.0
+   Compiling rustls-webpki v0.103.13
+   Compiling rand v0.9.4
+   Compiling group v0.12.1
+   Compiling dbus-secret-service v4.1.0
+   Compiling regex v1.12.3
+   Compiling elliptic-curve v0.12.3
+   Compiling rustls v0.23.40
+   Compiling keyring v3.6.3
+   Compiling wcore-compact v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-compact)
+   Compiling rand_distr v0.5.1
+   Compiling wcore-safety v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-safety)
+   Compiling rfc6979 v0.3.1
+   Compiling zopfli v0.8.3
+   Compiling signature v1.6.4
+   Compiling globset v0.4.18
+   Compiling ecdsa v0.14.8
+   Compiling aes v0.8.4
+   Compiling ecb v0.1.2
+   Compiling cbc v0.1.2
+   Compiling md-5 v0.10.6
+   Compiling zip v8.6.0
+   Compiling regalloc2 v0.12.2
+   Compiling pulley-interpreter v36.0.12
+   Compiling ignore v0.4.25
+   Compiling lopdf v0.42.0
+   Compiling p256 v0.11.1
+   Compiling sha1 v0.10.6
+   Compiling crypto-bigint v0.5.5
+   Compiling zip v2.4.2
+   Compiling simple_asn1 v0.6.4
+   Compiling wasmtime-environ v36.0.12
+   Compiling calamine v0.36.1
+   Compiling wcore-repomap v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-repomap)
+   Compiling jsonwebtoken v10.3.0
+   Compiling openssl-sys v0.9.116
+   Compiling inotify-sys v0.1.5
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling inotify v0.11.2
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling aws-smithy-async v1.2.14
+   Compiling wcore-protocol v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-protocol)
+   Compiling openssl v0.10.80
+   Compiling tower-http v0.6.11
+   Compiling h2 v0.4.14
+   Compiling aws-smithy-types v1.4.9
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-sandbox)
+   Compiling tokio-rustls v0.26.4
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling tungstenite v0.24.0
+   Compiling postgres-protocol v0.6.12
+   Compiling notify v8.2.0
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling aws-smithy-query v0.60.15
+   Compiling lettre v0.11.22
+   Compiling tokio-tungstenite v0.24.0
+   Compiling postgres-types v0.2.14
+   Compiling pdf-extract v0.12.0
+   Compiling signal-hook v0.3.18
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-types v1.3.16
+   Compiling aws-sigv4 v1.4.3
+   Compiling aws-smithy-json v0.62.7
+   Compiling native-tls v0.2.18
+   Compiling cap-rand v3.4.5
+   Compiling whoami v2.1.2
+   Compiling imap v2.4.1
+   Compiling predicates-core v1.0.10
+   Compiling tokio-postgres v0.7.18
+   Compiling curve25519-dalek v4.1.3
+   Compiling signal-hook-mio v0.2.5
+   Compiling wcore-user-model v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-user-model)
+   Compiling hyper v1.10.1
+   Compiling cranelift-codegen v0.123.12
+   Compiling axum-core v0.4.5
+   Compiling num_cpus v1.17.0
+   Compiling is-terminal v0.4.17
+   Compiling termtree v0.5.1
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-plugin-api)
+   Compiling open v5.3.5
+   Compiling predicates-tree v1.0.13
+   Compiling deadpool v0.12.3
+   Compiling ed25519-dalek v2.2.0
+   Compiling wcore-cron v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-cron)
+   Compiling crossterm v0.29.0
+   Compiling predicates v3.1.4
+   Compiling tokio-stream v0.1.18
+   Compiling hyper-util v0.1.20
+   Compiling wcore-permissions v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-permissions)
+   Compiling fragile v2.1.0
+   Compiling futures-timer v3.0.4
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling downcast v0.11.0
+   Compiling criterion v0.5.1
+   Compiling mockall v0.14.0
+   Compiling rstest v0.26.1
+   Compiling serial_test v3.5.0
+   Compiling tokio-test v0.4.5
+   Compiling wcore-agents-pack v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-agents-pack)
+   Compiling wayland-ijfw v0.12.25 (/root/wayland-fix-tui-noise/crates/wayland-ijfw)
+   Compiling wcore-dispatch v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-dispatch)
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.7.9
+   Compiling wiremock v0.6.5
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-egress)
+   Compiling wayland-honcho v0.12.25 (/root/wayland-fix-tui-noise/crates/wayland-honcho)
+   Compiling wcore-honcho-adapter v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-honcho-adapter)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-config v1.8.16
+   Compiling wcore-channels v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channels)
+   Compiling wcore-observability v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-observability)
+   Compiling wcore-pricing v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-pricing)
+   Compiling wcore-memory v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-memory)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-msteams)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-email)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-signal)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-telegram)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-discord)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-matrix)
+   Compiling wcore-providers v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-providers)
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-sms)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channel-slack)
+   Compiling wcore-tools v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-tools)
+   Compiling wcore-swarm v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-swarm)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-channels-registry)
+   Compiling cranelift-native v0.123.12
+   Compiling cranelift-frontend v0.123.12
+   Compiling wasmtime-internal-unwinder v36.0.12
+   Compiling wasmtime-internal-cranelift v36.0.12
+   Compiling wasmtime v36.0.12
+   Compiling wcore-mcp v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-mcp)
+   Compiling wcore-cua v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-cua)
+   Compiling wcore-browser v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-browser)
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-skills v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-eval)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-fix-tui-noise/crates/wayland-ollama)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-evolve)
+   Compiling wcore-plugin-wasm v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-plugin-wasm)
+   Compiling wcore-agent v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 03s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/wcore_agent-574879049bbe0ff7)
+
+running 49 tests
+{"type":"info","msg_id":"msg-abc-123","message":"test info message"}
+
+test output::null_sink::tests::null_sink_does_not_panic ... ok
+test output::permission_prompt::tests::prompt_and_record_aborts_does_not_persist ... ok
+test output::permission_prompt::tests::prompt_choice_2_is_allow_always ... ok
+test output::permission_prompt::tests::prompt_choice_1_is_allow_once ... ok
+test output::permission_prompt::tests::prompt_choice_3_is_deny_once ... ok
+test output::permission_prompt::tests::prompt_and_record_persists_decision ... ok
+test output::permission_prompt::tests::prompt_garbage_falls_back_to_deny_once ... ok
+test output::permission_prompt::tests::prompt_renders_tool_and_args ... ok
+test output::permission_prompt::tests::prompt_choice_4_is_deny_always ... ok
+test output::protocol_sink::tests::auth_error_code_none_for_non_auth ... ok
+test output::protocol_sink::tests::auth_error_code_tags_401_as_auth_required ... ok
+test output::permission_prompt::tests::prompt_eof_aborts ... ok
+test output::protocol_sink::tests::auth_error_code_tags_403_as_auth_invalid ... ok
+test output::protocol_sink::tests::emit_error_propagates_retryable_flag_not_hardcoded_false ... ok
+test output::protocol_sink::tests::protocol_sink_default_does_not_advertise_sub_agent_traces ... ok
+test output::protocol_sink::tests::protocol_sink_emit_compaction_noop_when_flag_off ... ok
+test output::protocol_sink::tests::protocol_sink_advertises_non_destructive_compact_only_when_built ... ok
+test output::protocol_sink::tests::protocol_sink_emit_tool_chunk_default_is_noop ... ok
+test output::protocol_sink::tests::protocol_sink_emit_sub_agent_event_default_is_noop ... ok
+test output::slash_render::tests::handled_with_no_output_emits_nothing ... ok
+test output::slash_render::tests::boxed_output_uses_one_border_per_input_line ... ok
+test output::slash_render::tests::renders_error ... ok
+test output::slash_render::tests::renders_exit_farewell ... ok
+test output::slash_render::tests::renders_handled_with_border_default ... ok
+test output::slash_render::tests::renders_not_implemented_tag ... ok
+test output::protocol_sink::tests::protocol_sink_streaming_tools_advertised_tracks_builder ... ok
+test output::slash_render::tests::renders_handled_no_color ... ok
+test output::terminal::tests::test_emit_error_clears_latch ... ok
+test output::terminal::tests::test_error_and_stream_end_clear_in_tool_block ... ok
+test output::protocol_sink::tests::protocol_sink_with_sub_agent_traces_advertises_capability ... ok
+test output::terminal::tests::test_first_delta_latch_arms_on_stream_start ... ok
+test output::protocol_sink::tests::protocol_sink_set_current_msg_id_updates_state ... ok
+test output::terminal::tests::test_stream_end_clears_latch_and_spinner ... ok
+test output::terminal::tests::test_stream_start_resets_in_tool_block ... ok
+test output::terminal::tests::test_terminal_sink_construct_no_color ... ok
+test output::terminal::tests::test_tool_block_flag_set_by_tool_call_and_cleared_by_text_delta ... ok
+test output::tests::test_error_chain_single_line ... ok
+test output::tests::test_formatter_no_color_mode ... ok
+test output::terminal::tests::test_tool_call_rearms_marker_latch ... ok
+test output::tests::test_new_methods_no_color_no_panic ... ok
+test output::tests::test_text_truncation_cjk_does_not_panic ... ok
+test output::tests::test_text_truncation_empty_string ... ok
+test output::tests::test_text_truncation_exact_length_unchanged ... ok
+test output::terminal::tests::test_spinner_lifecycle_in_runtime ... ok
+test output::tests::test_text_truncation_long_string_truncated ... ok
+test output::tests::test_text_truncation_mixed_cjk_ascii_does_not_panic ... ok
+test output::tests::test_text_truncation_short_string_unchanged ... ok
+test output::tests::test_tool_lifecycle_truncates_long_input ... ok
+test output::tests::test_turn_stats_no_panic ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 2206 filtered out; finished in 0.00s
+

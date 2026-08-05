@@ -1,0 +1,28 @@
+21-C3 differential corpus, SeanDesktop (Windows), 25 passed / 0 failed / 0 ignored / 0 filtered out
+dimension              mode        standalone       host-protocol    pair
+corpus_approval        in-process  NO-CHANNEL       REFUSED          -
+corpus_approval        live        UNAVAILABLE      NO-CHANNEL       -
+corpus_cost            in-process  REFUSED          REFUSED          RUNNING
+corpus_cost            live        NOT-EXPRESSIBLE  NOT-EXPRESSIBLE  -
+corpus_depth           in-process  REFUSED          REFUSED          RUNNING
+corpus_depth           live        NOT-EXPRESSIBLE  REFUSED          -
+corpus_egress          in-process  REFUSED          NOT-EXPRESSIBLE  -
+corpus_egress          live        NOT-EXPRESSIBLE  REFUSED          -
+corpus_fan_out         in-process  REFUSED          NOT-EXPRESSIBLE  -
+corpus_fan_out         live        NOT-EXPRESSIBLE  REFUSED          -
+corpus_filesystem      in-process  REFUSED          REFUSED          RUNNING
+corpus_filesystem      live        NOT-EXPRESSIBLE  REFUSED          -
+corpus_provider        in-process  NO-CHANNEL       REFUSED          -
+corpus_provider        live        NOT-EXPRESSIBLE  NO-CHANNEL       -
+corpus_secret          in-process  REFUSED          REFUSED          RUNNING
+corpus_secret          live        NOT-EXPRESSIBLE  REFUSED          -
+corpus_time            in-process  REFUSED          REFUSED          RUNNING
+corpus_time            live        NOT-EXPRESSIBLE  NOT-EXPRESSIBLE  -
+corpus_token           in-process  REFUSED          REFUSED          RUNNING
+corpus_token           live        NOT-EXPRESSIBLE  NOT-EXPRESSIBLE  -
+corpus_tool            in-process  NOT-EXPRESSIBLE  NOT-EXPRESSIBLE  -
+corpus_tool            live        NOT-EXPRESSIBLE  NOT-EXPRESSIBLE  -
+
+RUNNING_PAIRS=6 of 22   (Linux at the ledger's last measurement: 16 of 22)
+ALLOWED_CELLS=0
+COMBINATION_LINES=44  (11 dimensions x 4 combinations = 44; completeness invariant)

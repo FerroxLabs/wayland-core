@@ -1,0 +1,19 @@
+=== A. instrument reaches the room (no claim yet) ===
+timeline_events=8
+nonce=mlpre-1785383759 originals=0 all_bodies=0 ids=[]
+=== B. observer posts a known-positive ===
+http_status=200 event_id=$QiDC8hc7iNX2-kQXDcnJkq6Ki_GuW6VVDW6ZdDnZ42A
+=== C. count it: must be 1 (instrument can see a positive) ===
+timeline_events=9
+control_nonce=mlpre-1785383759 control_count=1
+nonce=mlpre-1785383759 originals=1 all_bodies=1 ids=["$QiDC8hc7iNX2-kQXDcnJkq6Ki_GuW6VVDW6ZdDnZ42A"]
+=== D. known-negative WITH a live control: must be 0 and NOT instrument-dead ===
+timeline_events=9
+control_nonce=mlpre-1785383759 control_count=1
+nonce=mlpre-never-sent-000 originals=0 all_bodies=0 ids=[]
+=== E. instrument-death detector: a control that does not exist must REFUSE ===
+timeline_events=9
+control_nonce=mlpre-never-sent-000 control_count=0
+OBSERVER=INSTRUMENT-DEAD reason=known-positive control read zero; the target count below is NOT reportable
+  exit=3
+NONCE_USED=mlpre-1785383759

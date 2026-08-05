@@ -1,0 +1,15 @@
+=== NOT MEASURED control: a far end with no usable ps ===
+far end: b4978a63bf13
+ps present? no
+setsid present? yes
+
+scan exit: 0
+ssh count: NOT MEASURED
+ssh reason: the surface could not be enumerated (remote scan failed: the far end's process table could not be enumerated (no supported ps invocation on this far end), so a count would omit an unknown number of processes), so no count exists — this is NOT zero orphans
+
+--- and the SAME binary against the POSIX far end must still MEASURE ---
+(otherwise the fix has simply made every ssh surface unmeasurable)
+scan exit: 0
+ssh count: 0 (MEASURED)
+
+control container removed: 0 remaining

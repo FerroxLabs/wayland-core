@@ -1,0 +1,39 @@
+[2m2026-07-30T14:15:59.649774Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+[2m2026-07-30T14:15:59.649831Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+[2m2026-07-30T14:15:59.650887Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-30T14:15:59.650911Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-30T14:15:59.651069Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-30T14:15:59.651149Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-30T14:15:59.651163Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-30T14:15:59.651164Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-30T14:15:59.651165Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-30T14:15:59.651166Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-30T14:15:59.651168Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-30T14:15:59.651169Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-30T14:15:59.651180Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-30T14:15:59.651189Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled — tool hidden
+[2m2026-07-30T14:15:59.651198Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-30T14:15:59.651227Z[0m [32m INFO[0m vision: using Anthropic (ANTHROPIC_API_KEY found)
+[2m2026-07-30T14:15:59.651251Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[2m2026-07-30T14:15:59.651255Z[0m [33m WARN[0m tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY. Tool hidden.
+[2m2026-07-30T14:15:59.651454Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-30T14:15:59.651481Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-30T14:15:59.651601Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-30T14:15:59.653445Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-30T14:15:59.653512Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-30T14:15:59.653783Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-30T14:15:59.654860Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[2m2026-07-30T14:15:59.654866Z[0m [32m INFO[0m vision: using Anthropic (ANTHROPIC_API_KEY found)
+[2m2026-07-30T14:15:59.655163Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-30T14:15:59.655190Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-30T14:15:59.662704Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m3681441 [3mdir[0m[2m=[0m/root/wayland-fix-tui-noise-home/.config/wayland-core/channels
+[2m2026-07-30T14:15:59.662720Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-30T14:15:59.704872Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:15:59.704881Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:15:59.704883Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:16:01.306790Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:16:01.306833Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:16:01.306839Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:16:01.306842Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:16:01.307058Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T14:16:01.322167Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0

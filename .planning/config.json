@@ -1,0 +1,66 @@
+{
+  "mode": "autonomous",
+  "runtime": "claude",
+  "granularity": "standard",
+  "workflow": {
+    "research": false,
+    "ai_integration_phase": true,
+    "plan_check": true,
+    "inline_plan_threshold": 3,
+    "verifier": true,
+    "auto_advance": true,
+    "node_repair": false,
+    "use_worktrees": true,
+    "nyquist_validation": true,
+    "security_enforcement": true,
+    "security_asvs_level": 2,
+    "security_block_on": "high",
+    "discuss_mode": "discuss",
+    "research_before_questions": false,
+    "code_review_command": null,
+    "plan_bounce": true,
+    "plan_bounce_script": null,
+    "plan_bounce_passes": 2,
+    "cross_ai_execution": false,
+    "cross_ai_command": "",
+    "cross_ai_timeout": 300,
+    "test_gate_timeout": 1800,
+    "test_command": "git diff --check && cargo fmt --all -- --check",
+    "build_command": "git diff --check",
+    "plan_review_convergence": true,
+    "_auto_chain_active": false
+  },
+  "ship": {
+    "pr_body_sections": []
+  },
+  "planning": {
+    "commit_docs": true,
+    "search_gitignored": true,
+    "sub_repos": []
+  },
+  "git": {
+    "create_tag": false
+  },
+  "parallelization": {
+    "enabled": true,
+    "plan_level": true,
+    "task_level": false,
+    "skip_checkpoints": false,
+    "max_concurrent_agents": 6,
+    "min_plans_for_parallel": 2
+  },
+  "hooks": {
+    "context_warnings": true
+  },
+  "project_code": "WCF",
+  "phase_id_convention": "sequential",
+  "agent_skills": {},
+  "claude_md_path": "./CLAUDE.md",
+  "model_overrides": {
+    "ferrox-executor": "sonnet",
+    "ferrox-verifier": "opus",
+    "ferrox-plan-checker": "opus",
+    "ferrox-code-reviewer": "opus",
+    "ferrox-security-auditor": "opus"
+  }
+}

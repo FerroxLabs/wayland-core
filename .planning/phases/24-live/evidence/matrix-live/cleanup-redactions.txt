@@ -1,0 +1,15 @@
+=== events this lane created, by nonce family (BEFORE cleanup) ===
+nonce=wayland-core live probe mlact- originals=1 all_bodies=2 ids=["$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA"]
+nonce=wayland-core live probe mlin- originals=1 all_bodies=1 ids=["$P0bacHeMO1F-326a7BnvUb-2JSL7H24PHa9rnbsKpfI"]
+nonce=wayland-core live probe mlsend- originals=1 all_bodies=1 ids=["$lCEFaNP1q7qxwphX4QBfHPXr2kUONF94PkHROqhhYaQ"]
+nonce=wayland-core live probe mlrst- originals=2 all_bodies=2 ids=["$8rWWSSH7nc9lgq3FJBV_B3bLXkhNS3cWx0p6nodLxuA","$BAnrbBtxNCqVOn0q_YfK8LD9elduO6Ec3amQH_RMtlQ"]
+nonce=wayland-core live probe mlpre- originals=0 all_bodies=0 ids=[]
+
+=== redacting every event whose body carries the probe marker ===
+ids_to_redact=       6
+redact $8rWWSSH7nc9lgq3FJBV_B3bLXkhNS3cWx0p6nodLxuA http_status=200 event_id=$j1ddMZ_Riwt0gCtmYrf13or3MioWtxjny8zZGm86vXg
+redact $BAnrbBtxNCqVOn0q_YfK8LD9elduO6Ec3amQH_RMtlQ http_status=200 event_id=$bUpd6enbkQyZKsTZk84u5pEYqZADlWs1IuCwNHAaOPw
+redact $lCEFaNP1q7qxwphX4QBfHPXr2kUONF94PkHROqhhYaQ http_status=200 event_id=$d4JgWJLZeOmiQ9ICbw8kgDZHy-x9Yn5lGaISQ8S1j2A
+redact $P0bacHeMO1F-326a7BnvUb-2JSL7H24PHa9rnbsKpfI http_status=200 event_id=$kpRiJmui29Mdp_Y4oS-CQA2XAyCTFUJy8Wb5arJAlrw
+redact $8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4 http_status=200 event_id=$anPybD3YFKXVrEjHmAEoCeO1JatGC83uvbTVedyg4l4
+redact $OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA http_status=200 event_id=$xdGXXQnjrax3jdRslTPjVhHAEEOvfk9Q9vxxykH6pAI

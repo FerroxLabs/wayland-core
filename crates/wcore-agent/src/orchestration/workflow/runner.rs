@@ -51,7 +51,7 @@
 //!   per-stage PassThrough path.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use thiserror::Error;
@@ -64,9 +64,15 @@ use super::limits::{self, DispatchBudget};
 use super::meta::WorkflowMeta;
 use super::pipeline;
 use super::schema::{self, WorkflowSchema};
-use crate::agents::channel_sink::{ChannelSink, SubAgentRelay};
+use crate::agents::channel_sink::{ChannelSink, SubAgentRelay, SubAgentTerminalRelay};
 use crate::output::OutputSink;
 use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig, SubAgentResult};
+use wcore_protocol::events::{
+    ProtocolEvent, WorkflowChildCorrelation, WorkflowChildTerminalState, WorkflowFailure,
+    WorkflowNodeLifecycle, WorkflowNodeState, WorkflowRunFinished, WorkflowRunStarted,
+    WorkflowTerminalState,
+};
+use wcore_types::spawner::ChildOrigin;
 
 /// Default per-stage turn budget. Workflow stages are single-shot
 /// instructions, so a small budget keeps a stuck stage from burning the
@@ -77,6 +83,287 @@ const DEFAULT_MAX_TURNS: usize = 8;
 
 /// Default per-stage token budget.
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+#[derive(Debug)]
+struct ChildSequence {
+    run_id: String,
+    agent_name: String,
+    next_sequence: u64,
+    terminal: Option<WorkflowChildTerminalState>,
+}
+
+#[derive(Debug)]
+struct WorkflowLifecycleState {
+    started: bool,
+    finished: bool,
+    next_sequence: u64,
+    terminal_nodes: HashSet<String>,
+    children: HashMap<String, ChildSequence>,
+}
+
+/// Per-run producer authority for workflow, node, and child correlation.
+///
+/// A single instance owns every sequence and event id for one execution. It
+/// also enforces terminal absorption before events reach the host sink.
+pub struct WorkflowLifecycleEmitter {
+    output: Arc<dyn OutputSink>,
+    workflow_id: String,
+    name: String,
+    node_count: usize,
+    node_ids: Vec<String>,
+    run_id: String,
+    /// Admission, identity allocation, and sink emission share one lock. This
+    /// makes physical wire order equal sequence order and closes the race where
+    /// a node event could pass a terminal check before `finish` won.
+    state: Mutex<WorkflowLifecycleState>,
+}
+
+impl WorkflowLifecycleEmitter {
+    pub fn new(
+        output: Arc<dyn OutputSink>,
+        workflow_id: String,
+        name: String,
+        node_count: usize,
+        node_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            output,
+            workflow_id,
+            name,
+            node_count,
+            node_ids,
+            run_id: uuid::Uuid::new_v4().to_string(),
+            state: Mutex::new(WorkflowLifecycleState {
+                started: false,
+                finished: false,
+                next_sequence: 1,
+                terminal_nodes: HashSet::new(),
+                children: HashMap::new(),
+            }),
+        }
+    }
+
+    pub fn start(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.started || state.finished {
+            return;
+        }
+        state.started = true;
+        self.output
+            .emit_correlated_workflow_started(&WorkflowRunStarted {
+                workflow_id: self.workflow_id.clone(),
+                name: self.name.clone(),
+                node_count: self.node_count,
+                run_id: self.run_id.clone(),
+                event_id: uuid::Uuid::new_v4().to_string(),
+                sequence: 0,
+                parent_run_id: None,
+            });
+    }
+
+    pub fn node_event(
+        &self,
+        node_id: &str,
+        state: WorkflowNodeState,
+        failure: Option<WorkflowFailure>,
+    ) {
+        let mut lifecycle = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.started || lifecycle.finished {
+            return;
+        }
+        let terminal = matches!(
+            state,
+            WorkflowNodeState::Succeeded | WorkflowNodeState::Failed | WorkflowNodeState::Blocked
+        );
+        if lifecycle.terminal_nodes.contains(node_id) {
+            return;
+        }
+        if terminal {
+            lifecycle.terminal_nodes.insert(node_id.to_string());
+        }
+        let child_run_id = child_run_id(&lifecycle.children, node_id);
+        let sequence = lifecycle.next_sequence;
+        lifecycle.next_sequence = lifecycle.next_sequence.saturating_add(1);
+        self.output
+            .emit_workflow_node_event(&WorkflowNodeLifecycle {
+                run_id: self.run_id.clone(),
+                node_id: node_id.to_string(),
+                child_run_id,
+                event_id: uuid::Uuid::new_v4().to_string(),
+                sequence,
+                state,
+                failure,
+            });
+    }
+
+    pub fn child_event(&self, parent_call_id: &str, agent_name: &str, inner: &Value) {
+        self.emit_child(parent_call_id, agent_name, inner, None);
+    }
+
+    pub fn child_terminal(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &Value,
+        terminal_state: WorkflowChildTerminalState,
+    ) {
+        self.emit_child(parent_call_id, agent_name, inner, Some(terminal_state));
+    }
+
+    fn emit_child(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &Value,
+        terminal_state: Option<WorkflowChildTerminalState>,
+    ) {
+        let mut lifecycle = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.started || lifecycle.finished {
+            return;
+        }
+        if parent_call_id
+            .strip_prefix("workflow:")
+            .is_some_and(|node_id| lifecycle.terminal_nodes.contains(node_id))
+        {
+            return;
+        }
+        let child = lifecycle
+            .children
+            .entry(parent_call_id.to_string())
+            .or_insert_with(|| ChildSequence {
+                run_id: uuid::Uuid::new_v4().to_string(),
+                agent_name: agent_name.to_string(),
+                next_sequence: 0,
+                terminal: None,
+            });
+        if child.agent_name != agent_name {
+            return;
+        }
+        if child.terminal.is_some() {
+            return;
+        }
+        let correlation = WorkflowChildCorrelation {
+            run_id: self.run_id.clone(),
+            child_run_id: child.run_id.clone(),
+            parent_child_run_id: None,
+            child_sequence: child.next_sequence,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            terminal_state,
+        };
+        child.next_sequence = child.next_sequence.saturating_add(1);
+        if terminal_state.is_some() {
+            child.terminal = terminal_state;
+        }
+        self.output.emit_correlated_sub_agent_event(
+            parent_call_id,
+            agent_name,
+            inner,
+            &correlation,
+        );
+    }
+
+    /// Terminalize every child whose task disappeared before producing its
+    /// authoritative result. The workflow join-error path calls this before
+    /// closing nodes and the run, so the serialized reducer never observes a
+    /// finished workflow with active child executions.
+    pub fn fail_active_children(&self, message: &str) {
+        let mut lifecycle = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.started || lifecycle.finished {
+            return;
+        }
+
+        let mut parent_call_ids: Vec<String> = lifecycle
+            .children
+            .iter()
+            .filter(|(_, child)| child.terminal.is_none())
+            .map(|(parent_call_id, _)| parent_call_id.clone())
+            .collect();
+        parent_call_ids.sort_unstable();
+
+        let mut terminals = Vec::with_capacity(parent_call_ids.len());
+        for parent_call_id in parent_call_ids {
+            let Some(child) = lifecycle.children.get_mut(&parent_call_id) else {
+                continue;
+            };
+            let correlation = WorkflowChildCorrelation {
+                run_id: self.run_id.clone(),
+                child_run_id: child.run_id.clone(),
+                parent_child_run_id: None,
+                child_sequence: child.next_sequence,
+                event_id: uuid::Uuid::new_v4().to_string(),
+                terminal_state: Some(WorkflowChildTerminalState::Failed),
+            };
+            child.next_sequence = child.next_sequence.saturating_add(1);
+            child.terminal = Some(WorkflowChildTerminalState::Failed);
+            terminals.push((parent_call_id, child.agent_name.clone(), correlation));
+        }
+
+        let inner = serde_json::json!({
+            "type": "error",
+            "error": {
+                "code": "workflow_task_interrupted",
+                "message": message,
+                "retryable": false
+            }
+        });
+        for (parent_call_id, agent_name, correlation) in terminals {
+            self.output.emit_correlated_sub_agent_event(
+                &parent_call_id,
+                &agent_name,
+                &inner,
+                &correlation,
+            );
+        }
+    }
+
+    pub fn finish_remaining(&self) {
+        let mut remaining: Vec<&str> = self.node_ids.iter().map(String::as_str).collect();
+        remaining.sort_unstable();
+        for node_id in remaining {
+            self.node_event(node_id, WorkflowNodeState::Blocked, None);
+        }
+    }
+
+    pub fn finish(&self, terminal_state: WorkflowTerminalState, failure: Option<WorkflowFailure>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.started || state.finished {
+            return;
+        }
+        state.finished = true;
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        self.output
+            .emit_correlated_workflow_finished(&WorkflowRunFinished {
+                workflow_id: self.workflow_id.clone(),
+                run_id: self.run_id.clone(),
+                event_id: uuid::Uuid::new_v4().to_string(),
+                sequence,
+                terminal_state,
+                failure,
+            });
+    }
+}
+
+fn child_run_id(children: &HashMap<String, ChildSequence>, node_id: &str) -> Option<String> {
+    children
+        .get(&format!("workflow:{node_id}"))
+        .map(|child| child.run_id.clone())
+}
 
 /// Resolve a node's turn budget: the per-node `AgentSpec.max_turns` override
 /// (lowered into `graph.node_budgets`) when present, else `DEFAULT_MAX_TURNS`.
@@ -350,18 +637,21 @@ pub(crate) async fn resolve_stage_schema(
                     });
                 };
                 result = spawner
-                    .spawn_one(SubAgentConfig {
-                        name: format!("{pipeline_id}[{item_index}]:{}", stage.id),
-                        prompt,
-                        max_turns: dispatch.max_turns,
-                        max_tokens: dispatch.max_tokens,
-                        system_prompt: None,
-                        // The pipeline stage IS an AgentSpec, so its provider /
-                        // model pin is read directly (no node_providers lookup).
-                        provider: stage.provider.clone(),
-                        model: stage.model.clone(),
-                        temperature: None,
-                    })
+                    .spawn_one_with_origin(
+                        SubAgentConfig {
+                            name: format!("{pipeline_id}[{item_index}]:{}", stage.id),
+                            prompt,
+                            max_turns: dispatch.max_turns,
+                            max_tokens: dispatch.max_tokens,
+                            system_prompt: None,
+                            // The pipeline stage IS an AgentSpec, so its provider /
+                            // model pin is read directly (no node_providers lookup).
+                            provider: stage.provider.clone(),
+                            model: stage.model.clone(),
+                            temperature: None,
+                        },
+                        ChildOrigin::Pipeline,
+                    )
                     .await;
                 drop(permit);
                 if result.is_error {
@@ -537,6 +827,7 @@ pub struct WorkflowRunner<'a> {
     /// `None`, sub-agents run with a `NullSink` (legacy behaviour) so nothing
     /// regresses for callers that never wire a parent.
     parent_output: Option<Arc<dyn OutputSink>>,
+    lifecycle: Option<Arc<WorkflowLifecycleEmitter>>,
 }
 
 impl<'a> WorkflowRunner<'a> {
@@ -552,6 +843,7 @@ impl<'a> WorkflowRunner<'a> {
             spawner,
             pipeline_sem: Arc::new(Semaphore::new(cap.max(1))),
             parent_output: None,
+            lifecycle: None,
         }
     }
 
@@ -561,6 +853,12 @@ impl<'a> WorkflowRunner<'a> {
     /// it the runner dispatches with a `NullSink` (sub-agent events dropped).
     pub fn with_parent_output(mut self, output: Arc<dyn OutputSink>) -> Self {
         self.parent_output = Some(output);
+        self
+    }
+
+    /// Attach the run-local lifecycle authority used by host protocol output.
+    pub fn with_lifecycle(mut self, lifecycle: Arc<WorkflowLifecycleEmitter>) -> Self {
+        self.lifecycle = Some(lifecycle);
         self
     }
 
@@ -659,9 +957,12 @@ impl<'a> WorkflowRunner<'a> {
                 // it. Unguarded graphs keep every reachable node live, so this
                 // branch never fires there — behaviour is unchanged.
                 if !live.contains(id) {
+                    self.emit_node_state(id, WorkflowNodeState::Blocked, None);
                     done.insert(id);
                     continue;
                 }
+                self.emit_node_state(id, WorkflowNodeState::Queued, None);
+                self.emit_node_state(id, WorkflowNodeState::Running, None);
                 match node_map[id] {
                     Node::AgentCall { .. } => agent_nodes.push(id),
                     Node::End => {
@@ -673,6 +974,7 @@ impl<'a> WorkflowRunner<'a> {
                             is_error: false,
                             turns: 0,
                         });
+                        self.emit_node_state(id, WorkflowNodeState::Succeeded, None);
                     }
                     Node::PassThrough => {
                         // A5: a `Pipeline(over: ...)` step lowers to a single
@@ -681,15 +983,20 @@ impl<'a> WorkflowRunner<'a> {
                         // otherwise it is a true pass-through (synthetic fan-out
                         // root) — no state change.
                         if let Some(def) = plan.pipelines.get(*id) {
-                            self.run_no_barrier_pipeline(
-                                plan,
-                                id,
-                                def,
-                                &mut state,
-                                &mut stage_results,
-                                &budget,
-                            )
-                            .await?;
+                            if let Err(err) = self
+                                .run_no_barrier_pipeline(
+                                    plan,
+                                    id,
+                                    def,
+                                    &mut state,
+                                    &mut stage_results,
+                                    &budget,
+                                )
+                                .await
+                            {
+                                self.emit_node_failure(id, &err);
+                                return Err(err);
+                            }
                         } else {
                             stage_results.push(StageResult {
                                 node_id: id.to_string(),
@@ -699,6 +1006,7 @@ impl<'a> WorkflowRunner<'a> {
                             });
                         }
                         done.insert(id);
+                        self.emit_node_state(id, WorkflowNodeState::Succeeded, None);
                     }
                     Node::Predicate { condition } => {
                         // Minimal v1: record the boolean to
@@ -716,6 +1024,7 @@ impl<'a> WorkflowRunner<'a> {
                             is_error: false,
                             turns: 0,
                         });
+                        self.emit_node_state(id, WorkflowNodeState::Succeeded, None);
                     }
                     Node::Aggregator { strategy } => {
                         // Fold inbound siblings' outputs into the aggregator's
@@ -728,6 +1037,7 @@ impl<'a> WorkflowRunner<'a> {
                             is_error: false,
                             turns: 0,
                         });
+                        self.emit_node_state(id, WorkflowNodeState::Succeeded, None);
                     }
                     Node::Loop {
                         agents,
@@ -740,18 +1050,24 @@ impl<'a> WorkflowRunner<'a> {
                         // simplification: loops do not fan out and inherit the
                         // global LOOP_ITER_CAP safety bound.
                         let cap = (*max_iters).min(LOOP_ITER_CAP);
-                        self.run_loop(
-                            plan,
-                            id,
-                            agents,
-                            done_check,
-                            cap,
-                            &mut state,
-                            &mut stage_results,
-                            &budget,
-                        )
-                        .await?;
+                        if let Err(err) = self
+                            .run_loop(
+                                plan,
+                                id,
+                                agents,
+                                done_check,
+                                cap,
+                                &mut state,
+                                &mut stage_results,
+                                &budget,
+                            )
+                            .await
+                        {
+                            self.emit_node_failure(id, &err);
+                            return Err(err);
+                        }
                         done.insert(id);
+                        self.emit_node_state(id, WorkflowNodeState::Succeeded, None);
                     }
                 }
             }
@@ -768,7 +1084,11 @@ impl<'a> WorkflowRunner<'a> {
                 // dispatched, fleet fan-out included). If the wave would exceed
                 // the budget, abort with the partial result before dispatching.
                 if let Err(attempted) = budget.try_charge_n(agent_nodes.len()) {
-                    return Err(self.budget_exceeded(attempted, &state, &stage_results));
+                    let err = self.budget_exceeded(attempted, &state, &stage_results);
+                    for id in &agent_nodes {
+                        self.emit_node_failure(id, &err);
+                    }
+                    return Err(err);
                 }
                 let outputs = self.dispatch_agents(plan, &agent_nodes, &state).await;
                 // FIX A — two-pass wave processing so a failing sibling never
@@ -795,7 +1115,7 @@ impl<'a> WorkflowRunner<'a> {
                         if pending_error.is_none() {
                             pending_error = Some(WorkflowRunError::StageFailed {
                                 stage: id.clone(),
-                                message: result.text,
+                                message: result.text.clone(),
                                 // Partial is filled in PASS 2 once the whole
                                 // wave has committed (see below).
                                 partial: Box::new(WorkflowRunResult {
@@ -804,6 +1124,20 @@ impl<'a> WorkflowRunner<'a> {
                                 }),
                             });
                         }
+                        self.emit_logical_child_terminal(
+                            &id,
+                            WorkflowChildTerminalState::Failed,
+                            &result.text,
+                        );
+                        self.emit_node_state(
+                            &id,
+                            WorkflowNodeState::Failed,
+                            Some(WorkflowFailure {
+                                code: "sub_agent_failed".to_string(),
+                                message: result.text,
+                                retryable: false,
+                            }),
+                        );
                         continue;
                     }
 
@@ -840,6 +1174,23 @@ impl<'a> WorkflowRunner<'a> {
                                     }),
                                 });
                             }
+                            let message = format!(
+                                "workflow dispatch budget exceeded at dispatch {attempted}"
+                            );
+                            self.emit_logical_child_terminal(
+                                &id,
+                                WorkflowChildTerminalState::Failed,
+                                &message,
+                            );
+                            self.emit_node_state(
+                                &id,
+                                WorkflowNodeState::Failed,
+                                Some(WorkflowFailure {
+                                    code: "dispatch_budget_exceeded".to_string(),
+                                    message,
+                                    retryable: false,
+                                }),
+                            );
                             continue;
                         }
                         Err(ResolveSchemaErr::Validation {
@@ -857,13 +1208,27 @@ impl<'a> WorkflowRunner<'a> {
                                 pending_error = Some(WorkflowRunError::SchemaValidationFailed {
                                     stage: id.clone(),
                                     attempts,
-                                    message,
+                                    message: message.clone(),
                                     partial: Box::new(WorkflowRunResult {
                                         final_state: Value::Null,
                                         stage_results: Vec::new(),
                                     }),
                                 });
                             }
+                            self.emit_logical_child_terminal(
+                                &id,
+                                WorkflowChildTerminalState::Failed,
+                                &message,
+                            );
+                            self.emit_node_state(
+                                &id,
+                                WorkflowNodeState::Failed,
+                                Some(WorkflowFailure {
+                                    code: "schema_validation_failed".to_string(),
+                                    message,
+                                    retryable: false,
+                                }),
+                            );
                             continue;
                         }
                     };
@@ -877,6 +1242,12 @@ impl<'a> WorkflowRunner<'a> {
                         is_error: false,
                         turns: result.turns,
                     });
+                    self.emit_logical_child_terminal(
+                        &id,
+                        WorkflowChildTerminalState::Succeeded,
+                        &format!("Sub-agent '{id}' completed successfully"),
+                    );
+                    self.emit_node_state(&id, WorkflowNodeState::Succeeded, None);
                     // The id originates from a node the wave just dispatched, so
                     // it is always present in `node_map`. Use the same defensive
                     // resolution as the rest of the runner, but DEFER (not return)
@@ -1074,17 +1445,27 @@ impl<'a> WorkflowRunner<'a> {
             Some(s) => format!("{base}\n\n{s}"),
             None => base,
         };
+        let config = SubAgentConfig {
+            name: id.to_string(),
+            prompt,
+            max_turns: node_turn_budget(&plan.graph, id),
+            max_tokens: node_token_budget(&plan.graph, id),
+            system_prompt: None,
+            provider: node_provider(&plan.graph, id),
+            model: node_pinned_model(&plan.graph, id),
+            temperature: None,
+        };
+        if self.parent_output.is_some() {
+            return self
+                .dispatch_via_relay(vec![(id.to_string(), config)], None)
+                .await
+                .into_iter()
+                .next()
+                .map(|(_, result)| result)
+                .unwrap_or_else(|| SubAgentResult::error(id, "retry dispatch returned no result"));
+        }
         self.spawner
-            .spawn_one(SubAgentConfig {
-                name: id.to_string(),
-                prompt,
-                max_turns: node_turn_budget(&plan.graph, id),
-                max_tokens: node_token_budget(&plan.graph, id),
-                system_prompt: None,
-                provider: node_provider(&plan.graph, id),
-                model: node_pinned_model(&plan.graph, id),
-                temperature: None,
-            })
+            .spawn_one_with_origin(config, ChildOrigin::Workflow)
             .await
     }
 
@@ -1138,10 +1519,13 @@ impl<'a> WorkflowRunner<'a> {
             // reach the parent. `dispatch_via_relay` handles N==1 as a fan-out
             // of one. When `None`, keep the legacy `spawn_one` (NullSink) path.
             if self.parent_output.is_some() {
-                return self.dispatch_via_relay(configs).await;
+                return self.dispatch_via_relay(configs, None).await;
             }
             let (id, cfg) = configs.into_iter().next().expect("len checked == 1");
-            let result = self.spawner.spawn_one(cfg).await;
+            let result = self
+                .spawner
+                .spawn_one_with_origin(cfg, ChildOrigin::Workflow)
+                .await;
             return vec![(id, result)];
         }
 
@@ -1172,7 +1556,7 @@ impl<'a> WorkflowRunner<'a> {
         // a parent, fall through to `SpawnExtras::default()` (NullSink) so the
         // legacy unmonitored path is byte-for-byte unchanged.
         if self.parent_output.is_some() {
-            return self.dispatch_via_relay(configs).await;
+            return self.dispatch_via_relay(configs, None).await;
         }
         let ids: Vec<String> = configs.iter().map(|(id, _)| id.clone()).collect();
         let tasks: Vec<(SubAgentConfig, SpawnExtras)> = configs
@@ -1181,24 +1565,25 @@ impl<'a> WorkflowRunner<'a> {
             .collect();
         let results = self
             .spawner
-            .spawn_parallel_with_per_task_extras(tasks)
+            .spawn_parallel_with_per_task_extras_origin(tasks, ChildOrigin::Workflow)
             .await;
         ids.into_iter().zip(results).collect()
     }
 
     /// ForgeFlows-Live Phase 1 — relay fan-out that mirrors
     /// [`crate::spawn_tool::SpawnTool::spawn_with_relay`]: build one shared
-    /// stream-drain channel, a dedicated lifecycle channel per task, per-task
+    /// stream-drain channel, a dedicated terminal channel per task, per-task
     /// [`SpawnExtras`] carrying a `ChannelSink` keyed by `workflow:<node_id>`,
     /// dispatch via `spawn_parallel_with_per_task_extras`, then flush the
-    /// lifecycle receivers AFTER the stream drain (W5.5 H-1: terminal
-    /// Done/Failed events survive a full stream channel). Results return in
+    /// terminal receivers after the stream drain. Typed Done/Failed events
+    /// survive a full stream channel. Results return in
     /// input order, so a positional zip back to the node ids is correct.
     ///
     /// PRECONDITION: only called when `self.parent_output.is_some()`.
     async fn dispatch_via_relay(
         &self,
         configs: Vec<(String, SubAgentConfig)>,
+        fleet_run_id: Option<String>,
     ) -> Vec<(String, SubAgentResult)> {
         // SAFETY: guarded by every caller — only invoked when the parent sink
         // is wired (mirrors `SpawnTool::spawn_with_relay`'s precondition).
@@ -1216,75 +1601,131 @@ impl<'a> WorkflowRunner<'a> {
             crate::agents::channel_sink::CHANNEL_CAPACITY,
         );
 
-        // W5.5 H-1: one dedicated lifecycle channel per task. Collected as a Vec
-        // of receivers so we can flush them after the stream drain.
-        let mut lifecycle_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentRelay>> =
+        // One dedicated authoritative terminal channel per task.
+        let mut terminal_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentTerminalRelay>> =
             Vec::with_capacity(configs.len());
 
         // Build per-task SpawnExtras with a distinct parent_call_id + ChannelSink.
-        let tasks: Vec<(SubAgentConfig, SpawnExtras)> = configs
-            .into_iter()
-            .map(|(id, cfg)| {
-                // Unique id per node — the bridge keys SubAgentView on this.
-                let parent_call_id = format!("workflow:{id}");
-                // W5.5 H-1: dedicated lifecycle channel (capacity 2, never shared).
-                let (ltx, lrx) = tokio::sync::mpsc::channel::<SubAgentRelay>(
-                    crate::agents::channel_sink::LIFECYCLE_CAPACITY,
-                );
-                lifecycle_rxs.push(lrx);
-                let sink = Arc::new(ChannelSink::new_with_lifecycle(
-                    parent_call_id.clone(),
-                    cfg.name.clone(),
-                    tx.clone(),
-                    ltx,
-                ));
-                let extras = SpawnExtras {
-                    channel_sink: Some(sink),
-                    agent_name: Some(cfg.name.clone()),
-                    parent_call_id: Some(parent_call_id),
-                };
-                (cfg, extras)
-            })
-            .collect();
+        let tasks: Vec<(SubAgentConfig, SpawnExtras)> =
+            configs
+                .into_iter()
+                .map(|(id, cfg)| {
+                    // Unique id per node — the bridge keys SubAgentView on this.
+                    let parent_call_id = format!("workflow:{id}");
+                    let (terminal_tx, terminal_rx) =
+                        tokio::sync::mpsc::channel::<SubAgentTerminalRelay>(
+                            crate::agents::channel_sink::TERMINAL_CAPACITY,
+                        );
+                    terminal_rxs.push(terminal_rx);
+                    let sink = Arc::new(ChannelSink::new_with_terminal(
+                        parent_call_id.clone(),
+                        cfg.name.clone(),
+                        tx.clone(),
+                        terminal_tx,
+                    ));
+                    let extras = SpawnExtras {
+                        channel_sink: Some(sink),
+                        agent_name: Some(cfg.name.clone()),
+                        parent_call_id: Some(parent_call_id),
+                    };
+                    (cfg, extras)
+                })
+                .collect();
 
         // Drop the original tx so the drain exits when all per-task senders drop.
         drop(tx);
 
         // Drain task: wrap each SubAgentRelay in a SubAgentEvent via the parent.
         let drain_output = Arc::clone(&parent_output);
+        let drain_lifecycle = self.lifecycle.clone();
         let drain = tokio::spawn(async move {
             while let Some(relay) = rx.recv().await {
-                drain_output.emit_sub_agent_event(
-                    &relay.parent_call_id,
-                    &relay.agent_name,
-                    &relay.inner,
-                );
+                if let Some(lifecycle) = &drain_lifecycle {
+                    lifecycle.child_event(&relay.parent_call_id, &relay.agent_name, &relay.inner);
+                } else {
+                    drain_output.emit_sub_agent_event(
+                        &relay.parent_call_id,
+                        &relay.agent_name,
+                        &relay.inner,
+                    );
+                }
             }
         });
 
-        let results = self
-            .spawner
-            .spawn_parallel_with_per_task_extras(tasks)
-            .await;
+        let fleet_dispatched = fleet_run_id.is_some();
+        let results = if let Some(run_id) = fleet_run_id {
+            self.spawner
+                .spawn_via_fleet_with_per_task_extras(tasks, run_id)
+                .await
+        } else {
+            self.spawner
+                .spawn_parallel_with_per_task_extras_origin(tasks, ChildOrigin::Workflow)
+                .await
+        };
 
         // Wait for the stream drain to flush all pending stream relays. Every
         // per-task ChannelSink has been dropped by now (all tasks completed), so
         // rx.recv() returns None and the drain task exits promptly.
         let _ = drain.await;
 
-        // W5.5 H-1: flush lifecycle events AFTER the stream drain. The terminal
-        // Done/Failed event for each task sits in its dedicated lifecycle channel.
-        for mut lrx in lifecycle_rxs {
-            while let Some(relay) = lrx.recv().await {
-                parent_output.emit_sub_agent_event(
-                    &relay.parent_call_id,
-                    &relay.agent_name,
-                    &relay.inner,
-                );
+        // Drain attempt-level terminals after the best-effort stream. Workflow
+        // mode deliberately suppresses them: the caller emits one authoritative
+        // logical-child terminal only after schema validation and retries finish.
+        for mut terminal_rx in terminal_rxs {
+            while let Some(terminal) = terminal_rx.recv().await {
+                let SubAgentTerminalRelay { relay, .. } = terminal;
+                if self.lifecycle.is_none() {
+                    parent_output.emit_sub_agent_event(
+                        &relay.parent_call_id,
+                        &relay.agent_name,
+                        &relay.inner,
+                    );
+                }
             }
         }
 
-        ids.into_iter().zip(results).collect()
+        if fleet_dispatched {
+            Self::correlate_fleet_results(ids, results)
+        } else {
+            ids.into_iter().zip(results).collect()
+        }
+    }
+
+    /// Close the workflow-visible logical child only after all schema retries
+    /// and node-level validation have resolved. Per-attempt engine terminals
+    /// are drained by `dispatch_via_relay` but deliberately not published into
+    /// the workflow lifecycle; otherwise attempt zero could claim success while
+    /// a later correction attempt was still running or ultimately failed.
+    fn emit_logical_child_terminal(
+        &self,
+        node_id: &str,
+        terminal_state: WorkflowChildTerminalState,
+        message: &str,
+    ) {
+        let Some(lifecycle) = &self.lifecycle else {
+            return;
+        };
+        let inner = match terminal_state {
+            WorkflowChildTerminalState::Succeeded => serde_json::to_value(ProtocolEvent::Info {
+                msg_id: format!("workflow:{node_id}:terminal"),
+                message: message.to_owned(),
+            })
+            .expect("ProtocolEvent::Info must serialize"),
+            WorkflowChildTerminalState::Failed => serde_json::json!({
+                "type": "error",
+                "error": {
+                    "code": "sub_agent_error",
+                    "message": message,
+                    "retryable": false
+                }
+            }),
+        };
+        lifecycle.child_terminal(
+            &format!("workflow:{node_id}"),
+            node_id,
+            &inner,
+            terminal_state,
+        );
     }
 
     /// Fleet-sharded fan-out (> [`FLEET_FANOUT_THRESHOLD`] siblings): route the
@@ -1308,9 +1749,19 @@ impl<'a> WorkflowRunner<'a> {
         // The fleet run_id seeds the `fleet:<run_id>-shard-<i>-<j>` parent_call_id
         // tag; a workflow-scoped label keeps it distinguishable on the bus.
         let run_id = format!("workflow-fanout-{}", ids.len());
+        if self.parent_output.is_some() {
+            return self.dispatch_via_relay(configs, Some(run_id)).await;
+        }
         let sub_configs: Vec<SubAgentConfig> = configs.into_iter().map(|(_, cfg)| cfg).collect();
         let results = self.spawner.spawn_via_fleet(sub_configs, run_id).await;
 
+        Self::correlate_fleet_results(ids, results)
+    }
+
+    fn correlate_fleet_results(
+        ids: Vec<String>,
+        results: Vec<SubAgentResult>,
+    ) -> Vec<(String, SubAgentResult)> {
         // Index results by name so each node id picks up its own result
         // regardless of shard ordering. A name can in principle repeat across
         // results only if two nodes shared an id, which the graph forbids.
@@ -1562,7 +2013,10 @@ impl<'a> WorkflowRunner<'a> {
                     model: node_pinned_model(&plan.graph, agent_name),
                     temperature: None,
                 };
-                let result = self.spawner.spawn_one(cfg).await;
+                let result = self
+                    .spawner
+                    .spawn_one_with_origin(cfg, ChildOrigin::Workflow)
+                    .await;
                 if result.is_error {
                     return Err(self.fail(
                         &format!("{loop_id}:{agent_name}"),
@@ -1604,6 +2058,39 @@ impl<'a> WorkflowRunner<'a> {
                 stage_results: stage_results.to_vec(),
             }),
         }
+    }
+
+    fn emit_node_state(
+        &self,
+        node_id: &str,
+        state: WorkflowNodeState,
+        failure: Option<WorkflowFailure>,
+    ) {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.node_event(node_id, state, failure);
+        }
+    }
+
+    fn emit_node_failure(&self, node_id: &str, error: &WorkflowRunError) {
+        let code = match error {
+            WorkflowRunError::StageFailed { .. } => "stage_failed",
+            WorkflowRunError::SchemaValidationFailed { .. } => "schema_validation_failed",
+            WorkflowRunError::DispatchBudgetExceeded { .. } => "dispatch_budget_exceeded",
+            WorkflowRunError::UnknownEntry(_) => "unknown_entry",
+            WorkflowRunError::UnknownTarget(_) => "unknown_target",
+            WorkflowRunError::NodeNotInGraph(_) => "node_not_in_graph",
+            WorkflowRunError::Cycle(_) => "workflow_cycle",
+            WorkflowRunError::MissingPrompt(_) => "missing_prompt",
+        };
+        self.emit_node_state(
+            node_id,
+            WorkflowNodeState::Failed,
+            Some(WorkflowFailure {
+                code: code.to_string(),
+                message: error.to_string(),
+                retryable: false,
+            }),
+        );
     }
 
     /// Backfill a deferred wave error's `partial` with the fully-committed
@@ -1721,6 +2208,81 @@ pub(crate) fn build_prompt(template: &str, input: &Value) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CapturedLifecycle {
+        Started(u64),
+        Node(u64),
+        Finished(u64),
+    }
+
+    #[derive(Default)]
+    struct LifecycleCapture {
+        events: Mutex<Vec<CapturedLifecycle>>,
+        children: Mutex<Vec<WorkflowChildCorrelation>>,
+    }
+
+    impl OutputSink for LifecycleCapture {
+        fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+
+        fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+
+        fn emit_tool_call(&self, _name: &str, _input: &str) {}
+
+        fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+
+        fn emit_stream_start(&self, _msg_id: &str) {}
+
+        fn emit_stream_end(
+            &self,
+            _msg_id: &str,
+            _turns: usize,
+            _input_tokens: u64,
+            _output_tokens: u64,
+            _cache_creation_tokens: u64,
+            _cache_read_tokens: u64,
+            _finish_reason: wcore_types::message::FinishReason,
+        ) {
+        }
+
+        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+
+        fn emit_info(&self, _msg: &str) {}
+
+        fn emit_correlated_sub_agent_event(
+            &self,
+            _parent_call_id: &str,
+            _agent_name: &str,
+            _inner: &Value,
+            correlation: &WorkflowChildCorrelation,
+        ) {
+            self.children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(correlation.clone());
+        }
+
+        fn emit_correlated_workflow_started(&self, event: &WorkflowRunStarted) {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedLifecycle::Started(event.sequence));
+        }
+
+        fn emit_workflow_node_event(&self, event: &WorkflowNodeLifecycle) {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedLifecycle::Node(event.sequence));
+        }
+
+        fn emit_correlated_workflow_finished(&self, event: &WorkflowRunFinished) {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedLifecycle::Finished(event.sequence));
+        }
+    }
+
     #[test]
     fn build_prompt_appends_non_null_input() {
         let p = build_prompt("do it", &Value::String("ctx".into()));
@@ -1822,6 +2384,230 @@ Workflow(
             Ok(_) => panic!("expected InvalidSchema error, got Ok"),
             Err(WorkflowParseError::InvalidSchema { name, .. }) => assert_eq!(name, "findings"),
             Err(other) => panic!("expected InvalidSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_sequences_once_and_absorbs_node_terminals() {
+        let output: Arc<dyn OutputSink> = Arc::new(crate::output::null_sink::NullSink);
+        let lifecycle = WorkflowLifecycleEmitter::new(
+            output,
+            "audit".to_string(),
+            "Audit".to_string(),
+            2,
+            vec!["scan".to_string(), "verify".to_string()],
+        );
+
+        lifecycle.start();
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            1
+        );
+
+        lifecycle.node_event("scan", WorkflowNodeState::Queued, None);
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "stream_start"}),
+        );
+        lifecycle.child_terminal(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "info"}),
+            WorkflowChildTerminalState::Succeeded,
+        );
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "text_delta"}),
+        );
+        lifecycle.node_event("scan", WorkflowNodeState::Succeeded, None);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            3
+        );
+
+        // A terminal is absorbing: a late running event is not emitted and
+        // does not consume sequence authority.
+        lifecycle.node_event("scan", WorkflowNodeState::Running, None);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            3
+        );
+
+        // Finish accounts for every known node. The already-terminal scan is
+        // unchanged and verify receives exactly one blocked terminal.
+        lifecycle.finish_remaining();
+        {
+            let state = lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(state.next_sequence, 4);
+            assert_eq!(state.terminal_nodes.len(), 2);
+        }
+
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+        assert_eq!(
+            state.children["workflow:scan"].terminal,
+            Some(WorkflowChildTerminalState::Succeeded)
+        );
+        drop(state);
+
+        lifecycle.finish(WorkflowTerminalState::Succeeded, None);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            5
+        );
+
+        // The run terminal is absorbing too: duplicate finish and late child
+        // evidence cannot allocate new event or sequence identities.
+        lifecycle.finish(WorkflowTerminalState::Failed, None);
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "error"}),
+        );
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(state.next_sequence, 5);
+        assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+    }
+
+    #[test]
+    fn interrupted_workflow_terminalizes_active_children_before_finish() {
+        let capture = Arc::new(LifecycleCapture::default());
+        let output: Arc<dyn OutputSink> = capture.clone();
+        let lifecycle = WorkflowLifecycleEmitter::new(
+            output,
+            "audit".to_string(),
+            "Audit".to_string(),
+            1,
+            vec!["scan".to_string()],
+        );
+        lifecycle.start();
+        lifecycle.node_event("scan", WorkflowNodeState::Running, None);
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "text_delta"}),
+        );
+
+        lifecycle.fail_active_children("workflow task panicked");
+        lifecycle.finish_remaining();
+        lifecycle.finish(WorkflowTerminalState::Failed, None);
+
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            state.children["workflow:scan"].terminal,
+            Some(WorkflowChildTerminalState::Failed)
+        );
+        assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+        assert!(state.terminal_nodes.contains("scan"));
+        assert!(state.finished);
+        drop(state);
+
+        let children = capture
+            .children
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].terminal_state, None);
+        assert_eq!(
+            children[1].terminal_state,
+            Some(WorkflowChildTerminalState::Failed)
+        );
+    }
+
+    #[test]
+    fn concurrent_finish_is_the_last_admitted_wire_event() {
+        for _ in 0..64 {
+            let capture = Arc::new(LifecycleCapture::default());
+            let output: Arc<dyn OutputSink> = capture.clone();
+            let lifecycle = Arc::new(WorkflowLifecycleEmitter::new(
+                output,
+                "audit".to_string(),
+                "Audit".to_string(),
+                1,
+                vec!["scan".to_string()],
+            ));
+            lifecycle.start();
+
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let node_lifecycle = Arc::clone(&lifecycle);
+            let node_barrier = Arc::clone(&barrier);
+            let node = std::thread::spawn(move || {
+                node_barrier.wait();
+                node_lifecycle.node_event("scan", WorkflowNodeState::Queued, None);
+            });
+            let finish_lifecycle = Arc::clone(&lifecycle);
+            let finish_barrier = Arc::clone(&barrier);
+            let finish = std::thread::spawn(move || {
+                finish_barrier.wait();
+                finish_lifecycle.finish(WorkflowTerminalState::Succeeded, None);
+            });
+            barrier.wait();
+            node.join().unwrap();
+            finish.join().unwrap();
+
+            let before_late = capture
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len();
+            lifecycle.node_event("scan", WorkflowNodeState::Running, None);
+            lifecycle.child_event(
+                "workflow:scan",
+                "scan",
+                &serde_json::json!({"type": "text_delta"}),
+            );
+
+            let events = capture
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(events.len(), before_late);
+            assert!(matches!(
+                events.first(),
+                Some(CapturedLifecycle::Started(0))
+            ));
+            assert!(matches!(
+                events.last(),
+                Some(CapturedLifecycle::Finished(_))
+            ));
+            for (expected, event) in events.iter().enumerate() {
+                let actual = match event {
+                    CapturedLifecycle::Started(sequence)
+                    | CapturedLifecycle::Node(sequence)
+                    | CapturedLifecycle::Finished(sequence) => *sequence,
+                };
+                assert_eq!(actual, expected as u64);
+            }
         }
     }
 }

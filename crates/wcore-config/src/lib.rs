@@ -24,6 +24,7 @@ pub mod chatgpt_catalog;
 // W8c.2 F.1: CuaConfig TOML schema (consumed by wcore-cua::adapter::from_spec).
 pub mod compact;
 pub mod compat;
+pub mod confidential_blob;
 pub mod config;
 // Anvil (native gated-forge engine): `[anvil]` kill-switch config.
 pub mod anvil;
@@ -45,7 +46,25 @@ pub mod keychain;
 pub mod limits;
 pub mod mcp_cred_refs;
 pub mod plan;
+// F25-04: the plugin approval gate + its content-digest primitive. Lives here
+// because BOTH `wcore-cli` (which writes approvals) and `wcore-agent` (whose
+// loader enforces them) must agree byte-for-byte on the digest and the verdict;
+// duplicating either would create two answers to "is this plugin approved?".
+pub mod network_path;
+pub mod plugin_governance;
 pub mod plugins_config;
+pub mod portability;
 pub mod profile;
+pub mod resolution_provenance;
 pub mod shell;
+// Filesystem-aware SQLite journal-mode selection. WAL corrupts databases on
+// network filesystems (measured); every SQLite call site selects through here.
+pub mod sqlite_journal;
+// Consistent point-in-time capture of a live SQLite database. A WAL database is
+// a trio of files that is only meaningful together; copying them independently
+// yields a corrupt restore (measured). Needs a real connection, so it is gated
+// on the same `sqlite` feature as `sqlite_journal`'s connection-taking half.
+#[cfg(feature = "sqlite")]
+pub mod sqlite_snapshot;
 pub mod tools;
+pub mod workspace_trust;

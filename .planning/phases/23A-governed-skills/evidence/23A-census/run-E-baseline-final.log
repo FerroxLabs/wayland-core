@@ -1,0 +1,12 @@
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-23a-census/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.86s
+     Running tests/f23a_boundary_drive.rs (target/debug/deps/f23a_boundary_drive-a821b4e9ce4cf874)
+
+running 4 tests
+test generated_draft_is_refused_at_every_route_while_user_content_is_not ... ok
+test list_tags_hidden_matcher_selftest ... ok
+test refused_read_tool_call_does_not_kill_the_session ... ok
+test refused_skill_tool_call_does_not_kill_the_session ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.52s
+

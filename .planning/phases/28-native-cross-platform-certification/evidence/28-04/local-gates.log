@@ -1,0 +1,91 @@
+# Plan 28-04 local gate run — 2026-07-28T14:29:29Z, base cf48b349
+
+### cargo fmt --all -- --check
+rc=0
+
+### python3 .planning/scripts/f28-ledger.py --self-test
+self-test: 0 failure(s)
+self-test: every rejection code was tripped by a bad fixture and NOT tripped
+           by a good one (both directions checked for each).
+acceptance self-test: 0 failure(s)
+acceptance self-test: every F28A code tripped by a bad fixture and NOT by a
+                      good one, and neither an upward re-score nor a repair
+                      row was wrongly caught.
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --self-test
+self-test: 0 failure(s)
+self-test: every F28V code was tripped by a bad fixture and NOT by a good one;
+           recomputation was checked in both directions, a re-run family was
+           proved to SUPERSEDE rather than accumulate, and the Rust and Python
+           A3 allowlists were read from source and confirmed identical.
+rc=0
+
+### python3 .planning/scripts/f28-ledger.py --validate .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv --allow-open
+--validate: 63 finding(s), allow_open=True
+--validate: OK
+rc=0
+
+### python3 .planning/scripts/f28-ledger.py --validate (STRICT — MUST fail on the one open HIGH)
+--validate: 63 finding(s), allow_open=False
+--validate: REJECTED (1)
+  F28L-002  F-28-02-002 (line 39): disposition is OPEN; acceptance requires a terminal disposition
+rc=1 (1 is the CORRECT result here)
+
+### python3 .planning/scripts/f28-ledger.py --check-a2 .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv
+--check-a2: 63 finding(s)
+--check-a2: OK
+rc=0
+
+### python3 .planning/scripts/f28-ledger.py --check-downgrades .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv
+--check-downgrades: 63 finding(s)
+--check-downgrades: OK
+rc=0
+
+### python3 .planning/scripts/f28-ledger.py --check-backlog-ids .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv .planning/BACKLOG.md
+--check-backlog-ids: 46 accepted/deferred finding(s)
+--check-backlog-ids: OK
+rc=0
+
+### python3 .planning/scripts/f28-ledger.py --check-completeness .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv .planning/phases/28-native-cross-platform-certification/evidence/28-02/results.json .planning/phases/28-native-cross-platform-certification/evidence/28-03/soak.json .planning/phases/28-native-cross-platform-certification/evidence/28-03/candidate.json .planning/phases/28-native-cross-platform-certification/evidence/28-01/known-red.tsv
+--check-completeness: 63 ledger row(s) against 25 upstream finding id(s) from 4 artifact(s)
+--check-completeness: OK
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --verify .planning/phases/28-native-cross-platform-certification/28-04-CERTIFICATION-RECEIPT.json
+  note: 1 bound file(s) are zero bytes and none is cited as finding evidence: evidence/28-03/macos-activeness.err
+--verify: recomputed bindings for 28-04-CERTIFICATION-RECEIPT.json against the raw evidence under /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-04/.planning/phases/28-native-cross-platform-certification
+--verify: OK
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --check-claim-limit .planning/phases/28-native-cross-platform-certification/28-04-CERTIFICATION-RECEIPT.json
+--check-claim-limit: OK
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --check-enumeration .planning/phases/28-native-cross-platform-certification/28-04-CERTIFICATION-RECEIPT.json .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv
+--check-enumeration: OK
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --check-tamper-detection .planning/phases/28-native-cross-platform-certification/28-04-CERTIFICATION-RECEIPT.json
+--check-tamper-detection: OK
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --check-verdict .planning/phases/28-native-cross-platform-certification/28-04-PHASE-VERDICT.md .planning/ROADMAP.md
+--check-verdict: OK
+rc=0
+
+### python3 .planning/scripts/f28-verify-bindings.py --check-requirements .planning/REQUIREMENTS.md .planning/phases/28-native-cross-platform-certification/evidence/28-04/findings.tsv
+--check-requirements: OK
+rc=0
+
+### scope fence: only wcore-eval-scenarios touched under crates/
+crates/wcore-eval-scenarios/src/receipt.rs
+crates/wcore-eval-scenarios/tests/f28_receipt_contract.rs
+(and uncommitted:)
+ M crates/wcore-eval-scenarios/tests/f28_receipt_contract.rs
+
+### shared fence untouched
+(empty above = untouched)
+
+### existing receipt_contract.rs unmodified
+UNMODIFIED

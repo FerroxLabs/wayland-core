@@ -1,0 +1,33 @@
+RUN_SHA=f2d186f6c3e77b99961171632fbbfce5c5b5d776
+CLIPPY_RC=0
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+LIVE_BINARY_RUNS
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 3b82ef58-3e70-41c8-95a8-483be23cef67 with nextest profile: default
+    Starting 20 tests across 1 binary
+        PASS [   0.006s] ( 1/20) wcore-cli::child_attribution_corpus every_case_runs_at_least_two_siblings
+        PASS [   0.006s] ( 2/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.006s] ( 3/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.006s] ( 4/20) wcore-cli::child_attribution_corpus every_invariant_states_an_attribution_and_names_no_error_shape
+        PASS [   0.006s] ( 5/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.009s] ( 6/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.005s] ( 7/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.022s] ( 8/20) wcore-cli::child_attribution_corpus the_rendered_screen_surface_declares_its_unavailability
+        PASS [   0.006s] ( 9/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.006s] (10/20) wcore-cli::child_attribution_corpus the_corpus_carries_a_crash_and_restart_case
+        PASS [   0.006s] (11/20) wcore-cli::child_attribution_corpus support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.023s] (12/20) wcore-cli::child_attribution_corpus corpus_table_covers_every_lifecycle_event
+        PASS [   0.023s] (13/20) wcore-cli::child_attribution_corpus support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.131s] (14/20) wcore-cli::child_attribution_corpus the_ttl_reaper_cancels_only_the_expired_sibling
+        PASS [   2.355s] (15/20) wcore-cli::child_attribution_corpus attribution_reservation
+        PASS [   2.382s] (16/20) wcore-cli::child_attribution_corpus attribution_escalation
+        PASS [  20.124s] (17/20) wcore-cli::child_attribution_corpus attribution_refund
+        PASS [  20.156s] (18/20) wcore-cli::child_attribution_corpus attribution_delivery
+        PASS [  21.152s] (19/20) wcore-cli::child_attribution_corpus attribution_approval
+        SLOW [> 30.000s] (─────) wcore-cli::child_attribution_corpus attribution_cancellation
+        PASS [  38.842s] (20/20) wcore-cli::child_attribution_corpus attribution_cancellation
+────────────
+     Summary [  38.842s] 20 tests run: 20 passed (1 slow), 0 skipped

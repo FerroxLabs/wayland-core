@@ -15,13 +15,19 @@
 //! test does, asserting on the exact capability flags that signal
 //! plugin discovery survived linking + LTO:
 //!
-//! - `capabilities.browser_suite == true` (wayland-browser linked)
-//! - `capabilities.computer_use  == true` (wayland-cua linked — flag is
-//!   derived from plugin presence via `PluginCapabilitySet::from_verified`,
-//!   NOT from runtime `HostCuaRegistrar.computer_use_advertised`; that
-//!   inner registrar gate is what the per-plugin tests in
-//!   `wcore-agent/tests/capability_advertising_test.rs` cover.)
-//! - `capabilities.plugins`      == `true` (umbrella flag, has_plugins).
+//! - `capabilities.browser_suite` (wayland-browser linked)
+//! - `capabilities.computer_use` (wayland-cua linked — the flag derives from
+//!   plugin presence via `PluginCapabilitySet::from_verified`, NOT from the
+//!   runtime `HostCuaRegistrar.computer_use_advertised`; that inner registrar
+//!   gate is covered by `wcore-agent/tests/capability_advertising_test.rs`.)
+//! - `capabilities.plugins` == `true` (umbrella flag, has_plugins).
+//!
+//! Since `85b60a2f` those first two flags are gated on **backend liveness**,
+//! not linkage alone, so they are asserted as a two-run polarity differential
+//! (live probe inputs -> advertised, dead probe inputs -> withdrawn) rather
+//! than unconditionally `true`. Restoring an unconditional `== true` would
+//! re-introduce the false advertisement that narrowing fixed. Full reasoning
+//! in `plugin_discovery_e2e.rs` and `.planning/CI-TRIAGE.md`.
 //!
 //! Any future regression that drops a `use wayland_<plugin> as _;` from
 //! `wcore-cli/src/main.rs`, or any release-profile change that re-enables
@@ -167,6 +173,60 @@ fn release_binary_help_and_version_succeed() {
     );
 }
 
+/// Which answer the backend-liveness probes should give for a run. See the
+/// module docs and `plugin_discovery_e2e.rs` for why the capability flags are
+/// asserted as a two-run polarity differential rather than `== true`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backends {
+    /// Every probe input names something that could start.
+    Live,
+    /// Every probe input is provably dead.
+    Dead,
+}
+
+/// Plant the environment facts the probes read. The expected flag values come
+/// from what is planted here, never from invoking the probe under test.
+fn apply_backend_env(cmd: &mut Command, backends: Backends) {
+    // A credentialed Browserbase build probes Indeterminate and keeps the flag
+    // regardless of any local backend; clear it in BOTH legs so the Dead leg
+    // cannot be silently unfalsifiable.
+    cmd.env_remove("BROWSERBASE_API_KEY");
+    cmd.env_remove("BROWSERBASE_PROJECT_ID");
+
+    match backends {
+        Backends::Live => {
+            // Resolved with `which`, which accepts an absolute path as given and
+            // never executes it — the test binary is a valid sidecar stand-in.
+            cmd.env(
+                "WAYLAND_CAMOUFOX_BIN",
+                std::env::current_exe().expect("resolve test binary path"),
+            );
+            cmd.env("DISPLAY", ":0");
+        }
+        Backends::Dead => {
+            cmd.env(
+                "WAYLAND_CAMOUFOX_BIN",
+                "wayland-core-smoke-no-such-browser-binary",
+            );
+            cmd.env_remove("DISPLAY");
+            cmd.env_remove("WAYLAND_DISPLAY");
+        }
+    }
+}
+
+/// Read a capability flag the way a host reads it. These fields are
+/// `#[serde(skip_serializing_if = "is_false")]`, so a withdrawn capability is
+/// omitted from the wire rather than sent as `false`; absent and `false` are
+/// the same claim.
+fn advertises(caps: &serde_json::Value, key: &str) -> bool {
+    match &caps[key] {
+        serde_json::Value::Null => false,
+        v => v
+            .as_bool()
+            .unwrap_or_else(|| panic!("capabilities.{key} was not a bool: {v}")),
+    }
+}
+
 /// Drive `--json-stream` against the release binary, capture the first
 /// stdout line (the Ready event), and assert the plugin-capability flags
 /// the v0.2.0 release-time dead-code-strip regression hid.
@@ -174,24 +234,36 @@ fn release_binary_help_and_version_succeed() {
 /// Mirrors `plugin_discovery_e2e.rs::first_ready_event` but targets the
 /// release artifact at `target/release/wayland-core` instead of the
 /// debug binary Cargo wires through `CARGO_BIN_EXE_wayland-core`.
-fn first_ready_event_release(bin: &PathBuf) -> serde_json::Value {
+fn first_ready_event_release(bin: &PathBuf, backends: Backends) -> serde_json::Value {
     // Clean cwd + HOME so no `.wayland-core.toml` from the dev environment
     // perturbs config resolution.
     let tmp = TempDir::new().expect("create tmp workspace");
 
-    let mut child = Command::new(bin)
-        .args([
-            "--json-stream",
-            "--provider",
-            "anthropic",
-            "--api-key",
-            "test-key-not-used-because-we-stop-before-message",
-        ])
-        .current_dir(tmp.path())
-        .env("HOME", tmp.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "--json-stream",
+        "--provider",
+        "anthropic",
+        "--api-key",
+        "test-key-not-used-because-we-stop-before-message",
+    ])
+    .current_dir(tmp.path())
+    // `HOME` alone does NOT isolate on Windows: `dirs::home_dir()` reads
+    // `USERPROFILE` there, so the child loads the developer's real
+    // `%APPDATA%\wayland-core` config. Measured on `SeanD@seandesktop`
+    // 2026-07-29: with `HOME` only, this exact invocation produced 0 bytes of
+    // stdout and exited before `ready`, because the host config carried
+    // `storage.credentials.backend = "plaintext"` and durable session recovery
+    // refuses to start on it. With `WAYLAND_HOME` — the crate's canonical
+    // hermetic override, see `wcore_config::config::wayland_config_dir` — the
+    // same invocation emitted `ready` in under a second.
+    .env("HOME", tmp.path())
+    .env("WAYLAND_HOME", tmp.path())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    apply_backend_env(&mut cmd, backends);
+    let mut child = cmd
         .spawn()
         .expect("spawn release wayland-core --json-stream");
 
@@ -236,12 +308,15 @@ fn first_ready_event_release(bin: &PathBuf) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("release first stdout line was not JSON ({e}): {first_line:?}"))
 }
 
+/// Positive polarity. With both probes reporting Ready, neither can narrow, so
+/// the flags are a pure linkage signal and this is the LTO dead-code-strip
+/// guard the file was written to be.
 #[test]
 fn release_binary_ready_event_advertises_plugin_capabilities() {
     let Some(bin) = release_binary_or_skip() else {
         return;
     };
-    let event = first_ready_event_release(&bin);
+    let event = first_ready_event_release(&bin, Backends::Live);
 
     assert_eq!(
         event["type"], "ready",
@@ -255,26 +330,68 @@ fn release_binary_ready_event_advertises_plugin_capabilities() {
     );
 
     // wayland-browser plugin inventory items survived release LTO.
-    assert_eq!(
-        caps["browser_suite"], true,
-        "release binary: expected capabilities.browser_suite=true (wayland-browser stripped \
-         by release LTO?); caps: {caps}"
+    assert!(
+        advertises(caps, "browser_suite"),
+        "release binary: WAYLAND_CAMOUFOX_BIN resolves so liveness cannot narrow; withdrawn \
+         means wayland-browser was stripped by release LTO; caps: {caps}"
     );
 
     // wayland-cua plugin presence flips this — independent of the
     // separate `HostCuaRegistrar.computer_use_advertised` runtime gate
     // (which defaults false and controls per-tool registration).
-    assert_eq!(
-        caps["computer_use"], true,
-        "release binary: expected capabilities.computer_use=true (wayland-cua stripped by \
-         release LTO?); caps: {caps}"
+    assert!(
+        advertises(caps, "computer_use"),
+        "release binary: a display server is nominated so liveness cannot narrow; withdrawn \
+         means wayland-cua was stripped by release LTO; caps: {caps}"
     );
 
     // Umbrella plugins flag — any discovered plugin trips it.
-    assert_eq!(
-        caps["plugins"], true,
+    assert!(
+        advertises(caps, "plugins"),
         "release binary: expected capabilities.plugins=true (no plugins discovered at all); \
          caps: {caps}"
+    );
+}
+
+/// Negative polarity, against the SHIPPED artifact. The release profile is
+/// where 27-C2(b) actually reached users, so the honesty property is asserted
+/// on the same binary the LTO guard above covers.
+#[test]
+fn release_binary_withdraws_plugin_capabilities_when_backends_cannot_start() {
+    let Some(bin) = release_binary_or_skip() else {
+        return;
+    };
+    let event = first_ready_event_release(&bin, Backends::Dead);
+
+    assert_eq!(
+        event["type"], "ready",
+        "first release stdout line should be the Ready event, got: {event}"
+    );
+    let caps = &event["capabilities"];
+
+    // Proves this leg differs from the positive leg ONLY in backend liveness.
+    assert!(
+        advertises(caps, "plugins"),
+        "release binary: plugins=false means the plugin system is inert, so a withdrawn \
+         browser_suite below would prove nothing; caps: {caps}"
+    );
+
+    assert!(
+        !advertises(caps, "browser_suite"),
+        "release binary: no browser backend can start yet browser_suite is still \
+         advertised — this is the 27-C2(b) false advertisement, in the profile that \
+         ships. (A `chromium`/`browserbase` build probes Indeterminate by design and \
+         keeps the flag.) caps: {caps}"
+    );
+
+    // Indeterminate must NOT narrow, so the honest expectation is platform-dependent.
+    let expected_cua = !cfg!(target_os = "linux");
+    assert_eq!(
+        advertises(caps, "computer_use"),
+        expected_cua,
+        "release binary: computer_use should be {expected_cua} with no display on {}; \
+         Linux must narrow, macOS/Windows report Indeterminate and must not; caps: {caps}",
+        std::env::consts::OS
     );
 }
 

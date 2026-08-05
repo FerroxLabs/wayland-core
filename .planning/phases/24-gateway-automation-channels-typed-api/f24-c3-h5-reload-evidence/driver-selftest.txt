@@ -1,0 +1,5 @@
+PASS  1-known-positive-holder-takes-the-lock — lock reads as held (pgid 1760942)
+PASS  2-known-negative-repaired-release-frees-it — lock reads as free after a group kill
+PASS  3-the-old-release-would-have-missed-it — old kill left the lock HELD (/tmp/f24c3h6-selftest-AgRQ54/l2: 1760960) — this is what graded a correct fix as red
+
+selftest: 3 passed / 0 failed

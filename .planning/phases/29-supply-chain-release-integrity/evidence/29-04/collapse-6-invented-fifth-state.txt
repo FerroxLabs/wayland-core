@@ -1,0 +1,14 @@
+--- COLLAPSE-6: append a FIFTH record named termination_state_4 ---
+That name is not hypothetical. It is the exact state an agent on this
+program invented to route around an artifact it wrongly believed
+unobtainable, so the defence is tied to the real incident.
+[COLLAPSE-6a append termination_state_4] rc=2
+    error: invalid value 'termination_state_4' for '--state <STATE>': unknown release state: termination_state_4
+    
+    For more information, try '--help'.
+C6a_RC=2   (the CLI's value parser refuses the name before any logic runs)
+    a fifth record with state=termination_state_4 spliced straight into the chain JSON
+[COLLAPSE-6b state-verify] rc=1
+    wayland-release: invalid JSON in /tmp/29-04-GTjIF2/c6b.json: unknown variant `termination_state_4`, expected one of `packaging`, `deployment_preparation`, `rollback_rehearsal`, `release_acceptance` at line 91 column 36
+C6b_RC=1   (the closed enum refuses it at DESERIALIZATION)
+

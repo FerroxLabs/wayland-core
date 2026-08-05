@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Explicit E3 gate: requires a separately packaged `wayland-core` binary and
+# an externally pinned source SHA. Ordinary unit runs do not build the CLI.
+packaged-driver-gate = []
+
 [lib]
 name = "wcore_eval_scenarios"
 path = "src/lib.rs"
@@ -15,6 +20,45 @@ path = "src/lib.rs"
 [[bin]]
 name = "wayland-eval"
 path = "bin/wayland-eval.rs"
+
+[[bin]]
+name = "wcore-eval-fixture"
+path = "bin/wcore-eval-fixture.rs"
+
+[[bin]]
+name = "wayland-receipt"
+path = "bin/wayland-receipt.rs"
+
+# Phase 29 (F29-01/F29-04): the only executable surface that mints or checks a
+# release manifest or a release state record. Adds no dependency — everything
+# it needs (ed25519-dalek, sha2, base64, rand, serde, serde_json, clap) is
+# already declared below.
+[[bin]]
+name = "wayland-release"
+path = "bin/wayland-release.rs"
+
+# The independent delivery sink (Phase 24). A SEPARATE PROCESS on purpose: it
+# is started before the gateway and outlives its kill and platform restart, so
+# the arrivals journal is owned by something the gateway cannot write to except
+# by completing a real round trip. See src/fixtures/channel.rs.
+[[bin]]
+name = "wayland-channel-sink"
+path = "bin/wayland-channel-sink.rs"
+
+# Phase 24 (F24-05): the journey receipt tool. Adds NO dependency — clap,
+# serde_json, sha2 and anyhow are already declared below — so the workspace
+# manifest and the lockfile stay untouched.
+[[bin]]
+name = "wayland-journey"
+path = "bin/wayland-journey.rs"
+
+# Phase 30 (F30-01/F30-02): walks the shipped binary's own command tree so the
+# surface inventory is a measurement of the artifact rather than a reading of a
+# document, and verifies a scorecard document. Adds NO dependency — clap, serde,
+# serde_json and anyhow are already declared below.
+[[bin]]
+name = "wayland-scorecard"
+path = "bin/wayland-scorecard.rs"
 
 [dependencies]
 # Async runtime — used by the runner for spawn/timeout/stderr-drain.
@@ -27,6 +71,12 @@ serde_json   = { workspace = true }
 toml         = { workspace = true }
 # Hermetic tempdirs for per-scenario session-dir / cwd hermeticity (C-3).
 tempfile     = { workspace = true }
+# Workspace-evidence hashing must recognise the RESOLVED spelling of the
+# workspace, because that is the one the binary under test prints. On Windows
+# `canonicalize` returns the verbatim `\\?\C:\…` form, which the binary never
+# emits; `dunce::simplified` reduces it to the ordinary `C:\…` form that it
+# does. Already in the tree via wcore-agent and wcore-swarm — adds nothing new.
+dunce        = "1"
 # Error plumbing.
 anyhow       = { workspace = true }
 thiserror    = { workspace = true }
@@ -34,11 +84,19 @@ thiserror    = { workspace = true }
 clap         = { workspace = true }
 # Structured logging for runner diagnostics.
 tracing      = { workspace = true }
+# Content-address the exact Core binary exercised by an evaluation run.
+sha2         = { workspace = true }
+base64       = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand         = { workspace = true }
 # Direct HTTPS for the D9 LLM-as-judge grader (semantic eval). The eval crate
 # is a test harness, so its one raw reqwest call carries a scoped
 # `#[allow(clippy::disallowed_methods)]` (see judge.rs) rather than routing
 # through wcore-egress, which would add an internal-crate edge this crate avoids.
 reqwest      = { workspace = true }
+# Correct HTTP parsing for the loopback-only scripted OpenAI fixture.
+axum         = "0.7"
+futures      = { workspace = true }
 # D8 PTY TUI capture — drive wayland-core's ratatui TUI under a pseudo-terminal
 # and read the rendered screen. Direct deps (not in [workspace.dependencies])
 # but already in the lockfile via wcore-cli's TUI harness; vt100 pinned <0.16 to
@@ -49,8 +107,28 @@ vt100        = "0.15"
 # Wire-format types — reuse the engine's authoritative ProtocolEvent /
 # ProtocolCommand enums instead of redefining shapes that would drift.
 wcore-protocol = { workspace = true }
+wcore-config = { workspace = true }
+# `wcore_types::process_liveness` — the single zombie-aware liveness probe.
+# wcore-types is the bottom layer with zero internal deps, so this edge cannot
+# create a cycle. See .planning/ZOMBIE-PROBE.md.
+wcore-types = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
+serial_test.workspace = true
+wcore-mcp = { workspace = true }
+wcore-egress = { workspace = true }
 # Tests need the wayland-core binary available — declaring wcore-cli as
 # an artifact dev-dep would also work, but the runner already supports
 # binary discovery via WCORE_EVAL_BIN env + relative target/ walk
@@ -58,11 +136,3 @@ wcore-protocol = { workspace = true }
 # tests in tests/smoke.rs use that helper so no extra build dep is
 # required and there's no risk of pulling the entire wcore-cli tree
 # into the test compile graph.
-
-# libc — `hung_scenario_does_not_leak_pid` checks PID reaping via
-# `libc::kill(pid, 0)` instead of shelling out to /bin/kill, which is
-# absent in the ci-linux slim Debian docker image
-# (`rust:1.95-slim-bookworm`) — caused ENOENT panic + nextest job fail
-# in CI run 26396718138.
-[target.'cfg(unix)'.dev-dependencies]
-libc = { workspace = true }

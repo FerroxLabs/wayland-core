@@ -1,6 +1,259 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
+use thiserror::Error;
+
+use wcore_types::goal::GoalStrategy;
+
+use crate::diagnostics::GetRuntimeDiagnosticsCommand;
+use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
+
+pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
+pub const RECOVERED_APPROVAL_VERSION: u16 = 1;
+pub const BUDGET_GRANT_REQUEST_ID_MAX_BYTES: usize = 128;
+pub const BUDGET_GRANT_REQUEST_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
+pub const MCP_LIFECYCLE_VERSION: u16 = 1;
+
+pub(crate) fn is_valid_budget_grant_request_id(request_id: &str) -> bool {
+    if request_id.len() > BUDGET_GRANT_REQUEST_ID_MAX_BYTES {
+        return false;
+    }
+    let mut bytes = request_id.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+/// Closed payload for a versioned durable-session resynchronization request.
+///
+/// This command was introduced with recovery v1, so rejecting unknown fields
+/// does not tighten any legacy wire shape. It prevents a host from believing
+/// an authority-bearing extension was honored when Core actually ignored it.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionResyncCommand {
+    pub recovery_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub after: Option<RecoveryCursor>,
+}
+
+/// Closed payload for an operator action on an interrupted durable turn.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeTurnCommand {
+    pub recovery_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub cursor: RecoveryCursor,
+    pub action: ResumeTurnAction,
+}
+
+/// Closed payload for resolving the exact approval restored after a crash.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveInterruptedApprovalCommand {
+    pub recovery_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub cursor: RecoveryCursor,
+    pub approval_id: String,
+    pub decision: RecoveredApprovalDecision,
+    #[serde(default)]
+    pub answer: Option<String>,
+}
+
+/// Closed, structurally valid operator grant for continuing a budget-stopped
+/// session. Runtime authority checks (launcher opt-in, outstanding receipt,
+/// and managed-policy ownership) remain the dispatcher's responsibility.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContinueWithBudgetCommand {
+    pub request_id: String,
+    pub additional_tokens: u64,
+    pub additional_cost_usd: f64,
+}
+
+impl<'de> Deserialize<'de> for ContinueWithBudgetCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            request_id: String,
+            #[serde(default)]
+            additional_tokens: u64,
+            #[serde(default)]
+            additional_cost_usd: f64,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if !is_valid_budget_grant_request_id(&wire.request_id) {
+            return Err(serde::de::Error::custom(format!(
+                "request_id must match {BUDGET_GRANT_REQUEST_ID_PATTERN} and contain at most {BUDGET_GRANT_REQUEST_ID_MAX_BYTES} ASCII bytes"
+            )));
+        }
+        if !wire.additional_cost_usd.is_finite() || wire.additional_cost_usd < 0.0 {
+            return Err(serde::de::Error::custom(
+                "additional_cost_usd must be finite and non-negative",
+            ));
+        }
+        if wire.additional_tokens == 0 && wire.additional_cost_usd == 0.0 {
+            return Err(serde::de::Error::custom(
+                "continue_with_budget must add tokens or cost headroom",
+            ));
+        }
+        Ok(Self {
+            request_id: wire.request_id,
+            additional_tokens: wire.additional_tokens,
+            additional_cost_usd: wire.additional_cost_usd,
+        })
+    }
+}
+
+/// Closed, correlated request to remove one session-scoped runtime MCP server.
+///
+/// This command never mutates configured or plugin-owned declarations. Within
+/// one Core session, replaying the same `request_id` and `name` returns the
+/// original terminal result; reusing the ID for another name is rejected.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveMcpServerCommand {
+    pub lifecycle_version: u16,
+    pub request_id: String,
+    pub name: String,
+}
+
+// ---------------------------------------------------------------------------
+// F22-C1 — host CONTROL of a durable Goal.
+//
+// `crate::goal` gave a host the ability to OBSERVE a Goal (`goal_snapshot`,
+// `goal_transition`). It deliberately shipped no command, and said so: a
+// command variant with no dispatcher is a capability nothing answers. These
+// five close the other direction, and each one is answered in the CLI command
+// loop in the same change that introduces it.
+//
+// ## Why these five, and why not `run`
+//
+// They mirror `wayland-core goal` (`goal_cmd.rs:223-379`) verb for verb, EXCEPT
+// `run`. `goal run` drives the real `FleetDispatcher` — waves, worker
+// subprocesses, leases, shard timeouts — which is a long-running drive, not a
+// command-loop reply, and inlining it would block the session it was issued on.
+//
+// [`ProtocolCommand::GoalAdvance`] is NOT a substitute for it. It is the verb
+// the taxonomy already implied and nothing could issue: `LoopPolicy::Manual`
+// has no numeric ceiling precisely because "each advance is itself an explicit
+// operator action" (`goal.rs:196-199`), and before this command there was no
+// operator surface anywhere that could take one. A Manual-policy Goal was
+// therefore unadvanceable by a host by construction.
+//
+// ## What a host is NOT permitted to say
+//
+// [`GoalOpenCommand`] carries `max_tokens` — a REQUEST — and deliberately does
+// NOT carry the CLI's `--parent-max-tokens` / `--parent-envelope`. The
+// effective envelope is the intersection with the parent, and the parent is the
+// session's own authority, never a number the wire supplied. This is the same
+// boundary `GoalAuthorityWire` holds on the event side: a host may recognise an
+// envelope, never assert one. A `parent_max_tokens` field on the wire would be
+// exactly the authority-minting route that type was shaped to avoid.
+//
+// ## Why cancel and advance carry a cursor
+//
+// Same reason [`ResolveInterruptedApprovalCommand`] does: the cursor binds the
+// decision to the state the operator actually inspected, so a stale host card
+// cannot cancel a Goal that has since terminated, nor advance one that has
+// already consumed the iteration the operator was looking at.
+
+/// Closed payload authorizing a durable Goal from a host control plane.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalOpenCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    pub objective: String,
+    /// Loop bound, at least 1. Mirrors `goal open --iterations`: `1` records
+    /// `LoopPolicy::Once`, higher records `Fixed`. There is deliberately no
+    /// spelling for "unbounded" — the canonical taxonomy has no such variant,
+    /// and a wire field that invented one would be a second loop vocabulary.
+    pub iterations: u32,
+    /// Which of the five canonical loop owners this Goal authorizes.
+    pub strategy: GoalStrategy,
+    /// Token ceiling the host REQUESTS. Core intersects it with the session's
+    /// own envelope; the recorded authority is the intersection, never this.
+    pub max_tokens: u64,
+}
+
+/// Closed payload declaring one task in a Goal's durable ledger.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalDeclareTaskCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    pub task_id: String,
+    /// Task ids that must carry a DURABLE completion before this one is
+    /// claimable. A set, not a list: declaring the same dependency twice is
+    /// the same graph, and the ledger's exactly-once-unblock count must not
+    /// be able to differ based on how many times a host repeated an edge.
+    #[serde(default)]
+    pub depends_on: BTreeSet<String>,
+    /// The key the task's effect is deduplicated by, stable across attempts.
+    /// Absent means Core derives the same default the CLI does.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+/// Closed payload consuming one iteration of a Goal's authorized loop bound.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalAdvanceCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    /// The state the operator inspected before advancing.
+    pub cursor: RecoveryCursor,
+}
+
+/// Closed payload terminating a Goal through the ONE canonical transition.
+///
+/// The terminal is always [`wcore_types::goal::GoalTerminalState::Cancelled`],
+/// which the taxonomy defines as "the operator or host cancelled" — a state
+/// that named a host actor before any host could reach it. A host cannot
+/// nominate an arbitrary terminal: letting the wire pick `Verified` would let
+/// an untrusted peer mint the one stamp that is reserved for a real executable
+/// gate.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalCancelCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub goal_id: String,
+    /// The state the operator inspected before cancelling.
+    pub cursor: RecoveryCursor,
+}
+
+/// Closed payload pulling the current projection of one Goal, or of all Goals
+/// in the session when `goal_id` is absent.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GoalResyncCommand {
+    pub goal_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub goal_id: Option<String>,
+}
 
 /// Commands sent from the client to the agent (Client -> Agent)
 #[derive(Debug, Deserialize, PartialEq)]
@@ -49,6 +302,42 @@ pub enum ProtocolCommand {
         #[serde(default)]
         compaction: Option<String>,
     },
+    /// Add explicit operator-authorized headroom to the active session's
+    /// provider envelope. This never changes global or per-user limits.
+    ContinueWithBudget(ContinueWithBudgetCommand),
+    /// Request a versioned, idempotently-correlated recovery view of a
+    /// durable session. `after = None` asks for the current snapshot;
+    /// supplying a cursor additionally asks for typed replay after it.
+    SessionResync(SessionResyncCommand),
+    /// Apply an explicit recovery action to an interrupted turn. The cursor
+    /// binds the decision to the state the operator actually inspected.
+    ResumeTurn(ResumeTurnCommand),
+    /// Resolve the exact approval gate restored for an interrupted durable
+    /// turn. The cursor prevents a stale host card from authorizing a newer
+    /// tool call after the session head advances.
+    ResolveInterruptedApproval(ResolveInterruptedApprovalCommand),
+    /// Resolve an unknown tool effect only after binding the operator's typed
+    /// claim to the exact durable state they inspected. Dispatchers must call
+    /// [`ProtocolCommand::validate_operator_resolution`] against live
+    /// authority before applying this command.
+    ResolveUnknownToolEffect(OperatorToolEffectResolution),
+    /// Request the process's versioned, redacted effective runtime view.
+    GetRuntimeDiagnostics(GetRuntimeDiagnosticsCommand),
+    /// F22-C1: authorize a durable Goal. The recorded envelope is the
+    /// intersection with the session's own authority, never the request.
+    GoalOpen(GoalOpenCommand),
+    /// F22-C1: declare one task in a Goal's durable ledger.
+    GoalDeclareTask(GoalDeclareTaskCommand),
+    /// F22-C1: consume one iteration of a Goal's authorized loop bound. The
+    /// cursor binds the advance to the state the operator inspected.
+    GoalAdvance(GoalAdvanceCommand),
+    /// F22-C1: terminate a Goal through the ONE canonical transition, as
+    /// `Cancelled`. The cursor prevents a stale host card from cancelling a
+    /// Goal that has already finished.
+    GoalCancel(GoalCancelCommand),
+    /// F22-C1: pull the current `goal_snapshot` for one Goal, or for every
+    /// Goal in the session when `goal_id` is absent.
+    GoalResync(GoalResyncCommand),
     AddMcpServer {
         name: String,
         transport: String,
@@ -62,6 +351,20 @@ pub enum ProtocolCommand {
         url: Option<String>,
         #[serde(default)]
         headers: Option<HashMap<String, String>>,
+        /// Explicit user/host opt-in for loopback MCP endpoints. Other
+        /// non-public address classes remain blocked by the MCP egress guard.
+        #[serde(default)]
+        allow_local: bool,
+    },
+    /// Remove a server previously introduced by [`ProtocolCommand::AddMcpServer`]
+    /// in this process. Configured and plugin-owned servers remain authoritative.
+    RemoveMcpServer(RemoveMcpServerCommand),
+    /// Request a read-only, process-lifetime developer capability for an
+    /// already-running local Desktop session. Core accepts this only when the
+    /// local launcher opted in and the workspace uses the trusted-local
+    /// sandbox profile. It never widens writes or disables containment.
+    GrantWorkspaceCapability {
+        executable: String,
     },
     /// W7 S4: resume a session that emitted `ApprovalRequired`. The
     /// host echoes the `resume_token` from the corresponding event so
@@ -99,6 +402,117 @@ pub enum ProtocolCommand {
     Ping,
 }
 
+/// Live authority against which an operator-resolution command is validated.
+#[derive(Debug, Clone, Copy)]
+pub struct OperatorResolutionAuthority<'a> {
+    pub session_id: &'a str,
+    pub turn_id: &'a str,
+    pub cursor: &'a RecoveryCursor,
+    pub tool_execution_id: &'a str,
+}
+
+/// Fail-closed protocol-boundary errors for operator tool-effect resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OperatorResolutionValidationError {
+    #[error("command is not an operator tool-effect resolution")]
+    WrongCommand,
+    #[error("unsupported operator-resolution recovery version: {actual}")]
+    UnsupportedVersion { actual: u16 },
+    #[error("malformed operator-resolution field: {field}")]
+    Malformed { field: &'static str },
+    #[error("stale operator-resolution authority: {field}")]
+    Stale { field: &'static str },
+}
+
+impl ProtocolCommand {
+    /// Validate syntax and exact live authority before an operator resolution
+    /// reaches a dispatcher. Unknown fields/enums are already rejected by the
+    /// closed serde types; this boundary additionally rejects malformed and
+    /// stale claims.
+    pub fn validate_operator_resolution(
+        &self,
+        authority: &OperatorResolutionAuthority<'_>,
+    ) -> Result<(), OperatorResolutionValidationError> {
+        let Self::ResolveUnknownToolEffect(resolution) = self else {
+            return Err(OperatorResolutionValidationError::WrongCommand);
+        };
+
+        if resolution.recovery_version != OPERATOR_RESOLUTION_RECOVERY_VERSION {
+            return Err(OperatorResolutionValidationError::UnsupportedVersion {
+                actual: resolution.recovery_version,
+            });
+        }
+        for (field, value) in [
+            ("session_id", resolution.session_id.as_str()),
+            ("turn_id", resolution.turn_id.as_str()),
+            ("tool_execution_id", resolution.tool_execution_id.as_str()),
+            ("operator_id", resolution.operator_id.as_str()),
+        ] {
+            if !valid_identifier(value) {
+                return Err(OperatorResolutionValidationError::Malformed { field });
+            }
+        }
+        if !valid_identifier(&resolution.evidence.reference_id) {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "evidence.reference_id",
+            });
+        }
+        if resolution.evidence.observed_at_unix_ms == 0 {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "evidence.observed_at_unix_ms",
+            });
+        }
+        if !valid_recovery_cursor_digest(&resolution.cursor.journal_digest) {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "cursor.journal_digest",
+            });
+        }
+        if !valid_evidence_digest(&resolution.evidence.digest) {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "evidence.digest",
+            });
+        }
+
+        for (field, matches) in [
+            ("session_id", resolution.session_id == authority.session_id),
+            ("turn_id", resolution.turn_id == authority.turn_id),
+            (
+                "tool_execution_id",
+                resolution.tool_execution_id == authority.tool_execution_id,
+            ),
+            ("cursor", &resolution.cursor == authority.cursor),
+        ] {
+            if !matches {
+                return Err(OperatorResolutionValidationError::Stale { field });
+            }
+        }
+        Ok(())
+    }
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_recovery_cursor_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_evidence_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalScope {
@@ -115,18 +529,39 @@ pub enum ApprovalScope {
     },
 }
 
+/// Host-selected action for an interrupted turn.
+///
+/// `Reconcile` invokes only Core-registered authoritative reconcilers. It does
+/// not carry, and must never be interpreted as, a free-form operator claim
+/// that an external effect succeeded or failed.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeTurnAction {
+    Continue,
+    Reconcile,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveredApprovalDecision {
+    Approve,
+    Deny,
+}
+
 /// Per DECISIONS.md §D1: `Force` is the canonical variant name.
 ///
 /// Foreign-agent vocabulary aliases accepted via serde:
 /// - `"yolo"` — Gemini CLI (`--yolo` flag surface)
 /// - `"dangerously_skip_permissions"` — Claude Code (snake_case form)
 /// - `"dangerously-skip-permissions"` — Claude Code (kebab-case form)
-/// - `"dangerously_skip_sandbox_and_permissions"` — Codex
 ///
 /// The canonical `"force"` (produced by `rename_all = "snake_case"`) is
 /// always accepted. All aliases deserialise to `SessionMode::Force` so
 /// foreign agents can drive wcore without an enum rename on either side.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// Vocabulary that claims sandbox bypass is rejected: an untrusted wire peer
+/// cannot mint the local lease required for Dangerous authority.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
     Default,
@@ -134,8 +569,7 @@ pub enum SessionMode {
     #[serde(
         alias = "yolo",
         alias = "dangerously_skip_permissions",
-        alias = "dangerously-skip-permissions",
-        alias = "dangerously_skip_sandbox_and_permissions"
+        alias = "dangerously-skip-permissions"
     )]
     Force,
 }
@@ -243,6 +677,71 @@ mod tests {
     }
 
     #[test]
+    fn continue_with_budget_is_typed_and_defaults_missing_axes_to_zero() {
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"continue_with_budget","request_id":"budget-001","additional_tokens":250000}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::ContinueWithBudget(ContinueWithBudgetCommand {
+                request_id: "budget-001".into(),
+                additional_tokens: 250_000,
+                additional_cost_usd: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn continue_with_budget_accepts_cost_only_grants() {
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"continue_with_budget","request_id":"budget-002","additional_cost_usd":2.5}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::ContinueWithBudget(ContinueWithBudgetCommand {
+                request_id: "budget-002".into(),
+                additional_tokens: 0,
+                additional_cost_usd: 2.5,
+            })
+        );
+    }
+
+    #[test]
+    fn continue_with_budget_rejects_structurally_invalid_grants() {
+        for invalid in [
+            r#"{"type":"continue_with_budget"}"#,
+            r#"{"type":"continue_with_budget","request_id":"","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"   ","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget/invalid","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-😀","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-empty","additional_tokens":0,"additional_cost_usd":0}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-negative","additional_cost_usd":-1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-wrong-type","additional_tokens":1.5}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-overflow","additional_tokens":18446744073709551616}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-unknown","additional_tokens":1,"future_authority":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ProtocolCommand>(invalid).is_err(),
+                "invalid grant unexpectedly deserialized: {invalid}"
+            );
+        }
+
+        let oversized_request_id = format!(
+            r#"{{"type":"continue_with_budget","request_id":"{}","additional_tokens":1}}"#,
+            "x".repeat(BUDGET_GRANT_REQUEST_ID_MAX_BYTES + 1)
+        );
+        assert!(serde_json::from_str::<ProtocolCommand>(&oversized_request_id).is_err());
+
+        let boundary_request_id = format!(
+            r#"{{"type":"continue_with_budget","request_id":"{}","additional_tokens":1}}"#,
+            "x".repeat(BUDGET_GRANT_REQUEST_ID_MAX_BYTES)
+        );
+        assert!(serde_json::from_str::<ProtocolCommand>(&boundary_request_id).is_ok());
+    }
+
+    #[test]
     fn add_mcp_server_stdio_deserialize() {
         let json = r#"{
             "type": "add_mcp_server",
@@ -262,6 +761,7 @@ mod tests {
                 env,
                 url,
                 headers,
+                allow_local,
             } => {
                 assert_eq!(name, "team-tools");
                 assert_eq!(transport, "stdio");
@@ -270,6 +770,7 @@ mod tests {
                 assert_eq!(env.unwrap().get("TOKEN").unwrap(), "abc123");
                 assert!(url.is_none());
                 assert!(headers.is_none());
+                assert!(!allow_local);
             }
             _ => panic!("expected AddMcpServer"),
         }
@@ -283,13 +784,28 @@ mod tests {
     }
 
     #[test]
+    fn workspace_capability_grant_deserializes_without_authority_claims() {
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"grant_workspace_capability","executable":"/opt/sdk/bin/tool"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::GrantWorkspaceCapability {
+                executable: "/opt/sdk/bin/tool".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn add_mcp_server_sse_deserialize() {
         let json = r#"{
             "type": "add_mcp_server",
             "name": "remote-tools",
             "transport": "sse",
             "url": "http://localhost:8080/sse",
-            "headers": {"Authorization": "Bearer tok"}
+            "headers": {"Authorization": "Bearer tok"},
+            "allow_local": true
         }"#;
         let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
         match cmd {
@@ -299,6 +815,7 @@ mod tests {
                 command,
                 url,
                 headers,
+                allow_local,
                 ..
             } => {
                 assert_eq!(name, "remote-tools");
@@ -306,9 +823,29 @@ mod tests {
                 assert!(command.is_none());
                 assert_eq!(url.unwrap(), "http://localhost:8080/sse");
                 assert_eq!(headers.unwrap().get("Authorization").unwrap(), "Bearer tok");
+                assert!(allow_local);
             }
             _ => panic!("expected AddMcpServer"),
         }
+    }
+
+    #[test]
+    fn remove_mcp_server_is_closed_and_versioned() {
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"remove_mcp_server","lifecycle_version":1,"request_id":"remove-001","name":"runtime-tools"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::RemoveMcpServer(RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "remove-001".into(),
+                name: "runtime-tools".into(),
+            })
+        );
+
+        let unknown_field = r#"{"type":"remove_mcp_server","lifecycle_version":1,"request_id":"remove-001","name":"runtime-tools","persistent":true}"#;
+        assert!(serde_json::from_str::<ProtocolCommand>(unknown_field).is_err());
     }
 
     #[test]
@@ -329,10 +866,7 @@ mod tests {
         }
     }
 
-    // F-004: SessionMode::Force must accept all foreign-agent vocabulary aliases.
-    // Gemini sends "yolo", Claude Code sends "dangerously_skip_permissions" (and
-    // the kebab variant), Codex sends "dangerously_skip_sandbox_and_permissions".
-    // All must deserialise to SessionMode::Force without error.
+    // F-004: SessionMode::Force accepts foreign approval-bypass vocabulary.
     #[test]
     fn set_mode_force_canonical() {
         let json = r#"{"type":"set_mode","mode":"force"}"#;
@@ -382,15 +916,11 @@ mod tests {
     }
 
     #[test]
-    fn set_mode_force_alias_dangerously_skip_sandbox_and_permissions() {
+    fn set_mode_rejects_untrusted_sandbox_bypass_vocabulary() {
         let json = r#"{"type":"set_mode","mode":"dangerously_skip_sandbox_and_permissions"}"#;
-        let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cmd,
-            ProtocolCommand::SetMode {
-                mode: SessionMode::Force
-            }
-        );
+        let error = serde_json::from_str::<ProtocolCommand>(json)
+            .expect_err("wire peers cannot mint local Dangerous authority");
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     // W0: ApprovalScope gains the prefix-carrying variant `AlwaysPrefix`.

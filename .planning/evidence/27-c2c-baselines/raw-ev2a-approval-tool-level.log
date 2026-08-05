@@ -1,0 +1,54 @@
+   Compiling rustix v1.1.4
+   Compiling slab v0.4.12
+   Compiling linux-raw-sys v0.12.1
+   Compiling hyper v1.10.1
+   Compiling serde_core v1.0.228
+   Compiling serde_derive_internals v0.29.1
+   Compiling schemars v0.8.22
+   Compiling dyn-clone v1.0.20
+   Compiling x11rb-protocol v0.13.2
+   Compiling inventory v0.3.24
+   Compiling futures-util v0.3.32
+   Compiling schemars_derive v0.8.22
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling futures-executor v0.3.32
+   Compiling futures v0.3.32
+   Compiling serial_test v3.5.0
+   Compiling tower-http v0.6.11
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-27c2c/crates/wcore-plugin-api)
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling tempfile v3.27.0
+   Compiling fs-set-times v0.20.3
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling xattr v1.6.1
+   Compiling fd-lock v4.0.4
+   Compiling gethostname v1.1.0
+   Compiling x11rb v0.13.2
+   Compiling tar v0.4.46
+   Compiling cap-primitives v3.4.5
+   Compiling wcore-config v0.12.25 (/root/wayland-27c2c/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-27c2c/crates/wcore-egress)
+   Compiling cap-std v3.4.5
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-27c2c/crates/wcore-sandbox)
+   Compiling wcore-observability v0.12.25 (/root/wayland-27c2c/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-27c2c/crates/wcore-memory)
+   Compiling wcore-tools v0.12.25 (/root/wayland-27c2c/crates/wcore-tools)
+   Compiling wcore-cua v0.12.25 (/root/wayland-27c2c/crates/wcore-cua)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.00s
+     Running tests/approval_gate_baseline_test.rs (target/debug/deps/approval_gate_baseline_test-32f222b91e5970e6)
+
+running 1 test
+EV2A: arm=withheld outcome=PolicySuspended backend_dispatches=0
+EV2A: arm=granted outcome=Ok backend_dispatches=1
+EV2A: arm=first_time_before outcome=PolicySuspended backend_dispatches=0 arm=first_time_after outcome=Ok backend_dispatches=1
+EV2A-SUMMARY: arms=4 withheld_suspended=2 withheld_backend_dispatches=0 granted_ok=2 granted_backend_dispatches=2 discrimination=PASS
+test baseline_approval_gate_blocks_dispatch ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

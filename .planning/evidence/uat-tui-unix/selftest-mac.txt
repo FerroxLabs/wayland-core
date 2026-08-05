@@ -1,0 +1,8 @@
+=== SELFTEST: the binary assertion MUST fail on inputs that deserve it ===
+  bogus-path  -> rc=92 :: ASSERT_BIN=FAIL reason=missing path=/nonexistent/definitely-not-here
+  a-directory -> rc=93 :: ASSERT_BIN=FAIL reason=not_regular_file path=/etc
+  non-exec    -> rc=94 :: ASSERT_BIN=FAIL reason=not_executable path=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/tmp.KmtlzbB4oy
+  real-binary -> rc=0 :: ASSERT_BIN=OK path=/bin/sh size=101232
+SELFTEST_PASSES=4 SELFTEST_FAILS=0
+SELFTEST=OK
+selftest_rc=0

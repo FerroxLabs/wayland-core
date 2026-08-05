@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
-use wcore_protocol::events::{ProtocolEvent, ToolStatus};
+use wcore_protocol::events::{McpRemovalOutcome, ProtocolEvent, ToolStatus};
 use wcore_types::message::{ContentBlock, Message, Role};
 
 use crate::tui::anim::AnimId;
@@ -116,6 +116,24 @@ pub fn apply_event(app: &mut App, event: ProtocolEvent) {
 /// through every arm.
 fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
     match event {
+        ProtocolEvent::ExecutionPolicy { snapshot } => {
+            let policy = snapshot.policy;
+            app.mode = match policy.approvals() {
+                wcore_types::execution_policy::ApprovalPolicy::Prompt => {
+                    wcore_protocol::commands::SessionMode::Default
+                }
+                wcore_types::execution_policy::ApprovalPolicy::AutoEdit => {
+                    wcore_protocol::commands::SessionMode::AutoEdit
+                }
+                wcore_types::execution_policy::ApprovalPolicy::Bypass => {
+                    wcore_protocol::commands::SessionMode::Force
+                }
+            };
+            app.execution_policy = Some(policy);
+        }
+        ProtocolEvent::WorkspacePolicy { policy } => {
+            app.workspace_policy = Some(policy);
+        }
         // ── Streaming lifecycle ──────────────────────────────────────
         ProtocolEvent::StreamStart { .. } => {
             app.session.streaming_active = true;
@@ -602,13 +620,26 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             parent_call_id,
             agent_name,
             inner,
+        }
+        | ProtocolEvent::CorrelatedSubAgentEvent {
+            parent_call_id,
+            agent_name,
+            inner,
+            ..
         } => {
             apply_sub_agent_event(app, parent_call_id, agent_name, inner);
         }
 
         // ── Workflows (ForgeFlows-Live lifecycle) ────────────────────
         ProtocolEvent::WorkflowStarted {
-            workflow_id, name, ..
+            workflow_id: workflow_key,
+            name,
+            ..
+        }
+        | ProtocolEvent::CorrelatedWorkflowStarted {
+            run_id: workflow_key,
+            name,
+            ..
         } => {
             // One view per run, keyed by `workflow_id`. ADOPT the last view if
             // it is unfinished AND either still pending (a node arrived first,
@@ -616,16 +647,16 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // view so each sequential run gets its own (fixes the merge bug
             // where a second run reused the first's view).
             let adopt = app.workflows.last().is_some_and(|w| {
-                w.finished.is_none() && (w.key == PENDING_WORKFLOW_KEY || w.key == workflow_id)
+                w.finished.is_none() && (w.key == PENDING_WORKFLOW_KEY || w.key == workflow_key)
             });
             if adopt {
                 let view = app.workflows.last_mut().expect("adopt implies non-empty");
-                view.key = workflow_id;
+                view.key = workflow_key;
                 view.name = name;
                 view.finished = None;
             } else {
                 app.workflows.push(WorkflowView {
-                    key: workflow_id,
+                    key: workflow_key,
                     name,
                     nodes: Vec::new(),
                     finished: None,
@@ -633,15 +664,20 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             }
         }
         ProtocolEvent::WorkflowFinished {
-            workflow_id,
+            workflow_id: workflow_key,
             succeeded,
+        }
+        | ProtocolEvent::CorrelatedWorkflowFinished {
+            run_id: workflow_key,
+            succeeded,
+            ..
         } => {
             // Resolve the run by its `workflow_id`; fall back to the last
             // unfinished view if the started event was never seen.
             let idx = app
                 .workflows
                 .iter()
-                .position(|w| w.key == workflow_id)
+                .position(|w| w.key == workflow_key)
                 .or_else(|| app.workflows.iter().rposition(|w| w.finished.is_none()));
             if let Some(idx) = idx {
                 app.workflows[idx].finished = Some(succeeded);
@@ -685,6 +721,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                         model: t.model,
                         provider: t.provider,
                         cost_usd: t.cost_usd,
+                        priced: t.priced,
                     })
                     .collect(),
             });
@@ -751,6 +788,29 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 );
                 crate::tui::state::TransientSlice {
                     toast: Some(toast_msg.clone()),
+                    toast_at: Some(now),
+                    mcp_status,
+                    ..prev.clone()
+                }
+            });
+        }
+        ProtocolEvent::McpRemovalResult {
+            name,
+            outcome,
+            removed_tools,
+            ..
+        } => {
+            let tool_count = removed_tools.len();
+            let now = Instant::now();
+            app.set_transient(|prev| {
+                let mut mcp_status = prev.mcp_status.clone();
+                if outcome == McpRemovalOutcome::Removed {
+                    mcp_status.remove(&name);
+                }
+                crate::tui::state::TransientSlice {
+                    toast: Some(format!(
+                        "{name} removal {outcome:?} · {tool_count} tools"
+                    )),
                     toast_at: Some(now),
                     mcp_status,
                     ..prev.clone()
@@ -892,6 +952,10 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         ProtocolEvent::CuaPolicyDenied { op, reason, .. } => {
             push_system(app, format!("Computer-use op `{op}` blocked: {reason}"));
         }
+        ProtocolEvent::CapabilityActivation { activation } => {
+            app.capability_status
+                .insert(activation.capability, activation);
+        }
 
         // ── No view impact in Wave 0 ─────────────────────────────────
         // These variants carry diagnostics or capability handshakes that
@@ -901,6 +965,23 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // json-stream hosts; the in-process TUI never runs delegated (no
         // host to fulfil the send), so it has no view impact here.
         ProtocolEvent::Ready { .. }
+        | ProtocolEvent::SessionRecoverySnapshot { .. }
+        | ProtocolEvent::SessionRecoveryReplay { .. }
+        | ProtocolEvent::SessionRecoveryUnavailable { .. }
+        | ProtocolEvent::TurnRecoveryLifecycle { .. }
+        // Operator resolution receipts are consumed by JSON-stream hosts.
+        // The in-process TUI derives recovery state directly from the engine,
+        // so accepting the receipt here must not synthesize local authority.
+        | ProtocolEvent::UnknownToolEffectResolved { .. }
+        | ProtocolEvent::ProviderAttempt { .. }
+        | ProtocolEvent::ProviderRetry { .. }
+        | ProtocolEvent::ProviderFailure { .. }
+        // Failover receipts are authoritative host/protocol evidence. The TUI
+        // has no receipt view yet, so accepting one must not mutate local state.
+        | ProtocolEvent::ProviderFailoverReceipt { .. }
+        | ProtocolEvent::RuntimeDiagnosticsSnapshot { .. }
+        | ProtocolEvent::RuntimeDiagnosticsUnavailable { .. }
+        | ProtocolEvent::MidFlightMonitorDecision { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }
         | ProtocolEvent::EvolutionEvent { .. }
@@ -908,13 +989,129 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::CuaEvent { .. }
         | ProtocolEvent::Suspend { .. }
         | ProtocolEvent::ApprovalResume { .. }
+        // Budget grant commands are accepted only by the JSON-stream host
+        // loop; the in-process TUI cannot originate one. Keep the event
+        // exhaustively accepted without synthesizing local grant authority.
+        | ProtocolEvent::BudgetGrantResult { .. }
         | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::HostSendMessageRequest { .. }
+        // Node state is redundant with the correlated child relay for the TUI;
+        // Desktop consumes this authoritative lifecycle event directly.
+        | ProtocolEvent::WorkflowNodeEvent { .. }
         // A1.2: the receipt is not emitted yet (climb lands in A1.5/A1.6) and
         // chip rendering is an A2 concern — the TUI ignores it for now.
         | ProtocolEvent::AnvilReceipt { .. }
+        | ProtocolEvent::AnvilReceiptInvalidated { .. }
         | ProtocolEvent::Pong => {}
+        // ── F22-C1: durable Goals ────────────────────────────────────
+        //
+        // Before this arm the TUI had zero goal references, so a user driving
+        // a durable Goal from the terminal could not see one at all. These two
+        // arms are the whole TUI ingest: the view is WRITTEN from the
+        // projection and never derived, so the terminal cannot show a Goal
+        // state the chain does not hold.
+        ProtocolEvent::GoalSnapshot { goal, .. } => {
+            // Keyed insert, so a re-snapshot REPLACES rather than accumulates.
+            app.goals.insert(goal.goal_id.clone(), goal);
+        }
+        ProtocolEvent::GoalTransition {
+            goal_id,
+            transition,
+            lifecycle,
+            ..
+        } => {
+            // The lifecycle also lands on the projection when one is already
+            // held, so the status line does not show a terminal transition
+            // beside a running projection until the next snapshot arrives.
+            if let Some(projection) = app.goals.get_mut(&goal_id) {
+                projection.lifecycle = lifecycle.clone();
+            }
+            app.goal_last_transition = Some(crate::tui::app::GoalTransitionView {
+                goal_id,
+                transition,
+                lifecycle,
+            });
+        }
+        // The TUI now ISSUES Goal control commands as well as rendering them
+        // (`/goal` → `TuiEngine::request_goal_control` →
+        // `GoalControlBridge::issue_goal_control`). A refusal arrives back through
+        // this same ingest path rather than being returned to the caller, so
+        // the rule that Goal view state is written only from the event stream
+        // holds for control exactly as it does for observation.
+        ProtocolEvent::GoalControlRefused {
+            request_id,
+            goal_id,
+            reason,
+            ..
+        } => {
+            app.goal_last_refusal = Some(crate::tui::app::GoalRefusalView {
+                request_id,
+                goal_id,
+                reason,
+            });
+        }
     }
+}
+
+/// F22-C1 — the status-line summary of durable Goal activity, if any.
+///
+/// `None` when no Goal has been reported, so a session that never opens one
+/// pays no status-line width — the same discipline the cost and MCP indicators
+/// follow.
+///
+/// Counts live Goals rather than naming one: a user running a fleet needs to
+/// know how many are still going before they need to know which.
+#[must_use]
+pub fn goal_status_summary(app: &App) -> Option<String> {
+    // A refusal alone must keep the segment alive. The common refusal on a
+    // fresh session is `goal_not_found`, which by definition arrives with zero
+    // Goals and zero transitions — so gating on those two only would make the
+    // single most likely refusal invisible.
+    if app.goals.is_empty() && app.goal_last_transition.is_none() && app.goal_last_refusal.is_none()
+    {
+        return None;
+    }
+    let total = app.goals.len();
+    let terminal = app
+        .goals
+        .values()
+        .filter(|goal| goal.lifecycle.is_terminal())
+        .count();
+    let live = total.saturating_sub(terminal);
+
+    let mut summary = if total == 0 {
+        if app.goal_last_transition.is_some() {
+            // A transition arrived before any snapshot did. Say so rather than
+            // rendering "0 goals", which reads as "none exist".
+            "goal: awaiting snapshot".to_owned()
+        } else {
+            // Only a refusal. There is genuinely nothing to await — claiming
+            // otherwise would promise a snapshot that is never coming.
+            "goal: none".to_owned()
+        }
+    } else {
+        format!("goals {live} live / {total}")
+    };
+
+    if let Some(last) = &app.goal_last_transition {
+        let kind = serde_json::to_value(last.transition)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "transition".to_owned());
+        summary.push_str(&format!(" · {} {kind}", last.goal_id));
+    }
+    // A refusal is shown LAST and unconditionally, so an operator who issued a
+    // control command that Core rejected cannot read the unchanged Goal counts
+    // as "it worked". Silence here would make a refused command and a
+    // successful no-op render identically.
+    if let Some(refusal) = &app.goal_last_refusal {
+        let reason = serde_json::to_value(refusal.reason)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "refused".to_owned());
+        summary.push_str(&format!(" · refused {reason}"));
+    }
+    Some(summary)
 }
 
 /// Find the in-flight tool card matching `call_id`, if any.
@@ -1835,6 +2032,64 @@ mod tests {
     use crate::tui::fixtures;
     use serde_json::json;
     use wcore_protocol::events::{ErrorInfo, OutputType, ToolCategory, ToolInfo};
+
+    #[test]
+    fn execution_policy_event_sets_tui_posture_and_approval_mode() {
+        use wcore_protocol::execution_policy::ExecutionPolicySequence;
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, ExecutionPosture,
+            PolicySource,
+        };
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::ExecutionPolicy {
+                snapshot: ExecutionPolicySequence::launch(
+                    EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                        ApprovalPolicy::Bypass,
+                        PolicySource::LocalCliLaunch,
+                    )),
+                    1,
+                )
+                .current()
+                .clone(),
+            },
+        );
+
+        assert_eq!(
+            app.execution_policy.as_ref().unwrap().posture(),
+            ExecutionPosture::Smart
+        );
+        assert_eq!(app.mode, wcore_protocol::commands::SessionMode::Force);
+    }
+
+    #[test]
+    fn workspace_policy_event_stores_the_effective_receipt() {
+        use wcore_types::workspace_trust::{
+            WorkspacePolicyReceipt, WorkspaceSandboxProfile, resolve_workspace_trust,
+        };
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::WorkspacePolicy {
+                policy: WorkspacePolicyReceipt {
+                    trust: resolve_workspace_trust("fp", []),
+                    profile: WorkspaceSandboxProfile::Strict,
+                    backend: "sandbox-exec".to_string(),
+                    writable_roots: vec!["/workspace".to_string()],
+                    readable_roots: vec!["/workspace".to_string()],
+                    capabilities: Vec::new(),
+                },
+            },
+        );
+
+        let receipt = app.workspace_policy.expect("workspace receipt");
+        assert_eq!(receipt.profile, WorkspaceSandboxProfile::Strict);
+        assert_eq!(receipt.backend, "sandbox-exec");
+        assert!(!receipt.trust.is_trusted());
+    }
 
     // ── hydrate_history (resume repaint) ─────────────────────────────────
 
@@ -3010,6 +3265,63 @@ mod tests {
     }
 
     #[test]
+    fn session_cost_preserves_pricing_status_for_tui_rendering() {
+        use wcore_protocol::events::TurnCost;
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::SessionCost {
+                session_id: "s1".into(),
+                total_cost_usd: 0.0,
+                per_turn: vec![
+                    TurnCost {
+                        turn: 1,
+                        model: "unknown-model".into(),
+                        provider: "custom".into(),
+                        cost_usd: 0.0,
+                        priced: false,
+                    },
+                    TurnCost {
+                        turn: 2,
+                        model: "local-model".into(),
+                        provider: "ollama".into(),
+                        cost_usd: 0.0,
+                        priced: true,
+                    },
+                ],
+            },
+        );
+
+        let rows = &app.cost.as_ref().expect("cost view").per_turn;
+        assert!(!rows[0].priced, "unknown pricing must remain unpriced");
+        assert!(rows[1].priced, "known-free pricing must remain priced");
+    }
+
+    #[test]
+    fn capability_activation_updates_diagnostics_without_transcript_noise() {
+        use wcore_protocol::events::{CapabilityActivation, CapabilityId, CapabilityReasonCode};
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::CapabilityActivation {
+                activation: CapabilityActivation::unavailable(
+                    CapabilityId::DelegateIsolation,
+                    CapabilityReasonCode::IsolationNotEnforced,
+                ),
+            },
+        );
+
+        assert!(app.session.turns.is_empty());
+        assert!(app.toast.is_none());
+        assert_eq!(
+            app.capability_status[&CapabilityId::DelegateIsolation].reason,
+            Some(CapabilityReasonCode::IsolationNotEnforced)
+        );
+    }
+
+    #[test]
     fn mcp_ready_no_longer_creates_transcript_turn() {
         // v0.9.1 W1-B Bug 2: `McpReady` used to push "MCP server X
         // ready — N tool(s)" turns at session start, drowning the first
@@ -3484,6 +3796,12 @@ mod tests {
             ProtocolEvent::Suspend {
                 reason: "approval".into(),
                 resume_token: "t".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::ProviderFailoverReceipt {
+                receipt: json!({"selected_provider": "fallback"}),
             },
         );
         assert!(app.session.turns.is_empty());
@@ -4455,6 +4773,272 @@ mod tests {
             app.session.tool_cards.len(),
             before,
             "a non-egress orphan approval must not synthesize a card"
+        );
+    }
+
+    // ── F22-C1: durable Goals reach the terminal ─────────────────────
+
+    fn goal_projection(
+        goal_id: &str,
+        lifecycle: wcore_protocol::goal::GoalLifecycleWire,
+    ) -> wcore_protocol::goal::GoalProjection {
+        wcore_protocol::goal::GoalProjection {
+            goal_id: goal_id.to_owned(),
+            objective: "ship it".into(),
+            authority: wcore_protocol::goal::GoalAuthorityWire {
+                effective_limits: std::collections::BTreeMap::new(),
+                strategy: wcore_types::goal::GoalStrategy::Fleet,
+                loop_policy: wcore_types::goal::LoopPolicy::Once,
+                parent_envelope_digest: "parent".into(),
+                snapshot_digest: "sha256:aa".into(),
+            },
+            lifecycle,
+            iterations_started: 0,
+            iteration_ceiling: Some(1),
+            resume_count: 0,
+            opened_at_unix_ms: 1,
+            cursor: wcore_protocol::events::RecoveryCursor {
+                journal_sequence: Some(1),
+                journal_digest: "sha256:bb".into(),
+            },
+            tasks: Vec::new(),
+            loop_owner: None,
+            loop_owner_epochs: 0,
+        }
+    }
+
+    fn snapshot_event(
+        goal_id: &str,
+        lifecycle: wcore_protocol::goal::GoalLifecycleWire,
+    ) -> ProtocolEvent {
+        ProtocolEvent::GoalSnapshot {
+            goal_version: wcore_protocol::goal::GOAL_PROTOCOL_VERSION,
+            session_id: "s".into(),
+            goal_id: goal_id.to_owned(),
+            cursor: wcore_protocol::events::RecoveryCursor {
+                journal_sequence: Some(1),
+                journal_digest: "sha256:bb".into(),
+            },
+            state_digest: "sha256:cc".into(),
+            goal: goal_projection(goal_id, lifecycle),
+        }
+    }
+
+    /// The baseline this lane exists to move: before it, no ProtocolEvent
+    /// could put a Goal in front of a terminal user at all.
+    #[test]
+    fn a_goal_snapshot_becomes_visible_state_and_a_status_segment() {
+        let mut app = App::new();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "a session with no Goal must render no Goal segment"
+        );
+
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+
+        assert_eq!(app.goals.len(), 1);
+        let summary = goal_status_summary(&app).expect("a reported Goal must be visible");
+        assert!(
+            summary.contains("1 live / 1"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    /// F22-C1 control: a REFUSED command must be visible in the TUI.
+    ///
+    /// The TUI can now issue Goal commands (`/goal`, dispatched through
+    /// `GoalControlBridge::issue_goal_control`),
+    /// so it must be able to show that one was rejected. The refusal that
+    /// matters most is the one that arrives with NO Goals and NO transitions —
+    /// `goal_not_found` on a fresh session — because the segment's original
+    /// early-return keyed on exactly those two being empty and would have
+    /// rendered nothing at all.
+    #[test]
+    fn a_refused_goal_command_is_visible_even_with_no_goals_at_all() {
+        let mut app = App::new();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "precondition: an untouched session renders no Goal segment"
+        );
+
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalControlRefused {
+                goal_version: 1,
+                request_id: "req-1".to_owned(),
+                session_id: "s".to_owned(),
+                goal_id: "ghost".to_owned(),
+                reason: wcore_protocol::events::GoalControlRefusalReason::GoalNotFound,
+            },
+        );
+
+        let refusal = app
+            .goal_last_refusal
+            .as_ref()
+            .expect("a refusal must land in view state");
+        assert_eq!(refusal.request_id, "req-1");
+        assert_eq!(refusal.goal_id, "ghost");
+
+        // THE assertion: with zero goals and zero transitions the segment must
+        // still render, and must say "refused". The pre-repair early-return
+        // returned None here, so a refused command looked exactly like a
+        // session that had never issued one.
+        let summary =
+            goal_status_summary(&app).expect("a refusal alone must keep the segment alive");
+        assert!(
+            summary.contains("refused") && summary.contains("goal_not_found"),
+            "a refusal must name itself in the status line: {summary}"
+        );
+        // It must NOT claim a snapshot is coming — nothing is.
+        assert!(
+            !summary.contains("awaiting snapshot"),
+            "a refusal must not promise a snapshot that will never arrive: {summary}"
+        );
+    }
+
+    /// A re-snapshot must REPLACE, or the status line counts one Goal twice.
+    #[test]
+    fn re_snapshotting_one_goal_replaces_it_rather_than_accumulating() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Opened),
+        );
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+
+        assert_eq!(
+            app.goals.len(),
+            1,
+            "one Goal, snapshotted twice, is one Goal"
+        );
+        assert_eq!(
+            app.goals["g-1"].lifecycle,
+            wcore_protocol::goal::GoalLifecycleWire::Running,
+            "the later snapshot must win"
+        );
+    }
+
+    /// A terminated Goal must stop being counted as live, or the terminal
+    /// shows work still running that finished.
+    #[test]
+    fn a_terminated_goal_leaves_the_live_count_but_stays_in_the_total() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        apply_event(
+            &mut app,
+            snapshot_event("g-2", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        assert!(goal_status_summary(&app).unwrap().contains("2 live / 2"));
+
+        apply_event(
+            &mut app,
+            snapshot_event(
+                "g-2",
+                wcore_protocol::goal::GoalLifecycleWire::Terminated {
+                    terminal: wcore_types::goal::GoalTerminalState::Cancelled,
+                },
+            ),
+        );
+        let summary = goal_status_summary(&app).unwrap();
+        assert!(
+            summary.contains("1 live / 2"),
+            "unexpected summary: {summary}"
+        );
+    }
+
+    /// A transition must update the held projection's lifecycle, so the
+    /// status line cannot show `2 live` for a Goal that just terminated
+    /// while the next snapshot is still in flight.
+    #[test]
+    fn a_terminal_transition_updates_the_held_projection_before_the_next_snapshot() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        assert!(goal_status_summary(&app).unwrap().contains("1 live / 1"));
+
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalTransition {
+                goal_version: wcore_protocol::goal::GOAL_PROTOCOL_VERSION,
+                session_id: "s".into(),
+                goal_id: "g-1".into(),
+                cursor: wcore_protocol::events::RecoveryCursor {
+                    journal_sequence: Some(2),
+                    journal_digest: "sha256:dd".into(),
+                },
+                transition: wcore_protocol::goal::GoalTransitionKind::LoopOwnerFinished,
+                lifecycle: wcore_protocol::goal::GoalLifecycleWire::Terminated {
+                    terminal: wcore_types::goal::GoalTerminalState::Verified,
+                },
+            },
+        );
+
+        let summary = goal_status_summary(&app).unwrap();
+        assert!(
+            summary.contains("0 live / 1"),
+            "unexpected summary: {summary}"
+        );
+        assert!(
+            summary.contains("loop_owner_finished"),
+            "the transition must be named: {summary}"
+        );
+    }
+
+    /// A transition arriving before any snapshot must say so, not render
+    /// "0 goals" — which a user reads as "none exist".
+    #[test]
+    fn a_transition_with_no_snapshot_yet_reports_awaiting_rather_than_zero() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::GoalTransition {
+                goal_version: wcore_protocol::goal::GOAL_PROTOCOL_VERSION,
+                session_id: "s".into(),
+                goal_id: "g-9".into(),
+                cursor: wcore_protocol::events::RecoveryCursor {
+                    journal_sequence: Some(1),
+                    journal_digest: "sha256:ee".into(),
+                },
+                transition: wcore_protocol::goal::GoalTransitionKind::Opened,
+                lifecycle: wcore_protocol::goal::GoalLifecycleWire::Opened,
+            },
+        );
+        let summary = goal_status_summary(&app).expect("a transition alone is still news");
+        assert!(
+            summary.contains("awaiting snapshot"),
+            "unexpected: {summary}"
+        );
+        assert!(
+            !summary.contains("0 live"),
+            "must not read as none exist: {summary}"
+        );
+    }
+
+    /// `/new` must drop the Goal VIEW, or the terminal keeps showing a Goal
+    /// nothing is reporting on.
+    #[test]
+    fn resetting_the_session_clears_the_goal_view() {
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            snapshot_event("g-1", wcore_protocol::goal::GoalLifecycleWire::Running),
+        );
+        assert!(goal_status_summary(&app).is_some());
+        app.reset_agents();
+        assert!(
+            goal_status_summary(&app).is_none(),
+            "the Goal view must not survive /new"
         );
     }
 }

@@ -1,0 +1,1518 @@
+{
+  "schema": "wayland.cert.receipt",
+  "schema_version": 2,
+  "body_sha256": "8db1ef07600f644166b422956b13b4f9b5d75af5dc7d0822aa7a4a16746116fb",
+  "body": {
+    "certification_id": "f28-native-cross-platform-certification-supersession-001",
+    "phase": "28-native-cross-platform-certification",
+    "bindings": {
+      "candidate": [
+        {
+          "scope": "matrix-linux-windows",
+          "commit": "32e2f57d09fe4b287e513081862217dc9daa5901",
+          "tree": "63ec0e6c36ff8e63789aab2f9760870304b671df",
+          "ledger_ref": "evidence/28-02/candidate.json",
+          "binaries": [
+            {
+              "target": "x86_64-unknown-linux-gnu",
+              "sha256": "e8431ba208c5e794813e6e0b10a005229d982a9a99f05642e3eee98e2adc47d3",
+              "provenance": "CI run 30269095004 release artifact, digest asserted on the host before the run"
+            },
+            {
+              "target": "x86_64-pc-windows-msvc",
+              "sha256": "baf9bd692833eb7b9d54f00053739115b6ad5257fbdb0b0e99a8694a2ee996a6",
+              "provenance": "CI run 30269095004 release artifact; digest asserted on the host before the run"
+            }
+          ]
+        },
+        {
+          "scope": "matrix-macos-rerun-and-soak",
+          "commit": "e4a3f5fc0f92a7b0126f594146c4b71182e9e378",
+          "tree": "6a494c995358d76f0bb296abf3ea8a086b24c28b",
+          "ledger_ref": "evidence/28-03/candidate.json",
+          "binaries": [
+            {
+              "target": "x86_64-unknown-linux-gnu",
+              "sha256": "ab8cf3d34457b5897b94f8313a96f6dce04a95eb8f0d3bc3343fcba9bdb2991d",
+              "provenance": "soak family linux on hetzner-dsm; digest asserted against the candidate ledger before the first session"
+            },
+            {
+              "target": "aarch64-apple-darwin",
+              "sha256": "59f57fb3fa6a554645ace02ba2044439235cc9460c660a8392ac4df1e6fa7ce8",
+              "provenance": "soak family macos on certification-mac (macOS 26.3, arm64); digest asserted against the candidate ledger before the first session"
+            },
+            {
+              "target": "x86_64-pc-windows-msvc",
+              "sha256": "54b12e8e5576ee54e88a93975c360e6c624202059f449d80574b71adf00c631e",
+              "provenance": "soak family windows on seandesktop; digest asserted against the candidate ledger before the first session"
+            }
+          ]
+        }
+      ],
+      "platform": [
+        {
+          "os_family": "linux",
+          "target": "x86_64-unknown-linux-gnu",
+          "cells_total": 216,
+          "cells_pass": 216,
+          "cells_red": 0,
+          "cells_skipped": 0,
+          "critical_cells": 48,
+          "evidence_ref": "evidence/28-02/results.json"
+        },
+        {
+          "os_family": "macos",
+          "target": "aarch64-apple-darwin",
+          "cells_total": 216,
+          "cells_pass": 216,
+          "cells_red": 0,
+          "cells_skipped": 0,
+          "critical_cells": 48,
+          "evidence_ref": "evidence/28-03/macos-cells.json (re-run at e4a3f5fc; supersedes 28-02's macOS cells)"
+        },
+        {
+          "os_family": "windows",
+          "target": "x86_64-pc-windows-msvc",
+          "cells_total": 219,
+          "cells_pass": 219,
+          "cells_red": 0,
+          "cells_skipped": 0,
+          "critical_cells": 51,
+          "evidence_ref": "evidence/28-02/results.json"
+        }
+      ],
+      "posture": [
+        {
+          "name": "sandbox-required-fail-closed",
+          "description": "WAYLAND_SANDBOX=none is an ERROR, not a downgrade, and no opt-in was set. Every sandbox-probes cell asserts exit=0 with WAYLAND_SANDBOX=none and WAYLAND_ALLOW_NO_SANDBOX unset, and additionally requires a POSITIVE activeness observation - a containment differential - so a green cannot be indistinguishable from a silently disabled sandbox.",
+          "evidence_ref": "evidence/28-02/results.json (cells[].observable and .activeness)"
+        },
+        {
+          "name": "observation-blocked-NOT-authorised",
+          "description": "The observation-blocked skip class was NOT authorised for any cell (controls.json observation_blocked_authorised=false, authorised_cells=[]), and no cell in the matrix carries any skip of any class.",
+          "evidence_ref": "evidence/28-02/controls.json"
+        },
+        {
+          "name": "read-only-soak-workload",
+          "description": "The soak workload is read-only by construction and no mutating verb can enter the allowlist. This is why state_dir_bytes is flat, and it is a recorded weakness of the measurement rather than a strength - see F-28-04-006.",
+          "evidence_ref": "evidence/28-03/soak.json (families[].workload)"
+        },
+        {
+          "name": "pre-registered-delta-bands",
+          "description": "Delta bands were decided by unanimous four-way cross-audit and committed at 1dea6437, BEFORE any soak session existed; the record landed at a0ca3ecf. bands.json declares numbers_are_measured=false and the validator rejects the file if that is flipped.",
+          "evidence_ref": "evidence/28-03/bands.json"
+        },
+        {
+          "name": "supersedes-a-prior-signed-phase-28-receipt",
+          "description": "This receipt SUPERSEDES the Phase 28 certification receipt whose body_sha256 is 2037352cff1c2f2c8f8b35e59289ba73b514cd56977c8e22d599ed45e49e0fbb and whose signing key_id is phase-28-certification-2026-07-28 (28-04-CERTIFICATION-RECEIPT.json, bound byte-exactly in the artifacts binding). The superseded receipt is NOT withdrawn, NOT altered and NOT invalid: its signature remains correct over the evidence as it stood when it was signed, and it accurately records the dispositions of that moment. It is superseded because the LEDGER MOVED after signing, and a signed artifact is never edited to follow it. Supersession is phase-scoped evidence maintenance. It is NOT a release trust root, NOT a seal, NOT a re-seal and NOT an authorization to release, and it confers no authority the superseded receipt did not already have.",
+          "evidence_ref": "28-04-CERTIFICATION-RECEIPT.json"
+        },
+        {
+          "name": "known-open-findings-outside-this-ledger",
+          "description": "Amendment A3 forbids a certification receipt from asserting zero known defects, and the three claims in this receipt must NOT be read as such an assertion: they range over the rows of evidence/28-04/findings.tsv and over nothing else. TWO MEDIUM FINDINGS OPENED BY THE 28-adj ADJUDICATION ARE NOT ROWS IN THAT LEDGER AND ARE THEREFORE COVERED BY NO CLAIM HERE. F-28-ADJ-001: the residual-grant disclosure is guarded by nothing - the test named reclamation_reports_grants_it_could_not_revoke never calls reclamation_report, so mutant M3, which deletes the disclosure so an operator is told nothing was left behind while un-revokable ACL grants remain, leaves the suite byte-identical at 133 passed 0 failed 23 ignored. F-28-ADJ-002: the same permanent-wedge shape as F-28-02-002 survives through a different door - write_new_synced_lease (storage.rs:138) creates then writes, so a crash between the two leaves a 0-byte .toml that read_validated_lease rejects and recover_dead_leases_locked propagates with ?, aborting recovery on every subsequent ExecutionIdentity::start; stated as a STATIC READING, not reproduced. A reader must not conclude from F-28-02-002 being FIXED that the wedge class is eliminated. Both are MEDIUM and non-blocking under the standing severity policy, both are being worked in a separate lane at the time of signing, and their absence from the ledger is a GAP IN THE LEDGER rather than evidence of their absence.",
+          "evidence_ref": "evidence/28-adj/28-ADJ-NOTES.md"
+        }
+      ],
+      "fixture_corpus": [
+        {
+          "name": "e5-matrix-cases",
+          "sha256": "3817dc779062e335926a1b2b71d7f6b168803c7e580a0812579e64b3bdda0880",
+          "item_count": 9,
+          "source_ref": "crates/wcore-eval-scenarios/src/e5_cases.rs"
+        },
+        {
+          "name": "e5-soak-definitions",
+          "sha256": "66ca848025927641321c22f159554e73f4dffba52f710de6d0dbe0e913f0d001",
+          "item_count": 6,
+          "source_ref": "crates/wcore-eval-scenarios/src/e5_soak.rs"
+        }
+      ],
+      "environment": [
+        {
+          "host": "hetzner-dsm",
+          "os_family": "linux",
+          "os_build": "x86_64-unknown-linux-gnu",
+          "run_context": "phase worktree /root/wayland-p28; harness at 9529c46a; SHA asserted on the host before any step",
+          "evidence_ref": "evidence/28-02/results.json (runs[])"
+        },
+        {
+          "host": "Seans-MacBook-Pro.local",
+          "os_family": "macos",
+          "os_build": "aarch64-apple-darwin",
+          "run_context": "certification Mac, macOS 26.3 arm64; NO cargo ran here beyond `cargo fmt --all -- --check`",
+          "evidence_ref": "evidence/28-02/results.json (runs[])"
+        },
+        {
+          "host": "seandesktop",
+          "os_family": "windows",
+          "os_build": "x86_64-pc-windows-msvc",
+          "run_context": "ONE scheduled-task run on the single physical Windows box, with 0 compiler processes measured on the box at BOTH ends of the run (QUIET_CHECK and QUIET_CHECK_END). An earlier attempt at 22:29 started quiet but a concurrent lane resumed compiling before it finished; that attempt's own gate reported EXIT=9 and its rows were DISCARDED rather than recorded, and the leg was re-run once the box was quiet again. Every Windows row here comes from the second, fully quiet run.",
+          "evidence_ref": "evidence/28-02/results.json (runs[])"
+        },
+        {
+          "host": "certification-mac (macOS 26.3, arm64)",
+          "os_family": "macos",
+          "os_build": "aarch64-apple-darwin",
+          "run_context": "soak, concurrency 4, 1000 sessions",
+          "evidence_ref": "evidence/28-03/soak.json (families[])"
+        },
+        {
+          "host": "github-hosted macos-latest runner",
+          "os_family": "macos",
+          "os_build": "aarch64-apple-darwin, rustc 1.97.1",
+          "run_context": "GitHub Actions run 30364529551 at headSha cf48b349, workflow 'macOS native suites (Phase 28)'; the only environment in which the two macOS members of the hostile platform matrix have ever executed",
+          "evidence_ref": "evidence/28-04/macos-ci-30364529551.log"
+        }
+      ],
+      "artifacts": [
+        {
+          "path": "evidence/28-01/candidate.json",
+          "sha256": "37c5a3ae6046f9f98c358b8e1ff9e356b1f104c42493baeb86c7317f7dfd1086",
+          "bytes": 54998
+        },
+        {
+          "path": "evidence/28-01/known-red.tsv",
+          "sha256": "ef34b8dd121063176aaccca90a057f0301f423458ee65f303f96917589a34335",
+          "bytes": 4519
+        },
+        {
+          "path": "evidence/28-01/matrix.tsv",
+          "sha256": "510a10431e0056ebbc4a4a0e8d09f3fbe3a63d6d0b90f326b72c33b7c221e9d0",
+          "bytes": 58410
+        },
+        {
+          "path": "evidence/28-01/target-manifest.tsv",
+          "sha256": "f3f6d670899d56e16f516507a5f8195118d3b1382d3202a8de8148c5d1e8e393",
+          "bytes": 2130
+        },
+        {
+          "path": "evidence/28-02/candidate.json",
+          "sha256": "3f3b1702a705880ccb79ef29a4f65ee436bdaedd40c3456459c4ff6ef15b2431",
+          "bytes": 55830
+        },
+        {
+          "path": "evidence/28-02/controls.json",
+          "sha256": "34292c6b384b2a5e2fa908943c46a232f78d3915f058b1268a3a4d0f319355f8",
+          "bytes": 7324
+        },
+        {
+          "path": "evidence/28-02/linux-activeness.json",
+          "sha256": "fa45185871fdefa144f96ea65b3a27e900f3030770f4b331f058b4784b916275",
+          "bytes": 269
+        },
+        {
+          "path": "evidence/28-02/macos-activeness.json",
+          "sha256": "39851ac5c710a8974e24af173381cfe265aa8038be5e2579ed0aa8de3262fef4",
+          "bytes": 739
+        },
+        {
+          "path": "evidence/28-02/results.json",
+          "sha256": "b4f4d302e7cb6d82cbcba9de81efd75e764b1065097ea72ce1f0c2a7d874035a",
+          "bytes": 373078
+        },
+        {
+          "path": "evidence/28-02/target-manifest.tsv",
+          "sha256": "d9d43789e19f7a78d19fd664dd9614ae2092bb65aca73a51469cf9cee8a920fb",
+          "bytes": 2329
+        },
+        {
+          "path": "evidence/28-02/windows-activeness.json",
+          "sha256": "73fd9d3fded66e65850b98426a76dc5562cde6602747fa3eb623a26a24d2b57d",
+          "bytes": 177
+        },
+        {
+          "path": "evidence/28-03/bands.json",
+          "sha256": "274d5be5d1a0db7ba0abc01a24481bb5058ac12c36cf3b81ae2527fb4628a20d",
+          "bytes": 8424
+        },
+        {
+          "path": "evidence/28-03/candidate.json",
+          "sha256": "ac1812e2a6f0f2c669d8d12011174bd1275cfd9d86d37f215f5dbd3ff666a27a",
+          "bytes": 60463
+        },
+        {
+          "path": "evidence/28-03/linux-soak.json",
+          "sha256": "a24ed2a2ada52079721fa078c3af264048785cbecac1befcf644d1b4c2700735",
+          "bytes": 44556
+        },
+        {
+          "path": "evidence/28-03/macos-activeness.json",
+          "sha256": "5971cc4b55928d37f32f2c517e00afa95e7492f045bde1359967ed86a1e6d269",
+          "bytes": 248
+        },
+        {
+          "path": "evidence/28-03/macos-cells.json",
+          "sha256": "4f574c89dc02454b68f08503c95da87e13959d666e2cbee066315b63ee0e590a",
+          "bytes": 87057
+        },
+        {
+          "path": "evidence/28-03/macos-soak.json",
+          "sha256": "f15a15bd913a2c9e3a53fb04a5efe89c4d6826e12b10bbb5b3c20945cdf92537",
+          "bytes": 45712
+        },
+        {
+          "path": "evidence/28-03/soak.json",
+          "sha256": "2c9854f9410674d0e4c36d83a3103c4f87afc5bc9ebe10b0618ce57b721798bf",
+          "bytes": 157115
+        },
+        {
+          "path": "evidence/28-03/target-manifest.tsv",
+          "sha256": "85fece75d65f0fcf6b3bf4eadba01b90580faa4e5efd3ac257248cf7af08df9d",
+          "bytes": 2022
+        },
+        {
+          "path": "evidence/28-04/findings.tsv",
+          "sha256": "51ddac033dc99a4b1b4d06d3b247b2a4287362b2aae12a9fb83f9513a243e75a",
+          "bytes": 58035
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/kr01/kr01-as-seand-load.tsv",
+          "sha256": "1b3341cd9f99eaed960ddd99599c0688de0b926a83669630f1c47e1e1ab6df6c",
+          "bytes": 70
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/windows-soak-load.tsv",
+          "sha256": "8fa8949666390fb0f856d9ef1d9d11fb3d831b46bbf2b55f7648b7096afbdd7e",
+          "bytes": 365
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/windows-soak.json",
+          "sha256": "66aae7ab58169a2be8588a8ae013c3d8128b94b22ac74efb47ec5eae3ace0e3d",
+          "bytes": 44492
+        },
+        {
+          "path": "28-04-CERTIFICATION-RECEIPT.json",
+          "sha256": "c4ab82aeb110d61499c99483635aa14e0b82d2ba44939aabe6f2076297c82c3c",
+          "bytes": 97795
+        }
+      ],
+      "logs": [
+        {
+          "path": "evidence/28-01/hz-clippy.log",
+          "sha256": "062d11b201a16bf1fde6c1c7ce5ea213653fa61cd2390f44784693ebb336c853",
+          "bytes": 392,
+          "produced_by": "28-01"
+        },
+        {
+          "path": "evidence/28-01/hz-matrix.log",
+          "sha256": "68da013b518f56c9931144a62c606afd1a094cf15e258596b40e6fb4d3ad1417",
+          "bytes": 9521,
+          "produced_by": "28-01"
+        },
+        {
+          "path": "evidence/28-01/surface-capture.txt",
+          "sha256": "37f96ab8eaef4cd3c8c2e5a42534a8c046eff0d96f2e35368382c219a4ee61f3",
+          "bytes": 35241,
+          "produced_by": "28-01"
+        },
+        {
+          "path": "evidence/28-02/gate-mutations.log",
+          "sha256": "2138510412c0c4fd4c388e9591f097acf3a29815997e083215140a40d888d0d3",
+          "bytes": 3372,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/hz-clippy.log",
+          "sha256": "dcc19c1ab12d817b21fabc226fc6ff8948e766c33bb70cfdb654c738b5d6b15c",
+          "bytes": 1190,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/hz-verifier.log",
+          "sha256": "c32fe91630a78cd356c52f445368c0848b570ec953eb5bdd0b437ea803d4ee10",
+          "bytes": 196,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/linux-markers.log",
+          "sha256": "50285c1e7231cbafd43b109947c92323fa7d884f57336774aa915f2cffdde7cc",
+          "bytes": 51840,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/macos-markers.log",
+          "sha256": "7078338b51b999172d655d9d7bc0e21232a645dddaf42a4c39f3dfe8d7276971",
+          "bytes": 51720,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/macos-matrix.log",
+          "sha256": "293c3dd1d05e16c3fd95f32099defaa11b1d6faab4f21f52471175d40e0c32ff",
+          "bytes": 1233,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/marker-mutations.log",
+          "sha256": "9d09a057a68fd473a73fb161f6f32df8b478fa5aed6b3b21dde75de18ea8b1de",
+          "bytes": 1568,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/surface-capture.txt",
+          "sha256": "37f96ab8eaef4cd3c8c2e5a42534a8c046eff0d96f2e35368382c219a4ee61f3",
+          "bytes": 35241,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/win-control.log",
+          "sha256": "b07c6cb0e9b0d258d3db0bcd1618129d8cdcc4acc9d5b6f40f5160b7d67c82cd",
+          "bytes": 14712,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/win-matrix.log",
+          "sha256": "7580b7006c6df7fad3df7ec3b64a58f156dbe333316c81ef45b3630f4e3387f4",
+          "bytes": 54246,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-02/windows-markers.log",
+          "sha256": "5e0b4a6f7269bed66230423cb0a3b65fe1a5c09dd08e850980e1c1ffe9594dc7",
+          "bytes": 53493,
+          "produced_by": "28-02"
+        },
+        {
+          "path": "evidence/28-03/hz-clippy.log",
+          "sha256": "0d835c25413f9ad557486bb2a0892fb9c3c1b7a7b020d3fa7f3c30c43d4edc51",
+          "bytes": 207,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/hz-soak-contract.log",
+          "sha256": "80a26a84b5a118549f12c029d9dc81b92a36c1522913a8813ab4dce7981904d5",
+          "bytes": 14041,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/linux-soak.log",
+          "sha256": "d47b5d981ab81d31bba4dcd2319b9ccdf4019eb9e1016a0afccf4ae4d54f3fdd",
+          "bytes": 636,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/macos-activeness.err",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/macos-markers.log",
+          "sha256": "2512c772f8840cc0c33e23867ccdc4d9a5dc6ef35e094bc9497eef2cd5c0db12",
+          "bytes": 51840,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/macos-matrix.log",
+          "sha256": "87bc24ed3be55a369c6d95b8f6b62824adf97b1400c787369ba8d470fea6280e",
+          "bytes": 51856,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/macos-soak.log",
+          "sha256": "3f7c76dcb04fd7b61d08cacf2513192f5896e203dc538812f8999418229dcd49",
+          "bytes": 694,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-03/surface-capture.txt",
+          "sha256": "43e6dbde22288ab06c2350e2c63e8e889b95cc9852a9bab7ee960e249f9813d4",
+          "bytes": 38463,
+          "produced_by": "28-03"
+        },
+        {
+          "path": "evidence/28-04/hz-clippy.log",
+          "sha256": "107e075d252f9c5ad4148b40566000e3a4d4fa5142844cac5dbba5794381adbe",
+          "bytes": 166,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/hz-crate.log",
+          "sha256": "12c0f0984428c777aa28ce17cfec887282f67cfa96f751021938760053dbaeb8",
+          "bytes": 51024,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/hz-receipt.log",
+          "sha256": "378a39573ac9f7f20a0ed77420f1b04a28ae06756edfb4c44e6b044b889375ae",
+          "bytes": 7268,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/local-gates.log",
+          "sha256": "9de8f1389dbc5cec006f48bf26c8a77fceee1e139ec11fd6fdcf0db115ee8d46",
+          "bytes": 4680,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/macos-ci-30364529551.log",
+          "sha256": "89d28572a8d732b97d4c98f2e7b4ab4af95ee7aa68ea8b1a7f9b7803ba421e65",
+          "bytes": 97244,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-04/verifier-rejections.log",
+          "sha256": "e7f4c37a283a6d1ff346cf220be602b352c0352fa5b4d67b7c520733c58b6976",
+          "bytes": 3219,
+          "produced_by": "28-04"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/kr01/kr01-as-SYSTEM.log",
+          "sha256": "be694f4434f62b4239ef4311f0982fec655adb3e1b851853acb9d177c66298a6",
+          "bytes": 26111,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/kr01/kr01-as-seand.log",
+          "sha256": "1db94c6eea907231ed65f85c02102df01ceea4031ca1464199254ea0af49b4c5",
+          "bytes": 20600,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/kr01/live_fs_acl.log",
+          "sha256": "829360d6595eca4550563e144c38f4ef175e2da4837d9d366185220833d3110b",
+          "bytes": 4104,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/kr01/live_fs_acl_ignored.log",
+          "sha256": "55ef018ae345a8f3374f5fa83edab503dcf4209bb6ad845e68a7784c731e145c",
+          "bytes": 2624,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/kr01/live_integrity_suite.log",
+          "sha256": "2b0f38b7041944c8911bea8688d50bcea458f829ee828cab6074d4fb4aef2ee8",
+          "bytes": 3040,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/soak-attempt1-quietwait.log",
+          "sha256": "5d392277860ab7ada68a079174ed159518dcde61d5e5e7f048eb0638750c90ad",
+          "bytes": 14381,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-03-windows-requeue/windows-soak.log",
+          "sha256": "66d207226adfadcf5efbbfa4e496002e10d0a00e401a8d68e7e5e47699792933",
+          "bytes": 2911,
+          "produced_by": "28-03-windows-requeue"
+        },
+        {
+          "path": "evidence/28-kr01-repair/final-witness-and-containment-regression.log",
+          "sha256": "09a80be8fbdf58cb247e4ae8ded47125a61296485ca26790f45ba4d77ad9bb18",
+          "bytes": 6171,
+          "produced_by": "28-kr01-repair"
+        },
+        {
+          "path": "evidence/28-kr01-repair/kr01-denial-ladder.log",
+          "sha256": "397d157a0c454c8ed84daa0a843ea203e9d33f0a22f9bf0cb222b5b563e265e9",
+          "bytes": 6944,
+          "produced_by": "28-kr01-repair"
+        },
+        {
+          "path": "evidence/28-kr01-repair/phaseA-serial-6runs.log",
+          "sha256": "dc3bc2a55330eaeaad6de530d158bb334dc6c2539c22ee4e55cf9faebb83a01e",
+          "bytes": 9068,
+          "produced_by": "28-kr01-repair"
+        },
+        {
+          "path": "evidence/28-kr01-repair/phaseB-matrix-parallel-cleanup-guard.log",
+          "sha256": "237c29ade1f8f8a046cf3590d29a5a4894f92ef3c44dd3b30e2d56a124a0b8cd",
+          "bytes": 23750,
+          "produced_by": "28-kr01-repair"
+        },
+        {
+          "path": "evidence/28-kr07-suites/kr07-ladder-run1.log",
+          "sha256": "8aa34be2f888255c21b2949374e9e562cf5df1b2394e495f6a23b283ede78d04",
+          "bytes": 1789,
+          "produced_by": "28-kr07-suites"
+        },
+        {
+          "path": "evidence/28-kr07-suites/kr07-ladder2-and-original.log",
+          "sha256": "5d5ce8c15d9bba706dc4ee31cdf254df7375a7159d6a34e8e57c2055db27251e",
+          "bytes": 5778,
+          "produced_by": "28-kr07-suites"
+        },
+        {
+          "path": "evidence/28-kr07-suites/kr07-ladder3-reproduction.log",
+          "sha256": "e83832c6133e51c3c8b0f0815ba77040ff143c7065e32038d95bbdccd13b4d30",
+          "bytes": 1676,
+          "produced_by": "28-kr07-suites"
+        },
+        {
+          "path": "evidence/28-kr07-suites/kr07-linux-suites.log",
+          "sha256": "65fdc409df68197676f0a7a7c7cb239d82225bfb118245110d0c1f59db5d80d9",
+          "bytes": 54112,
+          "produced_by": "28-kr07-suites"
+        },
+        {
+          "path": "evidence/28-kr07-suites/kr07-repair-verification.log",
+          "sha256": "2f4784b7f1ca30562b3db3d815b0ac972a1a8027ff9e4b7581edceb9f1fddb2d",
+          "bytes": 5952,
+          "produced_by": "28-kr07-suites"
+        },
+        {
+          "path": "evidence/28-kr07-suites/kr07-windows-suites.log",
+          "sha256": "7a3c6ffa4540570a554eb773653b17d6482c07164086706f2639042481c4e17a",
+          "bytes": 9447,
+          "produced_by": "28-kr07-suites"
+        },
+        {
+          "path": "evidence/F-28-02-001/macos-proof.log",
+          "sha256": "8f228097af3f33c0b9dd9a64ea8c79dc10cf32f171deae75d66e2ff59763f51a",
+          "bytes": 1933,
+          "produced_by": "F-28-02-001"
+        },
+        {
+          "path": "evidence/F-28-02-001/panel-question.txt",
+          "sha256": "2d78224166e49cf72f1dcdd340a53702909c145ec85823d21c28b911c2598557",
+          "bytes": 2726,
+          "produced_by": "F-28-02-001"
+        },
+        {
+          "path": "evidence/28-adj/gate-falsification.log",
+          "sha256": "6bd45fe17879c0f905d5f71456de1e0ab7771cb77f69406425ed0c0408b1cfdc",
+          "bytes": 1529,
+          "produced_by": "28-adj"
+        },
+        {
+          "path": "evidence/28-adj/m3.log",
+          "sha256": "04af5f04f59c159f4328ae179e93b4473b91a27343f607c3511e7712a529c796",
+          "bytes": 1754,
+          "produced_by": "28-adj"
+        },
+        {
+          "path": "evidence/28-adj/panel-codex.txt",
+          "sha256": "19a57e48e7c541a63935643f0571621af32bf8e3aba65d29a07518f254cc7377",
+          "bytes": 7093,
+          "produced_by": "28-adj"
+        },
+        {
+          "path": "evidence/28-adj/panel-gemini.txt",
+          "sha256": "4203fad7dbc478b7dd6dd01e20ece188dbd1fd915690d5e2c98ad560f08cf050",
+          "bytes": 781,
+          "produced_by": "28-adj"
+        },
+        {
+          "path": "evidence/28-adj/panel-kimi.txt",
+          "sha256": "8f01ca9917b2c6cc144905aaa11ea2bdef95c6525643d57d30dc21c5aac79460",
+          "bytes": 1818,
+          "produced_by": "28-adj"
+        },
+        {
+          "path": "evidence/28-adj/panel-question.txt",
+          "sha256": "f3845cc368c50ee68c80b80ecd224564e67e5fbb93bf56fb9b9e99808ee7c60b",
+          "bytes": 3463,
+          "produced_by": "28-adj"
+        }
+      ],
+      "skip_policy": {
+        "classes": [
+          "platform-inapplicability",
+          "observation-blocked",
+          "architectural-impossibility",
+          "unresolved-surface"
+        ],
+        "skipped_cells": [],
+        "skipped_critical_cases": 0
+      }
+    },
+    "findings": [
+      {
+        "id": "KR-01",
+        "origin": "carried-red",
+        "subject": "descendant process tree is not reaped; a process survives its owner (wcore-sandbox::live_integrity::live_future_drop_reaps_descendant_job_tree, Windows, deterministic)",
+        "inherited_severity": "known-red/non-gating",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "2",
+        "disposition": "DISPROVED",
+        "rationale": "A2 crossing (panel calibration example 1): subject matter is an orphaned process and Criterion 2's subject matter is a soak with no orphan process, so the accept path is closed and only FIXED or DISPROVED were available. TESTED on seandesktop and the reap WORKS: 12/12 serial passes across competing load from 4 to 32 processes. The witness was STRENGTHENED, not the assertion relaxed - from heartbeat-file length (which cannot separate reaped from starved and biases toward a false pass under load) to host-side fixed-ProcessId liveness, and capture_alive_descendant_pids now panics if no descendant is ever observed so a run that proves nothing fails as unmeasurable. The carried row was MISATTRIBUTED: the old red never reached its reap assertion, aborting ~30 lines earlier in its own setup.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "evidence/28-03-windows-requeue/KR-01.md and F-WR-REPAIR-SUMMARY.md - KR01_WITNESS_DESCENDANTS_ALIVE_BEFORE_DROP=[31360] then KR01_WITNESS_SURVIVORS_AFTER_DROP=0 of 1, 12/12 serial; ladder rung 5 refutes the serialisation alternative by failing the ORIGINAL shape serially in 2.7s"
+      },
+      {
+        "id": "KR-02",
+        "origin": "carried-red",
+        "subject": "Windows snapshot private DACL enforcement is unproven; snapshot.rs windows_private_dacl_* fail at their WRITE_DAC reopen step with error 5, identically at parent",
+        "inherited_severity": "known-red/non-gating",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "A1 re-score unchanged from 28-01: the observed red is in the test's own reopen step and reproduces at parent, so it is not evidence of a candidate regression, and it contradicts no criterion as scored. Contract section 3.4's unproven-control corollary would move it across the A2 line and was DELIBERATELY NOT APPLIED - inventing a stricter rule than the recorded decision is what grew Phase 20 to 74 plans. Not repaired here: this plan repairs nothing by design.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-KR02",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "KR-03",
+        "origin": "carried-red",
+        "subject": "worker output exhaustion buffer-retention bound is unproven; worker_runtime_limits::multi_worker_output_exhaustion_fails_without_retaining_buffers takes ~35s against a 20s budget and the timeout was deliberately NOT raised",
+        "inherited_severity": "known-red/non-gating",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "A1 re-score unchanged: the red is a budget overrun in the test, not an observed retention of buffers, so no criterion-contradicting behaviour is established. Same section 3.4 treatment as KR-02. The soak's resource slopes (harness_rss_bytes <= 2x, all green on three families) are adjacent evidence but do not measure this bound.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-KR03",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "KR-04",
+        "origin": "carried-red",
+        "subject": "bash cannot run under Windows AppContainer at all; msys requires \\BaseNamedObjects and AppContainer confines to AppContainerNamedObjects by construction (0xC0000022)",
+        "inherited_severity": "known-red/architectural",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Architectural impossibility, not a defect in the candidate: no budget fixes it. The product contract is fail-closed and the test asserts it. Carried knowingly and enumerated in the signed receipt so it is visible at acceptance and again at release rather than absorbed. This is the canonical architectural-impossibility instance and its impossibility_check IS that fail-closed assertion.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-KR04",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "KR-05",
+        "origin": "carried-red",
+        "subject": "AppContainer ACL lease SID/profile mismatch: a security control reports itself active while being inactive; the product continues to execute UNSANDBOXED and logs a message that reads like a platform limitation",
+        "inherited_severity": "environment-quirk/non-gating",
+        "p28_severity": "CRITICAL",
+        "contradicted_criterion": "1",
+        "disposition": "DISPROVED",
+        "rationale": "A2 crossing (panel calibration example 2), accept path closed. MEASURED BY CONTROL and the answer is the opposite of what was feared: in BOTH wedged observations the probe reported unavailable and the product REFUSED TO EXECUTE (worker executed=False, no uncontained High-integrity label). On this candidate the wedge is a DENIAL OF SERVICE, not an elevation of privilege, so the CRITICAL claim as written - silently inactive control, execution continues unsandboxed - does not hold. 28-02 said this must not be closed on the delegated surface alone; the additional evidence that closes it is that on Windows is_available() IS a real sandboxed spawn rather than a capability query, driven at BOTH session types, with 6/6 directional controls caught including two negative ones. The residual - the bash-tool path under a wedged lease - is unmeasured and is carried as F-28-04-002 rather than absorbed into this row.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "evidence/28-02/controls.json (obs-scheduled-task-wedged and obs-ssh-wedged: probe_report=unavailable, product_behaviour=refused-fail-closed) and evidence/28-02/win-control.log; 6/6 directional controls passed"
+      },
+      {
+        "id": "KR-06",
+        "origin": "carried-red",
+        "subject": "whether the Windows sandbox is observable in the CERTIFICATION ENVIRONMENT is unmeasured; the standing rule that it cannot be observed over SSH is refuted on one host but does not generalise",
+        "inherited_severity": "standing-rule-now-refuted",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "-",
+        "disposition": "DISPROVED",
+        "rationale": "The finding's subject is that observability was UNMEASURED. It is now measured, by a directional control run in the certification environment before any sandbox cell was graded: 3 positive and 3 negative controls, all caught, at both scheduled-task and SSH session types. The standing rule 'never conclude a red from an SSH run' is CONFIRMED-FALSE and retracted. SCOPE, stated rather than dropped: the wedge-clearable verdict is not generalised off seandesktop, the observation-blocked skip class remains NOT AUTHORISED and was never used, and neither AppContainer intel file is cited as evidence for anything.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "evidence/28-02/controls.json verdict=wedge-clearable with 6/6 directional controls; 28-02-OBSERVABILITY-CONTROL.md"
+      },
+      {
+        "id": "F-28-01-001",
+        "origin": "contract",
+        "subject": "the unproven-control corollary of A2 was considered and deliberately NOT applied, so KR-02 and KR-03 stayed below the A2 line",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Carried knowingly and recorded with its reasoning so a later reader can apply the corollary DELIBERATELY rather than rediscover it. The decision record names exactly two A2 crossings and 28-01 was directed to name two; applying the corollary would have made four. Cost is bounded because the structural rule reached the same place by a different road - the properties became measured matrix cells under the positive-evidence rule, where a cell that cannot produce positive evidence is a RED and never a skip.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-C4",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-002",
+        "origin": "contract",
+        "subject": "the standing severity policy is not in AGENTS.md; 28-01 was directed to quote it verbatim from there and that file contains no such text",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Documentation defect in the program's own instruction set, not in the candidate. Section 1.3 of the contract quotes ROADMAP.md and commit d0837aa7 instead and says so. Either add the policy to AGENTS.md section 11 or correct the plans that cite it as living there.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-POLICY-DOC",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-003",
+        "origin": "contract",
+        "subject": "the severity-amendment commit d0837aa7 - the decision's load-bearing 'later instrument' - ends its own message with 'Phase 28's criteria are untouched (different phase)'",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "This is the STRONGEST available evidence for the losing c4-literal position and it appears in no panel response, so it is carried into the signed receipt rather than left in a contract appendix. It does not by itself overturn the decision: the sentence is as consistent with 'I am not editing that phase's text' as with 'that phase is exempt', and the dissent's own reversal condition is narrower (a restatement made KNOWING the current policy), which this is not. Under A2 the practical gap is narrow, because the findings c4-literal would protect are exactly the ones A2 already removes from the accept path. A reader reopening the acceptance rule should start here.",
+        "owner": "Sean (maintainer decision, reversible by one line)",
+        "backlog_id": "BL-F28-C4",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R001",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core agent` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R002",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core crucible` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R004",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core forge` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R007",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core init` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R008",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core mcp-serve` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R010",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core models` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R012",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core project-context` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R014",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core self-update` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R017",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core swarm` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact (class present-but-unclaimed)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Certified anyway and flagged: the surface WAS exercised by the matrix and the soak, so this does not reduce coverage - it records that attribution is incomplete. An uncertified surface that ships is worse than an unattributed one, and the surface may predate phases 24-27, which is itself worth knowing at certification time. Carried knowingly. NOTE for a later reader: these IDs are POSITIONAL and shifted between the 28-02 and 28-03 resolutions, so do not diff them by ID.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-UNCLAIMED",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R003",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core fetch` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R005",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core goal` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R006",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core image` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R009",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core migrate` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R011",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core profile` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R013",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core sandbox` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R015",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core session` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R016",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core setup` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-01-R018",
+        "origin": "candidate-resolution",
+        "subject": "surface `wayland-core workflow` is exposed by the candidate binary and is discussed by phase artifacts but not in a form the resolver recognises as a claim (class attribution-weak)",
+        "inherited_severity": "n/a-raised-by-phase-28",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A limit of the INSTRUMENT, deliberately never rendered as a fact about the product: the resolver's recall is incomplete and the class exists so that gap cannot read as 'the phase never claimed it'. The bare claim form is barred from accusing, because accusing a phase of claiming a surface that does not exist costs a disposition to clear. Carried knowingly.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-SURFACE-WEAK",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-02-001",
+        "origin": "matrix",
+        "subject": "macOS sandbox activeness is not obtainable through any black-box surface of the shipped candidate: 24 critical sandbox-probes cells on macos are RED because no containment differential can be formed",
+        "inherited_severity": "-",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "1",
+        "disposition": "FIXED",
+        "rationale": "A2 crossing raised by 28-02 itself: Criterion 1's subject matter is the hostile matrix including sandbox probes, and a Criterion-subject property that cannot be evidenced at all means the criterion cannot be honestly asserted for that family. FIXED by a real product surface, not by re-grading: `wayland-core sandbox status|exec` dispatches through wcore_tools::bash::BashTool::execute_with_ctx - the agent's OWN shell function - so a regression that stopped routing the agent's shell through containment breaks this probe too. The delegated admission gate was NOT touched: sandbox_exec still cannot own descendants and swarm still refuses on macOS. Admitting sandbox_exec to the delegated path would have turned 24 cells green by weakening a security control, which was the most tempting and most forbidden route available.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "cargo nextest run -p wcore-cli --test sandbox_activeness (2/2) and --lib -E 'test(sandbox_cmd)' (6/6); re-run matrix evidence/28-03/macos-cells.json 216/216 with activeness observed on all 24 sandbox cells; mutation test - probe rewired through a raw shell yields 1 passed 1 FAILED",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-02-002",
+        "origin": "control",
+        "subject": "the stale AppContainer lease wedge is a PERSISTENT DENIAL OF SERVICE: a file nobody knows to look for permanently refuses all sandboxed execution, with a message that reads like a platform limitation",
+        "inherited_severity": "-",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "-",
+        "disposition": "FIXED",
+        "rationale": "FIXED, and re-adjudicated INDEPENDENTLY by lane 28-adj, which did not author the repair. The repair (15821c03 + 3f3f93dc) is genuinely merged - both are ancestors of the integration branch and the acl_lease module is byte-identical to what was tested (sha256 bc6bdac1) - so this is not a paper disposition. A dead-owner lease that cannot reconcile is now MOVED to a quarantine subdirectory and recovery CONTINUES, instead of returning Err and aborting the whole pass on every later ExecutionIdentity::start. Verified by attack rather than by reading the summary. owner_is_live is the FIRST statement in the per-lease loop, so it dominates all THREE mutating branches and not only the reclaim one - the honour-when-alive leg is stronger than claimed. The quarantine allow-list is narrow: only a real directory of that name is skipped, a junction or a file of that name still hard-errors, i.e. fails closed, and NO product code ever reads back out of that directory, so it adds no writable surface and no trust crossing. The lane's M1 result 'only the re-entrancy test fails' is CORRECT, and the reason is that the mutation harness runs each test in its own process while the test lease root is keyed on process id; in the full suite the allow-list is guarded harder still. ONE REAL DEFECT FOUND AND MEASURED, and it is the predicted fourth self-passing gate: the test named reclamation_reports_grants_it_could_not_revoke does NOT test that - it never calls reclamation_report - and mutant M3, which deletes the residual-grant disclosure so an operator is told nothing was left behind while un-revokable ACL grants remain, leaves the suite at 133 passed 0 failed 23 ignored, byte-identical to pristine. Filed as F-28-ADJ-001 rather than absorbed here: the disclosure is a secondary property of the repair and not this finding's subject, and even with ZERO disclosure the repaired state strictly dominates refusing forever, which never revoked those grants either and whose documented remedy - delete the file by hand - disclosed nothing at all. The finding's own message clause IS pinned, by a_leaked_test_lease_is_diagnosed_by_name, which asserts the remedy and all three denied false explanations; that is what defeated the internal pass arguing for OPEN. Cross-audit 3/3 FIXED (codex gpt-5.6-sol, gemini 3.1-pro, kimi K3). Severity was NOT downgraded and no accept path was opened: the disposition is reached by repair, on hardware.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "independent re-measurement by the adjudicator on SeanDesktop at 3f3f93dc (byte-identical to integration HEAD): pristine wcore-sandbox --lib = 133 passed 0 failed 23 ignored, and mutation M3 (residual-disclosure branch deleted, MUT_COMPILED=True, APPLIED_SHA256=8dc05b5c) = the SAME 133/0/23, which is what proves F-28-ADJ-001 - evidence/28-adj/m3.log, m3.diff, adj-m3.ps1; lane 28-h2 mutants M1 (allow-list removed -> quarantine_directory_does_not_become_a_second_wedge FAILED) and M2 (owner_is_live bypassed -> live_owner_unreconcilable_lease_is_honoured_not_reclaimed FAILED) at evidence/28-h2/mutate2-m1.log and mutate2-m2.log; before/after hardware repro at evidence/28-h2/repro-before.log (wedged: refused, ran=False, twice, permanent) versus repro-head.log (reclaimed in flight, Exit code 0, F28H2RAN, and second run silent); live_owner_is_never_reclaimed and killed_owner_is_recovered_before_next_execution ok under WAYLAND_SANDBOX_LIVE_WINDOWS=1 against a real CreateAppContainerProfile identity at evidence/28-h2/final.log",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-02-003",
+        "origin": "control",
+        "subject": "swarm dispatch admission intermittently refuses with the sandbox reported available (obs-scheduled-task-cleared: probe_report=available, product_behaviour=refused-fail-closed)",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "A real intermittency in the delegated-admission path, measured by the control rather than inferred. It fails CLOSED, so it costs availability and not containment, and it contradicts no criterion. Not repaired here.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-SWARM-ADMIT",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-02-004",
+        "origin": "control",
+        "subject": "the belief itself: a standing rule with no discriminating control ('never conclude a red from an SSH run') discounted real Windows security evidence for weeks",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A process defect, and the one this program should be most interested in: an unmeasured belief was treated as a measured result and suppressed evidence about a security control. Retracted at 28-02 and corrected in LANE-BRIEF section 2 and AGENTS.md section 11. Not marked FIXED because 28-02 itself recorded that remaining plan-brief copies still carry the retracted rule and need a serialized cross-lane edit by the orchestrator - claiming FIXED over copies I have not changed would be the same defect in miniature. Carried knowingly with that residual named.",
+        "owner": "orchestrator (serialized cross-lane edit)",
+        "backlog_id": "BL-F28-BELIEF",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-02-005",
+        "origin": "matrix",
+        "subject": "a probe task run through `backend run --backend local` on macOS created a file OUTSIDE its workspace",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "ROOT-CAUSED after the fact and the diagnosis reduces it: that path CONSULTS wcore_sandbox::default_for_platform() and refuses when no real backend exists, but never routes the child through SandboxBackend::execute, and its own receipt says containment was 'selected but NOT applied to this child'. So this measured nothing about sandbox-exec - it measured a path that never contained anything. Real, honestly reported by the product, contradicts no criterion. Same subject as F-MA-002.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-LOCAL-BACKEND",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-02-006",
+        "origin": "matrix",
+        "subject": "the Linux bwrap backend read-binds ALL of /etc, so a sandboxed worker reads /etc/shadow",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Measured and deliberately NOT inflated. The source was read before scoring: SYSTEM_RO_DIRS includes /etc and the bind is a deliberate --ro-bind /etc /etc, so enforces_read_deny()==true is not lying - it means the backend honours fs_read_deny masks, not that it denies everything ungranted. A hardening gap, not a control that reports itself active while inactive, and the subject matter of no criterion. Independently reproduced a second time during the macOS-activeness work (F28_SHADOW=READ inside the sandbox).",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-BWRAP-ETC",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-WR-01",
+        "origin": "matrix",
+        "subject": "the KR-01 acceptance test never evaluated its own property: it aborted in its own setup at live_integrity.rs:273 with the sandboxed command exiting 1 on 'Access is denied.', so no descendant existed and the reap assertion ~30 lines below was never reached",
+        "inherited_severity": "-",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "1",
+        "disposition": "FIXED",
+        "rationale": "A member of the native wcore-sandbox live acceptance surface - the hostile platform matrix as 28-CLEANUP defines it - so a deterministic red there contradicts Criterion 1 and A2 closes accept and defer. More serious than a stale known-red: the fix for the underlying defect landed at 2b662fe8 together with this very test, so what existed was a LANDED FIX WHOSE OWN ACCEPTANCE TEST HAD BEEN RED EVER SINCE, with the red attributed to the defect the fix closed. Rebuilt on primitives an 8-rung denial ladder proved (the nested cmd /d /c shape is what is refused; choice.exe exits in <80ms under this token; the descendant must be detached with start \"\" /b). Assertion NOT relaxed - witness strengthened.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "12/12 serial passes in evidence/28-03-windows-requeue and F-WR-REPAIR-SUMMARY.md; hard_process_containment_windows re-run after the helper extraction 6 passed / 0 failed",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-WR-02",
+        "origin": "matrix",
+        "subject": "suites report `test result: ok` having executed ZERO tests: 16 all-ignored integration binaries (flavour A) plus live_integrity.rs which printed an affirmative `5 passed` for zero work (flavour B)",
+        "inherited_severity": "-",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "1",
+        "disposition": "FIXED",
+        "rationale": "Criterion 1 subject matter: a suite that runs zero tests cannot evidence that a family passed the hostile matrix, so a green from one is coverage-from-nothing. Flavour B is strictly worse than A because `5 passed` reads as certification while `0 passed; 12 ignored` at least invites a second look. The detector for this class HAD THIS CLASS'S DISEASE - the first inventory generator matched #[ignore] against doc-comment PROSE describing the defect - and was fixed by anchoring on ^\\s*#\\[ and never collecting comment lines. All 16 now carry an always-running zero_execution_guard (3 + 13), deliberately NOT #[ignore]d, because three suites in this repo carried a guard that was itself ignored and so was inert against precisely its own scenario. Flavours C and D are closed generically at the invocation site with no-tests=fail rather than by restructuring 19 files.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "falsification measured both directions per suite: env SET without --ignored -> 'FAILED. 0 passed; 1 failed; 11 ignored' rc=101, env UNSET -> 'ok. 1 passed; 0 failed; 11 ignored' rc=0; nextest known-positive 'error: no tests to run' rc=4 vs known-negative '50 passed' rc=0",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-WR-03",
+        "origin": "matrix",
+        "subject": "execute-from-a-granted-directory is uncovered by any green test",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DISPROVED",
+        "rationale": "Retired on measurement. Rung 4 of the denial ladder ran the script from a granted directory with cwd:None and it ran to the 20s timeout with a 1749-byte heartbeat, so the path works and is now additionally covered by the repaired descendant test's green.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "evidence/28-kr01-repair/kr01-denial-ladder.log rung 4 - exit 0, heartbeat 1749 bytes"
+      },
+      {
+        "id": "F-WR-04",
+        "origin": "matrix",
+        "subject": "leaked live-test state on the Windows certification host: 564 AppContainer profiles and 68 work directories under C:\\Users\\Public",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "FIXED",
+        "rationale": "The count was a direct census of two weeks of historical failures of the very test repaired under F-WR-01: the work directory is removed only on the test's success path, so a test that could not reach its assertion leaked a directory and a profile on every run. Cleaned (564 removed, 0 failures, 0 leases remaining) and the repaired test tears down via reap_stray_descendants() and no longer creates a %PUBLIC% work dir at all. Cleanup was scoped to wcoresandbox*/WCore* profiles and wcore-* dirs; no other lane's state was touched. Note the leaked profiles were ALSO tested as a hypothesis for the parallel-mode failures and REFUTED - removing all 564 changed neither mode's outcome.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "F-WR-REPAIR-SUMMARY.md - 564 profiles removed with 0 failures, 68 work directories, 0 leases remaining, LEFTOVER_MY_TASKS=0",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-WR-05",
+        "origin": "matrix",
+        "subject": "running the sandbox as SYSTEM trips validate_mutex_security: acquire() always builds a 2-entry DACL while the validator expects 1 when the caller's SID IS the SYSTEM SID, and it fails closed with a message that reads like a platform limitation",
+        "inherited_severity": "-",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "The KR-05 pattern in miniature - a fail-closed refusal wearing the costume of a platform limitation - but SYSTEM is not the shipping configuration, so LOW. It contradicts no criterion and it cost one lane a run rather than any user anything. Recorded because the misleading-message half of KR-05 is CONFIRMED and this is a second instance of it.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-SYSTEM-DACL",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-WR-06",
+        "origin": "matrix",
+        "subject": "over ssh+PowerShell every non-zero exit status collapses to 1, and stdout sentinels are insufficient because CLIXML progress records splice into the stream and a status line can vanish while its marker survives",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "FIXED",
+        "rationale": "A measurement-transport defect that silently destroys a result rather than failing loudly: a Windows leg could not distinguish 'failed' from 'failed the way we predicted', so rc==1 passed for every failure mode it was meant to separate. Fixed by a verified carrier rather than by care: the remote writes WLRC first and WLDONE last to a status file, a SEPARATE ssh call reads it back, and exit status is ignored entirely, with three-state grading (no marker = incomplete, marker without status = UNREADABLE, both = true code). Landed in LANE-BRIEF section 2 and AGENTS.md section 11. Related trap recorded: \"$LASTEXITCODE:TAG\" renders EMPTY because PowerShell reads $VAR: as namespace notation.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "7/7 faithful over exit codes 0/1/2/3/7/100/255; evidence/28-kr01-repair/F-WR-06-EXIT-STATUS-PATTERN.md; the mid-write UNREADABLE case was then observed live during a real build poll",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-KR-07",
+        "origin": "matrix",
+        "subject": "live_cmd_runs_when_allowlist_has_missing_path fails deterministically (12/12 serial) with SandboxError::Timeout against a 10s manifest on a `cmd /c echo`",
+        "inherited_severity": "-",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "1",
+        "disposition": "FIXED",
+        "rationale": "A native Windows AppContainer acceptance case in the hostile platform matrix, so a deterministic red contradicts Criterion 1 and A2 closes accept and defer. A 12-rung ladder showed the red was NEVER about the missing allowlist entry the finding is named for - the absent path alone clears in ~107ms - it was the OTHER entry: the test granted over std::env::temp_dir(), which is unbounded and shared with every process on the host, and apply_explicit_access propagates across the whole subtree on EVERY execution. THIS IS A TEST FIX, NOT A PRODUCT FIX, stated plainly: the product's O(objects) grant cost is unchanged and is filed as F-KR-09. Rung 11's own prediction was REFUTED (19,487ms against a predicted 25s exhaustion) and was left failing in the tree, because a rung edited until it passes measures nothing.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "matched pair in ONE invocation: the unrepaired shape red at KR07B_REMEASURE verdict=FAIL Timeout elapsed_ms=25003 (100.0% of ceiling) while the repaired test printed 'test result: ok. 5 passed; 0 failed'; repaired case 107ms; cost ladder 200 objects 133ms vs 200,000 objects 19,487ms",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-KR-08",
+        "origin": "matrix",
+        "subject": "concurrent live AppContainer executions interfere on one host: the same suite yields 3/2, 2/3 and 1/4 in parallel versus a flat 4/1 across 12 serial runs",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Accepted because the observed failure is the product's fail-closed guard DECLINING TO MEASURE an ambiguous scope ('resolve_anchor_pid found 2 candidate anchors ... the descendant scope would be ambiguous') rather than answering wrongly - correct behaviour, not a defect. Its consequence is an operating rule, now recorded: --test-threads=1 is a CORRECTNESS REQUIREMENT for live sandbox suites, not a preference, and any live-Windows figure this program recorded from a parallel run is untrustworthy. This is the cause of CLASS-WIN-LIVE-01, whose exact 3-passed/2-failed signature reproduced 3/3 in parallel and 0/12 in serial.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-WIN-PARALLEL",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-KR-09",
+        "origin": "matrix",
+        "subject": "AppContainer ACL grant+revoke is O(objects under the granted path) and is paid on EVERY execution: 133ms at 200 objects, ~10s at %TEMP%'s 57,636, 19,487ms at 200,000",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "A cost defect, not a containment defect, so it is the subject matter of no criterion. It matters in the field rather than in the lab: the allowlist the repaired test itself documents (~/.cache, ~/.cargo, ~/.npm, ~/.rustup) is exactly the large-tree case, so a real user can pay tens of seconds of setup on every sandboxed command. MEDIUM per standing policy, non-blocking.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-ACL-COST",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28C-R01",
+        "origin": "matrix",
+        "subject": "wcore-agent/actor_acl_test is RED under --ignored: sub_agent_with_deny_policy_short_circuits expects a deny error and gets 'tool-executed'",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DISPROVED",
+        "rationale": "DISPROVED as a product defect by a 4-rung ladder, each rung a separate observation: the asserted enforcement string occurs in exactly one file in the workspace - the test itself, zero product sources; CallActor::SubAgent is constructed only in unit tests; every production site sets learned_policy: None. The pre-filter was deliberately removed in v0.8.1 U11 and the tests retained as a forward spec, and rungs 1-3 confirm that claim independently rather than trusting the prose. The unenforced deny path is UNREACHABLE in production, so it is not a live security gap. Left byte-identical - no #[ignore] removed, no assertion relaxed, no test deleted. The suite's four 'passing' tests were found VACUOUS: all four assert that the tool runs, which is trivially true when no pre-filter exists.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "28-CLEANUP-SUMMARY.md RED 1 rungs 1-4, reproduced verbatim on hetzner serial --ignored"
+      },
+      {
+        "id": "F-28C-R02",
+        "origin": "matrix",
+        "subject": "wcore-agent/tool_token_bench_smoke is RED (0 passed / 1 failed, 63s) with 'sandbox UNAVAILABLE and unsandboxed execution is not permitted'",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DISPROVED",
+        "rationale": "DISPROVED as a product defect. The gate was UNDIAGNOSABLE BY CONSTRUCTION - it told the operator to see a scratch workdir that cleanup_workdir deleted on the same code path, and Row never retained the content - so that was fixed additively first, which made the ladder possible. Rungs then showed the host CAN sandbox (bwrap present, rc 0), bwrap IS visible to the test's own environment, and no selection ever happened (WAYLAND_ALLOW_NO_SANDBOX=1 produced a byte-identical failure, and that variable is read only by unsandboxed_fallback()). The bench builds a bare ToolRegistry with no engine, so BashTool takes a FailClosedBackend from ctx.sandbox and is structurally unable to execute there. The product's fail-closed refusal is correct and is the audit M-2 design. Harness gap filed as F-28C-01.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "28-CLEANUP-SUMMARY.md RED 2 rungs 1-5, reproduced on hetzner"
+      },
+      {
+        "id": "F-28C-R03",
+        "origin": "matrix",
+        "subject": "wcore-cli/acp_engine_turn is RED (0 passed / 2 failed): both cases fail at engine init_session",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DISPROVED",
+        "rationale": "DISPROVED as a product defect, and THE SUITE IS STILL RED AND IS REPORTED RED. Rung 4 is the load-bearing one: removing the host config under an isolated HOME and XDG_CONFIG_HOME made the plaintext error disappear and MOVED THE PANIC from line 87 to line 98 - a moving panic line attributes a failure rather than guessing at it. The original red was host-config contamination: the test calls Config::resolve(), which reads the operator's real ~/.config/wayland-core/config.toml (line 103 backend = \"plaintext\") despite the file's doc-comment calling this 'the hermetic test seam'. What remains once isolated is a deliberate, documented, fail-closed refusal with two actionable remediations. It was NOT made to pass: doing so would have meant configuring credentials inside the test, which changes what it asserts. Residuals filed as F-28C-02 and F-28C-03.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "",
+        "counter_evidence": "28-CLEANUP-SUMMARY.md RED 3 rungs 1-5, reproduced on hetzner"
+      },
+      {
+        "id": "F-28C-R04",
+        "origin": "matrix",
+        "subject": "two eval-scenarios suites (cross_session_live, live_personas) print an affirmative `1 passed` in 0.00s having executed nothing, via an env-gated early return (flavour B)",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "FIXED",
+        "rationale": "Confirmed on hardware rather than inherited - the prior inventory listed them as unchecked candidates. Not in the hostile platform matrix (they are LLM-credential eval suites), so A2 does not fire and the score is on ordinary merits. Fixed by the same always-running zero_execution_guard as the other 13, and the guard is deliberately not #[ignore]d. Their defect is independent of the missing DEEPSEEK_API_KEY, and no credential was supplied.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "the 13-guard falsification table in 28-CLEANUP-SUMMARY.md: env SET without --ignored -> FAILED rc=101, env unset -> ok rc=0, against a 'before' of `ok. 0 passed; N ignored`",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28C-R05",
+        "origin": "matrix",
+        "subject": "a targeted nextest run matching zero tests exits 0 by default, because .config/nextest.toml set no no-tests policy and vx.toml pins nextest unversioned, so the behaviour depended on whichever CLI happened to be installed",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "FIXED",
+        "rationale": "The generic close for zero-execution flavours (c) and (d) at the INVOCATION SITE rather than file by file: no-tests = \"fail\" on [profile.default], inherited by ci/e2e/eval, scoped to the whole invocation so a workspace run is unaffected and only a targeted run matching nothing fails. Stated limit: this is a NEXTEST-ONLY guarantee - plain `cargo test` retains the hazard, which is why the detector still exists and why F-28-04-003 carries the residual.",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "falsified known-positive against known-negative on hetzner: `cargo nextest run -p wcore-observability --test otlp_local_test` -> 'error: no tests to run' rc=4; `--lib` -> '50 tests run: 50 passed' rc=0",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28C-01",
+        "origin": "matrix",
+        "subject": "tool_token_bench cannot measure BashTool on any host: it dispatches through a context with no sandbox backend, so every Bash row fails closed and the sanity gate refuses to write the markdown - the bench's Bash column has never been produced",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Bench-class, non-blocking, contradicts no criterion. Real and worth knowing: a measurement surface that has never produced its headline column is the same defect family as a suite that reports ok having run nothing.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-BENCH-SANDBOX",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28C-02",
+        "origin": "matrix",
+        "subject": "acp_engine_turn reads the host's real config.toml while documenting itself as hermetic, so its result depends on the developer's machine",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "The real fault behind RED 3. A non-hermetic test in a suite that calls itself the hermetic test seam is an instrument that reports the operator's environment as a product property - the same class as the retracted SSH belief in F-28-02-004.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-ACP-HERMETIC",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28C-03",
+        "origin": "matrix",
+        "subject": "an ACP/A2A session cannot be established on a headless Linux host with no OS keyring unless the operator sets credentials.backend = \"encrypted-file\" and supplies a passphrase",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Fail-closed and actionable with two documented remediations, so not a security defect - but headless Linux is the canonical deployment for an agent CLI and this is a first-run wall. Contradicts no criterion.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-HEADLESS-KEYRING",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-MA-001",
+        "origin": "matrix",
+        "subject": "WorkspacePolicy::contained grants the ENTIRE host temp directory as a writable scratch root (scratch_dirs()), so a contained shell may write anywhere under /tmp",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Deliberate and documented in code, and it contradicts no criterion - recorded, not inflated. Measured rather than argued: it is what produced the first red of the new e2e containment gate, whose escape target sat in a tempfile::tempdir() the policy legitimately grants. That test was fixed at its cause rather than having its assertion weakened, and the episode is recorded in a comment in the test so a later reader does not 'fix' it the other way.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-TEMP-SCRATCH",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-MA-002",
+        "origin": "matrix",
+        "subject": "`backend run --backend local` names a containment backend in its effective policy while never applying it to the child",
+        "inherited_severity": "-",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Honest in the receipt text ('selected but NOT applied to this child'), which is why it is LOW rather than an instance of the KR-05 pattern. It matters because it is the surface 28-02 reached for FIRST when looking for macOS activeness evidence, and it is what F-28-02-005 actually measured.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-LOCAL-BACKEND",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-001",
+        "origin": "certification",
+        "subject": "the two macOS members of the hostile platform matrix (hard_process_containment_macos, live_integrity_macos) had never been executed on any machine",
+        "inherited_severity": "-",
+        "p28_severity": "HIGH",
+        "contradicted_criterion": "1",
+        "disposition": "FIXED",
+        "rationale": "Criterion 1 names macOS and 28-CLEANUP's own definition of the hostile platform matrix names both suites, so a family member that has never run means the criterion cannot be honestly asserted for it - A2 closes accept and defer. One predecessor lane recorded this as 'no macOS build host in this lane's reach', which was FALSE and was retracted on measurement: ci.yml already uses macos-latest. NOW MEASURED: a GitHub-hosted macOS runner executed both cases at exactly this plan's base commit cf48b349. The gate's load-bearing check is the third one - no `skip:` line - because both suites open with two early returns that would otherwise report `1 passed` having asserted nothing; that check PASSED, and I verified independently that zero output lines begin with skip: (the only three occurrences in the workflow log are the gate echoing its own source).",
+        "owner": "",
+        "backlog_id": "",
+        "executable_check": "GitHub Actions run 30364529551 at headSha cf48b349, job 'wcore-sandbox live macOS acceptance' conclusion success: both suites 'running 1 test' then 'test result: ok. 1 passed; 0 failed', and 'GATE: PASSED - both required_live_macos_* cases executed on a real macOS host'; log retained at evidence/28-04/macos-ci-30364529551.log",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-002",
+        "origin": "certification",
+        "subject": "KR-05 RESIDUAL: whether the bash-tool path (wcore_sandbox::default_for_platform()) executes unsandboxed under a WEDGED AppContainer lease is unmeasured; the control exercised SandboxRegistry::required_for_session",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Named explicitly rather than absorbed into KR-05's DISPROVED row, because 28-02 said in terms that KR-05 must not be closed on the delegated surface alone. Scored MEDIUM on ordinary merits and NOT raised to HIGH by the unproven-control corollary, which contract section 3.4 recorded as considered and deliberately not applied - inventing a stricter rule than the recorded decision is the failure that grew Phase 20 to 74 plans. What would close it: drive `wayland-core sandbox exec` (or any bash-tool path) on seandesktop with a lease deliberately wedged, and observe whether the child carries a containment signature or an uncontained High-integrity label.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-WEDGE-BASHPATH",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-003",
+        "origin": "certification",
+        "subject": "zero-execution flavour (d) survives for plain `cargo test`: 19 feature-gated and 25 platform-gated test binaries print `running 0 tests` / `ok` and exit 0, the largest blanking 16 tests",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "The invocation-site fix (no-tests = \"fail\") closes this for nextest only, and that limit is stated rather than glossed. Measured against a prior estimate of two instances, which is why the detector still exists. Contradicts no criterion, because every Phase 28 gate that matters runs through nextest or asserts an executed count.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-FLAVOUR-D",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-004",
+        "origin": "certification",
+        "subject": "THE CERTIFICATION SPANS TWO CANDIDATES: the Linux and Windows matrix legs are 28-02's at 32e2f57d, while the macOS matrix re-run and all three soak legs are at e4a3f5fc. No single-candidate full matrix exists for this phase.",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "The single most important thing a reader of this receipt must know, so it is a ledger row rather than a footnote. It does NOT contradict Criterion 3, because the receipt binds each candidate exactly and per-scope rather than picking one and calling it 'the' candidate - the binding is honest, the coverage is what is split. It does not contradict Criterion 1's text either, which requires each family to pass the matrix and does not require one candidate; it does sit against the PHASE GOAL's words ('the exact candidate proves ...'), and that is stated as an exception in the verdict rather than scored as a criterion contradiction. Eleven merges landed between the two, adding 15 surfaces including the `sandbox` verb that makes the macOS re-run possible at all. Carried knowingly: re-running the Linux and Windows matrix at e4a3f5fc is a real measurement this phase did not take, and re-running any measurement to obtain a better number is forbidden by this plan's scope fence.",
+        "owner": "Phase 29 (release acceptance)",
+        "backlog_id": "BL-F28-TWO-CANDIDATES",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-005",
+        "origin": "soak",
+        "subject": "the macOS orphan census is NON-AUTHORITATIVE: it observes a process group, and a hostile descendant can leave one, so its zero is a zero OBSERVATION rather than a containment guarantee",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Criterion 2's subject matter is 'no orphan process', so this bounds the strength of that claim on one family and is stated as an exception in the verdict. NOT scored HIGH: the instrument is not absent, it is weaker - it demonstrably detects an orphan, because a deliberately orphaned PRODUCT process was planted and FOUND. Linux (cgroup-v2) and Windows (job object) are authoritative and found theirs too. Scoring an instrument-scope limit as a criterion contradiction is the unproven-control corollary the contract declined at section 3.4. The soak.json record declares authoritative:false and carries the caveat in its own text, so no downstream reader can mistake it.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-MACOS-CENSUS",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-006",
+        "origin": "soak",
+        "subject": "the soak workload is READ-ONLY by construction, so state_dir_bytes was 301 bytes at the first sample and 301 at the last on every family",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A true measurement and a weak one, and 28-03 said so under its own heading rather than in a footnote. A green here means 'a thousand read-only sessions wrote nothing' - worth knowing, and NOT the same as 'the product does not accumulate state under use'. The bands document recorded the related limit BEFORE any number existed: in a soak of 1,000 fresh short-lived processes a per-process leak cannot accumulate, so detection weight sits on the slope bands rather than the drift bands. Carried knowingly; a state-accumulating workload is a deliberate future choice, not an oversight.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-SOAK-WORKLOAD",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-007",
+        "origin": "matrix",
+        "subject": "the macOS sandbox activeness observation is RUN-LEVEL: one containment differential is applied to all 24 macOS sandbox-probes cells rather than one observation per cell",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "A matrix-CONSTRUCTION concern raised by 28-02, carried unchanged by 28-03, and still true. It is recorded rather than resolved because resolving it would mean re-running a measurement, which this plan's scope fence forbids, and because narrowing the cell set to match the observation would be a silent reduction of coverage. The differential itself is real and per-run (DNS resolves outside and not inside; /etc readable outside and denied inside), and the same construction was used for Linux and Windows.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-RUNLEVEL-ACTIVENESS",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-008",
+        "origin": "certification",
+        "subject": "desktop_contract_corpus is red (CLASS-CONTRACT-01, structural) and was run by no Phase 28 lane",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "Recorded for completeness because three separate lanes named it and declined it. Structural and outside every Phase 28 lane's brief; closing it would require `wcore-contract generate`, which is a release-coordination action explicitly reserved and NOT performed by this phase. Contradicts no Phase 28 criterion - it is a Desktop wire-contract fixture question.",
+        "owner": "Sean / Desktop release coordination",
+        "backlog_id": "BL-F28-CONTRACT-CORPUS",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-009",
+        "origin": "certification",
+        "subject": "four of the five tests in wcore-agent/actor_acl_test are VACUOUS: all four assert that the tool RUNS, which is trivially true when the deny pre-filter they exist to test does not exist in production",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "A finding about the EVIDENCE BASE rather than about the candidate, and it is recorded as its own row instead of being left inside F-28C-R01's disposition, because the number it produces is what a reader would act on. This suite reports 4 passed and contributes nothing: the asserted enforcement string occurs in exactly one file in the workspace - the test itself - and every production construction site sets learned_policy: None. It is the same class as an all-ignored suite, one layer deeper: not zero tests executed, but four executed tests that cannot fail. Left byte-identical, and the suite should be read as a FORWARD SPEC rather than a certification input.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-VACUOUS-GREENS",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-010",
+        "origin": "certification",
+        "subject": "`cargo test --test acp_engine_turn` prints `8 passed` and exits 0 while executing NEITHER of the two cases the binary is named for, because `#[path = \"support/mod.rs\"] mod support;` compiles 8 further non-ignored tests into the same binary",
+        "inherited_severity": "-",
+        "p28_severity": "MEDIUM",
+        "contradicted_criterion": "-",
+        "disposition": "DEFERRED",
+        "rationale": "The sharpest zero-execution variant this program has found, because it defeats the program's OWN counter-rule: 'read the N passed count back' sees a healthy 8 passed and is satisfied. It also produced a detector FALSE POSITIVE - the inventory reported this file as all-ignored on a single-file scan - and a detector that over-reports trains the reader to skim the list, so the detector was corrected to resolve `mod` declarations and `#[path]` includes. NOT marked FIXED: an always-running guard worded for this specific hazard was added, but it was generated by the same generator as the other nine and its falsification was measured for three suites rather than for this binary individually, and the count-inflation itself is unchanged. Claiming FIXED over a guard I did not watch fail would be this phase's own defect in miniature.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-COUNT-INFLATION",
+        "executable_check": "",
+        "counter_evidence": ""
+      },
+      {
+        "id": "F-28-04-011",
+        "origin": "matrix",
+        "subject": "the two macOS members of the hostile platform matrix infer containment from a wall-clock bound and a matched write pair rather than from a containment differential of the kind the E5 matrix requires",
+        "inherited_severity": "-",
+        "p28_severity": "LOW",
+        "contradicted_criterion": "-",
+        "disposition": "ACCEPTED",
+        "rationale": "Recorded after reading both test bodies rather than accepting their green. Both ARE substantive, and the 0.05s / 0.04s durations are not a smell: hard_process_containment_macos runs `/bin/sh -c '/bin/sleep 45 & exit N'` under sandbox-exec twice and asserts wall clock < 20s, so FAST IS THE PASS CONDITION - a non-reaping backend leaves the detached sleep holding the stdout pipe and execute blocks to 45s or the 30s manifest timeout, and it physically cannot produce 0.05s. The bound is ONE-SIDED IN THE SAFE DIRECTION: runner load can only make it slower, so load can only produce a false FAIL and never a false PASS. live_integrity_macos is a matched pair whose INSIDE-write half is the built-in control that separates 'the sandbox contained it' from 'the sandbox failed to launch', which is the vacuous-pass trap this program keeps finding. The residual, and the only reason this row exists: neither forms a containment DIFFERENTIAL, so the macOS evidence for Criterion 1 rests on two different instruments (these two suites plus the 216-cell E5 re-run) rather than one.",
+        "owner": "Phase 30 (hardening)",
+        "backlog_id": "BL-F28-MACOS-INSTRUMENTS",
+        "executable_check": "",
+        "counter_evidence": ""
+      }
+    ],
+    "claims": {
+      "zero_skipped_critical_cases": true,
+      "zero_undispositioned_findings": true,
+      "zero_unresolved_critical_or_high": true
+    }
+  },
+  "authority": {
+    "kind": "phase_scoped",
+    "key_id": "phase-28-certification-supersession-001-2026-07-29",
+    "public_key_base64": "37H1PcpObnCl4P0R1tqemnyNhFdPubA8rIU0dagYFTY=",
+    "fingerprint_sha256": "20e970e9c98f73fbcc2b0923ca68024bfbdee9e2a0e9b9a174d31676b4bdc0f5",
+    "signature_base64": "oTNQ79szeLkHLJ2ps51XsST+K6lgU46YEcPG+LaaQ2Qb+otohnldTG0gQS05iv4/GfbxGtfUXZV3gXbPpzjLAA==",
+    "scope": "PHASE-SCOPED. This signature binds authorship and integrity of the assembled evidence for Phase 28 only. It is NOT a release trust root, NOT a seal, and NOT an authorization to release. Trust-root binding, rotation and revocation belong to Phase 29; tagging, releasing, merging and issue closure are reserved to Sean."
+  }
+}

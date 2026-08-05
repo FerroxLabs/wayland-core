@@ -1,0 +1,29 @@
+COMMAND: wayland-core backend scan --task-id f25-04-orphan-1171673 (after the reap)
+orphan scan for task f25-04-orphan-1171673 (nonce f25-04-orphan-1171673)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  count      NOT MEASURED — the surface could not be enumerated (backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+  count      NOT MEASURED — the surface could not be enumerated (WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned), so no count exists — this is NOT zero orphans
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 2 surface(s) NOT measured
+EXIT: 0

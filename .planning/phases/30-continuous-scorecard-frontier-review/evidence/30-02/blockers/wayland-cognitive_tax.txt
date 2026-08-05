@@ -1,0 +1,16 @@
+LEG LEG-05 - wayland / cognitive_tax - UNPROVEN
+==============================================================================
+BLOCKER AND SUBSTITUTION POINT:
+
+NOT MEASURABLE IN THIS TIER, decided by unanimous cross-audit panel BEFORE any trial ran and
+frozen in the protocol. Cognitive tax is a property of the human-operator loop --
+interruptions, approval prompts, disambiguation. A loopback fixture does not exercise that
+loop. Configuration-line counts, command counts, intervention counts and elapsed time are
+NOT cognitive tax; every external panel member refused to proxy it. F30-03 is therefore
+INCOMPLETE on this dimension and this plan says so rather than inventing a number.
+SUBSTITUTION POINT: a live-tier protocol with a scripted human operator and a pre-registered
+intervention taxonomy, run by a human evaluator.
+
+An UNPROVEN leg is NOT a win for any tool. No comparative result exists for
+any dimension in which a tool did not run: ComparativeResultV1 cannot be
+constructed without every compared tool's measurement.

@@ -1,0 +1,7 @@
+  note: 1 bound file(s) are zero bytes and none is cited as finding evidence: evidence/28-03/macos-activeness.err
+--verify: recomputed bindings for 28-04-CERTIFICATION-RECEIPT.json against the raw evidence under /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-28-receipt/.planning/phases/28-native-cross-platform-certification
+--verify: REJECTED (4)
+  F28V-ARTIFACT  artifacts[evidence/28-04/findings.tsv].sha256: receipt claims 511e19dd1954630eb533446f33f84880e6d80b79523d6cd6fa00f863b3547a03, recomputed 51ddac033dc99a4b1b4d06d3b247b2a4287362b2aae12a9fb83f9513a243e75a
+  F28V-ARTIFACT  artifacts[evidence/28-04/findings.tsv].bytes: receipt claims 55568, recomputed 58035
+  F28V-CLAIM  body.claims.zero_undispositioned_findings: receipt asserts False, recomputed True from the raw ledger and cell list
+  F28V-CLAIM  body.claims.zero_unresolved_critical_or_high: receipt asserts False, recomputed True from the raw ledger and cell list

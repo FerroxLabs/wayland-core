@@ -1,0 +1,24 @@
+total rows: 27
+delivery rows: 24
+
+--- idempotency_key presence ---
+non-null keys: 8
+null/missing  : 16
+
+--- per text: the keys seen ---
+  f24j-delivery-01
+       cron:2b1290cb-e26e-4024-9acb-4649166d47a9:1785377817818
+       cron:2b1290cb-e26e-4024-9acb-4649166d47a9:1785377928165
+  f24j-delivery-02
+       None
+       None
+  f24j-delivery-03
+       None
+       None
+  f24j-delivery-04
+       cron:5b9f212c-d7ef-4201-834e-4adcd745104a:1785377817916
+       cron:5b9f212c-d7ef-4201-834e-4adcd745104a:1785377928165
+
+distinct delivery keys: 9
+arrivals-per-KEY histogram: {1: 8, 16: 1}
+arrivals-per-TEXT histogram: {2: 12}

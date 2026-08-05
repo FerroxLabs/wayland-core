@@ -1,7 +1,8 @@
-use std::io::{self, BufWriter, Stdout, Write};
-use std::sync::Mutex;
+use std::io;
+use std::sync::Arc;
 
 use crate::events::ProtocolEvent;
+use crate::output_pump::{OutputPump, OutputStream};
 
 /// Trait for emitting protocol events to a host.
 ///
@@ -14,7 +15,7 @@ pub trait ProtocolEmitter: Send + Sync {
 
 /// Thread-safe JSON Lines writer to stdout
 pub struct ProtocolWriter {
-    writer: Mutex<BufWriter<Stdout>>,
+    output: OutputPump,
 }
 
 impl Default for ProtocolWriter {
@@ -25,29 +26,50 @@ impl Default for ProtocolWriter {
 
 impl ProtocolWriter {
     pub fn new() -> Self {
+        Self::new_with_failure_handler(Arc::new(|| {
+            tracing::error!("protocol output delivery failed");
+        }))
+    }
+
+    pub fn new_with_failure_handler(handler: Arc<dyn Fn() + Send + Sync>) -> Self {
         Self {
-            writer: Mutex::new(BufWriter::new(io::stdout())),
+            output: OutputPump::new_with_failure_handler(handler),
+        }
+    }
+
+    /// Wait at most 100 ms for every event accepted before this call to reach
+    /// process stdout. The writer remains open on success; timeout and late
+    /// output failures are returned to the caller.
+    pub fn flush_bounded(&self) -> io::Result<()> {
+        self.output.flush_bounded()
+    }
+
+    #[cfg(test)]
+    fn with_writer<F>(writer: F) -> Self
+    where
+        F: Fn(OutputStream, &[u8]) -> io::Result<()> + Send + 'static,
+    {
+        Self {
+            output: OutputPump::with_writer(writer, None),
         }
     }
 }
 
 impl ProtocolEmitter for ProtocolWriter {
     fn emit(&self, event: &ProtocolEvent) -> io::Result<()> {
-        let mut w = self
-            .writer
-            .lock()
-            .map_err(|_| io::Error::other("protocol writer lock poisoned"))?;
-        serde_json::to_writer(&mut *w, event)
-            .map_err(|e| io::Error::other(format!("failed to serialize protocol event: {}", e)))?;
-        writeln!(&mut *w)?;
-        w.flush()
+        let mut bytes = serde_json::to_vec(event)
+            .map_err(|e| io::Error::other(format!("failed to serialize protocol event: {e}")))?;
+        bytes.push(b'\n');
+        self.output.write(OutputStream::Stdout, bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{Capabilities, ProtocolEvent};
+    use std::sync::Mutex;
+
+    use crate::events::ProtocolEvent;
 
     #[test]
     fn test_writer_construction() {
@@ -55,17 +77,35 @@ mod tests {
     }
 
     #[test]
-    fn test_writer_emit_does_not_panic() {
-        let writer = ProtocolWriter::new();
-        let event = ProtocolEvent::Ready {
-            version: "0.1.0".to_string(),
-            session_id: None,
-            capabilities: Capabilities {
-                tool_approval: true,
-                modes: vec!["default".into(), "auto_edit".into(), "force".into()],
-                ..Default::default()
-            },
-        };
-        let _ = writer.emit(&event);
+    fn writer_delivers_exact_json_lines_in_order() {
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let delivered_for_writer = Arc::clone(&delivered);
+        let writer = ProtocolWriter::with_writer(move |stream, bytes| {
+            assert_eq!(stream, OutputStream::Stdout);
+            delivered_for_writer
+                .lock()
+                .unwrap()
+                .extend_from_slice(bytes);
+            Ok(())
+        });
+
+        writer
+            .emit(&ProtocolEvent::StreamStart {
+                msg_id: "message-1".to_string(),
+            })
+            .unwrap();
+        writer
+            .emit(&ProtocolEvent::TextDelta {
+                text: "hello".to_string(),
+                msg_id: "message-1".to_string(),
+            })
+            .unwrap();
+        writer.flush_bounded().unwrap();
+
+        assert_eq!(
+            delivered.lock().unwrap().as_slice(),
+            b"{\"type\":\"stream_start\",\"msg_id\":\"message-1\"}\n\
+              {\"type\":\"text_delta\",\"text\":\"hello\",\"msg_id\":\"message-1\"}\n"
+        );
     }
 }

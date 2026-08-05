@@ -11,6 +11,27 @@ use wcore_types::message::{FinishReason, TokenUsage};
 
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
+    /// Bind the Core session identity after session creation. Default no-op
+    /// keeps non-session sinks unchanged; protocol-capable sinks retain it so
+    /// producer events can correlate to the same session advertised to hosts.
+    fn bind_session_id(&self, _session_id: &str) {}
+
+    /// Return the bound Core session identity, when this sink carries one.
+    fn current_session_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Emit one authoritative top-level Anvil receipt. Default no-op prevents
+    /// terminal/test sinks from accidentally promoting receipt-shaped text.
+    fn emit_anvil_receipt(&self, _receipt: &wcore_protocol::anvil::AnvilReceipt) {}
+
+    /// Emit one authoritative top-level Anvil invalidation event.
+    fn emit_anvil_receipt_invalidation(
+        &self,
+        _invalidation: &wcore_protocol::anvil::AnvilReceiptInvalidation,
+    ) {
+    }
+
     /// Stream text delta from LLM
     fn emit_text_delta(&self, text: &str, msg_id: &str);
     /// Stream thinking content from LLM
@@ -90,6 +111,37 @@ pub trait OutputSink: Send + Sync {
     fn emit_error(&self, msg: &str, retryable: bool);
     /// Display informational message
     fn emit_info(&self, msg: &str);
+
+    /// Tell whoever is watching THIS turn that it is not being recorded,
+    /// because the host took durable session persistence away.
+    ///
+    /// Split out of [`Self::emit_info`] because the two surfaces need opposite
+    /// treatment for the SAME fact, and only the sink knows which it is:
+    ///
+    /// * A **protocol host** must receive it every turn, correlated to that
+    ///   turn's `msg_id`. `wcore-cli`'s integration test
+    ///   `f14_sigkill_recovery::without_secure_store_the_default_runs_degraded_and_leaves_nothing_durable`
+    ///   runs two turns specifically to assert this ("a startup notice is
+    ///   indistinguishable from a per-turn notice if you only ever run one
+    ///   turn"). The default body below is that behaviour, unchanged.
+    ///
+    /// * A **human at a terminal** must NOT. It is one person, in one process,
+    ///   who was already told at config resolution by
+    ///   `wcore_config::config`'s `warn_durable_sessions_disabled_once` —
+    ///   whose own doc comment says the operator should hear it "ONCE, at a
+    ///   moment that is about configuration — not repeatedly, attached to a
+    ///   message they were trying to answer". Repeating it per turn is exactly
+    ///   what that `Once` guard was installed to prevent, re-introduced one
+    ///   layer up. Measured: 520 bytes of identical prose per turn, 91% of all
+    ///   per-turn stderr on a host with no keyring.
+    ///
+    /// The per-turn RECORD does not depend on this at all — the engine writes
+    /// one `tracing::warn!` per undurable turn into the bounded diagnostics
+    /// log regardless of sink, so collapsing the terminal repeat loses nothing.
+    fn emit_durability_degraded(&self, msg: &str) {
+        self.emit_info(msg);
+    }
+
     /// W1: F9 trace emission. Implementations that don't structure-trace
     /// (e.g. `TerminalSink`, `NullSink`) leave the default no-op body. The
     /// `ProtocolSink` impl emits `ProtocolEvent::TraceEvent` ONLY when the
@@ -122,15 +174,48 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// Desktop producer contract v1: emit a child relay with durable workflow
+    /// correlation. Non-protocol sinks retain the legacy presentation path.
+    fn emit_correlated_sub_agent_event(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &serde_json::Value,
+        _correlation: &wcore_protocol::events::WorkflowChildCorrelation,
+    ) {
+        self.emit_sub_agent_event(parent_call_id, agent_name, inner);
+    }
+
     /// ForgeFlows-Live: a workflow run started. Default no-op; only
     /// `ProtocolSink` configured with `with_sub_agent_traces(true)` emits
     /// the `WorkflowStarted` variant (same gate as `emit_sub_agent_event`).
     fn emit_workflow_started(&self, _workflow_id: &str, _name: &str, _node_count: usize) {}
 
+    /// Desktop producer contract v1: correlated workflow start. Defaulting to
+    /// the legacy method keeps terminal and in-process sinks source-compatible.
+    fn emit_correlated_workflow_started(&self, event: &wcore_protocol::events::WorkflowRunStarted) {
+        self.emit_workflow_started(&event.workflow_id, &event.name, event.node_count);
+    }
+
+    /// Desktop producer contract v1: ordered node lifecycle transition.
+    fn emit_workflow_node_event(&self, _event: &wcore_protocol::events::WorkflowNodeLifecycle) {}
+
     /// ForgeFlows-Live: a workflow run finished. Default no-op; only
     /// `ProtocolSink` configured with `with_sub_agent_traces(true)` emits
     /// the `WorkflowFinished` variant (same gate as `emit_sub_agent_event`).
     fn emit_workflow_finished(&self, _workflow_id: &str, _succeeded: bool) {}
+
+    /// Desktop producer contract v1: correlated workflow terminal. The
+    /// compatibility boolean is derived from the typed terminal state.
+    fn emit_correlated_workflow_finished(
+        &self,
+        event: &wcore_protocol::events::WorkflowRunFinished,
+    ) {
+        self.emit_workflow_finished(
+            &event.workflow_id,
+            event.terminal_state == wcore_protocol::events::WorkflowTerminalState::Succeeded,
+        );
+    }
 
     /// W7 F4: emit a streaming chunk from a long-running tool. Default
     /// no-op; only `ProtocolSink` configured with
@@ -154,6 +239,38 @@ pub trait OutputSink: Send + Sync {
         _fallback: Option<&str>,
         _state: &str,
         _error: Option<&str>,
+    ) {
+    }
+
+    /// Emit one complete F15 provider-selection receipt. Default no-op for
+    /// non-protocol sinks; JSON-stream output remains additive.
+    fn emit_provider_failover_receipt(&self, _receipt: serde_json::Value) {}
+
+    /// Emit one physical provider attempt with its typed outcome. Default
+    /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
+    fn emit_provider_attempt(&self, _failure: Option<&str>) {}
+
+    /// Emit an actual Core retry decision, separately from the physical send.
+    fn emit_provider_retry(&self, _failure: Option<&str>) {}
+
+    /// Emit a typed provider failure without claiming another physical send or
+    /// retry decision.
+    fn emit_provider_failure(&self, _failure: &str) {}
+
+    /// F10: emit a typed monitor control-flow decision. Default no-op for
+    /// non-protocol sinks; JSON and test sinks preserve the stable reason.
+    fn emit_midflight_monitor_decision(
+        &self,
+        _directive: wcore_protocol::events::MonitorDirective,
+        _reason: wcore_protocol::events::MonitorReason,
+    ) {
+    }
+
+    /// F05: emit one typed capability-activation fact. Default no-op keeps
+    /// terminal and test sinks quiet; protocol-capable hosts override it.
+    fn emit_capability_activation(
+        &self,
+        _activation: &wcore_protocol::events::CapabilityActivation,
     ) {
     }
 

@@ -1,0 +1,8 @@
+=== LEG 1: independent read of the room ===
+timeline_events=16
+control_nonce=mlsend-1785385106 control_count=1
+nonce=mlsend-1785385106 originals=1 all_bodies=1 ids=["$lCEFaNP1q7qxwphX4QBfHPXr2kUONF94PkHROqhhYaQ"]
+=== known-negative in the same capture: the FAILED pre-fix run's nonce must be 0 ===
+timeline_events=16
+control_nonce=mlsend-1785385106 control_count=1
+nonce=mlsend-1785384109 originals=0 all_bodies=0 ids=[]

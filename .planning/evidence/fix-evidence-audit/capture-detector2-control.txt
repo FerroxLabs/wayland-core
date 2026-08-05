@@ -1,0 +1,7 @@
+SELFTEST: cfg(test) span=True prod_write_test=False prod_read_test=False result=PASS
+scanned 1771 .rs files under crates/
+distinct keys READ in production: 491
+keys read in production with NO production writer: 188
+  ... of which the ONLY writer is a test: 111
+CONTROL(known positive) crates/wcore-cli/src/tui/tool_formatters/bash.rs: 2/3 unbacked, ratio=0.667, unbacked_keys=['cmd', 'stdout']
+written: /tmp/lfea-invented.json

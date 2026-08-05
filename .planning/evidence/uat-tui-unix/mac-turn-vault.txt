@@ -1,0 +1,35 @@
+[2m2026-07-30T10:20:11.620044Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m35
+[2m2026-07-30T10:20:11.620173Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m35
+[2m2026-07-30T10:20:11.622130Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-30T10:20:11.629042Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-30T10:20:11.629098Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-30T10:20:11.629105Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-30T10:20:11.629108Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-30T10:20:11.629110Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-30T10:20:11.629113Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-30T10:20:11.629115Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-30T10:20:11.629117Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-30T10:20:11.629121Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-30T10:20:11.629132Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.629139Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-30T10:20:11.629157Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.629169Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.629177Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.645569Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.645579Z[0m [32m INFO[0m video_analyze: ffmpeg + vision backend present — tool enabled
+[2m2026-07-30T10:20:11.645589Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-30T10:20:11.645678Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-30T10:20:11.651077Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-30T10:20:11.651322Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-30T10:20:11.651332Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-30T10:20:11.652376Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-30T10:20:11.983887Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.983909Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T10:20:11.984051Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-30T10:20:11.984067Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-30T10:20:11.990406Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m3926 [3mdir[0m[2m=[0m/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/home-vault/Library/Application Support/wayland-core/channels
+[2m2026-07-30T10:20:11.990428Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-30T10:20:12.085457Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+Pricing unavailable for flux-router/flux-auto; the call remains bounded by the token envelope and cost is unpriced, not $0.
+* WAYLAND_UAT_OK
+[turns: 1 | tokens: 8581 in / 8 out]

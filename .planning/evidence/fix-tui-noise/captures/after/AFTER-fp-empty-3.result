@@ -1,0 +1,21 @@
+LABEL=AFTER-fp-empty-3
+BIN=/root/wayland-fix-tui-noise/target/release/wayland-core
+BIN_SHA256=7e50e9d5b1e0c94eeec69ee547b67ac1cef36026ab3c39cf84ac20c663580be0
+BUILD_INFO=wayland-core 0.12.25 (source 1e0a61d3bba55b83ec5650587e4bcd5b8c34ed94) 
+HOME_DIR=/root/wayland-fix-tui-noise-fphome-e3
+HOME_PREEXISTING_CONFIG=NO
+EXTRA=[]
+LOADAVG=12.17 7.37 5.60
+PANE_DEAD=0
+PANE_NONEMPTY_LINES=30
+ASSERT_PTY=OK
+T_ANY=0.13
+T_SPLASH=0.14
+T_READY=0.36
+T_END=0.37
+SURFACE=ONBOARDING
+BOOT_LOG=/root/wayland-fix-tui-noise-ev/after/AFTER-fp-empty-3.boot.log
+BOOT_LOG_LINES=31
+BOOT_MAX_GAP_S=0.012
+WLRC=0
+WLDONE

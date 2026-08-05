@@ -1,0 +1,86 @@
+[
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "a2d3975079cad122cc6a238ee45569f794cf91919588aefe29ba469502bc7454",
+    "body": {
+      "state": "packaging",
+      "ordinal": 0,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": null,
+      "evidence": [
+        {
+          "name": "build-log",
+          "sha256": "0ee286808098d9bdb47a5d629c78d03e04603e6f6a009b83d780ac6ee1be3c69"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "packaging-key",
+      "signature_base64": "7RyQulZWN/ejDkqVQE2pA+nL9gt+cDKLUvojor08y7slr3RpL5oIa80gZRuaLtxY5Yt6dfsCOperdW3tErWDBQ=="
+    }
+  },
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "b9ff08e25a8cd9df52d710f783468e7c6d21c73689a6375aa14d0051fa3c6b14",
+    "body": {
+      "state": "deployment_preparation",
+      "ordinal": 1,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": "a2d3975079cad122cc6a238ee45569f794cf91919588aefe29ba469502bc7454",
+      "evidence": [
+        {
+          "name": "staging-log",
+          "sha256": "20dfaca8933ca41352f47b80049cd88ac210b7872349d790c4d2bb1dd6b2cbe8"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "deployment-preparation-key",
+      "signature_base64": "RbZsa4HKl/Sao43Ef2GVuYvgpwEBQx/nqfL+8joA6gUF8DWecf6lEIpJ3tON1UpSkmJwdEG8fNOSWC5jiH2ABQ=="
+    }
+  },
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "5b559f05118bc1d179b35e3b90e7934a1e5a59a4aa8595c7b225f3fea68a9b2a",
+    "body": {
+      "state": "rollback_rehearsal",
+      "ordinal": 2,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": "b9ff08e25a8cd9df52d710f783468e7c6d21c73689a6375aa14d0051fa3c6b14",
+      "evidence": [
+        {
+          "name": "rollback-log",
+          "sha256": "5db91d41b0ed1762851523e6aba962f54697a0a0b810a527d1e68d3584ec932e"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "rollback-rehearsal-key",
+      "signature_base64": "itidVASJcfcewwlCR9AKSVhO5HnP/vpgqBgTCnIIVl2+e8JNRQyvroUvhRmvKUg9dZTKNVp/Btd3X6eRUSL2Bw=="
+    }
+  },
+  {
+    "schema": "wayland.release.state-record",
+    "schema_version": 1,
+    "body_sha256": "21b76eeb3f0a4e4c0c325f9e3b811a060240018418a51aef2c9460a623e534cd",
+    "body": {
+      "state": "release_acceptance",
+      "ordinal": 3,
+      "manifest_sha256": "f60d20159e1ea74f1c0a862e32e0aac74856162128335bd6624196330813343c",
+      "previous_record_sha256": "5b559f05118bc1d179b35e3b90e7934a1e5a59a4aa8595c7b225f3fea68a9b2a",
+      "evidence": [
+        {
+          "name": "acceptance-log",
+          "sha256": "cbd971f20fee7968d1cfb4eaa3fa5f7e13dc5b6468714c9f8a3913e5d3fac172"
+        }
+      ]
+    },
+    "authority": {
+      "key_id": "release-acceptance-key",
+      "signature_base64": "Eb4ZXrxIrLbiZTPMcUoBhRRd+njzGNGqcPKIG+E1L5ZsSYxR7GEjCz8ZvzWEwD+PBf5phdi7KslAl3voctSwBA=="
+    }
+  }
+]

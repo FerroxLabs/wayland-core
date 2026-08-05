@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::agents::channel_sink::{ChannelSink, SubAgentRelay};
+use crate::agents::channel_sink::{ChannelSink, SubAgentRelay, SubAgentTerminalRelay};
 use crate::agents::registry::AgentRegistry;
 use crate::output::OutputSink;
-use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig};
+use crate::spawner::{AgentSpawner, ForkOverrides, SpawnExtras, SubAgentConfig};
 use wcore_protocol::events::ToolCategory;
 use wcore_swarm::Topology;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::spawner::{ChildOrigin, RequestedChildWorkspace};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use wcore_tools::Tool;
 
@@ -128,6 +129,11 @@ impl Tool for SpawnTool {
         false
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Spawned agents can perform arbitrary nested effects with no aggregate reconciler.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let (tasks, agent_names) = match parse_tasks(&input) {
             Ok(parsed) => parsed,
@@ -142,6 +148,21 @@ impl Tool for SpawnTool {
         if tasks.is_empty() {
             return ToolResult {
                 content: "No tasks provided".to_string(),
+                is_error: true,
+            };
+        }
+
+        // Spawn children never plumb `allowed_tools`, so the canonical workspace
+        // classification MUST resolve to shared read-only. Consume
+        // `ForkOverrides::requested_workspace` here and fail closed if the Spawn
+        // surface ever resolves to mutation authority, so a shared child can never
+        // silently acquire an isolated-mutation checkout with write-capable tools.
+        if ForkOverrides::default().requested_workspace() != RequestedChildWorkspace::SharedReadOnly
+        {
+            return ToolResult {
+                content: "Spawn requires shared read-only workspace authority, but the \
+                          resolved fork overrides requested mutation authority"
+                    .to_string(),
                 is_error: true,
             };
         }
@@ -182,6 +203,7 @@ impl Tool for SpawnTool {
         // per-task relay path (cap still enforced above via Mesh cap). Fleet only
         // fires when the caller explicitly set topology=Fleet AND parent_output is
         // None (unmonitored path).
+        let origin = child_origin(self.topology);
         let results = if self.topology == Topology::Fleet && self.parent_output.is_none() {
             // Pure fleet path: no relay, sharded dispatch.
             let run_id = format!("spawn-tool-{}", uuid::Uuid::new_v4().simple());
@@ -189,10 +211,12 @@ impl Tool for SpawnTool {
         } else if self.parent_output.is_some() {
             // Relay path: each task gets its own ChannelSink + parent_call_id.
             // Works for both named and anonymous tasks (Decision A).
-            self.spawn_with_relay(tasks, &agent_names).await
+            self.spawn_with_relay(tasks, &agent_names, origin).await
         } else {
             // Legacy anonymous path: no parent output wired.
-            self.spawner.spawn_parallel(tasks).await
+            self.spawner
+                .spawn_parallel_with_extras_origin(tasks, SpawnExtras::default(), origin)
+                .await
         };
 
         let output: Vec<String> = results
@@ -289,6 +313,15 @@ fn parse_tasks(input: &Value) -> Result<(Vec<SubAgentConfig>, Vec<Option<String>
     Ok((configs, agent_names))
 }
 
+fn child_origin(topology: Topology) -> ChildOrigin {
+    match topology {
+        Topology::Spawn => ChildOrigin::Spawn,
+        Topology::Swarm => ChildOrigin::Swarm,
+        Topology::Mesh => ChildOrigin::Mesh,
+        Topology::Fleet => ChildOrigin::Fleet,
+    }
+}
+
 impl SpawnTool {
     /// v0.9.4 W1 relay fix: spawn with per-task channel-sink relay.
     ///
@@ -298,16 +331,17 @@ impl SpawnTool {
     /// and its OWN `ChannelSink` so the bridge creates N distinct
     /// `SubAgentView`s instead of collapsing all tasks into one row.
     ///
-    /// W5.5 H-1: each ChannelSink now has a dedicated lifecycle channel
-    /// (capacity 2) for the terminal Done/Failed event. Stream events use
+    /// Each ChannelSink has a dedicated terminal channel (capacity 1) for the
+    /// authoritative Done/Failed result. Stream events use
     /// the shared bounded `tx` (best-effort); the terminal signal uses the
-    /// per-task `lifecycle_tx` (guaranteed). After the main stream drain
-    /// exits, we flush all lifecycle receivers so the bridge always sees the
+    /// per-task terminal sender. After the main stream drain exits, we flush
+    /// all terminal receivers so the bridge always sees the
     /// terminal event even when a chatty sub-agent filled the stream buffer.
     async fn spawn_with_relay(
         &self,
         tasks: Vec<SubAgentConfig>,
         agent_names: &[Option<String>],
+        origin: ChildOrigin,
     ) -> Vec<crate::spawner::SubAgentResult> {
         // SAFETY: guarded by caller — `spawn_with_relay` is only called
         // when `self.parent_output.is_some()`.
@@ -323,41 +357,42 @@ impl SpawnTool {
             crate::agents::channel_sink::CHANNEL_CAPACITY,
         );
 
-        // W5.5 H-1: one dedicated lifecycle channel per task. Collected as
+        // One dedicated terminal channel per task. Collected as
         // a Vec of receivers so we can flush them after the stream drain.
-        let mut lifecycle_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentRelay>> =
+        let mut terminal_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentTerminalRelay>> =
             Vec::with_capacity(tasks.len());
 
         // Build per-task SpawnExtras with distinct parent_call_id + ChannelSink.
-        let per_task_extras: Vec<SpawnExtras> = tasks
-            .iter()
-            .enumerate()
-            .map(|(idx, task)| {
-                let agent_label = agent_names
-                    .get(idx)
-                    .and_then(|a| a.as_deref())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("anon");
-                // Unique id per task — the bridge keys SubAgentView on this.
-                let parent_call_id = format!("spawn:{}:{}", idx, agent_label);
-                // W5.5 H-1: dedicated lifecycle channel (capacity 2, never shared).
-                let (ltx, lrx) = tokio::sync::mpsc::channel::<SubAgentRelay>(
-                    crate::agents::channel_sink::LIFECYCLE_CAPACITY,
-                );
-                lifecycle_rxs.push(lrx);
-                let sink = Arc::new(ChannelSink::new_with_lifecycle(
-                    parent_call_id.clone(),
-                    task.name.clone(),
-                    tx.clone(),
-                    ltx,
-                ));
-                SpawnExtras {
-                    channel_sink: Some(sink),
-                    agent_name: Some(task.name.clone()),
-                    parent_call_id: Some(parent_call_id),
-                }
-            })
-            .collect();
+        let per_task_extras: Vec<SpawnExtras> =
+            tasks
+                .iter()
+                .enumerate()
+                .map(|(idx, task)| {
+                    let agent_label = agent_names
+                        .get(idx)
+                        .and_then(|a| a.as_deref())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("anon");
+                    // Unique id per task — the bridge keys SubAgentView on this.
+                    let parent_call_id = format!("spawn:{}:{}", idx, agent_label);
+                    let (terminal_tx, terminal_rx) =
+                        tokio::sync::mpsc::channel::<SubAgentTerminalRelay>(
+                            crate::agents::channel_sink::TERMINAL_CAPACITY,
+                        );
+                    terminal_rxs.push(terminal_rx);
+                    let sink = Arc::new(ChannelSink::new_with_terminal(
+                        parent_call_id.clone(),
+                        task.name.clone(),
+                        tx.clone(),
+                        terminal_tx,
+                    ));
+                    SpawnExtras {
+                        channel_sink: Some(sink),
+                        agent_name: Some(task.name.clone()),
+                        parent_call_id: Some(parent_call_id),
+                    }
+                })
+                .collect();
 
         // Drop the original tx so the drain exits when all per-task senders drop.
         drop(tx);
@@ -379,7 +414,7 @@ impl SpawnTool {
         let tasks_and_extras: Vec<_> = tasks.into_iter().zip(per_task_extras).collect();
         let results = self
             .spawner
-            .spawn_parallel_with_per_task_extras(tasks_and_extras)
+            .spawn_parallel_with_per_task_extras_origin(tasks_and_extras, origin)
             .await;
 
         // Wait for the stream drain to flush all pending stream relays. By this
@@ -387,12 +422,10 @@ impl SpawnTool {
         // so rx.recv() returns None and the drain task exits promptly.
         let _ = drain.await;
 
-        // W5.5 H-1: flush lifecycle events AFTER the stream drain. The terminal
-        // Done/Failed event for each task sits in its dedicated lifecycle channel.
-        // Because the ChannelSink (and its lifecycle_tx clone) has already dropped,
-        // recv() returns None after the one lifecycle event, so this loop is O(N).
-        for mut lrx in lifecycle_rxs {
-            while let Some(relay) = lrx.recv().await {
+        // Flush authoritative terminals after the best-effort stream drain.
+        for mut terminal_rx in terminal_rxs {
+            while let Some(terminal) = terminal_rx.recv().await {
+                let relay = terminal.relay;
                 parent_output.emit_sub_agent_event(
                     &relay.parent_call_id,
                     &relay.agent_name,
@@ -469,7 +502,7 @@ mod child_prompt_trim_tests {
 
 #[cfg(test)]
 mod topology_cap_tests {
-    use wcore_swarm::Topology;
+    use wcore_swarm::{MAX_CONCURRENT_WORKERS, MAX_DISPATCH_WORKERS, Topology};
 
     fn cap_for(topology: Topology) -> usize {
         topology.default_config().max_agents as usize
@@ -481,8 +514,15 @@ mod topology_cap_tests {
     }
 
     #[test]
-    fn swarm_topology_cap_is_20() {
-        assert_eq!(cap_for(Topology::Swarm), 20);
+    fn swarm_topology_scheduled_cap_is_100() {
+        assert_eq!(cap_for(Topology::Swarm), MAX_DISPATCH_WORKERS);
+        assert_eq!(MAX_DISPATCH_WORKERS, 100);
+    }
+
+    #[test]
+    fn swarm_active_concurrency_cap_is_20() {
+        assert_eq!(MAX_CONCURRENT_WORKERS, 20);
+        assert!(MAX_CONCURRENT_WORKERS < cap_for(Topology::Swarm));
     }
 
     #[test]
@@ -534,6 +574,111 @@ mod topology_cap_tests {
 }
 
 #[cfg(test)]
+mod durable_topology_origin_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+    use wcore_config::config::{Config, SessionConfig};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_swarm::Topology;
+    use wcore_tools::Tool;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::spawner::ChildOrigin;
+
+    use super::SpawnTool;
+    use crate::spawner::AgentSpawner;
+
+    struct ImmediateProvider;
+
+    #[async_trait]
+    impl LlmProvider for ImmediateProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("done".into())).await.unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                usage: TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn requested_topology_is_preserved_in_the_durable_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            session: SessionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let spawner = Arc::new(
+            AgentSpawner::new(Arc::new(ImmediateProvider), config)
+                .with_parent_workspace(dir.path())
+                .unwrap(),
+        );
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run(
+                "test-provider",
+                "test-model",
+                &dir.path().to_string_lossy(),
+                Some("f1920008"),
+            )
+            .unwrap();
+        spawner
+            .bind_durable_session(active.journal, &active.session.id)
+            .unwrap();
+        let supervisor = spawner.durable_child_supervisor().unwrap();
+
+        for (topology, name) in [
+            (Topology::Spawn, "spawn-child"),
+            (Topology::Swarm, "swarm-child"),
+            (Topology::Mesh, "mesh-child"),
+            (Topology::Fleet, "fleet-child"),
+        ] {
+            let result = SpawnTool::new(Arc::clone(&spawner))
+                .with_topology(topology)
+                .execute(json!({
+                    "tasks": [{"name": name, "prompt": "return done"}]
+                }))
+                .await;
+            assert!(!result.is_error, "{topology}: {}", result.content);
+        }
+
+        let records = supervisor.list().unwrap();
+        assert_eq!(records.len(), 4);
+        for origin in [
+            ChildOrigin::Spawn,
+            ChildOrigin::Swarm,
+            ChildOrigin::Mesh,
+            ChildOrigin::Fleet,
+        ] {
+            let record = records
+                .iter()
+                .find(|record| record.origin == origin)
+                .unwrap_or_else(|| panic!("missing durable {origin:?} record"));
+            assert_eq!(
+                supervisor.inspect(&record.child_id).unwrap(),
+                Some(record.clone())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod partial_failure_rollup_tests {
     //! #661 — a batch is an ERROR when ANY child fails, not only when EVERY
     //! child fails. Mirrors wcore-tools' `delegate_batch_partial_failure_is_error`
@@ -553,7 +698,7 @@ mod partial_failure_rollup_tests {
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
     use super::SpawnTool;
-    use crate::spawner::AgentSpawner;
+    use crate::spawner::{AgentSpawner, bind_test_durable_session};
     use wcore_tools::Tool;
 
     /// Marker embedded in exactly one task's prompt. `parse_tasks` folds the
@@ -600,16 +745,24 @@ mod partial_failure_rollup_tests {
 
     #[tokio::test]
     async fn spawn_batch_partial_failure_is_error() {
+        let dir = tempfile::tempdir().unwrap();
         // Session off so the child engines never touch disk; every other
         // default is fine (matches the end-to-end spawn integration tests).
         let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
             session: SessionConfig {
                 enabled: false,
                 ..Default::default()
             },
             ..Config::default()
         };
-        let spawner = Arc::new(AgentSpawner::new(Arc::new(PartialFailProvider), config));
+        let spawner = Arc::new(
+            AgentSpawner::new(Arc::new(PartialFailProvider), config)
+                .with_parent_workspace(dir.path())
+                .unwrap(),
+        );
+        bind_test_durable_session(&spawner, dir.path(), "f190022");
         let tool = SpawnTool::new(spawner);
 
         let out = tool

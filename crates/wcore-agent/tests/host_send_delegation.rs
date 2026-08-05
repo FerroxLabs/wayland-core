@@ -171,8 +171,7 @@ async fn run_turn(h: &Harness, call: ContentBlock) -> ContentBlock {
         &h.mgr,
         &writer,
         "msg-1",
-        false, // auto_approve OFF — the gate must fire
-        &[],   // allow_list empty (mirrors: send_message not allow-listed)
+        &[], // allow_list empty (mirrors: send_message not allow-listed)
         None,
         wcore_compact::CompactionLevel::Off,
         false,
@@ -227,8 +226,8 @@ fn no_default_or_autoedit_mode_auto_approves_exec() {
     assert!(!mgr.is_auto_approved("exec"), "Default mode gates exec");
     mgr.set_mode(SessionMode::AutoEdit);
     assert!(
-        mgr.is_auto_approved("info"),
-        "sanity: AutoEdit auto-approves info"
+        mgr.is_auto_approved_tool_cmd("edit", Some("Write"), None),
+        "sanity: AutoEdit auto-approves the built-in Write tool"
     );
     assert!(
         !mgr.is_auto_approved("exec"),

@@ -12,10 +12,9 @@
 //!    `REPEAT_THRESHOLD` entries share the same root-cause signature,
 //!    the monitor reports [`MonitorAction::ReplanRepeatedError`].
 //!
-//! The walker for this sub-wave doesn't yet plug into the monitor —
-//! that wiring lands when the main loop calls `ExecutionGraph::execute`
-//! (Task C.5 / W8b.2.B.1). This module is otherwise standalone and
-//! testable in isolation.
+//! `AgentEngine::run` owns one monitor per run and consumes its decisions at
+//! provider and tool-result boundaries. The graph walker remains a separate
+//! execution surface; it shares the same budget view through its context.
 
 use std::collections::VecDeque;
 
@@ -27,6 +26,14 @@ const WINDOW_LEN: usize = 8;
 /// How many consecutive identical signatures trip
 /// [`MonitorAction::ReplanRepeatedError`].
 const REPEAT_THRESHOLD: usize = 3;
+
+/// Consecutive failed provider attempts with a failed tool round and no output
+/// before another identical full-context retry is considered wasteful.
+const OUTPUT_STALL_THRESHOLD: u32 = 2;
+
+const ROUTE_REPEAT_THRESHOLD: usize = 3;
+const MAX_ROUTE_CYCLE_LEN: usize = 4;
+const ROUTE_WINDOW_LEN: usize = ROUTE_REPEAT_THRESHOLD * MAX_ROUTE_CYCLE_LEN;
 
 /// Decision emitted by [`MidFlightMonitor::tick`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,13 +48,33 @@ pub enum MonitorAction {
     /// The last `REPEAT_THRESHOLD` errors collapsed to the same root
     /// cause. The walker should stop and ask its parent to replan.
     ReplanRepeatedError,
+    /// The same root error repeated after a replan directive.
+    StopRepeatedError,
+    /// A normalized tool/outcome route is cycling; inject a changed-strategy
+    /// directive before allowing another provider turn.
+    ReplanRepeatedRoute,
+    /// The same normalized route repeated after a replan directive.
+    StopRepeatedRoute,
+    /// Repeated provider attempts produced no output while retrying a context
+    /// whose latest tool round had already failed.
+    StopOutputStall,
 }
 
 pub struct MidFlightMonitor {
     budget: ExecutionBudgetView,
     /// Most recent error signatures, oldest at front, newest at back.
     /// Capacity-bounded to `WINDOW_LEN`.
-    recent_errors: VecDeque<String>,
+    recent_errors: VecDeque<(String, bool)>,
+    recent_tool_outcomes: VecDeque<ToolOutcomeObservation>,
+    last_replanned_route: Option<Vec<String>>,
+    last_replanned_error: Option<String>,
+    consecutive_output_stalls: u32,
+}
+
+#[derive(Clone)]
+struct ToolOutcomeObservation {
+    normalized: String,
+    raw: String,
 }
 
 impl MidFlightMonitor {
@@ -58,6 +85,10 @@ impl MidFlightMonitor {
         Self {
             budget,
             recent_errors: VecDeque::with_capacity(WINDOW_LEN),
+            recent_tool_outcomes: VecDeque::with_capacity(ROUTE_WINDOW_LEN),
+            last_replanned_route: None,
+            last_replanned_error: None,
+            consecutive_output_stalls: 0,
         }
     }
 
@@ -66,18 +97,103 @@ impl MidFlightMonitor {
     /// line numbers, PIDs, timestamps) are stripped via
     /// [`Self::root_cause_signature`].
     pub fn record_error(&mut self, message: &str) {
+        self.record_error_observation(message, true);
+    }
+
+    /// Record an engine tool error. Only tools excluded from the existing
+    /// FailureGuard need monitor-owned stop escalation; guarded tools keep
+    /// their established termination owner.
+    pub fn record_tool_error(&mut self, tool_name: &str, message: &str) {
+        self.record_error_observation(message, matches!(tool_name, "Bash" | "unknown"));
+    }
+
+    fn record_error_observation(&mut self, message: &str, stop_eligible: bool) {
         let sig = Self::root_cause_signature(message);
+        if self
+            .last_replanned_error
+            .as_ref()
+            .is_some_and(|last| last != &sig)
+        {
+            self.last_replanned_error = None;
+        }
         if self.recent_errors.len() == WINDOW_LEN {
             self.recent_errors.pop_front();
         }
-        self.recent_errors.push_back(sig);
+        self.recent_errors.push_back((sig, stop_eligible));
+    }
+
+    /// Record whether a provider attempt made progress. Only an attempt that
+    /// both carried a failed tool round and produced no output counts as a
+    /// stall; any output resets the consecutive streak.
+    pub fn record_stream_attempt(&mut self, failed_tool_round: bool, produced_output: bool) {
+        if failed_tool_round && !produced_output {
+            self.consecutive_output_stalls = self.consecutive_output_stalls.saturating_add(1);
+        } else {
+            self.consecutive_output_stalls = 0;
+        }
+    }
+
+    /// Record one tool action and normalized outcome. Semantic input values
+    /// remain exact, while explicitly volatile fields (timestamps, request
+    /// IDs, nonces, and similar correlation data) are replaced. This exposes
+    /// repeated routes without collapsing productive argument changes.
+    pub fn record_tool_outcome(
+        &mut self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        is_error: bool,
+        outcome: &str,
+    ) {
+        if !is_error {
+            self.last_replanned_error = None;
+        }
+        let normalized = format!(
+            "{tool_name}|{}|{}|{}",
+            normalized_action_json(input, None),
+            if is_error { "error" } else { "success" },
+            if is_error {
+                Self::root_cause_signature(outcome)
+            } else {
+                stable_success_signature(outcome)
+            }
+        );
+        if let Some(route) = &self.last_replanned_route {
+            let expected = &route[self.recent_tool_outcomes.len() % route.len()];
+            if &normalized != expected {
+                // The agent materially deviated from the route after the
+                // replan. A later return to the old route is a new incident,
+                // not proof that the earlier directive was ignored.
+                self.last_replanned_route = None;
+            }
+        }
+        if self.recent_tool_outcomes.len() == ROUTE_WINDOW_LEN {
+            self.recent_tool_outcomes.pop_front();
+        }
+        self.recent_tool_outcomes.push_back(ToolOutcomeObservation {
+            normalized,
+            raw: format!("{tool_name}|{}|{is_error}|{outcome}", input),
+        });
+    }
+
+    /// Provider-retry boundaries consume only budget/stall signals. Route and
+    /// repeated-error decisions belong to the committed tool-result boundary;
+    /// consuming them during a provider retry would misattribute ownership.
+    pub fn tick_provider(&mut self) -> MonitorAction {
+        if let Some(reason) = self.budget.first_exceeded_reason() {
+            return MonitorAction::CancelBudget { reason };
+        }
+        if self.consecutive_output_stalls >= OUTPUT_STALL_THRESHOLD {
+            return MonitorAction::StopOutputStall;
+        }
+        MonitorAction::Continue
     }
 
     /// Inspect the current state and return the next action. Cheap;
     /// call once per turn / graph tick.
     pub fn tick(&mut self) -> MonitorAction {
-        if let Some(reason) = self.budget.first_exceeded_reason() {
-            return MonitorAction::CancelBudget { reason };
+        let provider_action = self.tick_provider();
+        if provider_action != MonitorAction::Continue {
+            return provider_action;
         }
         // Replan when the last REPEAT_THRESHOLD entries collapse to a
         // single signature (i.e. the agent is hitting the same wall
@@ -89,45 +205,230 @@ impl MidFlightMonitor {
                 .rev()
                 .take(REPEAT_THRESHOLD)
                 .collect::<Vec<_>>();
-            if tail.windows(2).all(|w| w[0] == w[1]) {
+            if tail.windows(2).all(|w| w[0].0 == w[1].0) {
+                // The caller injects a changed-strategy instruction into the
+                // next model turn. Consume this streak so a later unrelated
+                // error does not immediately re-trigger the same replan.
+                let repeated = tail[0].0.clone();
+                let stop_eligible = tail.iter().all(|observation| observation.1);
+                self.recent_errors.clear();
+                if stop_eligible && self.last_replanned_error.as_ref() == Some(&repeated) {
+                    self.last_replanned_error = None;
+                    return MonitorAction::StopRepeatedError;
+                }
+                self.last_replanned_error = stop_eligible.then_some(repeated);
                 return MonitorAction::ReplanRepeatedError;
             }
+        }
+        if let Some(route) = self.repeated_route() {
+            self.recent_tool_outcomes.clear();
+            if self.last_replanned_route.as_ref() == Some(&route) {
+                self.last_replanned_route = None;
+                return MonitorAction::StopRepeatedRoute;
+            }
+            self.last_replanned_route = Some(route);
+            return MonitorAction::ReplanRepeatedRoute;
         }
         MonitorAction::Continue
     }
 
-    /// Reduce a free-text error message to a stable root-cause
-    /// signature. Strips:
-    ///   * absolute and relative paths (any token containing a `/`)
-    ///   * decimal numbers (line/byte/PID/timestamp counters)
-    ///   * trailing punctuation
+    fn repeated_route(&self) -> Option<Vec<String>> {
+        for cycle_len in 1..=MAX_ROUTE_CYCLE_LEN {
+            let repeated_len = cycle_len * ROUTE_REPEAT_THRESHOLD;
+            if self.recent_tool_outcomes.len() < repeated_len {
+                continue;
+            }
+            let tail = self
+                .recent_tool_outcomes
+                .iter()
+                .skip(self.recent_tool_outcomes.len() - repeated_len)
+                .cloned()
+                .collect::<Vec<_>>();
+            let cycle = tail[..cycle_len]
+                .iter()
+                .map(|observation| observation.normalized.clone())
+                .collect::<Vec<_>>();
+            let normalized_repeats = tail.chunks_exact(cycle_len).all(|chunk| {
+                chunk
+                    .iter()
+                    .map(|observation| &observation.normalized)
+                    .eq(cycle.iter())
+            });
+            // Exact single-call repetition is already owned by LoopGuard.
+            // The monitor handles a one-step route only when raw outcomes
+            // differ but collapse after explicit volatile-field normalization.
+            let raw_varies =
+                cycle_len > 1 || tail.windows(2).any(|pair| pair[0].raw != pair[1].raw);
+            if normalized_repeats && raw_varies {
+                return Some(cycle);
+            }
+        }
+        None
+    }
+
+    /// Reduce a free-text error message to a stable root-cause signature.
+    /// Directory prefixes and volatile counters are removed, while error/status
+    /// codes and resource basenames remain distinct so unrelated failures do
+    /// not collapse into one replan trigger.
     ///
     /// Two errors that differ only by volatile fields will produce the
     /// same signature.
     pub fn root_cause_signature(message: &str) -> String {
         let mut out = String::with_capacity(message.len());
-        for token in message.split_whitespace() {
-            // Drop path-like tokens (contain `/` or `\`).
-            if token.contains('/') || token.contains('\\') {
-                continue;
-            }
-            // Drop pure-number tokens (line/byte counts, PIDs).
-            if token
-                .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.')
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit())
-            {
-                // Skip if the token *starts* with a digit.
-                continue;
+        let mut previous_previous_token = None::<String>;
+        let mut previous_token = None::<String>;
+        for raw_token in message.split_whitespace() {
+            let trimmed = raw_token.trim_end_matches(|c: char| ",;:.".contains(c));
+            let bare = trim_token_wrappers(trimmed);
+            let token = if is_rfc3339_timestamp(bare) {
+                "<timestamp>".to_string()
+            } else if let Some((scheme, remainder)) = trimmed.split_once("://") {
+                let authority = remainder.split('/').next().unwrap_or(remainder);
+                let resource = remainder.rsplit('/').next().unwrap_or(remainder);
+                format!("{scheme}://{authority}/{resource}")
+            } else if trimmed.contains('/') || trimmed.contains('\\') {
+                let parts = trimmed
+                    .split(['/', '\\'])
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>();
+                match (parts.first(), parts.last()) {
+                    (Some(scope), Some(resource)) if scope != resource => {
+                        // Keep the stable scope and resource identity while
+                        // dropping volatile intermediate directories.
+                        // `/etc/config.json` and `/tmp/config.json` must not
+                        // collapse into the same failure.
+                        let resource = if scope.eq_ignore_ascii_case("tmp")
+                            && looks_like_volatile_temp_resource(resource)
+                        {
+                            resource.rfind('.').map_or_else(
+                                || "<volatile>".to_string(),
+                                |dot| format!("<volatile>{}", &resource[dot..]),
+                            )
+                        } else {
+                            (*resource).to_string()
+                        };
+                        format!("{scope}/{resource}")
+                    }
+                    (_, Some(resource)) => (*resource).to_string(),
+                    _ => "<path>".to_string(),
+                }
+            } else {
+                trimmed.to_string()
+            };
+            if token.chars().all(|c| c.is_ascii_digit()) {
+                let is_contextual_status = token.len() == 3
+                    && token
+                        .parse::<u16>()
+                        .is_ok_and(|status| (100..=599).contains(&status))
+                    && previous_token.as_deref().is_some_and(|previous| {
+                        matches!(previous, "http" | "status" | "status_code")
+                            || previous.starts_with("http/")
+                            || (previous == "code"
+                                && previous_previous_token.as_deref().is_some_and(|label| {
+                                    matches!(label, "http" | "status") || label.starts_with("http/")
+                                }))
+                    });
+                if !is_contextual_status {
+                    continue;
+                }
             }
             if !out.is_empty() {
                 out.push(' ');
             }
-            out.push_str(token.trim_end_matches(|c: char| ",;:.".contains(c)));
+            out.push_str(&token);
+            previous_previous_token = previous_token;
+            previous_token = Some(token.to_ascii_lowercase());
         }
         out
     }
+}
+
+fn looks_like_volatile_temp_resource(resource: &str) -> bool {
+    let stem = resource.rsplit_once('.').map_or(resource, |(stem, _)| stem);
+    stem.rsplit_once('-').is_some_and(|(_, suffix)| {
+        suffix.len() >= 4 && suffix.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+fn normalized_action_json(value: &serde_json::Value, key: Option<&str>) -> String {
+    if key.is_some_and(is_volatile_action_key) {
+        return "\"<volatile>\"".to_string();
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries = map.iter().collect::<Vec<_>>();
+            entries.sort_by_key(|(key, _)| *key);
+            let body = entries
+                .into_iter()
+                .map(|(key, value)| format!("{key}:{}", normalized_action_json(value, Some(key))))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{body}}}")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|value| normalized_action_json(value, key))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn is_volatile_action_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().replace('-', "_").as_str(),
+        "timestamp"
+            | "timestamp_ms"
+            | "request_id"
+            | "correlation_id"
+            | "trace_id"
+            | "span_id"
+            | "nonce"
+            | "pid"
+            | "created_at"
+            | "updated_at"
+    )
+}
+
+fn stable_success_signature(message: &str) -> String {
+    let mut output = Vec::new();
+    let mut previous_was_volatile_label = false;
+    for raw_token in message.split_whitespace() {
+        let trimmed = raw_token.trim_end_matches(|character: char| ",;:.".contains(character));
+        let bare = trim_token_wrappers(trimmed);
+        let (token, volatile_label) = if is_rfc3339_timestamp(bare) {
+            ("<timestamp>".to_string(), false)
+        } else if let Some((label, _)) = trimmed.split_once('=') {
+            if is_volatile_action_key(label) {
+                (format!("{label}=<volatile>"), false)
+            } else {
+                (trimmed.to_string(), false)
+            }
+        } else if previous_was_volatile_label {
+            ("<volatile>".to_string(), false)
+        } else if trimmed.contains('/') || trimmed.contains('\\') {
+            (MidFlightMonitor::root_cause_signature(trimmed), false)
+        } else {
+            (
+                trimmed.to_string(),
+                is_volatile_action_key(trimmed.trim_end_matches([':', '='])),
+            )
+        };
+        output.push(token);
+        previous_was_volatile_label = volatile_label;
+    }
+    output.join(" ")
+}
+
+fn trim_token_wrappers(token: &str) -> &str {
+    token.trim_matches(|character: char| "[](){}<>\"'".contains(character))
+}
+
+fn is_rfc3339_timestamp(token: &str) -> bool {
+    token.contains('T') && chrono::DateTime::parse_from_rfc3339(token).is_ok()
 }
 
 #[cfg(test)]
@@ -147,8 +448,348 @@ mod tests {
 
     #[test]
     fn signature_collapses_paths_and_numbers() {
-        let a = MidFlightMonitor::root_cause_signature("ENOENT at /tmp/foo.txt line 12 byte 8192");
-        let b = MidFlightMonitor::root_cause_signature("ENOENT at /var/bar.log line 7 byte 4096");
+        let a = MidFlightMonitor::root_cause_signature(
+            "ENOENT at /tmp/run-abc/foo.txt line 12 byte 8192",
+        );
+        let b = MidFlightMonitor::root_cause_signature(
+            "ENOENT at /tmp/run-def/foo.txt line 7 byte 4096",
+        );
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn signature_preserves_status_codes_and_resource_identity() {
+        let unauthorized = MidFlightMonitor::root_cause_signature("HTTP 401 for /tmp/api.json");
+        let server_error = MidFlightMonitor::root_cause_signature("HTTP 500 for /tmp/api.json");
+        let other_resource = MidFlightMonitor::root_cause_signature("HTTP 401 for /tmp/auth.json");
+        assert_ne!(unauthorized, server_error);
+        assert_ne!(unauthorized, other_resource);
+
+        let verbose_unauthorized =
+            MidFlightMonitor::root_cause_signature("HTTP status code 401 for /tmp/api.json");
+        let verbose_server_error =
+            MidFlightMonitor::root_cause_signature("HTTP status code 500 for /tmp/api.json");
+        assert_ne!(verbose_unauthorized, verbose_server_error);
+    }
+
+    #[test]
+    fn signature_does_not_confuse_line_numbers_with_http_statuses() {
+        let a = MidFlightMonitor::root_cause_signature("parse failed at line 401");
+        let b = MidFlightMonitor::root_cause_signature("parse failed at line 402");
+        assert_eq!(a, b);
+
+        let unauthorized = MidFlightMonitor::root_cause_signature("HTTP 401 from /tmp/api.json");
+        let forbidden = MidFlightMonitor::root_cause_signature("HTTP 403 from /tmp/api.json");
+        assert_ne!(unauthorized, forbidden);
+
+        let http_unauthorized =
+            MidFlightMonitor::root_cause_signature("HTTP/1.1 401 from /tmp/api.json");
+        let http_server_error =
+            MidFlightMonitor::root_cause_signature("HTTP/1.1 500 from /tmp/api.json");
+        assert_ne!(http_unauthorized, http_server_error);
+    }
+
+    #[test]
+    fn signature_preserves_path_scope() {
+        let system = MidFlightMonitor::root_cause_signature("denied /etc/config.json");
+        let temporary = MidFlightMonitor::root_cause_signature("denied /tmp/config.json");
+        assert_ne!(system, temporary);
+
+        let schema_v1 = MidFlightMonitor::root_cause_signature("invalid /tmp/schema-v1.json");
+        let schema_v2 = MidFlightMonitor::root_cause_signature("invalid /tmp/schema-v2.json");
+        assert_ne!(schema_v1, schema_v2);
+    }
+
+    #[test]
+    fn signature_preserves_url_authority() {
+        let api_a = MidFlightMonitor::root_cause_signature(
+            "request failed at https://api-a.example/v1/messages",
+        );
+        let api_b = MidFlightMonitor::root_cause_signature(
+            "request failed at https://api-b.example/v1/messages",
+        );
+        assert_ne!(api_a, api_b);
+        assert!(api_a.contains("https://api-a.example/messages"));
+    }
+
+    #[test]
+    fn output_stall_requires_two_consecutive_empty_failed_rounds() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        mon.record_stream_attempt(true, false);
+        assert_eq!(mon.tick(), MonitorAction::Continue);
+        mon.record_stream_attempt(false, true);
+        assert_eq!(mon.tick(), MonitorAction::Continue);
+        mon.record_stream_attempt(true, false);
+        mon.record_stream_attempt(true, false);
+        assert_eq!(mon.tick(), MonitorAction::StopOutputStall);
+    }
+
+    #[test]
+    fn repeated_error_replan_consumes_the_triggering_streak() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/work item 42");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+        assert_eq!(mon.tick(), MonitorAction::Continue);
+    }
+
+    #[test]
+    fn repeated_error_stops_when_the_same_replan_is_ignored() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/a/work item 1");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/b/work item 2");
+        }
+        assert_eq!(mon.tick(), MonitorAction::StopRepeatedError);
+    }
+
+    #[test]
+    fn failure_guard_tools_keep_their_existing_stop_owner() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_tool_error("Read", "permission denied at /tmp/a/work item 1");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_tool_error("Read", "permission denied at /tmp/b/work item 2");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+    }
+
+    #[test]
+    fn material_progress_resets_repeated_error_escalation() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/a/work item 1");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+        mon.record_tool_outcome(
+            "Edit",
+            &serde_json::json!({"path": "fixed"}),
+            false,
+            "changed",
+        );
+
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/b/work item 2");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+    }
+
+    #[test]
+    fn repeated_alternating_route_replans_then_stops_if_ignored() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        let input_a = serde_json::json!({"path": "a"});
+        let input_b = serde_json::json!({"path": "b"});
+
+        for pass in 0..ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome(
+                "Read",
+                &input_a,
+                false,
+                &format!("unchanged request_id {}", 100 + pass),
+            );
+            mon.record_tool_outcome(
+                "Grep",
+                &input_b,
+                false,
+                &format!("no match timestamp_ms {}", 200 + pass),
+            );
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedRoute);
+
+        for pass in 0..ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome(
+                "Read",
+                &input_a,
+                false,
+                &format!("unchanged request_id {}", 300 + pass),
+            );
+            mon.record_tool_outcome(
+                "Grep",
+                &input_b,
+                false,
+                &format!("no match timestamp_ms {}", 400 + pass),
+            );
+        }
+        assert_eq!(mon.tick(), MonitorAction::StopRepeatedRoute);
+    }
+
+    #[test]
+    fn progress_expires_pending_route_before_a_later_recurrence() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        let input = serde_json::json!({"path": "stable"});
+        for _ in 0..ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome("Read", &input, false, "same read");
+            mon.record_tool_outcome("Grep", &input, false, "same grep");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedRoute);
+
+        mon.record_tool_outcome("Edit", &input, false, "materially changed file");
+        for _ in 0..ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome("Read", &input, false, "same read");
+            mon.record_tool_outcome("Grep", &input, false, "same grep");
+        }
+        assert_eq!(
+            mon.tick(),
+            MonitorAction::ReplanRepeatedRoute,
+            "productive deviation makes a later recurrence a new replan, not an immediate stop"
+        );
+    }
+
+    #[test]
+    fn volatile_action_fields_normalize_but_semantic_arguments_do_not() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for pass in 0..ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome(
+                "Read",
+                &serde_json::json!({"path": "a", "request_id": format!("req-{pass}")}),
+                false,
+                "same read",
+            );
+            mon.record_tool_outcome(
+                "Grep",
+                &serde_json::json!({"query": "needle", "timestamp_ms": 1000 + pass}),
+                false,
+                "same grep",
+            );
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedRoute);
+
+        let view = ExecutionBudget::default().start_root();
+        let mut productive = MidFlightMonitor::new(view);
+        for pass in 0..ROUTE_REPEAT_THRESHOLD {
+            productive.record_tool_outcome(
+                "Read",
+                &serde_json::json!({"path": format!("file-{pass}.rs")}),
+                false,
+                "ok",
+            );
+            productive.record_tool_outcome(
+                "Grep",
+                &serde_json::json!({"query": format!("needle-{pass}")}),
+                false,
+                "ok",
+            );
+        }
+        assert_eq!(productive.tick(), MonitorAction::Continue);
+    }
+
+    #[test]
+    fn semantic_uuid_arguments_remain_distinct() {
+        let view = ExecutionBudget::default().start_root();
+        let mut semantic = MidFlightMonitor::new(view);
+        for suffix in 1..=ROUTE_REPEAT_THRESHOLD {
+            semantic.record_tool_outcome(
+                "Read",
+                &serde_json::json!({
+                    "resource_id": format!("00000000-0000-0000-0000-{suffix:012}")
+                }),
+                false,
+                "same read",
+            );
+        }
+        assert_eq!(semantic.tick(), MonitorAction::Continue);
+
+        let view = ExecutionBudget::default().start_root();
+        let mut volatile = MidFlightMonitor::new(view);
+        for suffix in 1..=ROUTE_REPEAT_THRESHOLD {
+            volatile.record_tool_outcome(
+                "Read",
+                &serde_json::json!({
+                    "request_id": format!("00000000-0000-0000-0000-{suffix:012}")
+                }),
+                false,
+                "same read",
+            );
+        }
+        assert_eq!(volatile.tick(), MonitorAction::ReplanRepeatedRoute);
+    }
+
+    #[test]
+    fn unlabelled_success_uuids_remain_distinct() {
+        assert_ne!(
+            stable_success_signature("opened 00000000-0000-0000-0000-000000000001"),
+            stable_success_signature("opened 00000000-0000-0000-0000-000000000002")
+        );
+        assert_eq!(
+            stable_success_signature("request_id 00000000-0000-0000-0000-000000000001"),
+            stable_success_signature("request_id 00000000-0000-0000-0000-000000000002")
+        );
+    }
+
+    #[test]
+    fn one_step_route_normalizes_volatile_success_metadata() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        let input = serde_json::json!({"path": "stable"});
+        for request_id in 1000..1000 + ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome(
+                "Read",
+                &input,
+                false,
+                &format!("unchanged request_id {request_id}"),
+            );
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedRoute);
+    }
+
+    #[test]
+    fn successful_progress_numbers_remain_distinct() {
+        assert_ne!(
+            stable_success_signature("10 tests failed"),
+            stable_success_signature("9 tests failed")
+        );
+        assert_eq!(
+            stable_success_signature("unchanged request_id 1000"),
+            stable_success_signature("unchanged request_id 1001")
+        );
+    }
+
+    #[test]
+    fn rfc3339_timestamps_normalize_without_collapsing_dates_or_versions() {
+        assert_eq!(
+            stable_success_signature("[2026-07-14T12:00:01Z] unchanged"),
+            stable_success_signature("[2026-07-14T12:00:02Z] unchanged")
+        );
+        assert_eq!(
+            MidFlightMonitor::root_cause_signature(
+                "failed at 2026-07-14T12:00:01+07:00 endpoint unavailable"
+            ),
+            MidFlightMonitor::root_cause_signature(
+                "failed at 2026-07-14T12:00:02+07:00 endpoint unavailable"
+            )
+        );
+        assert_ne!(
+            stable_success_signature("schema date 2026-07-14 version v2"),
+            stable_success_signature("schema date 2026-07-15 version v2")
+        );
+        assert_ne!(
+            MidFlightMonitor::root_cause_signature("requires schema-v1 on 2026-07-14"),
+            MidFlightMonitor::root_cause_signature("requires schema-v2 on 2026-07-15")
+        );
+    }
+
+    #[test]
+    fn different_arguments_do_not_collapse_into_one_route() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for line in 1..=ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome("Read", &serde_json::json!({"line": line}), false, "ok");
+        }
+        assert_eq!(mon.tick(), MonitorAction::Continue);
     }
 }

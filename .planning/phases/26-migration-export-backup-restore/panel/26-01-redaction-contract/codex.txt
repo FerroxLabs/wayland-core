@@ -1,0 +1,9 @@
+PANEL-MEMBER: codex
+PANEL-QUESTION-SHA256: ccd6608ce227290e3bf093d415f01d46db8e9d2e9b7eee72b8adf3e641e4ca7f
+---
+The contract still does not hold strictly. `CredentialRef::name` and `CredentialRef::source_file` are public `String` fields and `CredentialRef` derives `Deserialize`; a hostile document can deserialize a credential value into either field, after which serde, Debug, Display, and errors can emit it. `CredentialRef::new(secret, ".env")` is another direct construction path.
+
+The probe covers genuine discovery and the now-closed `details` paths, but it does not test hostile deserialization or direct construction of `CredentialRef` itself. No supplied evidence shows an observable leak in the measured documents, so this is cosmetic rather than `contract-leaks`.
+
+PANEL-VERDICT: contract-cosmetic
+PANEL-BASIS: CredentialRef::name and CredentialRef::source_file remain public deserializable Strings through which a credential value can enter and later be emitted.

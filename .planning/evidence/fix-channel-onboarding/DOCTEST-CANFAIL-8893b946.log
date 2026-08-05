@@ -1,0 +1,95 @@
+WLRC=0
+WLDONE
+=====LOG=====
+commit=8893b946c241dcbb1b0eb83381f950a65f494482
+
+### CONTROL 0 — unmutated document MUST pass (the gate can reach green)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+CONTROL_RC=0
+
+==================================================================
+CASE: drop 'name' from the first documented Slack config (UAT round trip 1)
+--- doc diff applied ---
+ docs/channels.md | 1 -
+ 1 file changed, 1 deletion(-)
+test the_checker_rejects_a_document_with_no_complete_configs_at_all ... ok
+test the_extractor_ignores_fenced_blocks_without_the_path_marker ... ok
+test the_extractor_finds_the_documented_configs ... ok
+test the_checker_rejects_a_block_missing_a_channelconfig_field ... ok
+test the_checker_rejects_a_block_missing_a_platform_option ... ok
+test the_checker_rejects_a_documented_legacy_secrets_table ... ok
+test the_checker_passes_a_hand_written_correct_document ... ok
+test every_documented_channel_config_loads_and_constructs ... FAILED
+test the_checker_rejects_a_name_that_does_not_match_the_stem ... ok
+thread 'every_documented_channel_config_loads_and_constructs' (1484704) panicked at crates/wcore-channels-registry/tests/channels_doc_configs_load.rs:235:5:
+  - the documented config for slack.toml does not load: config: slack.toml: TOML parse error at line 1, column 1
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+CASE_RC=101
+--- restored, tree clean for doc: ---
+
+==================================================================
+CASE: drop 'workspace_name' (UAT round trip 4 — adapter layer)
+--- doc diff applied ---
+ docs/channels.md | 1 -
+ 1 file changed, 1 deletion(-)
+test the_checker_rejects_a_document_with_no_complete_configs_at_all ... ok
+test the_extractor_ignores_fenced_blocks_without_the_path_marker ... ok
+test the_extractor_finds_the_documented_configs ... ok
+test the_checker_rejects_a_block_missing_a_platform_option ... ok
+test the_checker_rejects_a_block_missing_a_channelconfig_field ... ok
+test the_checker_rejects_a_documented_legacy_secrets_table ... ok
+test the_checker_passes_a_hand_written_correct_document ... ok
+test every_documented_channel_config_loads_and_constructs ... FAILED
+test the_checker_rejects_a_name_that_does_not_match_the_stem ... ok
+thread 'every_documented_channel_config_loads_and_constructs' (1485215) panicked at crates/wcore-channels-registry/tests/channels_doc_configs_load.rs:235:5:
+  - the documented config for slack.toml parses as a ChannelConfig but the slack adapter rejects its [options]: config parse: missing field `workspace_name`
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+CASE_RC=101
+--- restored, tree clean for doc: ---
+
+==================================================================
+CASE: make Discord's name disagree with its own path comment
+--- doc diff applied ---
+ docs/channels.md | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+test the_checker_rejects_a_document_with_no_complete_configs_at_all ... ok
+test the_extractor_ignores_fenced_blocks_without_the_path_marker ... ok
+test the_extractor_finds_the_documented_configs ... ok
+test the_checker_rejects_a_block_missing_a_channelconfig_field ... ok
+test the_checker_rejects_a_block_missing_a_platform_option ... ok
+test the_checker_rejects_a_documented_legacy_secrets_table ... ok
+test the_checker_passes_a_hand_written_correct_document ... ok
+test the_checker_rejects_a_name_that_does_not_match_the_stem ... ok
+test every_documented_channel_config_loads_and_constructs ... FAILED
+thread 'every_documented_channel_config_loads_and_constructs' (1485473) panicked at crates/wcore-channels-registry/tests/channels_doc_configs_load.rs:235:5:
+  - the documented config for discord.toml sets name = "disco", which does not match the file stem "discord" its own path comment declares — this is a load error
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+CASE_RC=101
+--- restored, tree clean for doc: ---
+
+==================================================================
+CASE: delete every complete-config marker (the section is gone)
+--- doc diff applied ---
+ docs/channels.md | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+test every_documented_channel_config_loads_and_constructs ... FAILED
+test the_checker_rejects_a_document_with_no_complete_configs_at_all ... ok
+test the_extractor_ignores_fenced_blocks_without_the_path_marker ... ok
+test the_extractor_finds_the_documented_configs ... FAILED
+test the_checker_rejects_a_block_missing_a_platform_option ... ok
+test the_checker_rejects_a_name_that_does_not_match_the_stem ... ok
+test the_checker_rejects_a_block_missing_a_channelconfig_field ... ok
+test the_checker_rejects_a_documented_legacy_secrets_table ... ok
+test the_checker_passes_a_hand_written_correct_document ... ok
+thread 'every_documented_channel_config_loads_and_constructs' (1486003) panicked at crates/wcore-channels-registry/tests/channels_doc_configs_load.rs:235:5:
+  - docs/channels.md carries 0 complete channel config(s) (a fenced ```toml block whose first line is `# ~/.wayland/channels/<stem>.toml`), expected at least 4. If the onboarding section was removed, this test is no longer checking anything.
+thread 'the_extractor_finds_the_documented_configs' (1486010) panicked at crates/wcore-channels-registry/tests/channels_doc_configs_load.rs:251:5:
+expected at least 4 complete configs, found 0: []
+test result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+CASE_RC=101
+--- restored, tree clean for doc: ---
+
+### FINAL — document restored, must pass again
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+FINAL_RC=0
+git status for doc: []

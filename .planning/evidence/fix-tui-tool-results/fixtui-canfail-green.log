@@ -1,0 +1,16 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-fixtui/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.92s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/tool_formatter_real_payloads.rs (target/debug/deps/tool_formatter_real_payloads-871b4662ad23582d)
+
+running 6 tests
+test formatter_never_invents_on_an_empty_payload ... ok
+test json_tools_read_the_keys_their_sources_actually_emit ... ok
+test write_then_edit_then_read_render_the_tools_own_words ... ok
+test bash_failure_never_reports_exit_zero ... ok
+test bash_success_renders_the_real_exit_code_and_byte_count ... ok
+test bash_stderr_is_surfaced ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+

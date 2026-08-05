@@ -1,0 +1,10 @@
+Phase 21 Success Criterion 1 of a Rust agent runtime reads VERBATIM: "A child cannot widen any provider, tool, filesystem, egress, secret, approval, depth, fan-out, time, token, or cost restriction."
+
+Measured evidence at one pinned commit, on Linux and Windows:
+- filesystem, egress, secret: proved REFUSED against the real shipped binary on both platforms.
+- tool: CONFIRMED ABSENT. The product unit test build_tool_registry(["Bash","Write"], IsolatedMutation) registers Bash without ever consulting the parent registry. The repair was DECLINED by the owner because wiring it at one caller leaves four production spawner sites fail-open, three of which have no parent registry in scope at all. Open.
+- approval: a child-sourced posture request now ratchets rather than replaces (repaired), but the live closure is recorded NOT-CLOSED because no shipped surface offers a child any way to request an approval posture.
+- PolicyGate (the opt-in enforcement gate): zero callers of set_policy_gate, every agent-path initialiser None. Fail-open. Repair DECLINED at a measured cost of 22 broken functional tests. Open.
+- provider, approval, and the Some(..) legs of depth/time/token/cost: recorded NO-CHANNEL or NOT-EXPRESSIBLE on live surfaces, i.e. the property holds by the ABSENCE OF A REQUEST CHANNEL rather than by enforcement.
+
+Grade the criterion. Answer with EXACTLY ONE of these two tokens on its own first line: NOT-MET or MET-WITH-STATED-EXCEPTIONS. Then one short paragraph of reasoning. Do not hedge between the two.

@@ -1,0 +1,42 @@
+=== does any adapter FALL BACK to a configured default when conversation_id is not a real id? ===
+--- slack ---
+416:        let conversation_id = if msg.conversation_id.is_empty() {
+417:            if self.config.default_channel_id.is_empty() {
+419:                    "no conversation_id and no default_channel_id configured".to_string(),
+422:            self.config.default_channel_id.clone()
+--- telegram ---
+--- discord ---
+--- matrix ---
+--- msteams ---
+--- whatsapp ---
+238:        let recipient = if msg.conversation_id.is_empty() {
+--- sms ---
+250:        if msg.conversation_id.is_empty() {
+--- email ---
+--- signal ---
+
+=== KNOWN-POSITIVE: conversation_id IS read by these adapters (instrument alive) ===
+crates/wcore-channel-discord/src/lib.rs
+crates/wcore-channel-email/src/lib.rs
+crates/wcore-channel-imessage/src/channel.rs
+crates/wcore-channel-matrix/src/lib.rs
+crates/wcore-channel-matrix/src/sync.rs
+crates/wcore-channel-msteams/src/lib.rs
+crates/wcore-channel-msteams/src/inbound.rs
+crates/wcore-channel-signal/src/lib.rs
+crates/wcore-channel-slack/src/lib.rs
+crates/wcore-channel-slack/src/inbound.rs
+crates/wcore-channel-sms/src/lib.rs
+crates/wcore-channel-sms/src/inbound.rs
+
+=== is there ANY way to give cron a conversation id? every cron add flag ===
+long, conflicts_with_all = ["channel", "skill"], value_name = "COMMAND"
+long, conflicts_with_all = ["slash", "channel"], value_name = "NAME"
+long, conflicts_with_all = ["slash", "skill"], value_name = "NAME"
+long, requires = "channel", value_name = "TEXT"
+long, requires = "describe"
+long, requires = "skill", value_name = "JSON"
+long, short = 'n', default_value = "20"
+long, short = 'n', default_value = "50"
+long, value_name = "KIND:PARAMS"
+long, value_name = "PHRASE"

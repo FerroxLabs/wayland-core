@@ -1,0 +1,8 @@
+### CI STEP SIMULATION on rockylinux:9 (glibc 2.34)
+--- direction 1: NEW artifact (almalinux:9 build) -- expect PASS
+raw: wayland-core 0.12.25
+STEP_RESULT=PASS
+--- direction 2: PLANTED REGRESSION, todays ubuntu:24.04 artifact -- expect FAIL
+raw: /s/wayland-core: /lib64/libc.so.6: version `GLIBC_2.38' not found (required by /s/wayland-core)
+/s/wayland-core: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by /s/wayland-core)
+STEP_RESULT=FAIL

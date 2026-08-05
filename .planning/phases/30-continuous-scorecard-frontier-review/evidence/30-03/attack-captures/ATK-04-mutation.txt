@@ -1,0 +1,10 @@
+case: ATK-04
+what: a claim is rested on the CTRL-01 evidence ID that opens nothing
+half: MUTATION
+class: factual
+scope: STATIC_SOURCE
+text: Structural probes confirm the peer baseline shape.
+outcome: REFUSED
+rule: evidence_id_unresolved
+refusal: claim `P` cites CTRL-01 evidence ID `PEER-PROBE-2026-07-26`, which 30-01 recorded `UNRESOLVED`: ids/PEER-PROBE-2026-07-26.txt
+missing: a resolvable citation (`PEER-PROBE-2026-07-26` is UNRESOLVED)

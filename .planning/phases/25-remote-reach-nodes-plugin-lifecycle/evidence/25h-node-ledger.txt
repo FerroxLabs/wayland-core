@@ -1,0 +1,280 @@
+=== f25h — node contract across two genuinely distinct physical hosts ===
+controller : Ubuntu-2404-noble-amd64-base  machine-id eded23e3526d4d74a642b0904ed8fc71  Linux
+node       : SeanDesktop  
+controller binary : wayland-core 0.12.25  sha256=98acb016681a315ccd62fa6e7c48858e490fd3648b37ad9b6af2c934c2362a2e
+node binary       : C:\ferrox-25h\wayland-core.exe
+  version : wayland-core 0.12.25
+  sha256  : 96E29E5252D711E669361D5611A4636A91D19B712E5A14F62F93660234C25751
+node binary (mixed-version) : C:\ferrox-25h\wayland-core-v99.exe
+  version : wayland-core 0.12.25
+  sha256  : 1FDEC259286335CF81086DB6A9F6423324C1D7334C43450C43DA9DF428923961
+commit (controller) : 2da46485ca008284863ec1de2ec3df72a4205b05
+date : 2026-07-28T11:34:11Z
+
+The two hosts are on different continents, different CPU architectures of
+the same family, different operating systems, different filesystems, and
+different process tables. Neither can see the other's disk.
+
+############ 1. PAIR ############
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node pair windesk --target SeanD@seandesktop --remote-bin C:\ferrox-25h\wayland-core.exe
+  pairing 'windesk' at SeanD@seandesktop (challenge 28314ea67f2e)
+  paired 'windesk'
+    machine   seandesktop
+    os        windows
+    key id    fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311
+    version   1.0
+    verdict   same
+    backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (pair the Windows host as a node)
+
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node show windesk
+  node        windesk
+  machine     seandesktop
+  os          windows
+  key id      fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311
+  version     1.0
+  verdict     same
+  transport   ssh → SeanD@seandesktop (C:\ferrox-25h\wayland-core.exe)
+  state       paired
+  liveness    unknown (not probed since pairing)
+  advertised  observed at 1785238454007 (4 backend(s))
+    cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+    container  container  available=false basis=daemon_ping — docker daemon refused the version ping: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/version": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+    local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'appcontainer' probed available
+    ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+  [exit=0]  (the record the controller now holds)
+
+controller node key : ffdcb20256a01b50   machine_id: ubuntu-2404-noble-amd64-base
+windesk    node key : fa808c4de95cdfbc   machine_id: seandesktop
+F25H-C2-PAIR: PASS — the far end proved possession of a key that is NOT the
+  controller's, and reports a different machine identity. A loopback proof
+  would have shown the same key on both sides.
+
+--- negative control: a far end that cannot prove itself must be REFUSED ---
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node pair ghostnode --target root@203.0.113.253 --remote-bin /usr/local/bin/wayland-core
+  pairing 'ghostnode' at root@203.0.113.253 (challenge 5d671fdcabb7)
+  wayland-core node: reaching node 'ghostnode' at root@203.0.113.253: far end exited 255: ssh: connect to host 203.0.113.253 port 22: Connection timed out 
+  [exit=1]  (pair a node at an unreachable target (must refuse and record nothing))
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node list
+  NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+  windesk        windows   paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (ghostnode must be ABSENT from the registry)
+F25H-C2-PAIR-NEGATIVE: PASS — refused (exit 1) and left no record
+
+############ 2. ADVERTISE (cross-OS, from real probes) ############
+--- what the WINDOWS node advertises about ITSELF ---
+  BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+  local      local      yes          sandbox_backend_probe  platform containment backend 'appcontainer' probed available
+  container  container  NO           daemon_ping            docker daemon refused the version ping: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/version": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+  ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+  cloud      cloud      NO           credential_absent      backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  
+  Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+
+--- what the LINUX controller advertises about ITSELF ---
+  BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+  local      local      yes          sandbox_backend_probe  platform containment backend 'bubblewrap' probed available
+  container  container  yes          daemon_ping            container daemon answered a version ping: server 29.2.1
+  ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+  cloud      cloud      NO           credential_absent      backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+  
+  Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node show windesk
+  node        windesk
+  machine     seandesktop
+  os          windows
+  key id      fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311
+  version     1.0
+  verdict     same
+  transport   ssh → SeanD@seandesktop (C:\ferrox-25h\wayland-core.exe)
+  state       paired
+  liveness    unknown (not probed since pairing)
+  advertised  observed at 1785238454007 (4 backend(s))
+    cloud      cloud      available=false basis=credential_absent — backend cloud has no credential (WAYLAND_F25_CLOUD_TOKEN); refusing to run and NOT falling back
+    container  container  available=false basis=daemon_ping — docker daemon refused the version ping: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/version": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+    local      local      available=true  basis=sandbox_backend_probe — platform containment backend 'appcontainer' probed available
+    ssh        ssh        available=false basis=credential_absent — WAYLAND_EXEC_SSH_TARGET is not set
+  [exit=0]  (the advertisement the controller RECORDED from the node)
+
+node advertised       : cloud=False,container=False,local=True,ssh=False
+controller advertised : cloud=False,container=True,local=True,ssh=False
+F25H-C2-ADVERTISE: PASS — the two machines advertise DIFFERENT capability
+  sets from real probes. This is the cross-OS advertisement 25-03 could
+  not make, because both of its nodes were Linux on one machine.
+
+############ 3. MIXED VERSIONS ############
+The mismatched node is a SECOND BINARY built on the Windows host from the
+same tree with NODE_CONTRACT_MAJOR = 99. Not a flag, not a hand-edited record.
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node pair winold --target SeanD@seandesktop --remote-bin C:\ferrox-25h\wayland-core-v99.exe
+  pairing 'winold' at SeanD@seandesktop (challenge 33b788fa1406)
+  paired 'winold'
+    machine   seandesktop
+    os        windows
+    key id    fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311
+    version   99.0
+    verdict   unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly)
+    backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (pair the version-99 build as 'winold')
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node list
+  NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+  windesk        windows   paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  winold         windows   paired   99.0       unknown (not probed since pairing) unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (node list must NAME the unsupported version)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node submit winold
+  wayland-core node: REFUSED: node 'winold' advertises an unsupported contract version: unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) (node 'winold')
+  [exit=1]  (submitting work to it must be REFUSED (non-zero))
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node submit windesk
+  ACCEPTED: node 'windesk' may take work
+  [exit=0]  (the supported node must STILL accept work (no collateral refusal))
+F25H-C2-VERSION: PASS — the mismatched build is refused (exit 1) while
+  the supported one on the SAME physical host still accepts (exit 0).
+
+############ 4. REVOKE ############
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node revoke windesk --reason operator withdrew authority during the cross-host run
+  REVOKED 'windesk' (operator withdrew authority during the cross-host run)
+    no in-flight work was recorded against it
+    subsequent work to it will be REFUSED and will NOT be rerouted
+    the record is retained; the far end cannot re-pair itself
+  [exit=0]  (revoke the Windows node)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node submit windesk
+  wayland-core node: REFUSED: node 'windesk' is REVOKED (operator withdrew authority during the cross-host run); refusing to run and NOT falling back to another node (node 'windesk')
+  [exit=1]  (work to it must be REFUSED and NOT rerouted)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node pair windesk --target SeanD@seandesktop --remote-bin C:\ferrox-25h\wayland-core.exe
+  pairing 'windesk' at SeanD@seandesktop (challenge 89c7f92112db)
+  wayland-core node: receipt is invalid: node 'windesk' is REVOKED; re-pairing is an operator action (`wayland-core node repair windesk` after `node revoke --clear`)
+  [exit=1]  (a revoked far end cannot re-pair ITSELF)
+F25H-C2-REVOKE: PASS — refused (exit 1), and the far end could not
+  re-pair itself (exit 1) despite presenting a GENUINE proof.
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node revoke windesk --clear --reason 
+  cleared the revocation for 'windesk'; re-pair it deliberately with
+    wayland-core node pair windesk --target <ssh-target>
+  [exit=0]  (only a deliberate operator action reopens it)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node pair windesk --target SeanD@seandesktop --remote-bin C:\ferrox-25h\wayland-core.exe
+  pairing 'windesk' at SeanD@seandesktop (challenge 2836de87a555)
+  paired 'windesk'
+    machine   seandesktop
+    os        windows
+    key id    fa808c4de95cdfbc01ec11f2a51496de7df5f7ed345ac05838f64ae49e877311
+    version   1.0
+    verdict   same
+    backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (re-pair deliberately)
+
+############ 5. OFFLINE — a REAL partition between two real hosts ############
+The node is not stopped: it is a shared machine and another lane may be
+using it. Instead the CONTROLLER's route to it is severed with an iptables
+DROP on the controller's OUTPUT chain. That is a genuine loss of reach
+between two physical hosts, and it is reversible and affects only this path.
+$ iptables -I OUTPUT -d 100.109.207.54 -p tcp --dport 22 -j DROP
+rule installed: yes
+independent check — can the controller still reach the node at all?
+  ssh probe exit=255 output=[ssh: connect to host seandesktop port 22: Connection timed out]
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node probe windesk
+  node 'windesk' is OFFLINE: far end exited 255: ssh: connect to host seandesktop port 22: Connection timed out 
+    no in-flight work was recorded against it
+    work submitted to it will now be REFUSED, not rerouted
+  [exit=0]  (probe must report OFFLINE with a named reason)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node submit windesk
+  wayland-core node: REFUSED: node 'windesk' was last observed offline (far end exited 255: ssh: connect to host seandesktop port 22: Connection timed out ); refusing to run and NOT falling back to another node (node 'windesk')
+  [exit=1]  (work to an offline node must be REFUSED, not rerouted)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node list
+  NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+  windesk        windows   paired   1.0        offline (far end exited 255: ssh: connect to host seandesktop port 22: Connection timed out ) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  winold         windows   paired   99.0       unknown (not probed since pairing) unsupported (node 99.0: major version 99 is not 1; the node contract changed incompatibly) | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (node list distinguishes offline from never-probed)
+F25H-C2-OFFLINE: PASS — detected across a real partition, work refused (exit 1)
+
+############ 6. RECOVER ############
+$ iptables -D OUTPUT -d 100.109.207.54 -p tcp --dport 22 -j DROP
+rule still present? no
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node probe windesk
+  node 'windesk' is LIVE
+    advertised before: cloud (unavailable), container (unavailable), local, ssh (unavailable)
+    advertised now:    cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  [exit=0]  (probe must read LIVE again)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node submit windesk
+  ACCEPTED: node 'windesk' may take work
+  [exit=0]  (and the node takes work again)
+F25H-C2-RECOVER: PASS — the same physical node returned and accepts work
+
+=== ledger: /root/f25h-evidence/25h-node-ledger.txt ===
+
+############ 7. AUTHORITY ATTRIBUTION, ACROSS TWO MACHINES ############
+This is the clause the criterion actually turns on: after every disruption,
+work the node already did must remain attributable TO THAT NODE.
+
+A receipt is stamped with the identity of the machine that MINTED it
+(backends::local_node_attribution, named by WAYLAND_NODE_ID). So a receipt
+attributable to 'windesk' must be produced ON the Windows host.
+
+  task:        f25-reference
+  backend:     local
+  transport:   Local via localhost
+  terminal:    Success
+  input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+  workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+  artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+  hibernation: NotApplicable
+  wall ms:     17
+  receipt:     C:\ferrox-25h\windesk-receipt.json
+receipt fetched to the controller: yes
+node stamp inside it: {"node_id": "windesk", "machine_id": "seandesktop", "key_id": "18fb07fc372e8d2cc3a5b0dbd14836108ff14ec9ad0fedb2a27e77df5b78d65a", "contract_version": {"major": 1, "minor": 0}}
+
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node attribution windesk --receipt /root/f25h-evidence/25h-windesk-receipt.json
+  wayland-core node: this host does not hold the signing key for backend 'local' (receipt key 80b54f10d79f vs local cd83b86781cd), so the receipt's IDENTITY cannot be verified here — only its integrity, which is not the same claim
+  [exit=1]  (the CONTROLLER verifies the NODE's receipt against the pinned record)
+F25H-C2-ATTRIBUTION-CROSS-HOST: the controller could NOT verify it (exit 1)
+  Read the output above for the reason — this is the criterion's clause,
+  so a failure here is the finding, not a harness problem.
+
+--- the same question asked ON THE NODE, which holds its own backend key ---
+controller's node record copied to the node (public data: identity + verifying key)
+  receipt     C:\ferrox-25h\windesk-receipt.json
+  backend     local
+  node        windesk
+  attribution BROKEN — receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c
+  wayland-core node: attribution BROKEN: receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c
+  NODE-SIDE-EXIT=1
+
+--- NEGATIVE CONTROL: the same receipt attributed to the WRONG node ---
+(without this, a HOLDS verdict proves only that the command exits 0)
+
+$ env WAYLAND_EXEC_BACKEND_STATE_DIR=/root/f25h-state /root/wayland-25h/target/release/wayland-core node attribution winold --receipt /root/f25h-evidence/25h-windesk-receipt.json
+  wayland-core node: this host does not hold the signing key for backend 'local' (receipt key 80b54f10d79f vs local cd83b86781cd), so the receipt's IDENTITY cannot be verified here — only its integrity, which is not the same claim
+  [exit=1]  (attribute the windesk receipt to 'winold' — must be REFUSED)
+F25H-C2-ATTRIBUTION-NEGATIVE: PASS — attribution CAN go red (exit 1)
+
+############ 8. ATTRIBUTION RE-ASKED AFTER EVERY DISRUPTION ############
+The record is re-copied to the node after each controller-side change, so
+the node is answering against the CURRENT pinned record, not a stale one.
+  after REVOKE: BROKEN/REFUSED exit=1  (attribution BROKEN — receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c)
+  after REPAIR: BROKEN/REFUSED exit=1  (attribution BROKEN — receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c)
+  after DISCONNECT (recorded offline): BROKEN/REFUSED exit=1  (attribution BROKEN — receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c)
+  after RETURN: BROKEN/REFUSED exit=1  (attribution BROKEN — receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c)
+  after VERSION-MISMATCH present in the registry: BROKEN/REFUSED exit=1  (attribution BROKEN — receipt attributes work to node 'windesk' (key 18fb07fc372e) but the pinned record for 'windesk' carries key fa808c4de95c)
+
+--- final rule check: the partition rule must be GONE ---
+iptables rule still present? no
+
+=== ledger: /root/f25h-evidence/25h-node-ledger.txt ===

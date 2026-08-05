@@ -23,6 +23,7 @@ fn turn_trace_provider_field_is_structured_not_family_anthropic() {
         cache_write: 0,
         cache_hit_rate: 0.0,
         cost_usd: 0.0,
+        cost_priced: true,
         tool_calls: vec![],
         hook_actions: vec![],
         source_product: "wayland-core".into(),

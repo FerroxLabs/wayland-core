@@ -19,7 +19,7 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::{MockLlmProvider, test_config};
+use common::{MockLlmProvider, bound_test_spawner_arc, test_config};
 use tokio::sync::mpsc;
 use wcore_agent::agents::channel_sink::{CHANNEL_CAPACITY, ChannelSink, SubAgentRelay};
 use wcore_agent::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig};
@@ -72,7 +72,8 @@ async fn spawn_relay_two_tasks_produce_distinct_parent_call_ids_and_terminal_eve
         ok_turn("result-A"),
         ok_turn("result-B"),
     ]));
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
 
     // One shared drain channel (mirrors SpawnTool::spawn_with_relay).
     let (tx, mut rx) = mpsc::channel::<SubAgentRelay>(CHANNEL_CAPACITY);
@@ -181,7 +182,8 @@ async fn spawn_no_channel_sink_produces_zero_relay_events_v094() {
         ok_turn("anon-A"),
         ok_turn("anon-B"),
     ]));
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
 
     // Tasks with no channel_sink (NullSink path).
     let tasks_and_extras = vec![
@@ -213,7 +215,8 @@ async fn spawn_relay_per_task_keying_produces_distinct_ids_v094() {
         ok_turn("task-x"),
         ok_turn("task-y"),
     ]));
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
 
     let (tx, mut rx) = mpsc::channel::<SubAgentRelay>(CHANNEL_CAPACITY);
 
@@ -282,7 +285,8 @@ async fn spawn_relay_per_task_keying_produces_distinct_ids_v094() {
 #[tokio::test]
 async fn spawn_relay_terminal_info_event_emitted_before_sink_drops_v094() {
     let provider = Arc::new(MockLlmProvider::with_turns(vec![ok_turn("done")]));
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
 
     let (tx, mut rx) = mpsc::channel::<SubAgentRelay>(CHANNEL_CAPACITY);
     let extras = SpawnExtras {

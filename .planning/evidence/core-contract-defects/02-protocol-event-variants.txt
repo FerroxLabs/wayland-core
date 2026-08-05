@@ -1,0 +1,63 @@
+parsed ProtocolEvent variants (depth-0 bare idents): 0
+NOTE: struct-form variants end with '{' which increments depth, so the bare-ident
+      match above is insufficient. See second pass below.
+
+ProtocolEvent variants (token pass): 62
+  duplicate wire types among variants: ['sub_agent_event', 'workflow_finished', 'workflow_started']
+  manifest desktop events: 52
+  core-event.schema discriminators: 52
+  producer-complete discriminators: 82
+
+  variants in NEITHER manifest NOR producer-complete NOR DEFERRED.md: 0
+
+  variants in producer-complete but NOT in manifest and NOT in DEFERRED.md
+  (the C4 class -- declared as inventory, justified nowhere):
+    count=7
+    WorkspacePolicy -> workspace_policy
+    CapabilityActivation -> capability_activation
+    ProviderAttempt -> provider_attempt
+    ProviderRetry -> provider_retry
+    ProviderFailure -> provider_failure
+    MidFlightMonitorDecision -> mid_flight_monitor_decision
+    CompactOffload -> compact_offload
+
+  manifest events with NO matching ProtocolEvent variant (reverse direction):
+    count=0: []
+
+  CONTROL known-positives (instrument liveness):
+    'ready' in variants: True
+    'execution_policy' in variants: True
+    'workspace_policy' in variants: True
+    'this_variant_does_not_exist' in variants: False
+
+  DEFERRED.md verbatim:
+    | # Deferred Desktop contract adversarial cases
+    | 
+    | This v1.7 corpus records the current producer wire. Contract negotiation,
+    | unknown-critical rejection, and unknown-noncritical dropping are live and
+    | proved by serialized replay through the reference host observer.
+    | 
+    | Policy, workflow, and Anvil sub-contract vectors exercise their current
+    | producer identities and reducer rules.
+    | 
+    | Anvil receipts are publication-bound: the producer binds the serialized
+    | verdict body and immediate post-publication artifact state. Durable Desktop
+    | replay and a persistent later-mutation watcher remain deferred.
+    | 
+    | - `ordinary_turn_tool_replay_reducer`: legacy ordinary turn and tool events
+    |   still have no producer event ID or monotonic sequence. Recovery v1 instead
+    |   exposes a sanitized, content-free journal cursor and replay stream for
+    |   interrupted-turn restoration; it does not retroactively make legacy event
+    |   payloads authoritative.
+    | - `anvil_desktop_replay_reducer`: deferred until Desktop consumes the Core
+    |   reducer and proves restart/replay against this corpus.
+    | - `anvil_persistent_mutation_watcher`: deferred because Core currently checks
+    |   immediate post-publication mutation, not later filesystem changes over the
+    |   full receipt lifetime.
+    | 
+    | Malformed command fixtures and the current unknown-type behavior are proved by
+    | `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
+    | shape-only because no production emitter is proven at this source baseline.
+    | Runtime diagnostics v1 is production-backed by correlated serialized replay;
+    | its executable readiness is non-spawning, launch-environment exact, and
+    | redacted before entering protocol state.

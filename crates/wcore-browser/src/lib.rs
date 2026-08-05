@@ -19,6 +19,8 @@
 pub mod aria;
 pub mod backends;
 pub mod binary;
+pub mod config_hint;
+pub mod liveness;
 pub mod op;
 pub mod policy;
 pub mod provider;

@@ -50,8 +50,9 @@
 //!
 //! - If `counter < CRASH_THRESHOLD` (3), the runner restarts the subprocess
 //!   in-place — backoff `100ms → 500ms → 2s` (one per strike), respawns the
-//!   binary via the stored [`TransportFactory`], replays the Init + ListTools
-//!   handshake, and **retries the failed call once** on the fresh instance.
+//!   binary via the stored [`TransportFactory`], and replays only the Init +
+//!   ListTools handshake. The ambiguous tool call returns its original error
+//!   and is **never retried implicitly** on the fresh instance.
 //! - If `counter >= CRASH_THRESHOLD`, the call returns
 //!   [`SubprocessPluginError::PermissionDenied`] with
 //!   `"auto-disabled after 3 crashes"` and **does not respawn**.
@@ -93,7 +94,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -106,7 +107,8 @@ use wcore_plugin_api::manifest::PluginManifest;
 
 use crate::error::{Result, SubprocessPluginError};
 use crate::rpc::{
-    SubprocessRequest, SubprocessResponse, SubprocessResponseBody, SubprocessVerb, ToolDescriptor,
+    CAPABILITY_CALL_TOOL_V2, SubprocessRequest, SubprocessResponse, SubprocessResponseBody,
+    SubprocessVerb, ToolDescriptor,
 };
 
 /// Default per-RPC timeout for subprocess plugin calls. Init/list happen on
@@ -261,6 +263,9 @@ pub struct SubprocessPluginRunner {
     restart_lock: Mutex<()>,
     /// Plugin name (for diagnostics + the auto-disabled error message).
     plugin_name: String,
+    /// Negotiated support for the optional durable-effect call verb. This is
+    /// refreshed after every successful Init, including process restarts.
+    supports_call_tool_v2: AtomicBool,
 }
 
 /// Aud-18: resolve the binary path to spawn, binding execute to the
@@ -452,6 +457,7 @@ impl SubprocessPluginRunner {
             factory,
             restart_lock: Mutex::new(()),
             plugin_name,
+            supports_call_tool_v2: AtomicBool::new(false),
         };
 
         let (manifest_version, capabilities, tools) = runner.handshake().await?;
@@ -482,6 +488,12 @@ impl SubprocessPluginRunner {
                 )));
             }
         };
+        self.supports_call_tool_v2.store(
+            capabilities
+                .iter()
+                .any(|capability| capability == CAPABILITY_CALL_TOOL_V2),
+            Ordering::Release,
+        );
 
         let list_resp = self.request(SubprocessVerb::ListTools).await?;
         let tools = match list_resp.body {
@@ -552,8 +564,8 @@ impl SubprocessPluginRunner {
     /// consults the crash budget:
     ///
     /// - `crash_count < CRASH_THRESHOLD`: restart the subprocess in-place
-    ///   with a `100ms → 500ms → 2s` backoff (indexed by the new strike
-    ///   count), then retry the call exactly once on the fresh instance.
+    ///   with a `100ms → 500ms → 2s` backoff for subsequent calls. Return
+    ///   the current ambiguous error without replaying the request.
     /// - `crash_count >= CRASH_THRESHOLD`: return
     ///   [`SubprocessPluginError::PermissionDenied`] with `"auto-disabled
     ///   after 3 crashes"` — the plugin stays disabled for the lifetime of
@@ -562,6 +574,15 @@ impl SubprocessPluginRunner {
     /// A successful call resets the counter to zero (consecutive-only
     /// semantics — matches v0.6.5 Task 1.2's `PluginRunner` pattern).
     pub async fn call_tool(&self, name: &str, input: serde_json::Value) -> Result<ToolOutput> {
+        self.call_tool_with_effect_identity(name, input, None).await
+    }
+
+    pub async fn call_tool_with_effect_identity(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        effect: Option<crate::rpc::SubprocessToolEffectIdentity>,
+    ) -> Result<ToolOutput> {
         // Hard short-circuit: once disabled, every call fails fast.
         if self.crash_count.load(Ordering::Acquire) >= CRASH_THRESHOLD {
             return Err(SubprocessPluginError::PermissionDenied(format!(
@@ -570,28 +591,47 @@ impl SubprocessPluginRunner {
             )));
         }
 
-        match self.call_tool_once(name, &input).await {
+        match self.call_tool_once(name, &input, effect.as_ref()).await {
             Ok(out) => {
                 // Reset on success — consecutive-only semantics.
                 self.crash_count.store(0, Ordering::Release);
                 Ok(out)
             }
-            Err(err) if is_crash(&err) => {
-                self.record_crash_and_maybe_restart(name, input, err).await
-            }
+            Err(err) if is_crash(&err) => self.record_crash_and_maybe_restart(err).await,
             Err(other) => Err(other),
         }
     }
 
     /// Single attempt at `call_tool` — no restart logic. Factored out so
     /// the outer `call_tool` can wrap it with crash classification.
-    async fn call_tool_once(&self, name: &str, input: &serde_json::Value) -> Result<ToolOutput> {
-        let resp = self
-            .request(SubprocessVerb::CallTool {
+    async fn call_tool_once(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        effect: Option<&crate::rpc::SubprocessToolEffectIdentity>,
+    ) -> Result<ToolOutput> {
+        let verb = match (effect, self.supports_call_tool_v2.load(Ordering::Acquire)) {
+            (Some(effect), true) => SubprocessVerb::CallToolV2 {
                 name: name.to_string(),
                 input: input.clone(),
-            })
-            .await?;
+                effect: effect.clone(),
+            },
+            (Some(_), false) => {
+                debug!(
+                    plugin = %self.plugin_name,
+                    "subprocess plugin did not negotiate call_tool_v2; using opaque legacy call"
+                );
+                SubprocessVerb::CallTool {
+                    name: name.to_string(),
+                    input: input.clone(),
+                }
+            }
+            (None, _) => SubprocessVerb::CallTool {
+                name: name.to_string(),
+                input: input.clone(),
+            },
+        };
+        let resp = self.request(verb).await?;
         match resp.body {
             SubprocessResponseBody::CallToolResult {
                 stdout,
@@ -611,13 +651,11 @@ impl SubprocessPluginRunner {
         }
     }
 
-    /// Increment the crash counter; if still under threshold and we have a
-    /// factory, restart the subprocess and retry exactly once. If at or
-    /// over the threshold (or no factory), return the original error.
+    /// Increment the crash counter and, when possible, restart the subprocess
+    /// for the next call. The current call is never replayed: a transport loss
+    /// after write is ambiguous with respect to physical side effects.
     async fn record_crash_and_maybe_restart(
         &self,
-        name: &str,
-        input: serde_json::Value,
         original_err: SubprocessPluginError,
     ) -> Result<ToolOutput> {
         let prev = self.crash_count.fetch_add(1, Ordering::AcqRel);
@@ -713,23 +751,7 @@ impl SubprocessPluginRunner {
             return Err(original_err);
         }
 
-        // Retry the original call exactly once on the new instance.
-        match self.call_tool_once(name, &input).await {
-            Ok(out) => {
-                // Successful retry resets the counter — the prior strikes
-                // are forgiven once forward progress resumes.
-                self.crash_count.store(0, Ordering::Release);
-                Ok(out)
-            }
-            Err(e) => {
-                warn!(
-                    plugin = %self.plugin_name,
-                    error = %e,
-                    "subprocess retry after restart still failed"
-                );
-                Err(e)
-            }
-        }
+        Err(original_err)
     }
 
     /// Kill the current child + drain pending senders. Safe to call when

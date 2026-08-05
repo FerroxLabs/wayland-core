@@ -1,0 +1,49 @@
+=== FENCED SHARED-FILE EDITS, diffed against MERGE-BASE c6766f02498f7bc7dda1511108c1d59ef9741af0 (never against the branch name) ===
+Both edits are purely additive, in one contiguous block each, with no reordering,
+no reformatting and no drive-by cleanup. 28-02 also edits both files; expect a merge.
+
+diff --git a/crates/wcore-eval-scenarios/Cargo.toml b/crates/wcore-eval-scenarios/Cargo.toml
+index 302a9a33..f9f2689b 100644
+--- a/crates/wcore-eval-scenarios/Cargo.toml
++++ b/crates/wcore-eval-scenarios/Cargo.toml
+@@ -29,6 +29,14 @@ path = "bin/wcore-eval-fixture.rs"
+ name = "wayland-receipt"
+ path = "bin/wayland-receipt.rs"
+ 
++# Phase 29 (F29-01/F29-04): the only executable surface that mints or checks a
++# release manifest or a release state record. Adds no dependency — everything
++# it needs (ed25519-dalek, sha2, base64, rand, serde, serde_json, clap) is
++# already declared below.
++[[bin]]
++name = "wayland-release"
++path = "bin/wayland-release.rs"
++
+ # The independent delivery sink (Phase 24). A SEPARATE PROCESS on purpose: it
+ # is started before the gateway and outlives its kill and platform restart, so
+ # the arrivals journal is owned by something the gateway cannot write to except
+diff --git a/crates/wcore-eval-scenarios/src/lib.rs b/crates/wcore-eval-scenarios/src/lib.rs
+index b717efce..e9f0d1bb 100644
+--- a/crates/wcore-eval-scenarios/src/lib.rs
++++ b/crates/wcore-eval-scenarios/src/lib.rs
+@@ -63,6 +63,10 @@ pub mod qa;
+ pub mod receipt;
+ pub mod receipt_policy;
+ mod redaction;
++/// Phase 29 signed release manifest + role-scoped trust root (F29-01/F29-04).
++pub mod release_integrity;
++/// Phase 29 closed four-state release ledger (F29-04).
++pub mod release_states;
+ pub mod report;
+ pub mod runner;
+ pub mod scenario;
+
+=== full changed-path set under crates/ (surgical-diff gate input) ===
+crates/wcore-eval-scenarios/Cargo.toml
+crates/wcore-eval-scenarios/bin/wayland-release.rs
+crates/wcore-eval-scenarios/src/lib.rs
+crates/wcore-eval-scenarios/src/release_integrity.rs
+crates/wcore-eval-scenarios/src/release_states.rs
+crates/wcore-eval-scenarios/tests/release_integrity_contract.rs
+
+=== fenced paths asserted UNTOUCHED (empty = pass) ===
+(end — nothing listed above means all seven are untouched)

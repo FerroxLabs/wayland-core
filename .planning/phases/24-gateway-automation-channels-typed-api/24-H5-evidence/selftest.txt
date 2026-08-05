@@ -1,0 +1,34 @@
+ok   known-positive: a raw token is an exact arrival and is countable
+ok   known-negative: an unrelated reply is absent and is NOT excused as a fault
+ok   THE THIRD ASSERTION: the old matcher misses what the repaired one catches
+ok   a present-but-undecodable token grades FAULT, never absence
+ok   grader: a true assertion with a live control PASSES
+ok   grader: a false assertion FAILS even with a live control
+ok   THE UNIVERSAL-DENIAL TRAP: a true assertion with a ZERO control FAILS
+ok   grader: a control of exactly 1 is live and does not fail the leg
+ok   known-positive: a 200 submit is accepted
+ok   known-negative: a 404 submit is NOT accepted and is an instrument fault
+ok   a transport error is not silently read as accepted
+ok   THE THIRD ASSERTION: the old driver had no acceptance check at all
+ok   source scan: the driver posts to the documented route, not an invented one
+ok   known-positive: the driver's token matches the fixture's correlation regex
+ok   known-negative: the run-2 token shape is proven NOT to match
+ok   THE THIRD ASSERTION: the fixture regex is read from the fixture, not hardcoded blind
+ok   journal: an ABSENT file and an EMPTY file are distinguishable
+ok   journal: byte count is non-zero for a populated journal
+ok   source scan: the driver delegates correlation and never re-implements it
+ok   source scan: every recorded leg passes a positive control
+ok   posture matcher, known-positive: the repaired log yields Workspace
+ok   posture matcher, known-negative: the HALF-FIX log yields Conversational
+ok   posture matcher: the OLD arrivals-only shape would have missed the half-fix
+ok   posture matcher: an unobserved channel returns null, never the fallback
+ok   denial matcher, known-positive: a real denial line is SIGHTED
+ok   denial matcher, known-negative: no denial for a channel that was not denied
+ok   denial matcher: the OLD shape (absence of arrival) would have missed a dead pipe
+ok   ANSI repair, known-positive: real colourised bytes yield the real posture
+ok   ANSI repair, known-negative: a genuinely absent channel still reads null
+ok   THE THIRD ASSERTION: the pre-repair matcher would have missed these lines
+ok   both matchers: a channel name is escaped, not injected, into the pattern
+ok   source scan: the driver asks for the log target that carries the posture
+
+selftest: passed=32 failed=0

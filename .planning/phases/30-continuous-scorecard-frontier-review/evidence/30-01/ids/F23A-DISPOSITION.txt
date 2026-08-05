@@ -1,0 +1,19 @@
+EVIDENCE ID : F23A-DISPOSITION
+LEDGER ROW  : 15
+ARTIFACT    : `phases/23A-governed-skills/23A-04-SUMMARY.md` — Success Criterion 1 **NOT MET**: `promote`, `revoke`, `rollback` unimplemented, `observe` partial, and "cannot execute before governed promotion" satisfied only by the absence of any promotion path. Plans 23A-02/03/04 NOT STARTED. F23A-01-H1 fixed; F23A-01-H2 (any errored tool call kills the session) left open and committed red
+
+== PATH RESOLUTION ==
+[OK]   stat phases/23A-governed-skills/23A-04-SUMMARY.md
+       -> .planning/phases/23A-governed-skills/23A-04-SUMMARY.md  size=5177
+       head:
+---
+phase: 23A-governed-skills
+plan: "04"
+subsystem: governed-skills
+tags: [not-executed, blocked, phase-disposition]
+requires: [23A-01, 23A-02, 23A-03]
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

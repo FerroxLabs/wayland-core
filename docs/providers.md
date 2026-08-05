@@ -271,9 +271,14 @@ the standard `OLLAMA_HOST` environment variable.
 ### Requirements
 
 - The `wayland-ollama` plugin must be enabled in `plugins.toml`
-  (default: enabled). Disable via:
+  (default: enabled). That file sits beside `config.toml` in the app
+  config root — `~/.config/wayland-core/plugins.toml` on Linux,
+  `~/Library/Application Support/wayland-core/plugins.toml` on macOS,
+  `%APPDATA%\wayland-core\plugins.toml` on Windows; `WAYLAND_HOME`
+  overrides the root. Plugins are an array of tables keyed by `name`:
   ```toml
-  [plugins.wayland-ollama]
+  [[plugin]]
+  name = "wayland-ollama"
   enabled = false
   ```
 - A running Ollama daemon and a pulled model. See
@@ -303,11 +308,12 @@ wayland-core auth login chatgpt
 
 This opens your browser to OpenAI's sign-in page (a loopback PKCE flow on
 `http://localhost:1455/auth/callback`). Approve the request and the tokens are
-written **encrypted** to:
-
-```
-~/.wayland/oauth/chatgpt.json     # dir mode 0700, file mode 0600 on Unix
-```
+stored through the credential ladder — OS keyring, then the encrypted vault,
+then a refusal. There is no cleartext rung; see
+[Advanced → OAuth token storage](advanced.md#chatgpt-subscription-login-oauth)
+for the migration and refusal contract. `~/.wayland/oauth/chatgpt.json` is a
+pre-v0.12.26 artifact: it is read, promoted into the ladder, and deleted the
+first time the engine loads it.
 
 The stored access token is a JWT; your `chatgpt_account_id` is read from it (no
 separate API call) and sent as the `chatgpt-account-id` request header. Login
@@ -360,7 +366,7 @@ wayland-core auth login chatgpt --import-codex
 
 This reads `$CODEX_HOME/auth.json` (default `~/.codex/auth.json`), validates the
 file's ownership/permissions, decodes the account id, and stores the tokens
-under `~/.wayland/oauth/chatgpt.json`. `wayland-core auth status` also attempts a
+through the credential ladder. `wayland-core auth status` also attempts a
 one-shot import when no wayland token exists yet.
 
 ### Fallback
@@ -403,7 +409,9 @@ is **fresher**:
 
 ```
 ~/.grok/auth.json            # the Grok CLI's credential file ($GROK_HOME/auth.json when set)
-~/.wayland/oauth/xai.json    # the engine's own store (written by an app or a prior refresh)
+the credential ladder        # the engine's own store (written by an app or a prior refresh);
+                             # `~/.wayland/oauth/xai.json` is the pre-v0.12.26 form, read and
+                             # promoted into the ladder on first load
 ```
 
 Preferring the fresher file avoids racing the Grok CLI for the **single-use,
@@ -481,3 +489,47 @@ omit behaviour via the `omit_max_tokens_when_unsized` compat flag:
 [providers.my-router.compat]
 omit_max_tokens_when_unsized = true   # unknown model + omitted cap ⇒ omit the field
 ```
+
+### Image-generation model (`image_model`)
+
+The built-in `image_generate` tool posts to the active provider's OpenAI-wire
+`/v1/images/generations` endpoint. That endpoint's **model namespace is
+per-provider and does not follow your chat model** — a key issued for one
+provider is generally not entitled to another's image model. The default is
+therefore part of each provider's compat preset:
+
+| Provider | Default image model |
+|---|---|
+| `openai` | `gpt-image-1` |
+| `flux-router` | `flux-image` |
+| everything else | none — the tool falls back to `gpt-image-1` |
+
+Override per account when your key is entitled to a different model (for
+example an OpenAI org that only has `dall-e-3`):
+
+```toml
+[providers.openai.compat]
+image_model = "dall-e-3"
+```
+
+The `OPENAI_IMAGE_MODEL` environment variable still takes precedence over both
+the config value and the preset, and applies to whichever OpenAI-wire provider
+is active:
+
+```bash
+OPENAI_IMAGE_MODEL=dall-e-3 wayland-core -p openai "generate a logo"
+```
+
+> Previously there was a single global default of `gpt-image-1` for every
+> OpenAI-wire provider, so `image_generate` failed on a Flux Router session
+> unless the user knew to set `OPENAI_IMAGE_MODEL=flux-image` (F-27C3-04).
+
+Note this governs the **tool** only. The separate `wayland-core image`
+subcommand talks to Flux Router directly and takes its arm from `--model`
+(default `flux-image`).
+
+> **Measured 2026-07-31.** The subcommand default used to be
+> `flux-image-together-flux`, which returns HTTP 401 `unauthorized` from the live
+> router, while `flux-image` returns 200 with the same key. `GET /v1/models` lists
+> `flux-image` as the only image arm. F-27C3-04 fixed the tool path above but not this
+> one, so the subcommand shipped defaulting to a dead arm.

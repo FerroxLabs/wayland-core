@@ -1,0 +1,26 @@
+=== F25-03 LIVE NODE EXERCISE — controller hetzner-dsm — 2026-07-27T02:59:19Z ===
+binary: /root/wayland-25/target/release/wayland-core (wayland-core 0.12.25)
+commit: 644bd5877f819ae8b2aafd339e5d0cb0d7293d83
+far end: container 'f25-03-farnode' (hostname f25-farnode-box), own fs / own key / own netns
+
+### PAIR — pair the separate far end as node 'farnode'
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge 2678e6661497)
+paired 'farnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      node list
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+STATE: far-end key  bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+STATE: controller key d66f9b31b176e4b6c7307c0477c50fa9838635ab7004f047e6db92ecb4f8b300
+STATE: the far end proved possession of a key that is genuinely NOT the controller's, before any record was written

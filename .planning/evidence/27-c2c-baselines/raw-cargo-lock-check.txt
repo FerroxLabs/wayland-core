@@ -1,0 +1,36 @@
+=== which crate block changed ===
+diff --git a/Cargo.lock b/Cargo.lock
+index 7d47f475..5bab2e1d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -9831,24 +9831,25 @@ dependencies = [
+  "anyhow",
+  "axum",
+  "base64 0.22.1",
+  "clap",
+  "ed25519-dalek",
+  "futures",
+  "libc",
+  "portable-pty",
+  "rand 0.8.6",
+  "reqwest",
+  "serde",
+  "serde_json",
++ "serial_test",
+  "sha2 0.10.9",
+  "tempfile",
+  "thiserror 2.0.18",
+  "tokio",
+  "toml",
+  "tracing",
+  "vt100",
+  "wcore-config",
+  "wcore-egress",
+  "wcore-mcp",
+  "wcore-protocol",
+  "wcore-types",
+=== restore lock then try --locked ===
+lock_restored_diff=[]
+METADATA_LOCKED_RC=101
+error: cannot update the lock file /root/wayland-27c2c/Cargo.lock because --locked was passed to prevent this
+help: to generate the lock file without accessing the network, remove the --locked flag and use --offline instead.

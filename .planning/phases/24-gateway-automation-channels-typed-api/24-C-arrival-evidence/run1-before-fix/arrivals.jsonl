@@ -1,0 +1,10 @@
+{"seq":1,"ts":"1.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-01","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121776.346108752Z"}
+{"seq":2,"ts":"2.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-02","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121776.348193726Z"}
+{"seq":3,"ts":"3.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-03","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121776.349435418Z"}
+{"seq":4,"ts":"4.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-04","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121776.350604892Z"}
+{"seq":5,"ts":"5.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-05","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121776.351751200Z"}
+{"seq":6,"ts":"6.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-06","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121777.347096510Z"}
+{"seq":7,"ts":"7.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-07","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121777.348643873Z"}
+{"seq":8,"ts":"8.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-08","auth_fingerprint":"sha256:b08d6e44417c","answered":true,"at":"1785121777.349909331Z"}
+{"seq":9,"ts":"9.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-09","auth_fingerprint":"sha256:b08d6e44417c","answered":false,"at":"1785121777.351078955Z"}
+{"seq":10,"ts":"10.000000","endpoint":"chat.postMessage","conversation_id":"f24csink","text":"f24c-delivery-09","auth_fingerprint":"sha256:b08d6e44417c","answered":false,"at":"1785121784.032368578Z"}

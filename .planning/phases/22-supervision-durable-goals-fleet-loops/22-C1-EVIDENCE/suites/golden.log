@@ -1,0 +1,29 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/golden_v0_1_21.rs (target/debug/deps/golden_v0_1_21-f20d805e08c5cc31)
+
+running 22 tests
+test golden_error_without_msg_id_v0_1_21 ... ok
+test golden_error_v0_1_21 ... ok
+test golden_info_v0_1_21 ... ok
+test golden_config_changed_v0_1_21 ... ok
+test golden_each_w0_capability_flag_locks_its_documented_name ... ok
+test golden_mcp_ready_v0_1_21 ... ok
+test golden_ready_v0_1_21 ... ok
+test golden_pong_v0_1_21 ... ok
+test golden_ready_with_cost_attribution_advertised ... ok
+test golden_session_cost_empty_per_turn ... ok
+test golden_session_cost_v_w6 ... ok
+test golden_stream_end_error_v0_1_21 ... ok
+test golden_stream_end_every_finish_reason_serializes_snake_case ... ok
+test golden_stream_end_no_new_keys_when_unset_279 ... ok
+test golden_stream_end_length_v0_1_21 ... ok
+test golden_stream_end_stop_v0_1_21 ... ok
+test golden_stream_end_with_new_keys_when_set_279 ... ok
+test golden_stream_start_v0_1_21 ... ok
+test golden_text_delta_v0_1_21 ... ok
+test golden_thinking_v0_1_21 ... ok
+test golden_tool_cancelled_v0_1_21 ... ok
+test golden_usage_with_full_cache_fields_v0_1_21 ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

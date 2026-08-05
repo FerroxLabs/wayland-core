@@ -61,7 +61,8 @@ pub enum AuthCmd {
     ///
     /// Currently only `chatgpt` (aliases: `openai-chatgpt`) is wired: it
     /// runs the loopback PKCE flow against OpenAI's Codex client and stores
-    /// the tokens encrypted under `~/.wayland/oauth/chatgpt.json`.
+    /// the tokens in the credential ladder (OS keyring, else the encrypted
+    /// vault). It fails rather than writing them in cleartext.
     Login {
         /// Subscription provider to sign in to (`chatgpt`).
         provider: String,
@@ -169,6 +170,82 @@ fn providers_table(doc: &Table) -> Option<&Table> {
     doc.get("providers").and_then(toml::Value::as_table)
 }
 
+/// Open the credential ladder that sits beside `config_path`.
+///
+/// Derived from `config_path` rather than from `credentials_storage_path()` for
+/// two reasons, and both matter. In production they are the same path —
+/// `credentials_storage_path()` is literally `app_config_dir().join(
+/// "credentials.toml")`, i.e. the sibling of `config.toml`. In a test that
+/// drives [`run_with_path`] against a tempdir they are NOT: an ambient store
+/// path would make `cargo test` write into the developer's real credentials
+/// store. Deriving it keeps the CRUD verbs scoped to whatever config they were
+/// pointed at.
+///
+/// `[storage.credentials]` is read out of the same document, so `auth add`
+/// honours the operator's configured backend — including an explicit
+/// `backend = "plaintext"` opt-in.
+fn credentials_store(
+    config_path: &std::path::Path,
+    doc: &Table,
+) -> Result<Box<dyn wcore_config::credentials::CredentialsStore>> {
+    let storage: wcore_config::credentials::CredentialsStorageConfig = doc
+        .get("storage")
+        .and_then(toml::Value::as_table)
+        .and_then(|s| s.get("credentials"))
+        .cloned()
+        .map(toml::Value::try_into)
+        .transpose()
+        .context("parsing [storage.credentials]")?
+        .unwrap_or_default();
+    let store_path = config_path.with_file_name("credentials.toml");
+    wcore_config::credentials::open_store(&storage, &store_path)
+        .with_context(|| format!("opening the credentials store at {}", store_path.display()))
+}
+
+/// The `providers.<slug>.api_key` store slot for a CLI [`Provider`].
+///
+/// Every provider the `auth` recognizer knows is a bearer-key provider, so this
+/// is total in practice; the `Option` mirrors
+/// [`wcore_config::config::credentials_store_key`], which returns `None` for the
+/// out-of-band providers (Bedrock/Vertex/ChatGPT) that `auth add` cannot reach.
+fn store_slot(provider: Provider) -> Option<String> {
+    let provider_type = wcore_config::config::provider_type_from_slug(provider.slug())?;
+    wcore_config::config::credentials_store_key(provider_type)
+}
+
+/// Read a provider's LEGACY cleartext key out of `[providers.<slug>].api_key`.
+///
+/// This sink predates the credentials store and still OUTRANKS it in
+/// [`resolve_api_key`](wcore_config::config) (cli → config → store → env), so a
+/// value here shadows anything `auth add` writes into the ladder. `auth add`
+/// therefore removes it after a successful secure write; `auth list` reports it
+/// so an operator can see what is still in cleartext.
+fn legacy_config_key(doc: &Table, slug: &str) -> Option<String> {
+    providers_table(doc)?
+        .get(slug)?
+        .as_table()?
+        .get("api_key")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Drop `[providers.<slug>].api_key` from `doc`. Returns whether anything was
+/// removed. The rest of the provider table (`base_url`, `model`, …) is
+/// preserved — only the secret leaves.
+fn strip_legacy_config_key(doc: &mut Table, slug: &str) -> bool {
+    let Some(providers) = doc.get_mut("providers").and_then(toml::Value::as_table_mut) else {
+        return false;
+    };
+    let Some(table) = providers.get_mut(slug).and_then(toml::Value::as_table_mut) else {
+        return false;
+    };
+    let removed = table.remove("api_key").is_some();
+    if table.is_empty() {
+        providers.remove(slug);
+    }
+    removed
+}
+
 /// Get-or-insert the `[providers]` sub-table as mutable.
 fn providers_table_mut(doc: &mut Table) -> Result<&mut Table> {
     let entry = doc
@@ -229,33 +306,73 @@ fn resolve_provider(arg: &str, key: &str) -> Result<Provider> {
     })
 }
 
+/// List every provider that has a key, from BOTH locations.
+///
+/// Two locations, because there are two: the credential ladder (where `auth
+/// add` now writes) and the legacy `[providers.<slug>].api_key` cleartext sink
+/// (where it used to, and where an existing install's keys still are). Showing
+/// only one would make the other invisible — and the invisible one is the
+/// cleartext one, which is exactly backwards.
+///
+/// The WHERE column is the point of the change: a user has to be able to see
+/// which of their keys are still sitting in cleartext.
 fn list_cmd(config_path: &std::path::Path) -> Result<()> {
     let doc = load_doc(config_path)?;
-    let Some(providers) = providers_table(&doc) else {
-        println!("No providers configured. Add one with `wayland-core auth add <provider> <key>`.");
-        return Ok(());
+
+    // Every slug that could hold a key, from either side.
+    let mut slugs: Vec<String> = providers_table(&doc)
+        .map(|providers| providers.keys().cloned().collect())
+        .unwrap_or_default();
+    for provider in Provider::ALL {
+        if !slugs.iter().any(|s| s == provider.slug()) {
+            slugs.push(provider.slug().to_string());
+        }
+    }
+    slugs.sort();
+
+    // A store that will not open is reported, not silently treated as empty —
+    // "no providers configured" when the store is merely unreachable is the
+    // shape that sends a user to re-enter a key they already have.
+    let store = match credentials_store(config_path, &doc) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            eprintln!("warning: could not open the credentials store: {error:#}");
+            None
+        }
     };
-    if providers.is_empty() {
+
+    let mut rows: Vec<(String, String, &'static str)> = Vec::new();
+    for slug in &slugs {
+        let stored = store
+            .as_ref()
+            .zip(Provider::from_slug(slug).and_then(store_slot))
+            .and_then(|(store, slot)| store.get(&slot).ok().flatten());
+        if let Some(key) = stored {
+            rows.push((slug.clone(), mask_key(&key), "credentials store"));
+            continue;
+        }
+        if let Some(key) = legacy_config_key(&doc, slug) {
+            rows.push((slug.clone(), mask_key(&key), "config.toml (CLEARTEXT)"));
+        }
+    }
+
+    if rows.is_empty() {
         println!("No providers configured. Add one with `wayland-core auth add <provider> <key>`.");
         return Ok(());
     }
-    // Sort by slug for stable output.
-    let mut rows: Vec<(&String, String)> = providers
-        .iter()
-        .map(|(slug, tbl)| {
-            let key = tbl
-                .as_table()
-                .and_then(|t| t.get("api_key"))
-                .and_then(toml::Value::as_str)
-                .map(mask_key)
-                .unwrap_or_else(|| "(no api_key set)".to_string());
-            (slug, key)
-        })
-        .collect();
-    rows.sort_by(|a, b| a.0.cmp(b.0));
-    println!("{:<14} API KEY", "PROVIDER");
-    for (slug, masked) in rows {
-        println!("{slug:<14} {masked}");
+    println!("{:<14} {:<24} WHERE", "PROVIDER", "API KEY");
+    let mut any_cleartext = false;
+    for (slug, masked, where_) in rows {
+        any_cleartext |= where_.contains("CLEARTEXT");
+        println!("{slug:<14} {masked:<24} {where_}");
+    }
+    if any_cleartext {
+        println!();
+        println!(
+            "One or more keys are stored UNENCRYPTED in {}. Re-run \
+             `wayland-core auth add <provider> <key>` to move them into the credentials store.",
+            config_path.display()
+        );
     }
     Ok(())
 }
@@ -286,18 +403,48 @@ fn add_cmd(
 
     let mut doc = load_doc(config_path)?;
     let slug = provider.slug();
-    let existed = providers_table(&doc).and_then(|p| p.get(slug)).is_some();
-    {
-        let providers = providers_table_mut(&mut doc)?;
-        let entry = providers
-            .entry(slug.to_string())
-            .or_insert_with(|| toml::Value::Table(Table::new()));
-        let tbl = entry
-            .as_table_mut()
-            .with_context(|| format!("`providers.{slug}` in config is not a table"))?;
-        tbl.insert("api_key".to_string(), toml::Value::String(key.to_string()));
+    let Some(slot) = store_slot(provider) else {
+        bail!(
+            "{} authenticates out-of-band and has no API key slot",
+            provider.label()
+        );
+    };
+
+    let store = credentials_store(config_path, &doc)?;
+    let existed =
+        store.get(&slot).unwrap_or_default().is_some() || legacy_config_key(&doc, slug).is_some();
+
+    // The ladder, not the config file. `[providers.<slug>].api_key` is a
+    // CLEARTEXT sink and it was this command's only destination: `auth add` was
+    // the documented way to hand us a key and it wrote it, unencrypted, into
+    // config.toml. A refusal here is the ladder failing closed and it is
+    // surfaced verbatim — there is no cleartext branch to take instead.
+    store
+        .put(&slot, key)
+        .with_context(|| format!("storing the {} API key", provider.label()))?;
+
+    // NON-VACUITY, at runtime: never report a write we cannot read back.
+    match store.get(&slot) {
+        Ok(Some(read_back)) if read_back == key => {}
+        _ => bail!(
+            "the {} API key was accepted by the credentials store but did not read back; \
+             refusing to report a save that did not happen",
+            provider.label()
+        ),
     }
-    save_doc(&doc, config_path)?;
+
+    // Only now remove the legacy cleartext copy. It OUTRANKS the store in
+    // `resolve_api_key`, so leaving it would mean the key just stored is
+    // shadowed by the old one — a silent no-op from the user's point of view.
+    if strip_legacy_config_key(&mut doc, slug) {
+        save_doc(&doc, config_path)?;
+        println!(
+            "Removed the cleartext copy of this key from {} — it is now held only by the \
+             credentials store.",
+            config_path.display()
+        );
+    }
+
     if existed {
         println!("Updated API key for {} ({slug}).", provider.label());
     } else {
@@ -317,12 +464,34 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
     })?;
     let slug = provider.slug();
 
+    // BOTH locations. A remove that clears only one leaves the key resolvable
+    // from the other, and the one it would leave behind is the cleartext one.
     let mut doc = load_doc(config_path)?;
-    let removed = providers_table_mut(&mut doc)?.remove(slug).is_some();
-    if !removed {
+    let removed_config = providers_table_mut(&mut doc)?.remove(slug).is_some();
+
+    let removed_store = match (credentials_store(config_path, &doc), store_slot(provider)) {
+        (Ok(store), Some(slot)) => {
+            let had = store.get(&slot).unwrap_or_default().is_some();
+            store.delete(&slot).with_context(|| {
+                format!("removing the {} API key from the store", provider.label())
+            })?;
+            had
+        }
+        (Err(error), _) => {
+            // Report rather than swallow: a user told "removed" while the key
+            // is still in a store we could not open has been actively misled.
+            eprintln!("warning: could not open the credentials store: {error:#}");
+            false
+        }
+        (_, None) => false,
+    };
+
+    if !removed_config && !removed_store {
         bail!("no API key configured for {} ({slug})", provider.label());
     }
-    save_doc(&doc, config_path)?;
+    if removed_config {
+        save_doc(&doc, config_path)?;
+    }
     println!("Removed API key for {} ({slug}).", provider.label());
     Ok(())
 }
@@ -383,33 +552,21 @@ fn import_codex_login() -> Result<()> {
 
 /// `wayland-core auth logout chatgpt`.
 ///
-/// C5: removing the on-disk token is not enough — also unlink any
-/// `*.json.tmp` orphan left by an interrupted atomic write. A live
-/// `ChatGptTokenManager` cache cannot be reached from this short-lived CLI
-/// process (there is no live engine), so there is nothing in-memory to clear
-/// here; the manager built at the next engine start re-reads the (now
-/// missing) file. NotFound on the token file is treated as already-logged-out.
+/// C5: removing the on-disk token is not enough — the login now lives in the
+/// credential ladder, and a pre-migration cleartext file (plus any `*.json.tmp`
+/// orphan from an interrupted atomic write) may still exist beside it.
+/// [`OAuthStorage::delete`] clears BOTH tiers; deleting only the file would
+/// leave the user signed in through the ladder. A live `ChatGptTokenManager`
+/// cache cannot be reached from this short-lived CLI process (there is no live
+/// engine), so there is nothing in-memory to clear here; the manager built at
+/// the next engine start re-reads the (now empty) store.
 async fn logout_cmd(provider_arg: &str) -> Result<()> {
     let provider = resolve_oauth_provider(provider_arg)?;
     let storage = OAuthStorage::from_home().map_err(|e| anyhow!("opening token store: {e}"))?;
-    let path = storage.path_for(provider);
 
-    let removed = match std::fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => return Err(anyhow!("removing {}: {e}", path.display())),
-    };
-
-    // Unlink any orphaned temp file from an interrupted atomic write so a
-    // stale half-written token cannot resurrect a logged-out session.
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::remove_file(&tmp)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        // Best-effort: a leftover tmp that can't be removed is not fatal to a
-        // logout whose real token file is gone.
-        tracing::warn!(error = %e, path = %tmp.display(), "could not remove orphaned oauth tmp file");
-    }
+    let removed = storage
+        .delete(provider)
+        .map_err(|e| anyhow!("removing the stored token: {e}"))?;
 
     if removed {
         println!("Signed out of ChatGPT. The stored OAuth token was removed.");
@@ -437,8 +594,23 @@ async fn status_cmd() -> Result<()> {
             // sees signed-in status without an explicit import step.
             match chatgpt::import_codex_cli_tokens() {
                 Ok(t) => {
-                    let _ = storage.store(chatgpt::PROVIDER, &t);
-                    println!("(imported an existing ChatGPT login from the Codex CLI)");
+                    // The store can REFUSE (no secure rung on this host), and
+                    // discarding that refusal is what let `auth status` print
+                    // "signed in" on the same host where `auth login` printed a
+                    // loud refusal. The imported tokens are genuinely valid, so
+                    // still report them — but say plainly that nothing was
+                    // saved, or the next command silently reports logged out.
+                    match storage.store(chatgpt::PROVIDER, &t) {
+                        Ok(()) => {
+                            println!("(imported an existing ChatGPT login from the Codex CLI)");
+                        }
+                        Err(error) => {
+                            println!(
+                                "(found an existing ChatGPT login in the Codex CLI, but it \
+                                 could NOT be saved to this profile)\n{error}"
+                            );
+                        }
+                    }
                     Some(t)
                 }
                 Err(_) => None,
@@ -606,21 +778,72 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    /// Read the stored api_key for a slug straight out of the config
-    /// file — the assertion seam for the write paths.
+    /// Read the stored api_key for a slug back out of the CREDENTIALS STORE —
+    /// the assertion seam for the write paths, and it moved.
+    ///
+    /// It used to read `[providers.<slug>].api_key` out of `config.toml`,
+    /// because that is where `auth add` wrote it: in cleartext, outranking the
+    /// credentials store in `resolve_api_key`. Asserting there now would assert
+    /// the defect.
     fn stored_key(config_path: &std::path::Path, slug: &str) -> Option<String> {
         let doc = load_doc(config_path).expect("load config");
-        providers_table(&doc)?
-            .get(slug)?
-            .as_table()?
-            .get("api_key")?
-            .as_str()
-            .map(|s| s.to_string())
+        let store = credentials_store(config_path, &doc).expect("open store");
+        store.get(&store_slot(Provider::from_slug(slug)?)?).ok()?
+    }
+
+    /// Scope the ladder for a test: `WAYLAND_HOME` forces the isolated-profile
+    /// path (so the OS keyring is never touched — a test that wrote into the
+    /// developer's real Keychain would be a defect in itself), and a passphrase
+    /// mounts the in-home encrypted vault so there IS a secure tier to write to.
+    struct LadderEnv {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl LadderEnv {
+        fn scoped(home: &std::path::Path) -> Self {
+            let pairs: [(&'static str, Option<String>); 3] = [
+                ("WAYLAND_HOME", Some(home.display().to_string())),
+                (
+                    "WAYLAND_VAULT_PASSPHRASE",
+                    Some("auth-test-passphrase".into()),
+                ),
+                ("WAYLAND_VAULT_PASSPHRASE_FD", None),
+            ];
+            let saved = pairs
+                .iter()
+                .map(|(key, value)| {
+                    let prior = std::env::var_os(key);
+                    unsafe {
+                        match value {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                    (*key, prior)
+                })
+                .collect();
+            Self { saved }
+        }
+    }
+
+    impl Drop for LadderEnv {
+        fn drop(&mut self) {
+            for (key, prior) in &self.saved {
+                unsafe {
+                    match prior {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
     }
 
     #[test]
-    fn add_no_validate_writes_the_provider_key() {
+    #[serial_test::serial(auth_credentials_env)]
+    fn add_no_validate_stores_the_provider_key_and_never_writes_it_in_cleartext() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         run_with_path(
             AuthCmd::Add {
@@ -631,15 +854,138 @@ mod tests {
             &path,
         )
         .unwrap();
+        // NON-VACUITY: readable back from the store it should have landed in.
         assert_eq!(
             stored_key(&path, "anthropic").as_deref(),
             Some("sk-ant-test-123")
         );
+        // And nowhere in cleartext. `auth add` used to write exactly here.
+        let config_body = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !config_body.contains("sk-ant-test-123"),
+            "auth add wrote the key into config.toml in cleartext: {config_body}"
+        );
+        let cleartext_store = dir.path().join("credentials.toml");
+        assert!(
+            !cleartext_store.exists(),
+            "auth add must not create a cleartext credentials file"
+        );
+        assert!(
+            dir.path().join("credentials.enc").exists(),
+            "the key must have landed in the encrypted vault"
+        );
+    }
+
+    /// `auth add` MIGRATES a pre-existing cleartext key rather than leaving it
+    /// to shadow the new one: `[providers.<slug>].api_key` outranks the store in
+    /// `resolve_api_key`, so a stale cleartext copy would make the secure write
+    /// a silent no-op from the user's point of view.
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn add_strips_a_pre_existing_cleartext_key_that_would_shadow_the_store() {
+        let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[providers.anthropic]\napi_key = \"sk-ant-OLD-cleartext\"\nbase_url = \"https://x\"\n",
+        )
+        .unwrap();
+
+        run_with_path(
+            AuthCmd::Add {
+                provider: "anthropic".to_string(),
+                key: "sk-ant-NEW".to_string(),
+                no_validate: true,
+            },
+            &path,
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_key(&path, "anthropic").as_deref(),
+            Some("sk-ant-NEW")
+        );
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("sk-ant-OLD-cleartext"),
+            "the shadowing cleartext key must be removed: {body}"
+        );
+        assert!(
+            body.contains("https://x"),
+            "only the secret leaves — the rest of the provider table stays: {body}"
+        );
+    }
+
+    /// Fail-closed reaches the CLI. With no keyring (isolated) and no vault
+    /// passphrase there is no secure tier, and `auth add` must refuse with the
+    /// actionable message rather than falling back to cleartext.
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn add_refuses_rather_than_writing_cleartext_when_no_secure_tier_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = [
+            "WAYLAND_HOME",
+            "WAYLAND_VAULT_PASSPHRASE",
+            "WAYLAND_VAULT_PASSPHRASE_FD",
+        ]
+        .iter()
+        .map(|key| {
+            let prior = std::env::var_os(key);
+            unsafe {
+                if *key == "WAYLAND_HOME" {
+                    std::env::set_var(key, dir.path());
+                } else {
+                    std::env::remove_var(key);
+                }
+            }
+            (*key, prior)
+        })
+        .collect();
+
+        let err = run_with_path(
+            AuthCmd::Add {
+                provider: "anthropic".to_string(),
+                key: "sk-ant-refused".to_string(),
+                no_validate: true,
+            },
+            &path,
+        )
+        .unwrap_err();
+
+        for (key, prior) in saved {
+            unsafe {
+                match prior {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("WAYLAND_VAULT_PASSPHRASE"),
+            "the refusal must be actionable: {rendered}"
+        );
+        assert!(
+            !path.exists()
+                || !fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("sk-ant-refused"),
+            "a refused add must not write the key into config.toml"
+        );
+        assert!(
+            !dir.path().join("credentials.toml").exists(),
+            "a refused add must not create a cleartext credentials file"
+        );
     }
 
     #[test]
+    #[serial_test::serial(auth_credentials_env)]
     fn autodetect_resolves_provider_from_key_prefix() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         run_with_path(
             AuthCmd::Add {
@@ -694,8 +1040,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(auth_credentials_env)]
     fn add_replaces_an_existing_key_in_place() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         let add = |key: &str| {
             run_with_path(
@@ -717,8 +1065,10 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(auth_credentials_env)]
     fn add_preserves_other_config_tables() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         // Seed a config with an unrelated table and a default section.
         fs::write(
@@ -752,8 +1102,10 @@ mod tests {
     }
 
     #[test]
-    fn remove_drops_the_provider_table() {
+    #[serial_test::serial(auth_credentials_env)]
+    fn remove_clears_the_key_from_both_the_store_and_the_legacy_config_table() {
         let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
         let path = dir.path().join("config.toml");
         run_with_path(
             AuthCmd::Add {
@@ -765,6 +1117,23 @@ mod tests {
         )
         .unwrap();
         assert!(stored_key(&path, "xai").is_some());
+
+        // Reintroduce a legacy cleartext copy by hand, so the removal has to
+        // clear BOTH locations. A remove that cleared only the store would
+        // leave the cleartext one resolvable — and outranking.
+        let mut doc = load_doc(&path).unwrap();
+        providers_table_mut(&mut doc)
+            .unwrap()
+            .entry("xai".to_string())
+            .or_insert_with(|| toml::Value::Table(Table::new()))
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "api_key".to_string(),
+                toml::Value::String("xai-legacy".into()),
+            );
+        save_doc(&doc, &path).unwrap();
+
         run_with_path(
             AuthCmd::Remove {
                 provider: "xai".to_string(),
@@ -772,7 +1141,14 @@ mod tests {
             &path,
         )
         .unwrap();
-        assert!(stored_key(&path, "xai").is_none());
+        assert!(
+            stored_key(&path, "xai").is_none(),
+            "store copy must be gone"
+        );
+        assert!(
+            legacy_config_key(&load_doc(&path).unwrap(), "xai").is_none(),
+            "legacy cleartext copy must be gone too"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -178,6 +178,22 @@ impl Tool for GlobTool {
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Info
+    }
+
+    /// Pattern matching mutates nothing, so a failure — including a refused
+    /// traversal pattern — is authoritative rather than an ambiguous external
+    /// effect. See the note on `ReadTool::effect_contract` (live UAT D1).
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        ToolEffectContract {
+            kind: ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        }
+    }
+
+    /// Pattern matching walks the tree and returns paths. No input it accepts
+    /// can turn it into a mutation. Safe under `read_only`.
+    fn read_only_safe(&self, _input: &Value) -> bool {
+        true
     }
 
     fn describe(&self, input: &Value) -> String {

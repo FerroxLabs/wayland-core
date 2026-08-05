@@ -23,8 +23,8 @@ pub struct BuiltinToolsConfig {
 /// round-trip. With deferral on, only the tools on `hot_allowlist` ship
 /// their full schema. Everything else (cold built-ins + MCP tools) is —
 /// with `catalog` on (default) — folded into a single compact,
-/// name-only inventory line inside ToolSearch's own description (the
-/// openclaw pattern: no per-tool stub entries at all). With `catalog`
+/// name-only inventory line inside ToolSearch's own description (no
+/// per-tool stub entries at all). With `catalog`
 /// off, cold tools fall back to individual name + truncated-description
 /// stub entries. Either way the model hydrates on demand via `ToolSearch`.
 ///

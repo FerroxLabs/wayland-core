@@ -2,6 +2,7 @@
 name = "wcore-fixture-harness"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 description = "Customer-fixture catalog and replay harness for T6 app-integration tests."
 
 # See .blackboard/E2E-TESTING-STRATEGY-2026-05-24.md §3.5 T6 for the full design.

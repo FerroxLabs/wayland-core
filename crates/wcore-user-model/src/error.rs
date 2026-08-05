@@ -14,6 +14,11 @@ pub enum UserModelError {
     /// `wcore-honcho-adapter::select_backend_from_env`.
     #[error("backend config: {0}")]
     Config(String),
+    /// Caller supplied something this crate refuses to store — e.g. an empty
+    /// correction key or value. Distinct from `Rejected`, which reports a
+    /// remote backend's refusal rather than a local validation failure.
+    #[error("invalid input: {0}")]
+    Invalid(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("json: {0}")]

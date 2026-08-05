@@ -57,6 +57,31 @@ fn run_isolated(args: &[&str], home: &Path) -> Output {
         .unwrap_or_else(|e| panic!("failed to spawn {} {:?}: {e}", binary(), args))
 }
 
+/// [`run_isolated`] plus a vault passphrase, so the credential ladder has a
+/// secure tier to write into.
+///
+/// `WAYLAND_HOME` already keeps the OS keyring out of the picture (an isolated
+/// profile must never touch the process-global credential store), which means
+/// the encrypted vault is the ONLY rung available — and without unlock material
+/// the ladder correctly refuses every write. Any test that exercises a
+/// credential WRITE therefore has to supply this, on every platform, which is
+/// what makes the CRUD round trip below host-independent instead of passing on
+/// a developer laptop and failing on the headless gate host.
+fn run_isolated_with_vault(args: &[&str], home: &Path) -> Output {
+    Command::new(binary())
+        .args(args)
+        .current_dir(home)
+        .env("HOME", home)
+        .env("WAYLAND_HOME", home)
+        .env("WAYLAND_VAULT_PASSPHRASE", "harness-vault-passphrase")
+        .env_remove("WAYLAND_VAULT_PASSPHRASE_FD")
+        .env_remove("API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {} {:?}: {e}", binary(), args))
+}
+
 /// Convenience: run with `args`, no HOME isolation needed (pure
 /// argument-parsing subcommands like `--version` / `--help`).
 fn run(args: &[&str]) -> Output {
@@ -143,6 +168,85 @@ fn auth_list_on_a_fresh_config_reports_no_providers() {
     );
 }
 
+/// The ladder's refusal has to reach the USER, through the real binary.
+///
+/// A correct store is worthless if the surface around it routes the user past
+/// it, and `auth add` was the documented way to hand us a key — it wrote
+/// `[providers.<slug>].api_key` in cleartext. With no keyring (isolated home)
+/// and no vault passphrase there is no secure tier, so the command must exit
+/// NON-ZERO with an actionable message and leave nothing behind.
+#[test]
+fn auth_add_without_a_secure_tier_refuses_and_writes_no_cleartext() {
+    let home = TempDir::new().expect("create tempdir HOME");
+    let api_key = "sk-ant-refused-abcdefghijklmnop";
+    // `run_isolated` deliberately supplies NO vault passphrase.
+    let out = run_isolated(
+        &["auth", "add", "anthropic", api_key, "--no-validate"],
+        home.path(),
+    );
+
+    assert!(
+        !out.status.success(),
+        "`auth add` with no secure tier must FAIL; it exited 0. stdout: {}",
+        stdout_of(&out)
+    );
+    let rendered = format!("{}{}", stdout_of(&out), stderr_of(&out));
+    assert!(
+        rendered.contains("WAYLAND_VAULT_PASSPHRASE"),
+        "the refusal must name the way forward; got: {rendered}"
+    );
+
+    // NON-VACUITY FOR THE SCANNER, planted first. A refused `auth add` writes
+    // NOTHING — not even a log line, since `RotatingLog` materialises on its
+    // first record — so "the scan found no cleartext" would otherwise be true
+    // of an empty directory and would prove nothing. Prove the scanner can
+    // actually find the needle before trusting it not to.
+    let control = TempDir::new().expect("create control dir");
+    std::fs::write(control.path().join("planted.txt"), api_key).unwrap();
+    assert!(
+        find_cleartext(control.path(), api_key).is_some(),
+        "the cleartext scanner cannot find a planted key, so it cannot fail"
+    );
+
+    // Now the real assertion: nothing anywhere under HOME, in any file.
+    if let Some(leaked) = find_cleartext(home.path(), api_key) {
+        panic!(
+            "the refused key was written in cleartext to {}",
+            leaked.display()
+        );
+    }
+}
+
+/// Recursively byte-scan every file under `root` for `needle`, returning the
+/// first file that contains it.
+///
+/// A per-path check ("config.toml does not contain it") is satisfied by a leak
+/// into any file the test forgot to name — a temp file, a log, a `.env`. This
+/// walks the tree instead.
+fn find_cleartext(root: &Path, needle: &str) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 #[test]
 fn auth_add_list_remove_is_a_full_crud_round_trip() {
     let home = TempDir::new().expect("create tempdir HOME");
@@ -152,7 +256,7 @@ fn auth_add_list_remove_is_a_full_crud_round_trip() {
     // touches the network. The key is long enough that `mask_key` keeps
     // a head + tail (short keys are fully masked).
     let api_key = "sk-ant-harness-abcdefghijklmnop";
-    let add = run_isolated(
+    let add = run_isolated_with_vault(
         &["auth", "add", "anthropic", api_key, "--no-validate"],
         home.path(),
     );
@@ -169,7 +273,7 @@ fn auth_add_list_remove_is_a_full_crud_round_trip() {
     );
 
     // --- LIST shows the masked key -----------------------------------
-    let list = run_isolated(&["auth", "list"], home.path());
+    let list = run_isolated_with_vault(&["auth", "list"], home.path());
     assert!(list.status.success(), "`auth list` after add must exit 0");
     let list_out = stdout_of(&list);
     assert!(
@@ -188,7 +292,7 @@ fn auth_add_list_remove_is_a_full_crud_round_trip() {
     );
 
     // --- REMOVE ------------------------------------------------------
-    let remove = run_isolated(&["auth", "remove", "anthropic"], home.path());
+    let remove = run_isolated_with_vault(&["auth", "remove", "anthropic"], home.path());
     assert!(
         remove.status.success(),
         "`auth remove` must exit 0; status {:?}, stderr: {}",
@@ -202,7 +306,7 @@ fn auth_add_list_remove_is_a_full_crud_round_trip() {
     );
 
     // --- LIST is empty again — the round trip closed -----------------
-    let list_again = run_isolated(&["auth", "list"], home.path());
+    let list_again = run_isolated_with_vault(&["auth", "list"], home.path());
     assert!(
         list_again.status.success(),
         "`auth list` after remove must exit 0"

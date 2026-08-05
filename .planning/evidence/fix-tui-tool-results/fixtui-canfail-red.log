@@ -1,0 +1,56 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-fixtui/crates/wcore-cli)
+warning: unused imports: `first_line_preview` and `join_facts`
+  --> crates/wcore-cli/src/tui/tool_formatters/bash.rs:46:13
+   |
+46 | use super::{first_line_preview, join_facts, raw_text};
+   |             ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-cli` (lib) generated 1 warning (run `cargo fix --lib -p wcore-cli` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.02s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/tool_formatter_real_payloads.rs (target/debug/deps/tool_formatter_real_payloads-871b4662ad23582d)
+
+running 6 tests
+test json_tools_read_the_keys_their_sources_actually_emit ... ok
+test formatter_never_invents_on_an_empty_payload ... FAILED
+test write_then_edit_then_read_render_the_tools_own_words ... ok
+test bash_stderr_is_surfaced ... FAILED
+test bash_success_renders_the_real_exit_code_and_byte_count ... FAILED
+test bash_failure_never_reports_exit_zero ... FAILED
+
+failures:
+
+---- formatter_never_invents_on_an_empty_payload stdout ----
+
+thread 'formatter_never_invents_on_an_empty_payload' (1653007) panicked at crates/wcore-cli/tests/tool_formatter_real_payloads.rs:220:9:
+Bash: fabricated a `?` placeholder on an empty payload: Ran `?` Â· exit 0 Â· 0 bytes
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- bash_stderr_is_surfaced stdout ----
+
+thread 'bash_stderr_is_surfaced' (1653005) panicked at crates/wcore-cli/tests/tool_formatter_real_payloads.rs:166:5:
+wrong exit code: Ran `?` Â· exit 0 Â· 0 bytes
+
+---- bash_success_renders_the_real_exit_code_and_byte_count stdout ----
+
+thread 'bash_success_renders_the_real_exit_code_and_byte_count' (1653006) panicked at crates/wcore-cli/tests/tool_formatter_real_payloads.rs:130:5:
+byte count still wrong (was always 0): Ran `?` Â· exit 0 Â· 0 bytes
+
+---- bash_failure_never_reports_exit_zero stdout ----
+
+thread 'bash_failure_never_reports_exit_zero' (1653004) panicked at crates/wcore-cli/tests/tool_formatter_real_payloads.rs:149:5:
+real non-zero exit code missing: Ran `?` Â· exit 0 Â· 0 bytes
+
+
+failures:
+    bash_failure_never_reports_exit_zero
+    bash_stderr_is_surfaced
+    bash_success_renders_the_real_exit_code_and_byte_count
+    formatter_never_invents_on_an_empty_payload
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+error: test failed, to rerun pass `-p wcore-cli --test tool_formatter_real_payloads`

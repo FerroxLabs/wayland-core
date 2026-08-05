@@ -1,0 +1,6 @@
+# AUTH-05 -- do the named retained evidence refs still resolve?
+# deleting a retained evidence ref is itself a reserved action
+refs/f20a/candidate type=commit sha=9821ef7603ac1e687b600cda591af1657c883484
+refs/tags/f20a-candidate-9821ef76 type=tag sha=48601e469b3a3fca524811cc37e0a6ce6841e457
+refs/tags/f20a-harness-39d30e55 type=tag sha=8e3187ea960d9383babbd5ccd84221208763ca4a
+refs/tags/strike/f20-pre-workspace-20260717 type=tag sha=ac9545a401e0a221396072f2abb5e8db63a25942

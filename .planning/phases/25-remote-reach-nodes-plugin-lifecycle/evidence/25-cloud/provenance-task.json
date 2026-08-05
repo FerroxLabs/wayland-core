@@ -1,0 +1,17 @@
+{
+  "task_id": "f25-provenance",
+  "nonce": "f25-provenance-nonce",
+  "workspace": [],
+  "input": "dGhpcy1pbnB1dC1tdXN0LU5PVC1iZS10aGUtb3V0cHV0Cg==",
+  "argv": [
+    "cat",
+    "/etc/alpine-release"
+  ],
+  "artifact_name": "stdout.bin",
+  "resources": {
+    "cpu_millis": 30000,
+    "memory_bytes": 268435456,
+    "wall_time_ms": 60000,
+    "output_bytes": 1048576
+  }
+}

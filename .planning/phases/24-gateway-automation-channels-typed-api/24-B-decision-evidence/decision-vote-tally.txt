@@ -1,0 +1,4 @@
+member=codex pick=journey-minimal
+member=gemini pick=journey-minimal
+member=kimi pick=journey-minimal
+member=internal pick=journey-minimal

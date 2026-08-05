@@ -3,7 +3,7 @@
 //!
 //! For W2.5 the adapters are in-memory collectors that record what each
 //! plugin registered. The real `wcore_tools::registry::ToolRegistry` /
-//! `wcore_config::hooks::HookEngine` / `wcore_skills::bundled::register_bundled_skill`
+//! `wcore_config::hooks::HookEngine` / session-local bundled skill catalog
 //! / `wcore_mcp::tool_proxy::register_mcp_tools` wiring lands in W7/W8 when
 //! plugin-registered tools and MCP servers actually flow through the agent
 //! dispatch loop. The smoke test in
@@ -16,6 +16,8 @@ pub mod agent_registrar;
 pub mod browser_adapter;
 // Wave CU: host-side CUA-spec → real `CuaTool` reifier.
 pub mod cua_adapter;
+// F25-01: host-side capture for plugin-declared execution backends.
+pub mod exec_backend_adapter;
 pub mod hook_registrar;
 pub mod mcp_registrar;
 // v0.6.4 Task 1.1 — host-side `PluginTool` → real `wcore_tools::Tool`

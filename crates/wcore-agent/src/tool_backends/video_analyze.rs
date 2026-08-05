@@ -43,7 +43,8 @@ use wcore_tools::video_analyze_tool::{
 };
 use wcore_tools::vision_tools::{VisionBackend, VisionOutcome};
 
-use super::{build_ssrf_safe_tool_client, build_vision_backend};
+use super::{build_ssrf_safe_tool_client, build_vision_backend_with_accounting};
+use wcore_tools::media_cost::MediaAccounting;
 
 /// Two-layer outer wall-clock cap for the WHOLE pipeline (closes R-H1).
 /// ffmpeg + N vision calls + 1 synthesis call can take a while; cap at
@@ -108,10 +109,11 @@ pub async fn check_ffmpeg_available() -> bool {
 ///     ffmpeg flag (`-vf`, `-y`, `-i`) when concatenated into the
 ///     argv.
 ///   * Canonicalizes the path and verifies the realpath lives under
-///     one of the permitted prefixes (`/tmp/`, `~/Downloads/`, or
-///     `~/.wayland/videos/`). The verify-after-canonicalize order is
-///     the TOCTOU defense: a symlink that swaps target between check
-///     and use cannot smuggle the realpath out of the whitelist.
+///     one of the permitted prefixes ([`permitted_temp_root`],
+///     `~/Downloads/`, or `~/.wayland/videos/`). The verify-after-
+///     canonicalize order is the TOCTOU defense: a symlink that swaps
+///     target between check and use cannot smuggle the realpath out
+///     of the whitelist.
 pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
     let raw_str = raw
         .to_str()
@@ -148,7 +150,8 @@ pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
     // prefix too so symlinked tempdirs (macOS `/tmp` → `/private/tmp`) and
     // `~/` expansion both match cleanly.
     let mut allowed: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::fs::canonicalize("/tmp") {
+    let temp_root = permitted_temp_root();
+    if let Ok(p) = std::fs::canonicalize(&temp_root) {
         allowed.push(p);
     }
     if let Some(home) = dirs::home_dir() {
@@ -164,12 +167,39 @@ pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
 
     if !allowed.iter().any(|p| canonical.starts_with(p)) {
         return Err(format!(
-            "video path is outside permitted prefixes (/tmp/, ~/Downloads/, ~/.wayland/videos/): {}",
+            "video path is outside permitted prefixes ({}, ~/Downloads/, ~/.wayland/videos/): {}",
+            temp_root.display(),
             canonical.display()
         ));
     }
 
     Ok(canonical)
+}
+
+/// The temp root that participates in the [`validate_local_path`] whitelist.
+///
+/// Unix: `/tmp`, the shared temp directory every caller that hands this
+/// function a temporary file writes into.
+///
+/// Windows: the process temp directory (`%TEMP%`). `/tmp` is not an absolute
+/// path there — it is drive-relative, so `canonicalize("/tmp")` resolves
+/// against whatever drive the current directory happens to be on. A checkout
+/// on `D:` asks about `D:\tmp` and one on `C:` asks about `C:\tmp`; whether
+/// either exists, and who may write into it, is not a property a security
+/// boundary can rest on. Hosted `windows-latest` has no `D:\tmp` at all,
+/// which is how the accident surfaced (run 30727017681) — and a machine that
+/// does have one had been silently admitting it.
+///
+/// Deliberately NOT `std::env::temp_dir()` on Unix: on macOS that is the
+/// per-user `$TMPDIR` under `/var/folders/…`, so using it there would widen
+/// the whitelist rather than repair it. See [`download_remote_video`], which
+/// exists partly because of that difference.
+fn permitted_temp_root() -> PathBuf {
+    if cfg!(windows) {
+        std::env::temp_dir()
+    } else {
+        PathBuf::from("/tmp")
+    }
 }
 
 /// Download a remote video URL into a tempfile, SSRF-safe, and return the
@@ -506,14 +536,31 @@ fn select_step(_frame_count: usize) -> usize {
 /// Note: `check_ffmpeg_available()` is async (it spawns a child once),
 /// so this resolver is async too. The bootstrap site calls it inside
 /// the existing tokio runtime.
-pub async fn build_video_analyze_backend() -> Option<Arc<dyn VideoAnalysisBackend>> {
+pub async fn build_video_analyze_backend(
+    config: &wcore_config::config::Config,
+) -> Option<Arc<dyn VideoAnalysisBackend>> {
+    build_video_analyze_backend_with_accounting(config, &MediaAccounting::default()).await
+}
+
+/// [`build_video_analyze_backend`], with the session cost ledger bound.
+///
+/// **This is the single highest-value binding in the media surface.** This
+/// backend makes no provider call of its own — it fans every billable call out
+/// to the vision backend, `DEFAULT_FRAME_COUNT` frames plus one synthesis pass,
+/// so a single `video_analyze` tool call is nine billable provider calls. All
+/// nine were invisible to accounting. Binding the accounting here is what makes
+/// them nine visible rows rather than one invisible tool call.
+pub async fn build_video_analyze_backend_with_accounting(
+    config: &wcore_config::config::Config,
+    accounting: &MediaAccounting,
+) -> Option<Arc<dyn VideoAnalysisBackend>> {
     if !check_ffmpeg_available().await {
         tracing::warn!(
             "video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)"
         );
         return None;
     }
-    let vision = build_vision_backend()?;
+    let vision = build_vision_backend_with_accounting(config, accounting)?;
     tracing::info!("video_analyze: ffmpeg + vision backend present — tool enabled");
     Some(Arc::new(FfmpegFrameVideoBackend::new(vision)))
 }
@@ -594,7 +641,10 @@ mod tests {
 
     #[test]
     fn video_accepts_file_under_tmp() {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        // The literal `/tmp` this used to pass is drive-relative on Windows —
+        // it asked for `D:\tmp` on the CI checkout drive and blew up with
+        // NotFound (os 3) rather than testing anything about the whitelist.
+        let dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let p = dir.path().join("ok.mp4");
         std::fs::write(&p, b"fake").unwrap();
         let canonical = validate_local_path(&p).expect("tmp file should be accepted");
@@ -632,8 +682,17 @@ mod tests {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("OPENAI_API_KEY");
             std::env::remove_var("GEMINI_API_KEY");
+            // Arm 5 of `build_vision_backend` (added closing BL-F24-C3-H7).
+            // Without clearing this the test would resolve a backend — and
+            // silently STOP TESTING the gate — on any box where the operator
+            // has FLUX_API_KEY exported, which is exactly the box this lane
+            // runs its live leg on.
+            std::env::remove_var("FLUX_API_KEY");
         }
-        let got = build_video_analyze_backend().await;
+        // Default `Config` carries no api_key, so arm 4 (active OpenAI-wire
+        // provider) also declines.
+        let cfg = wcore_config::config::Config::default();
+        let got = build_video_analyze_backend(&cfg).await;
         // Whether ffmpeg is present or not, with no vision key we MUST
         // return None. (If ffmpeg is absent we also return None — the
         // separate `*_when_ffmpeg_missing` test cannot be hermetic on
@@ -658,7 +717,8 @@ mod tests {
             unsafe {
                 std::env::set_var("ANTHROPIC_API_KEY", "test-key");
             }
-            let got = build_video_analyze_backend().await;
+            let cfg = wcore_config::config::Config::default();
+            let got = build_video_analyze_backend(&cfg).await;
             unsafe {
                 std::env::remove_var("ANTHROPIC_API_KEY");
             }
@@ -680,7 +740,7 @@ mod tests {
             eprintln!("ffmpeg missing — skipping frame extraction shape test");
             return;
         }
-        let src_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src_dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let src = src_dir.path().join("clip.mp4");
         // Build a 2s test clip via lavfi (no input needed).
         let make = tokio::process::Command::new("ffmpeg")
@@ -746,7 +806,7 @@ mod tests {
             eprintln!("ffmpeg missing — skipping aggregator wire-up test");
             return;
         }
-        let src_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src_dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let src = src_dir.path().join("clip.mp4");
         let make = tokio::process::Command::new("ffmpeg")
             .args([
@@ -831,7 +891,7 @@ mod tests {
         if !check_ffmpeg_available().await {
             return;
         }
-        let src_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let src_dir = tempfile::tempdir_in(permitted_temp_root()).unwrap();
         let src = src_dir.path().join("clip.mp4");
         let make = tokio::process::Command::new("ffmpeg")
             .args([

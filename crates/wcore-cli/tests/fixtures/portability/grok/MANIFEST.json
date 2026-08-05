@@ -1,0 +1,39 @@
+{
+  "bounded": true,
+  "bounding_rule": "Only importer-relevant files are cloned verbatim; large trees are reproduced as directory markers preserving subdirectory counts.",
+  "canaries": [
+    {
+      "canary": "CANARY-fc8fcfe21665f581b2ddee8eb1f931fe",
+      "file": "auth.json",
+      "key": "*"
+    }
+  ],
+  "classification_rules": {
+    "R1": "dotenv key matching *_(API_KEY|TOKEN|SECRET|KEY|PASSWORD|PASSWD|CREDENTIAL)",
+    "R2": "JSON/YAML mapping key containing key/token/secret/auth/pass/cred with a string value >= 8 chars",
+    "R3": "every string value under credentials/ or in auth.json",
+    "R4": "TOML key = \"value\" assignment whose key matches R2's substring set with a value >= 8 chars",
+    "grok_exception": "grok's auth.json is replaced wholesale by a single-canary placeholder: its top-level KEY is an issuer URL plus an account UUID that R3 would leave in place, and the grok importer never opens the file (presence check only)."
+  },
+  "counts": {
+    "bin": 0,
+    "bundled": 4,
+    "completions": 2,
+    "docs": 1,
+    "downloads": 0,
+    "installed-plugins": 0,
+    "logs": 1,
+    "marketplace-cache": 6,
+    "memory!absent": 0,
+    "memtrace": 0,
+    "personas!absent": 0,
+    "root_files": 3,
+    "sessions": 26,
+    "sessions!names": "opaque",
+    "skills": 5,
+    "skills_with_skill_md": 5,
+    "upload_queue": 0,
+    "vendor": 0
+  },
+  "kind": "grok"
+}

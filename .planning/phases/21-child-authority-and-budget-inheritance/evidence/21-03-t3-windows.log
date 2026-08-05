@@ -1,0 +1,1865 @@
+WIN_RUN_START 2026-07-26T20:37:29.9144670+07:00
+git : From https://github.com/FerroxLabs/wayland-core
+At C:\ferrox-win-p21-runner.ps1:15 char:2
++ (git fetch origin plan/f20-unified-audit-repair 2>&1 | Out-String) |  ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (From https://gi...bs/wayland-core:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+ * branch            plan/f20-unified-audit-repair -> FETCH_HEAD
+
+git : Previous HEAD position was 4a3dd37 test(21-02): keep the vault passphrase live on Windows
+At C:\ferrox-win-p21-runner.ps1:16 char:2
++ (git checkout --detach $sha 2>&1 | Out-String) | Add-Content -Path $l ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Previous HEAD p...live on Windows:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+HEAD is now at a412aba chore(protocol): re-pin Desktop contract provenance digests
+
+RUN_SHA=a412aba754b1bab5cd5764ed8e0d8502c9ee4020
+cargo.exe :     Checking tokio v1.52.3
+At C:\ferrox-win-p21-runner.ps1:23 char:2
++ (& $cargo clippy -p wcore-cli -p wcore-agent -p wcore-budget -p wcore ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking tokio v1.52.3:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling winnow v1.0.3
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+    Checking wcore-types v0.12.25 (C:\ferrox-win-p21\crates\wcore-types)
+   Compiling rstest_macros v0.26.1
+   Compiling glob v0.3.3
+   Compiling relative-path v1.9.3
+    Checking futures-timer v3.0.4
+    Checking predicates-core v1.0.10
+   Compiling mockall_derive v0.14.0
+    Checking termtree v0.5.1
+   Compiling mockall v0.14.0
+    Checking fragile v2.1.0
+    Checking downcast v0.11.0
+   Compiling wcore-cli v0.12.25 (C:\ferrox-win-p21\crates\wcore-cli)
+    Checking wcore-permissions v0.12.25 (C:\ferrox-win-p21\crates\wcore-permissions)
+    Checking wcore-budget v0.12.25 (C:\ferrox-win-p21\crates\wcore-budget)
+    Checking predicates-tree v1.0.13
+    Checking predicates v3.1.4
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling toml_edit v0.25.12+spec-1.1.0
+    Checking tokio-util v0.7.18
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking wcore-protocol v0.12.25 (C:\ferrox-win-p21\crates\wcore-protocol)
+    Checking aws-smithy-async v1.2.14
+    Checking wasmtime-wasi v36.0.12
+    Checking wcore-user-model v0.12.25 (C:\ferrox-win-p21\crates\wcore-user-model)
+    Checking wcore-cron v0.12.25 (C:\ferrox-win-p21\crates\wcore-cron)
+    Checking deadpool v0.12.3
+    Checking tokio-stream v0.1.18
+    Checking tokio-tungstenite v0.24.0
+    Checking lettre v0.11.22
+    Checking tower-http v0.6.11
+    Checking h2 v0.4.14
+    Checking wcore-sandbox v0.12.25 (C:\ferrox-win-p21\crates\wcore-sandbox)
+    Checking aws-smithy-types v1.4.9
+    Checking tokio-postgres v0.7.18
+   Compiling proc-macro-crate v3.5.0
+   Compiling wcore-plugin-api v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-api)
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking aws-smithy-query v0.60.15
+    Checking tokio-test v0.4.5
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-smithy-http v0.63.6
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-observability v0.2.6
+    Checking tokio-postgres-rustls v0.13.0
+    Checking aws-sigv4 v1.4.3
+    Checking aws-types v1.3.16
+    Checking aws-smithy-json v0.62.7
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking wcore-agents-pack v0.12.25 (C:\ferrox-win-p21\crates\wcore-agents-pack)
+    Checking wayland-ijfw v0.12.25 (C:\ferrox-win-p21\crates\wayland-ijfw)
+    Checking wayland-browser v0.12.25 (C:\ferrox-win-p21\crates\wayland-browser)
+    Checking wcore-pluginsrc v0.12.25 (C:\ferrox-win-p21\crates\wcore-pluginsrc)
+    Checking wayland-cua v0.12.25 (C:\ferrox-win-p21\crates\wayland-cua)
+    Checking rstest v0.26.1
+    Checking wcore-dispatch v0.12.25 (C:\ferrox-win-p21\crates\wcore-dispatch)
+    Checking hyper-rustls v0.27.9
+    Checking axum v0.7.9
+    Checking wiremock v0.6.5
+    Checking mockito v1.7.2
+    Checking reqwest v0.12.28
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-runtime v1.11.3
+    Checking wcore-config v0.12.25 (C:\ferrox-win-p21\crates\wcore-config)
+    Checking wcore-egress v0.12.25 (C:\ferrox-win-p21\crates\wcore-egress)
+    Checking wayland-honcho v0.12.25 (C:\ferrox-win-p21\crates\wayland-honcho)
+    Checking wcore-plugin-wasm v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-wasm)
+    Checking wcore-honcho-adapter v0.12.25 (C:\ferrox-win-p21\crates\wcore-honcho-adapter)
+    Checking aws-runtime v1.7.3
+    Checking aws-sdk-ssooidc v1.100.0
+    Checking aws-sdk-sts v1.103.0
+    Checking aws-sdk-sso v1.98.0
+    Checking wcore-observability v0.12.25 (C:\ferrox-win-p21\crates\wcore-observability)
+    Checking wcore-channels v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels)
+    Checking wcore-pricing v0.12.25 (C:\ferrox-win-p21\crates\wcore-pricing)
+    Checking wcore-replay v0.12.25 (C:\ferrox-win-p21\crates\wcore-replay)
+    Checking wcore-acp v0.12.25 (C:\ferrox-win-p21\crates\wcore-acp)
+    Checking wcore-eval-scenarios v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval-scenarios)
+    Checking wcore-memory v0.12.25 (C:\ferrox-win-p21\crates\wcore-memory)
+    Checking aws-config v1.8.16
+    Checking wcore-channel-email v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-email)
+    Checking wcore-channel-telegram v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-telegram)
+    Checking wcore-channel-signal v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-signal)
+    Checking wcore-channel-matrix v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-matrix)
+    Checking wcore-channel-sms v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-sms)
+    Checking wcore-channel-discord v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-discord)
+    Checking wcore-channel-whatsapp v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-whatsapp)
+    Checking wcore-channel-msteams v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-msteams)
+    Checking wcore-channel-slack v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-slack)
+    Checking wcore-channels-registry v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels-registry)
+    Checking wcore-providers v0.12.25 (C:\ferrox-win-p21\crates\wcore-providers)
+    Checking wcore-tools v0.12.25 (C:\ferrox-win-p21\crates\wcore-tools)
+    Checking wcore-swarm v0.12.25 (C:\ferrox-win-p21\crates\wcore-swarm)
+    Checking wcore-mcp v0.12.25 (C:\ferrox-win-p21\crates\wcore-mcp)
+    Checking wcore-browser v0.12.25 (C:\ferrox-win-p21\crates\wcore-browser)
+    Checking wcore-cua v0.12.25 (C:\ferrox-win-p21\crates\wcore-cua)
+    Checking wcore-skills v0.12.25 (C:\ferrox-win-p21\crates\wcore-skills)
+    Checking wcore-plugin-subprocess v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-subprocess)
+    Checking wayland-ollama v0.12.25 (C:\ferrox-win-p21\crates\wayland-ollama)
+    Checking wcore-eval v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval)
+    Checking wcore-evolve v0.12.25 (C:\ferrox-win-p21\crates\wcore-evolve)
+    Checking wcore-agent v0.12.25 (C:\ferrox-win-p21\crates\wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 49s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+
+CLIPPY_CLEAN
+cargo.exe :    Compiling wcore-types v0.12.25 (C:\ferrox-win-p21\crates\wcore-types)
+At C:\ferrox-win-p21-runner.ps1:27 char:2
++ (& $cargo build -p wcore-cli --bin wayland-core 2>&1 | Out-String) |  ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...es\wcore-types):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling wcore-cli v0.12.25 (C:\ferrox-win-p21\crates\wcore-cli)
+   Compiling wcore-config v0.12.25 (C:\ferrox-win-p21\crates\wcore-config)
+   Compiling wcore-sandbox v0.12.25 (C:\ferrox-win-p21\crates\wcore-sandbox)
+   Compiling wcore-protocol v0.12.25 (C:\ferrox-win-p21\crates\wcore-protocol)
+   Compiling wcore-plugin-api v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-api)
+   Compiling wcore-channels v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels)
+   Compiling wcore-observability v0.12.25 (C:\ferrox-win-p21\crates\wcore-observability)
+   Compiling wcore-providers v0.12.25 (C:\ferrox-win-p21\crates\wcore-providers)
+   Compiling wcore-pricing v0.12.25 (C:\ferrox-win-p21\crates\wcore-pricing)
+   Compiling wcore-replay v0.12.25 (C:\ferrox-win-p21\crates\wcore-replay)
+   Compiling wcore-acp v0.12.25 (C:\ferrox-win-p21\crates\wcore-acp)
+   Compiling wcore-memory v0.12.25 (C:\ferrox-win-p21\crates\wcore-memory)
+   Compiling wcore-channel-matrix v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-matrix)
+   Compiling wcore-agents-pack v0.12.25 (C:\ferrox-win-p21\crates\wcore-agents-pack)
+   Compiling wayland-honcho v0.12.25 (C:\ferrox-win-p21\crates\wayland-honcho)
+   Compiling wcore-channel-signal v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-signal)
+   Compiling wcore-channel-slack v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-slack)
+   Compiling wcore-channel-discord v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-discord)
+   Compiling wcore-channel-whatsapp v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-whatsapp)
+   Compiling wcore-channel-email v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-email)
+   Compiling wcore-channel-sms v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-sms)
+   Compiling wcore-channel-telegram v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-telegram)
+   Compiling wcore-channel-msteams v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-msteams)
+   Compiling wcore-plugin-wasm v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-wasm)
+   Compiling wayland-cua v0.12.25 (C:\ferrox-win-p21\crates\wayland-cua)
+   Compiling wcore-dispatch v0.12.25 (C:\ferrox-win-p21\crates\wcore-dispatch)
+   Compiling wcore-honcho-adapter v0.12.25 (C:\ferrox-win-p21\crates\wcore-honcho-adapter)
+   Compiling wcore-pluginsrc v0.12.25 (C:\ferrox-win-p21\crates\wcore-pluginsrc)
+   Compiling wayland-browser v0.12.25 (C:\ferrox-win-p21\crates\wayland-browser)
+   Compiling wcore-tools v0.12.25 (C:\ferrox-win-p21\crates\wcore-tools)
+   Compiling wcore-channels-registry v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels-registry)
+   Compiling wcore-swarm v0.12.25 (C:\ferrox-win-p21\crates\wcore-swarm)
+   Compiling wayland-ollama v0.12.25 (C:\ferrox-win-p21\crates\wayland-ollama)
+   Compiling wcore-mcp v0.12.25 (C:\ferrox-win-p21\crates\wcore-mcp)
+   Compiling wcore-cua v0.12.25 (C:\ferrox-win-p21\crates\wcore-cua)
+   Compiling wcore-browser v0.12.25 (C:\ferrox-win-p21\crates\wcore-browser)
+   Compiling wcore-skills v0.12.25 (C:\ferrox-win-p21\crates\wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval)
+   Compiling wcore-evolve v0.12.25 (C:\ferrox-win-p21\crates\wcore-evolve)
+   Compiling wcore-agent v0.12.25 (C:\ferrox-win-p21\crates\wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.55s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+
+LIVE_BINARY_RUNS
+cargo.exe :    Compiling serde_core v1.0.228
+At C:\ferrox-win-p21-runner.ps1:35 char:2
++ (& $cargo nextest run -p wcore-types --no-fail-fast 2>&1 | Out-String ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling serde_core v1.0.228:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling typenum v1.20.1
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.1
+   Compiling num-traits v0.2.19
+   Compiling serde_json v1.0.150
+   Compiling syn v2.0.117
+   Compiling generic-array v0.14.7
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling thiserror v2.0.18
+   Compiling chrono v0.4.44
+   Compiling wcore-types v0.12.25 (C:\ferrox-win-p21\crates\wcore-types)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.58s
+GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
+ Nextest run ID afffa97f-642f-448e-a591-135108091f09 with nextest profile: default
+    Starting 132 tests across 2 binaries
+        PASS [   0.006s] (  1/132) wcore-types cache_tier::tests::custom_config_overrides_threshold
+        PASS [   0.006s] (  2/132) wcore-types cache_tier::tests::as_str_round_trip
+        PASS [   0.008s] (  3/132) wcore-types cache_tier::tests::custom_config_overrides_min
+        PASS [   0.009s] (  4/132) wcore-types cache_tier::tests::below_minimum_tokens_returns_none
+        PASS [   0.011s] (  5/132) wcore-types cache_tier::tests::long_reuse_returns_1h
+        PASS [   0.013s] (  6/132) wcore-types cache_tier::tests::exactly_at_5m_boundary
+        PASS [   0.015s] (  7/132) wcore-types cache_tier::tests::just_over_5m_boundary
+        PASS [   0.017s] (  8/132) wcore-types cache_tier::tests::exactly_at_min_token_threshold
+        PASS [   0.019s] (  9/132) wcore-types 
+child_transaction::tests::child_binding_requires_isolation_identity_policy_request_and_revision
+        PASS [   0.021s] ( 10/132) wcore-types 
+child_transaction::tests::merge_and_rollback_require_parent_cas_result_evidence
+        PASS [   0.024s] ( 11/132) wcore-types 
+child_transaction::tests::gate_subject_is_bound_to_exact_candidate_and_authority
+        PASS [   0.026s] ( 12/132) wcore-types cache_tier::tests::short_reuse_returns_5m
+        PASS [   0.028s] ( 13/132) wcore-types 
+child_transaction::tests::merge_ready_requires_the_exact_authorized_gate_plan
+        PASS [   0.031s] ( 14/132) wcore-types 
+child_transaction::tests::merged_receipt_cannot_change_authorized_parent_revision
+        PASS [   0.033s] ( 15/132) wcore-types 
+child_transaction::tests::merge_dispositions_require_executable_passing_evidence
+        PASS [   0.035s] ( 16/132) wcore-types 
+child_transaction::tests::receipt_rejects_unknown_host_path_and_invalid_exit_semantics
+        PASS [   0.037s] ( 17/132) wcore-types 
+child_transaction::tests::reducer_recomputes_content_addressed_receipt_digest
+        PASS [   0.039s] ( 18/132) wcore-types compact::tests::metadata_json_field_names
+        PASS [   0.041s] ( 19/132) wcore-types child_transaction::tests::reducer_rejects_revision_overflow
+        PASS [   0.045s] ( 20/132) wcore-types 
+child_transaction::tests::reducer_rejects_sibling_receipts_and_terminal_supersession
+        PASS [   0.046s] ( 21/132) wcore-types compact::tests::trigger_auto_serializes_to_snake_case
+        PASS [   0.048s] ( 22/132) wcore-types compact::tests::metadata_serialization_roundtrip
+        PASS [   0.050s] ( 23/132) wcore-types compact::tests::trigger_roundtrip
+        PASS [   0.052s] ( 24/132) wcore-types compact::tests::trigger_manual_serializes_to_snake_case
+        PASS [   0.054s] ( 25/132) wcore-types crucible::tests::from_modifications_parses_valid_and_rejects_garbage
+        PASS [   0.056s] ( 26/132) wcore-types 
+execution_policy::tests::managed_allow_does_not_activate_without_an_explicit_request
+        PASS [   0.058s] ( 27/132) wcore-types crucible::tests::decision_round_trips_all_variants
+        PASS [   0.060s] ( 28/132) wcore-types crucible::tests::plan_round_trips_and_usd_helpers
+        PASS [   0.062s] ( 29/132) wcore-types 
+execution_policy::tests::force_equivalent_bypasses_approval_but_retains_sandbox
+        PASS [   0.064s] ( 30/132) wcore-types execution_policy::tests::dangerous_ttl_and_activation_id_are_checked
+        PASS [   0.066s] ( 31/132) wcore-types 
+execution_policy::tests::local_dangerous_grant_retains_managed_floor_provenance
+        PASS [   0.069s] ( 32/132) wcore-types 
+execution_policy::tests::managed_approval_floor_cannot_be_weakened_by_any_request_source
+        PASS [   0.069s] ( 33/132) wcore-types execution_policy::tests::managed_deny_wins_before_source_validation
+        PASS [   0.069s] ( 34/132) wcore-types 
+execution_policy::tests::non_child_sources_still_select_the_requested_approvals_on_a_smart_session
+        PASS [   0.069s] ( 35/132) wcore-types 
+execution_policy::tests::only_explicit_local_launch_can_resolve_dangerous
+        PASS [   0.070s] ( 36/132) wcore-types execution_policy::tests::policy_snapshot_wire_names_are_stable
+        PASS [   0.070s] ( 37/132) wcore-types 
+execution_policy::tests::serialized_input_cannot_request_dangerous_or_managed
+        PASS [   0.070s] ( 38/132) wcore-types 
+execution_policy::tests::smart_approval_posture_cannot_be_weakened_by_a_child_sourced_request
+        PASS [   0.070s] ( 39/132) wcore-types 
+execution_policy::tests::stale_dangerous_grant_has_no_remaining_authority
+        PASS [   0.070s] ( 40/132) wcore-types llm::tests::flux_search_result_full_round_trip
+        PASS [   0.070s] ( 41/132) wcore-types llm::tests::flux_search_result_missing_optionals_defaults_to_none
+        PASS [   0.070s] ( 42/132) wcore-types llm::tests::llm_event_citations_carries_urls
+        PASS [   0.069s] ( 43/132) wcore-types llm::tests::llm_request_default_does_not_omit_max_tokens
+        PASS [   0.070s] ( 44/132) wcore-types llm::tests::llm_request_default_has_empty_stop_sequences
+        PASS [   0.070s] ( 45/132) wcore-types llm::tests::llm_request_default_has_no_cache_tier_or_routing_hint
+        PASS [   0.068s] ( 46/132) wcore-types llm::tests::llm_request_default_has_web_search_false
+        PASS [   0.069s] ( 47/132) wcore-types llm::tests::llm_request_with_cache_tier_round_trips
+        PASS [   0.068s] ( 48/132) wcore-types llm::tests::routing_hint_newtype_eq
+        PASS [   0.068s] ( 49/132) wcore-types llm::tests::test_finish_reason_from_stop_reason
+        PASS [   0.068s] ( 50/132) wcore-types llm::tests::test_llm_event_done_carries_stop_reason_and_usage
+        PASS [   0.068s] ( 51/132) wcore-types llm::tests::test_llm_event_text_delta_carries_content
+        PASS [   0.081s] ( 52/132) wcore-types llm::tests::test_llm_event_tool_use_fields
+        PASS [   0.082s] ( 53/132) wcore-types llm::tests::test_thinking_config_enabled_stores_budget
+        PASS [   0.082s] ( 54/132) wcore-types message::tests::finish_reason_maps_each_stop_reason
+        PASS [   0.081s] ( 55/132) wcore-types message::tests::finish_reason_max_turns_serializes_snake_case
+        PASS [   0.082s] ( 56/132) wcore-types message::tests::message_cache_breakpoint_none_is_skipped_in_serde
+        PASS [   0.081s] ( 57/132) wcore-types message::tests::message_cache_breakpoint_round_trips_through_serde
+        PASS [   0.082s] ( 58/132) wcore-types message::tests::message_new_initializes_cache_breakpoint_to_none
+        PASS [   0.081s] ( 59/132) wcore-types message::tests::message_now_initializes_cache_breakpoint_to_none
+        PASS [   0.081s] ( 60/132) wcore-types message::tests::test_content_block_image_serialization_roundtrip
+        PASS [   0.081s] ( 61/132) wcore-types message::tests::test_content_block_text_construction
+        PASS [   0.081s] ( 62/132) wcore-types message::tests::test_content_block_text_serialization
+        PASS [   0.082s] ( 63/132) wcore-types message::tests::test_content_block_tool_result_construction
+        PASS [   0.080s] ( 64/132) wcore-types message::tests::test_content_block_tool_result_serialization
+        PASS [   0.080s] ( 65/132) wcore-types message::tests::test_content_block_tool_use_construction
+        PASS [   0.080s] ( 66/132) wcore-types message::tests::test_content_block_tool_use_serialization_type_field
+        PASS [   0.080s] ( 67/132) wcore-types message::tests::test_message_construction_mixed_content
+        PASS [   0.079s] ( 68/132) wcore-types message::tests::test_message_construction_text_content
+        PASS [   0.079s] ( 69/132) wcore-types message::tests::test_message_new_skips_timestamp_in_json
+        PASS [   0.079s] ( 70/132) wcore-types message::tests::test_message_now_has_timestamp
+        PASS [   0.079s] ( 71/132) wcore-types message::tests::test_message_timestamp_backward_compat_deserialization
+        PASS [   0.079s] ( 72/132) wcore-types message::tests::test_message_timestamp_serialization_roundtrip
+        PASS [   0.079s] ( 73/132) wcore-types message::tests::test_role_deserialization_roundtrip
+        PASS [   0.079s] ( 74/132) wcore-types message::tests::test_role_serialization_assistant
+        PASS [   0.080s] ( 75/132) wcore-types message::tests::test_role_serialization_system
+        PASS [   0.079s] ( 76/132) wcore-types message::tests::test_role_serialization_tool
+        PASS [   0.080s] ( 77/132) wcore-types message::tests::test_role_serialization_user
+        PASS [   0.079s] ( 78/132) wcore-types message::tests::test_stop_reason_end_turn_variant
+        PASS [   0.079s] ( 79/132) wcore-types message::tests::test_stop_reason_max_tokens_variant
+        PASS [   0.079s] ( 80/132) wcore-types message::tests::test_stop_reason_tool_use_variant
+        PASS [   0.079s] ( 81/132) wcore-types message::tests::test_token_usage_default_all_zero
+        PASS [   0.079s] ( 82/132) wcore-types 
+message::tests::total_input_tokens_sums_disjoint_categories_with_saturation
+        PASS [   0.079s] ( 83/132) wcore-types model_aliases::tests::bedrock_consts_well_formed
+        PASS [   0.066s] ( 84/132) wcore-types model_aliases::tests::chatgpt_provider_has_codex_models
+        PASS [   0.066s] ( 85/132) wcore-types 
+model_aliases::tests::expand_short_form_anthropic_and_openai_for_symmetry
+        PASS [   0.066s] ( 86/132) wcore-types model_aliases::tests::expand_short_form_bedrock_roles
+        PASS [   0.066s] ( 87/132) wcore-types model_aliases::tests::expand_short_form_gemini_native_roles
+        PASS [   0.066s] ( 88/132) wcore-types model_aliases::tests::expand_short_form_passes_through_literals
+        PASS [   0.066s] ( 89/132) wcore-types model_aliases::tests::expand_short_form_vertex_roles
+        PASS [   0.066s] ( 90/132) wcore-types model_aliases::tests::known_providers_all_have_a_model_catalog
+        PASS [   0.066s] ( 91/132) wcore-types model_aliases::tests::minimax_is_a_known_provider
+        PASS [   0.066s] ( 92/132) wcore-types model_aliases::tests::models_for_provider_entries_resolve_and_dont_drift
+        PASS [   0.066s] ( 93/132) wcore-types model_aliases::tests::vertex_anthropic_consts_well_formed
+        PASS [   0.066s] ( 94/132) wcore-types model_aliases::tests::vertex_gemini_consts_non_empty
+        PASS [   0.066s] ( 95/132) wcore-types skill_types::tests::context_modifier_default_has_no_plan_transition
+        PASS [   0.067s] ( 96/132) wcore-types skill_types::tests::context_modifier_existing_fields_unaffected
+        PASS [   0.067s] ( 97/132) wcore-types skill_types::tests::context_modifier_with_plan_transition_is_not_empty
+        PASS [   0.067s] ( 98/132) wcore-types skill_types::tests::plan_mode_transition_enter_debug
+        PASS [   0.067s] ( 99/132) wcore-types skill_types::tests::plan_mode_transition_equality
+        PASS [   0.067s] (100/132) wcore-types skill_types::tests::plan_mode_transition_exit_with_content
+        PASS [   0.067s] (101/132) wcore-types skill_types::tests::plan_mode_transition_exit_without_content
+        PASS [   0.067s] (102/132) wcore-types spawner::tests::sub_agent_config_carries_optional_provider_and_model
+        PASS [   0.067s] (103/132) wcore-types tool::tests::test_tool_def_construction_fields
+        PASS [   0.067s] (104/132) wcore-types tool::tests::test_tool_def_deferred_defaults_to_false
+        PASS [   0.067s] (105/132) wcore-types tool::tests::test_tool_def_deferred_true
+        PASS [   0.067s] (106/132) wcore-types tool::tests::test_tool_def_empty_schema_is_valid
+        PASS [   0.066s] (107/132) wcore-types tool::tests::test_tool_result_error_empty_content
+        PASS [   0.067s] (108/132) wcore-types tool::tests::test_tool_result_error_is_error_true
+        PASS [   0.066s] (109/132) wcore-types tool::tests::test_tool_result_success_is_error_false
+        PASS [   0.067s] (110/132) wcore-types tool::tests::tool_effect_contract_defaults_to_opaque_without_reconciler
+        PASS [   0.067s] (111/132) wcore-types tool::tests::truncate_81_chars
+        PASS [   0.067s] (112/132) wcore-types tool::tests::truncate_at_80_chars_before_blank_line
+        PASS [   0.067s] (113/132) wcore-types tool::tests::truncate_at_blank_line
+        PASS [   0.067s] (114/132) wcore-types tool::tests::truncate_blank_line_before_limit
+        PASS [   0.067s] (115/132) wcore-types tool::tests::truncate_empty_string
+        PASS [   0.066s] (116/132) wcore-types tool::tests::truncate_exactly_80_chars
+        PASS [   0.066s] (117/132) wcore-types tool::tests::truncate_multibyte_chars_safe
+        PASS [   0.066s] (118/132) wcore-types tool::tests::truncate_short_description_unchanged
+        PASS [   0.066s] (119/132) wcore-types utf8_stream::tests::ascii_passes_through_unchanged
+        PASS [   0.067s] (120/132) wcore-types utf8_stream::tests::four_byte_emoji_split_every_boundary
+        PASS [   0.068s] (121/132) wcore-types utf8_stream::tests::genuinely_invalid_bytes_become_replacement
+        PASS [   0.068s] (122/132) wcore-types utf8_stream::tests::multibyte_split_across_chunks_is_not_corrupted
+        PASS [   0.068s] (123/132) wcore-types utf8_stream::tests::tail_never_exceeds_three_bytes
+        PASS [   0.068s] (124/132) wcore-types utf8_stream::tests::truncated_tail_flushes_as_replacement
+        PASS [   0.068s] (125/132) wcore-types 
+workspace_trust::tests::every_strict_constraint_wins_over_every_local_grant_order
+        PASS [   0.068s] (126/132) wcore-types workspace_trust::tests::local_grants_work_without_a_stricter_constraint
+        PASS [   0.067s] (127/132) wcore-types workspace_trust::tests::repository_controlled_sources_cannot_self_grant
+        PASS [   0.067s] (128/132) wcore-types::plan_mode_transition_test 
+context_modifier_transition_independent_of_other_fields
+        PASS [   0.067s] (129/132) wcore-types::plan_mode_transition_test context_modifier_with_transition_not_empty
+        PASS [   0.066s] (130/132) wcore-types::plan_mode_transition_test plan_mode_transition_equality
+        PASS [   0.066s] (131/132) wcore-types::plan_mode_transition_test 
+tc_3_2_04_context_modifier_backward_compatible
+        PASS [   0.066s] (132/132) wcore-types::plan_mode_transition_test tc_3_2_05_plan_mode_transition_variants
+GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
+     Summary [   0.300s] 132 tests run: 132 passed, 0 skipped
+
+WCORE_TYPES_RC=0
+cargo.exe :    Compiling wcore-protocol v0.12.25 (C:\ferrox-win-p21\crates\wcore-protocol)
+At C:\ferrox-win-p21-runner.ps1:39 char:2
++ (& $cargo nextest run -p wcore-cli --test child_authority_corpus --no ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...wcore-protocol):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling wcore-sandbox v0.12.25 (C:\ferrox-win-p21\crates\wcore-sandbox)
+   Compiling wcore-config v0.12.25 (C:\ferrox-win-p21\crates\wcore-config)
+   Compiling wcore-plugin-api v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-api)
+   Compiling wcore-channels v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels)
+   Compiling wcore-observability v0.12.25 (C:\ferrox-win-p21\crates\wcore-observability)
+   Compiling wcore-providers v0.12.25 (C:\ferrox-win-p21\crates\wcore-providers)
+   Compiling wcore-pricing v0.12.25 (C:\ferrox-win-p21\crates\wcore-pricing)
+   Compiling wcore-replay v0.12.25 (C:\ferrox-win-p21\crates\wcore-replay)
+   Compiling wcore-acp v0.12.25 (C:\ferrox-win-p21\crates\wcore-acp)
+   Compiling wcore-eval-scenarios v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval-scenarios)
+   Compiling wcore-memory v0.12.25 (C:\ferrox-win-p21\crates\wcore-memory)
+   Compiling wcore-channel-email v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-email)
+   Compiling wcore-agents-pack v0.12.25 (C:\ferrox-win-p21\crates\wcore-agents-pack)
+   Compiling wayland-honcho v0.12.25 (C:\ferrox-win-p21\crates\wayland-honcho)
+   Compiling wcore-channel-matrix v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-matrix)
+   Compiling wcore-channel-sms v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-sms)
+   Compiling wcore-channel-telegram v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-telegram)
+   Compiling wcore-channel-slack v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-slack)
+   Compiling wcore-channel-discord v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-discord)
+   Compiling wcore-channel-msteams v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-msteams)
+   Compiling wcore-dispatch v0.12.25 (C:\ferrox-win-p21\crates\wcore-dispatch)
+   Compiling wcore-channel-signal v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-signal)
+   Compiling wcore-channel-whatsapp v0.12.25 (C:\ferrox-win-p21\crates\wcore-channel-whatsapp)
+   Compiling wcore-plugin-wasm v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-wasm)
+   Compiling wcore-honcho-adapter v0.12.25 (C:\ferrox-win-p21\crates\wcore-honcho-adapter)
+   Compiling wcore-pluginsrc v0.12.25 (C:\ferrox-win-p21\crates\wcore-pluginsrc)
+   Compiling wayland-cua v0.12.25 (C:\ferrox-win-p21\crates\wayland-cua)
+   Compiling wayland-ollama v0.12.25 (C:\ferrox-win-p21\crates\wayland-ollama)
+   Compiling wcore-tools v0.12.25 (C:\ferrox-win-p21\crates\wcore-tools)
+   Compiling wcore-swarm v0.12.25 (C:\ferrox-win-p21\crates\wcore-swarm)
+   Compiling wcore-channels-registry v0.12.25 (C:\ferrox-win-p21\crates\wcore-channels-registry)
+   Compiling wayland-browser v0.12.25 (C:\ferrox-win-p21\crates\wayland-browser)
+   Compiling wcore-mcp v0.12.25 (C:\ferrox-win-p21\crates\wcore-mcp)
+   Compiling wcore-browser v0.12.25 (C:\ferrox-win-p21\crates\wcore-browser)
+   Compiling wcore-cua v0.12.25 (C:\ferrox-win-p21\crates\wcore-cua)
+   Compiling wcore-skills v0.12.25 (C:\ferrox-win-p21\crates\wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (C:\ferrox-win-p21\crates\wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (C:\ferrox-win-p21\crates\wcore-eval)
+   Compiling wcore-evolve v0.12.25 (C:\ferrox-win-p21\crates\wcore-evolve)
+   Compiling wcore-agent v0.12.25 (C:\ferrox-win-p21\crates\wcore-agent)
+   Compiling wcore-cli v0.12.25 (C:\ferrox-win-p21\crates\wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.81s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report 
+future-incompatibilities --id 1`
+GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
+ Nextest run ID 97b548a5-2086-4d69-a44c-33f04626481d with nextest profile: default
+    Starting 19 tests across 1 binary
+        PASS [   0.014s] ( 1/19) wcore-cli::child_authority_corpus 
+the_combination_set_is_the_full_cross_product_and_declares_its_unavailability
+        PASS [   0.035s] ( 2/19) wcore-cli::child_authority_corpus corpus_table_covers_every_census_dimension
+        PASS [   0.047s] ( 3/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.051s] ( 4/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.058s] ( 5/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.062s] ( 6/19) wcore-cli::child_authority_corpus every_vacuous_dimension_carries_a_no_channel_canary
+        PASS [   0.067s] ( 7/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.073s] ( 8/19) wcore-cli::child_authority_corpus 
+every_entry_states_a_request_and_an_invariant_and_names_no_error_shape
+        PASS [   8.180s] ( 9/19) wcore-cli::child_authority_corpus corpus_approval
+        PASS [  10.373s] (10/19) wcore-cli::child_authority_corpus corpus_time
+        PASS [  12.083s] (11/19) wcore-cli::child_authority_corpus corpus_token
+        PASS [  12.182s] (12/19) wcore-cli::child_authority_corpus corpus_cost
+        PASS [  13.786s] (13/19) wcore-cli::child_authority_corpus corpus_fan_out
+        PASS [  13.930s] (14/19) wcore-cli::child_authority_corpus corpus_tool
+        PASS [  14.184s] (15/19) wcore-cli::child_authority_corpus corpus_filesystem
+        PASS [  14.376s] (16/19) wcore-cli::child_authority_corpus corpus_egress
+        PASS [  14.404s] (17/19) wcore-cli::child_authority_corpus corpus_provider
+        PASS [  14.540s] (18/19) wcore-cli::child_authority_corpus corpus_secret
+        PASS [  27.683s] (19/19) wcore-cli::child_authority_corpus corpus_depth
+GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
+     Summary [  27.683s] 19 tests run: 19 passed, 0 skipped
+
+CORPUS_RC=0
+cargo.exe :    Compiling smallvec v1.15.1
+At C:\ferrox-win-p21-runner.ps1:43 char:2
++ (& $cargo nextest run -p wcore-protocol --test desktop_contract_corpu ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling smallvec v1.15.1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling futures-core v0.3.32
+   Compiling windows-sys v0.61.2
+   Compiling indexmap v2.14.0
+   Compiling aho-corasick v1.1.4
+   Compiling lock_api v0.4.14
+   Compiling tracing-core v0.1.36
+   Compiling slab v0.4.12
+   Compiling futures-timer v3.0.4
+   Compiling syn v2.0.117
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling regex-automata v0.4.14
+   Compiling proc-macro-crate v3.5.0
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling rstest_macros v0.26.1
+   Compiling tokio v1.52.3
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling rstest v0.26.1
+   Compiling chrono v0.4.44
+   Compiling wcore-types v0.12.25 (C:\ferrox-win-p21\crates\wcore-types)
+   Compiling wcore-protocol v0.12.25 (C:\ferrox-win-p21\crates\wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.13s
+GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
+ Nextest run ID db2093a7-93c4-445c-b323-f5f2e53dce73 with nextest profile: default
+    Starting 32 tests across 2 binaries
+        PASS [   0.014s] ( 1/32) wcore-protocol::desktop_contract_corpus manifest_pins_generator_and_all_three_digests
+        PASS [   0.021s] ( 2/32) wcore-protocol::desktop_contract_corpus 
+manifest_criticality_uses_only_the_normative_typed_vocabulary
+        PASS [   0.039s] ( 3/32) wcore-protocol::desktop_contract_adversarial 
+canonical_ready_advertises_the_embedded_generated_contract
+        PASS [   0.062s] ( 4/32) wcore-protocol::desktop_contract_adversarial 
+runtime_diagnostics_is_closed_versioned_correlated_and_redacted
+        PASS [   0.065s] ( 5/32) wcore-protocol::desktop_contract_adversarial 
+negotiated_host_rejects_unknown_critical_and_unclassified_events
+        PASS [   0.076s] ( 6/32) wcore-protocol::desktop_contract_adversarial 
+serialized_recovery_reducer_accepts_pinned_cursor_replay
+        PASS [   0.080s] ( 7/32) wcore-protocol::desktop_contract_corpus 
+inventory_is_exactly_eighteen_commands_and_forty_nine_events
+        PASS [   0.085s] ( 8/32) wcore-protocol::desktop_contract_corpus 
+contradictory_budget_grant_results_cannot_cross_the_wire
+        PASS [   0.096s] ( 9/32) wcore-protocol::desktop_contract_corpus 
+every_json_artifact_is_canonical_and_lf_terminated
+        PASS [   0.097s] (10/32) wcore-protocol::desktop_contract_adversarial 
+negotiated_observer_accepts_authoritative_anvil_invalidation
+        PASS [   0.107s] (11/32) wcore-protocol::desktop_contract_adversarial 
+serialized_policy_reducer_accepts_valid_revisions_and_duplicate_replay
+        PASS [   0.107s] (12/32) wcore-protocol::desktop_contract_corpus budget_grant_adversarial_fixtures_fail_closed
+        PASS [   0.113s] (13/32) wcore-protocol::desktop_contract_adversarial 
+serialized_policy_reducer_fails_closed_on_conflict_gap_version_and_criticality
+        PASS [   0.121s] (14/32) wcore-protocol::desktop_contract_adversarial 
+remaining_deferrals_exclude_live_negotiation_guarantees
+        PASS [   0.121s] (15/32) wcore-protocol::desktop_contract_adversarial 
+ready_replay_fails_closed_on_major_schema_and_fixture_mismatch
+        PASS [   0.128s] (16/32) wcore-protocol::desktop_contract_adversarial 
+negotiated_host_drops_serialized_unknown_noncritical_event
+        PASS [   0.130s] (17/32) wcore-protocol::desktop_contract_corpus malformed_durable_child_fixtures_are_rejected
+        PASS [   0.135s] (18/32) wcore-protocol::desktop_contract_adversarial 
+serialized_anvil_reducer_replays_invalidation_and_never_resurrects_trust
+        PASS [   0.159s] (19/32) wcore-protocol::desktop_contract_corpus 
+event_schema_distinguishes_correlated_and_legacy_child_shapes
+        PASS [   0.164s] (20/32) wcore-protocol::desktop_contract_corpus 
+authority_fixtures_pin_correlated_current_shapes
+        PASS [   0.164s] (21/32) wcore-protocol::desktop_contract_adversarial 
+serialized_workflow_reducer_replays_correlated_node_and_child_lifecycle
+        PASS [   0.200s] (22/32) wcore-protocol::desktop_contract_adversarial 
+serialized_recovery_reducer_fails_closed_on_version_cursor_and_state_drift
+        PASS [   0.200s] (23/32) wcore-protocol::desktop_contract_adversarial 
+serialized_anvil_reducer_proves_duplicate_inert_and_fail_closed_vectors
+        PASS [   0.206s] (24/32) wcore-protocol::desktop_contract_corpus 
+durable_child_type_fixtures_round_trip_without_a_parallel_model
+        PASS [   0.229s] (25/32) wcore-protocol::desktop_contract_corpus 
+producer_complete_schema_keeps_current_and_non_desktop_variants_visible
+        PASS [   0.237s] (26/32) wcore-protocol::desktop_contract_corpus 
+manifest_ready_and_schema_titles_share_one_contract_identity
+        PASS [   0.239s] (27/32) wcore-protocol::desktop_contract_adversarial 
+serialized_workflow_reducer_detects_conflict_gaps_and_absorbs_terminals
+        PASS [   0.239s] (28/32) wcore-protocol::desktop_contract_adversarial 
+production_workflow_reducer_replays_the_checked_corpus
+        PASS [   0.275s] (29/32) wcore-protocol::desktop_contract_adversarial 
+malformed_and_unknown_commands_never_deserialize_for_dispatch
+        PASS [   0.407s] (30/32) wcore-protocol::desktop_contract_corpus 
+every_command_fixture_deserializes_through_protocol_command
+        PASS [   0.785s] (31/32) wcore-protocol::desktop_contract_corpus 
+generated_schemas_reject_malformed_authority_types_and_enums
+        PASS [   0.957s] (32/32) wcore-protocol::desktop_contract_corpus 
+checked_corpus_matches_real_serializers_byte_for_byte
+GöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇGöÇ
+     Summary [   0.957s] 32 tests run: 32 passed, 0 skipped
+
+CONTRACT_RC=0
+WIN_RUN_END 2026-07-26T20:41:11.3508570+07:00 OVERALL_RC=0
+
+=================== WINDOWS CORPUS LEDGER RE-CAPTURE ===================
+#< CLIXML
+RUN_SHA=a412aba754b1bab5cd5764ed8e0d8502c9ee4020
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+At line:4 char:1
++ & $cargo nextest run -p wcore-cli --test child_authority_corpus --no- ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.57s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: the following packages contain code that will be rejected by a future version of Rust: 
+imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo 
+report future-incompatibilities --id 1`
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+ Nextest run ID f31f8ce9-ca08-4a65-ba46-c578ebff53b5 with nextest profile: default
+    Starting 19 tests across 1 binary
+        PASS [   0.009s] ( 1/19) wcore-cli::child_authority_corpus 
+the_combination_set_is_the_full_cross_product_and_declares_its_unavailability
+        PASS [   0.020s] ( 2/19) wcore-cli::child_authority_corpus 
+corpus_table_covers_every_census_dimension
+        PASS [   0.028s] ( 3/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.035s] ( 4/19) wcore-cli::child_authority_corpus 
+every_entry_states_a_request_and_an_invariant_and_names_no_error_shape
+        PASS [   0.051s] ( 5/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.058s] ( 6/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.061s] ( 7/19) wcore-cli::child_authority_corpus 
+every_vacuous_dimension_carries_a_no_channel_canary
+        PASS [   0.067s] ( 8/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   2.379s] ( 9/19) wcore-cli::child_authority_corpus corpus_approval
+        PASS [   4.076s] (10/19) wcore-cli::child_authority_corpus corpus_cost
+        PASS [   4.092s] (11/19) wcore-cli::child_authority_corpus corpus_time
+        PASS [   4.168s] (12/19) wcore-cli::child_authority_corpus corpus_token
+        PASS [   4.350s] (13/19) wcore-cli::child_authority_corpus corpus_fan_out
+        PASS [   4.369s] (14/19) wcore-cli::child_authority_corpus corpus_tool
+        PASS [   4.608s] (15/19) wcore-cli::child_authority_corpus corpus_secret
+        PASS [   4.620s] (16/19) wcore-cli::child_authority_corpus corpus_provider
+        PASS [   4.696s] (17/19) wcore-cli::child_authority_corpus corpus_filesystem
+        PASS [   4.705s] (18/19) wcore-cli::child_authority_corpus corpus_egress
+        PASS [  20.535s] (19/19) wcore-cli::child_authority_corpus corpus_depth
+â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+     Summary [  20.535s] 19 tests run: 19 passed, 0 skipped
+        PASS [   0.009s] ( 1/19) wcore-cli::child_authority_corpus 
+the_combination_set_is_the_full_cross_product_and_declares_its_unavailability
+  stdout â”€â”€â”€
+
+    running 1 test
+    AVAILABILITY :: windows :: json-stream=true :: headless=true :: tui=false
+    test the_combination_set_is_the_full_cross_product_and_declares_its_unavailability ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.020s] ( 2/19) wcore-cli::child_authority_corpus 
+corpus_table_covers_every_census_dimension
+  stdout â”€â”€â”€
+
+    running 1 test
+    test corpus_table_covers_every_census_dimension ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.028s] ( 3/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::truncated_stream_is_detected
+  stdout â”€â”€â”€
+
+    running 1 test
+    test support::mock_llm::self_tests::truncated_stream_is_detected ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.035s] ( 4/19) wcore-cli::child_authority_corpus 
+every_entry_states_a_request_and_an_invariant_and_names_no_error_shape
+  stdout â”€â”€â”€
+
+    running 1 test
+    test every_entry_states_a_request_and_an_invariant_and_names_no_error_shape ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.051s] ( 5/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+  stdout â”€â”€â”€
+
+    running 1 test
+    test support::mock_llm::self_tests::every_builder_body_is_parser_conformant ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.058s] ( 6/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+  stdout â”€â”€â”€
+
+    running 1 test
+    test support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.061s] ( 7/19) wcore-cli::child_authority_corpus 
+every_vacuous_dimension_carries_a_no_channel_canary
+  stdout â”€â”€â”€
+
+    running 1 test
+    test every_vacuous_dimension_carries_a_no_channel_canary ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   0.067s] ( 8/19) wcore-cli::child_authority_corpus 
+support::mock_llm::self_tests::text_fixture_is_parser_conformant
+  stdout â”€â”€â”€
+
+    running 1 test
+    test support::mock_llm::self_tests::text_fixture_is_parser_conformant ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+        PASS [   2.379s] ( 9/19) wcore-cli::child_authority_corpus corpus_approval
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_approval :: approval :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_approval :: approval :: VACUOUS :: expectation NO-CHANNEL :: seam 
+S5-policy-resolver :: canary true :: standalone-live-surface tui
+    COMBINATION :: corpus_approval :: windows :: standalone :: in-process :: NO-CHANNEL :: 
+obtained no approval posture â€” no production code constructs a child-sourced policy request :: 
+`PolicySource::Child` is named only by wcore-types/src/execution_policy.rs itself; resolver 
+measurement (non-managed parent at Prompt, child request Bypass): posture Smart, approvals 
+Prompt, source Child, managed false
+    COMBINATION :: corpus_approval :: windows :: host-protocol :: in-process :: NO-CHANNEL :: 
+obtained no approval posture â€” no production code constructs a child-sourced policy request :: 
+`PolicySource::Child` is named only by wcore-types/src/execution_policy.rs itself; resolver 
+measurement (non-managed parent at Prompt, child request Bypass): posture Smart, approvals 
+Prompt, source Child, managed false
+    COMBINATION :: corpus_approval :: windows :: standalone :: live :: UNAVAILABLE :: obtained 
+not observed on this platform :: the interactive TUI is not drivable on Windows: portable_pty's 
+ConPTY backend does not surface the spawned binary's stdout to the master end, so pty_capture.rs 
+is #![cfg(unix)] and support/pty.rs inherits the gate
+    LIVE :: corpus_approval :: windows :: tui :: wayland-core  (bare, on a PTY) â€” DECLARED 
+UNAVAILABLE on this platform :: the interactive TUI is not drivable on Windows: portable_pty's 
+ConPTY backend does not surface the spawned binary's stdout to the master end, so pty_capture.rs 
+is #![cfg(unix)] and support/pty.rs inherits the gate :: UNAVAILABLE
+    COMBINATION :: corpus_approval :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: 
+obtained no verdict â€” no delegated child reached a provider turn in this run :: the json-stream 
+run served 1 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_approval-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"90d9f5c89687","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073683565,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073683565,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpaq41FR","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpaq41FR","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_approval :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpaq41FR) :: 1 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_approval-json-stream.txt 
+:: NOT-EXPRESSIBLE
+    test corpus_approval ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 2.36s
+
+
+        PASS [   4.076s] (10/19) wcore-cli::child_authority_corpus corpus_cost
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_cost :: cost :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_cost :: cost :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup :: 
+canary true :: standalone-live-surface headless
+    COMBINATION :: corpus_cost :: windows :: standalone :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at 
+the child-spawn seam; $5.00 accrued against a parent allowance of $0.01, then a fresh grandchild 
+sub-budget opened over the same accrual; NO-CHANNEL canary intact: no crates/*/src file forwards 
+a Some(..) override into sub_budget
+    COMBINATION :: corpus_cost :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: 
+BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) â€” the session/turn seam the 
+protocol front-end drives; $5.00 accrued against a parent allowance of $0.01, then a fresh 
+grandchild sub-budget opened over the same accrual; NO-CHANNEL canary intact: no crates/*/src 
+file forwards a Some(..) override into sub_budget
+    COMBINATION :: corpus_cost :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no 
+verdict â€” no delegated child reached a provider turn in this run :: the headless run served 0 
+provider request(s) and none carried a tool_result, so the delegating tool call was never 
+executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_cost-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ------ stderr 
+---2026-07-26T13:48:03.422524Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.422817Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.426494Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.426659Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.426888Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.426904Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.426913Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.426918Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.426924Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.426930Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.426936Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.426945Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.426994Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.427008Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.427061Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.427069Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.427077Z 
+    IVE :: corpus_cost :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpTK8kK6) :: 0 provider 
+request(s) served and no tool_result among them â€” the delegation was never executed, so the 
+verdict was withheld; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_cost-headless.txt :: 
+NOT-EXPRESSIBLE
+    COMBINATION :: corpus_cost :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained 
+no verdict â€” no delegated child reached a provider turn in this run :: the json-stream run 
+served 0 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_cost-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"913eb8a743b9","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685450,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685450,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpVSdagN","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpVSdagN","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_cost :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpVSdagN) :: 0 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_cost-json-stream.txt :: 
+NOT-EXPRESSIBLE
+    test corpus_cost ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.06s
+
+
+        PASS [   4.092s] (11/19) wcore-cli::child_authority_corpus corpus_time
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_time :: time :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_time :: time :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup :: 
+canary true :: standalone-live-surface headless
+    COMBINATION :: corpus_time :: windows :: standalone :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at 
+the child-spawn seam; child-visible remaining wall time is Some(39.983ms) against a parent cap of 
+40ms; NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into sub_budget
+    COMBINATION :: corpus_time :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: 
+BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) â€” the session/turn seam the 
+protocol front-end drives; child-visible remaining wall time is Some(39.9677ms) against a parent 
+cap of 40ms; NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into 
+sub_budget
+    COMBINATION :: corpus_time :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained no 
+verdict â€” no delegated child reached a provider turn in this run :: the headless run served 0 
+provider request(s) and none carried a tool_result, so the delegating tool call was never 
+executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_time-headless.txt; 
+transcript head: exit status Some(1), terminated on its own: true--- stdout ------ stderr 
+---2026-07-26T13:48:03.422734Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.423182Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.427484Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.427604Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.427776Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.427791Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.427797Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.427803Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.427809Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.427814Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.427819Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.427828Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.427843Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.427855Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.427901Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.427909Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.427916Z 
+    IVE :: corpus_time :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmplbfP6t) :: 0 provider 
+request(s) served and no tool_result among them â€” the delegation was never executed, so the 
+verdict was withheld; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_time-headless.txt :: 
+NOT-EXPRESSIBLE
+    COMBINATION :: corpus_time :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained 
+no verdict â€” no delegated child reached a provider turn in this run :: the json-stream run 
+served 0 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_time-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"c85f2033268a","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685630,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685630,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpXnZInS","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpXnZInS","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_time :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpXnZInS) :: 0 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_time-json-stream.txt :: 
+NOT-EXPRESSIBLE
+    test corpus_time ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.06s
+
+
+        PASS [   4.168s] (12/19) wcore-cli::child_authority_corpus corpus_token
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_token :: token :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_token :: token :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup 
+:: canary true :: standalone-live-surface headless
+    COMBINATION :: corpus_token :: windows :: standalone :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at 
+the child-spawn seam; 1000 in / 1000 out recorded against a parent allowance of 100 / 100; 
+NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into sub_budget
+    COMBINATION :: corpus_token :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: 
+BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) â€” the session/turn seam the 
+protocol front-end drives; 1000 in / 1000 out recorded against a parent allowance of 100 / 100; 
+NO-CHANNEL canary intact: no crates/*/src file forwards a Some(..) override into sub_budget
+    COMBINATION :: corpus_token :: windows :: standalone :: live :: NOT-EXPRESSIBLE :: obtained 
+no verdict â€” no delegated child reached a provider turn in this run :: the headless run served 
+0 provider request(s) and none carried a tool_result, so the delegating tool call was never 
+executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_token-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ------ stderr 
+---2026-07-26T13:48:03.447651Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.447916Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.450682Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.450818Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.451140Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.451164Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.451172Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.451179Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.451184Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.451190Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.451196Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.451205Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.451224Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.451238Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.451292Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.451301Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.451310Z 
+    IVE :: corpus_token :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpIqNZWG) :: 0 provider 
+request(s) served and no tool_result among them â€” the delegation was never executed, so the 
+verdict was withheld; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_token-headless.txt :: 
+NOT-EXPRESSIBLE
+    COMBINATION :: corpus_token :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: 
+obtained no verdict â€” no delegated child reached a provider turn in this run :: the json-stream 
+run served 0 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_token-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"0020080ef268","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685480,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685480,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpuATAYT","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpuATAYT","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_token :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpuATAYT) :: 0 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_token-json-stream.txt :: 
+NOT-EXPRESSIBLE
+    test corpus_token ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.12s
+
+
+        PASS [   4.350s] (13/19) wcore-cli::child_authority_corpus corpus_fan_out
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_fan_out :: fan-out :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_fan_out :: fan-out :: ENFORCED :: expectation REFUSED :: seam S2-spawn-seam 
+:: canary false :: standalone-live-surface headless
+    COMBINATION :: corpus_fan_out :: windows :: standalone :: in-process :: REFUSED :: obtained 
+no breadth beyond the parent cap of 5 :: a batch of 8 was requested against the Spawn topology 
+cap of 5; 0 children were reported
+    COMBINATION :: corpus_fan_out :: windows :: host-protocol :: in-process :: REFUSED :: 
+obtained no breadth beyond the parent cap of 5 :: a batch of 8 was requested against the Spawn 
+topology cap of 5; 0 children were reported
+    COMBINATION :: corpus_fan_out :: windows :: standalone :: live :: REFUSED :: obtained no 
+breadth beyond the parent cap of 5 (0 children ran) :: a batch of 8 was requested and 0 child 
+provider turns arrived (the run served 2 provider request(s); the delegating tool call executed 
+and returned; 0 delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_fan_out-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.299127Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.299382Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.303938Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.304052Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.304334Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.304357Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.304372Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.304385Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.304399Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.304412Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.304425Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.304440Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.304464Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.304484Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.304577Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.304599Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.30
+    LIVE :: corpus_fan_out :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpvBYKdN) :: a batch of 8 
+was requested and 0 child provider turns arrived (the run served 2 provider request(s); the 
+delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_fan_out-headless.txt :: 
+REFUSED
+    COMBINATION :: corpus_fan_out :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: 
+obtained no verdict â€” no delegated child reached a provider turn in this run :: the json-stream 
+run served 1 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_fan_out-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"a255a57cae7a","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685678,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685678,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpdi1mSW","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpdi1mSW","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_fan_out :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpdi1mSW) :: 1 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_fan_out-json-stream.txt :: 
+NOT-EXPRESSIBLE
+    test corpus_fan_out ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.33s
+
+
+        PASS [   4.369s] (14/19) wcore-cli::child_authority_corpus corpus_tool
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_tool :: tool :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_tool :: tool :: ABSENT :: expectation REFUSED :: seam S2-spawn-seam :: 
+canary false :: standalone-live-surface headless
+    COMBINATION :: corpus_tool :: windows :: standalone :: in-process :: REFUSED :: obtained no 
+Bash effect â€” nothing the read-only parent does not hold :: the delegated child produced no 
+Bash effect on disk; parent workspace \\?\C:\Users\seand\AppData\Local\Temp\.tmpXwCPAi; child 
+text: durable child execution evidence mismatch: resolved model
+    COMBINATION :: corpus_tool :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+no Bash effect â€” nothing the read-only parent does not hold :: the delegated child produced no 
+Bash effect on disk; parent workspace \\?\C:\Users\seand\AppData\Local\Temp\.tmpTSPQv2; child 
+text: durable child execution evidence mismatch: resolved model
+    COMBINATION :: corpus_tool :: windows :: standalone :: live :: REFUSED :: obtained no Bash 
+effect :: no Bash effect reached the hermetic home after the delegation ran; 0 child provider 
+turn(s) arrived, so the refusal is attributable to what the child was given rather than to the 
+delegation never happening (the run served 2 provider request(s); the delegating tool call 
+executed and returned; 0 delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_tool-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.333886Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.334212Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.337321Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.337433Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.337629Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.337645Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.337652Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.337659Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.337664Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.337671Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.337678Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.337687Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.337705Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.337718Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.337769Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.337777Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.33
+    LIVE :: corpus_tool :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpW7YKYf) :: no Bash 
+effect reached the hermetic home after the delegation ran; 0 child provider turn(s) arrived, so 
+the refusal is attributable to what the child was given rather than to the delegation never 
+happening (the run served 2 provider request(s); the delegating tool call executed and returned; 
+0 delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_tool-headless.txt :: 
+REFUSED
+    COMBINATION :: corpus_tool :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: obtained 
+no verdict â€” no delegated child reached a provider turn in this run :: the json-stream run 
+served 1 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_tool-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"ce45e72552c5","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685661,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685661,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpmO5x5H","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpmO5x5H","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_tool :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpmO5x5H) :: 1 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_tool-json-stream.txt :: 
+NOT-EXPRESSIBLE
+    test corpus_tool ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.33s
+
+
+        PASS [   4.608s] (15/19) wcore-cli::child_authority_corpus corpus_secret
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_secret :: secret :: windows :: REFUSED
+    CENSUS :: corpus_secret :: secret :: ENFORCED :: expectation REFUSED :: seam S2-spawn-seam :: 
+canary false :: standalone-live-surface headless
+    COMBINATION :: corpus_secret :: windows :: standalone :: in-process :: REFUSED :: obtained no 
+bytes from any credential file the parent's policy denies :: synthetic .env: returned no bytes; 
+synthetic credentials file: returned no bytes; the parent's policy classifies the synthetic .env 
+as secret: true
+    COMBINATION :: corpus_secret :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+no bytes from any credential file the parent's policy denies :: synthetic .env: returned no 
+bytes; synthetic credentials file: returned no bytes; the parent's policy classifies the 
+synthetic .env as secret: true
+    COMBINATION :: corpus_secret :: windows :: standalone :: live :: REFUSED :: obtained no 
+credential bytes :: the synthetic credential sentinel did not reach the run's transcript; 0 child 
+provider turn(s) arrived (the run served 2 provider request(s); the delegating tool call executed 
+and returned; 0 delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_secret-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.215939Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.216233Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.219916Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.220185Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.220624Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.220664Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.220681Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.220696Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.220710Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.220724Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.220739Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.220764Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.220808Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.220841Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.220946Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.220967Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.22
+    LIVE :: corpus_secret :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpFYwZRU) :: the synthetic 
+credential sentinel did not reach the run's transcript; 0 child provider turn(s) arrived (the run 
+served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child 
+provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_secret-headless.txt :: 
+REFUSED
+    COMBINATION :: corpus_secret :: windows :: host-protocol :: live :: REFUSED :: obtained no 
+credential bytes :: the synthetic credential sentinel did not reach the run's transcript; 2 child 
+provider turn(s) arrived (the run served 4 provider request(s); the delegating tool call executed 
+and returned; 2 delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_secret-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"407cd7a24079","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685548,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685548,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpBk1gnF","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpBk1gnF","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_secret :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpBk1gnF) :: the synthetic credential sentinel 
+did not reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider 
+request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) 
+arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_secret-json-stream.txt :: 
+REFUSED
+    test corpus_secret ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.55s
+
+
+        PASS [   4.620s] (16/19) wcore-cli::child_authority_corpus corpus_provider
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_provider :: provider :: windows :: NO-CHANNEL
+    CENSUS :: corpus_provider :: provider :: VACUOUS :: expectation NO-CHANNEL :: seam 
+S2-spawn-seam :: canary true :: standalone-live-surface headless
+    COMBINATION :: corpus_provider :: windows :: standalone :: in-process :: NO-CHANNEL :: 
+obtained no provider â€” neither shipped child-spawn schema offers a way to name one :: read the 
+live `input_schema()` of the production Delegate and Spawn tools; neither advertises a 
+provider-naming property anywhere in its object graph
+    COMBINATION :: corpus_provider :: windows :: host-protocol :: in-process :: NO-CHANNEL :: 
+obtained no provider â€” neither shipped child-spawn schema offers a way to name one :: read the 
+live `input_schema()` of the production Delegate and Spawn tools; neither advertises a 
+provider-naming property anywhere in its object graph
+    COMBINATION :: corpus_provider :: windows :: standalone :: live :: NO-CHANNEL :: obtained no 
+provider â€” no child provider request left the parent's endpoint :: the delegation returned 
+without any child reaching a provider turn, so no child provider selection was observable â€” and 
+none was offered, because no shipped child-spawn schema carries a provider field (the run served 
+2 provider request(s); the delegating tool call executed and returned; 0 delegated child provider 
+turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_provider-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.297973Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.298413Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.302222Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.302329Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.302519Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.302534Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.302541Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.302548Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.302553Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.302560Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.302566Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.302575Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.302591Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.302604Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.302650Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.302658Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.30
+    LIVE :: corpus_provider :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmptMlHvp) :: the 
+delegation returned without any child reaching a provider turn, so no child provider selection 
+was observable â€” and none was offered, because no shipped child-spawn schema carries a provider 
+field (the run served 2 provider request(s); the delegating tool call executed and returned; 0 
+delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_provider-headless.txt :: 
+NO-CHANNEL
+    COMBINATION :: corpus_provider :: windows :: host-protocol :: live :: NO-CHANNEL :: obtained 
+no provider â€” the child ran on the parent's own configured endpoint :: the delegated child's 
+own turn arrived at the parent's mock endpoint (3 requests served in total), so the child used 
+the parent's provider and no shipped surface offered it another (the run served 3 provider 
+request(s); the delegating tool call executed and returned; 1 delegated child provider turn(s) 
+arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_provider-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"afd460585e5f","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685676,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685676,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpUqKKwo","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpUqKKwo","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_provider :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpUqKKwo) :: the delegated child's own turn 
+arrived at the parent's mock endpoint (3 requests served in total), so the child used the 
+parent's provider and no shipped surface offered it another (the run served 3 provider 
+request(s); the delegating tool call executed and returned; 1 delegated child provider turn(s) 
+arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_provider-json-stream.txt 
+:: NO-CHANNEL
+    test corpus_provider ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.61s
+
+
+        PASS [   4.696s] (17/19) wcore-cli::child_authority_corpus corpus_filesystem
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_filesystem :: filesystem :: windows :: REFUSED
+    CENSUS :: corpus_filesystem :: filesystem :: ENFORCED :: expectation REFUSED :: seam 
+S2-spawn-seam :: canary false :: standalone-live-surface headless
+    COMBINATION :: corpus_filesystem :: windows :: standalone :: in-process :: REFUSED :: 
+obtained no bytes from any path outside the parent's contained root :: relative traversal out of 
+the contained root: returned no bytes; absolute path outside the contained root: returned no 
+bytes; symlink whose target leaves the contained root: returned no bytes
+    COMBINATION :: corpus_filesystem :: windows :: host-protocol :: in-process :: REFUSED :: 
+obtained no bytes from any path outside the parent's contained root :: relative traversal out of 
+the contained root: returned no bytes; absolute path outside the contained root: returned no 
+bytes; symlink whose target leaves the contained root: returned no bytes
+    COMBINATION :: corpus_filesystem :: windows :: standalone :: live :: REFUSED :: obtained no 
+bytes from outside the parent's workspace root :: the outside sentinel did not reach the run's 
+transcript; 0 child provider turn(s) arrived (the run served 2 provider request(s); the 
+delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_filesystem-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.208255Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.208594Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.213836Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.214185Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.214692Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.214735Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.214752Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.214767Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.214781Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.214797Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.214812Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.214841Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.214894Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.214931Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.215036Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.215058Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.21
+    LIVE :: corpus_filesystem :: windows :: headless :: wayland-core --no-tui --provider 
+anthropic "delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp6DoCLZ) :: the 
+outside sentinel did not reach the run's transcript; 0 child provider turn(s) arrived (the run 
+served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child 
+provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_filesystem-headless.txt :: 
+REFUSED
+    COMBINATION :: corpus_filesystem :: windows :: host-protocol :: live :: REFUSED :: obtained 
+no bytes from outside the parent's workspace root :: the outside sentinel did not reach the run's 
+transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the 
+delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full 
+transcript at C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_filesystem-js
+on-stream.txt; transcript head: {"type":"ready","version":"0.12.25","session_id":"6730f2c830a9","c
+apabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["def
+ault","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attr
+ibution":true,"browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local"
+,"memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":
+"wcore-desktop-contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c1
+54bec9fddf93d24fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9
+146a71b3fff2e54","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc9647
+76f25a0be0f5f5","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only"
+,"contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available"
+,"effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operato
+r_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"av
+ailable","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_rec
+overy_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"c
+ontract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685587,"policy
+":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","ma
+naged_floor_active":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","r
+evision":0,"reason":"launch","effective_at_unix_ms":1785073685587,"policy":{"posture":"smart","app
+rovals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false
+}}{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprin
+t":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmplgTGZB","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmplgTGZB","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_filesystem :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmplgTGZB) :: the outside sentinel did not reach 
+the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the 
+delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_filesystem-json-stream.txt 
+:: REFUSED
+    test corpus_filesystem ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.68s
+
+
+        PASS [   4.705s] (18/19) wcore-cli::child_authority_corpus corpus_egress
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_egress :: egress :: windows :: REFUSED
+    CENSUS :: corpus_egress :: egress :: ENFORCED :: expectation REFUSED :: seam 
+S4-egress-chokepoint :: canary false :: standalone-live-surface headless
+    COMBINATION :: corpus_egress :: windows :: standalone :: in-process :: REFUSED :: obtained no 
+outbound destination beyond the parent's policy :: parent permits 
+https://webhook.site/corpus-exfil: false; child permits it: false; the child holds the parent's 
+exact policy object: true; no production code path constructs an EgressClient with an explicit 
+per-client policy; recorded, not classified as a Phase 21 widening: with the shipped default 
+config and no consent doorbell attached, the parent's own policy permits a plain GET to 
+https://corpus-not-allowlisted.invalid/probe: true. Parent and child are equally affected, so 
+nothing crosses the boundary
+    COMBINATION :: corpus_egress :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+no outbound destination beyond the parent's policy :: parent permits 
+https://webhook.site/corpus-exfil: false; child permits it: false; the child holds the parent's 
+exact policy object: true; no production code path constructs an EgressClient with an explicit 
+per-client policy; recorded, not classified as a Phase 21 widening: with the shipped default 
+config and no consent doorbell attached, the parent's own policy permits a plain GET to 
+https://corpus-not-allowlisted.invalid/probe: true. Parent and child are equally affected, so 
+nothing crosses the boundary
+    COMBINATION :: corpus_egress :: windows :: standalone :: live :: REFUSED :: obtained no 
+outbound destination beyond the parent's policy :: the egress sentinel body did not reach the 
+run's transcript; 0 child provider turn(s) arrived (the run served 2 provider request(s); the 
+delegating tool call executed and returned; 0 delegated child provider turn(s) arrived); full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_egress-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.422992Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.423271Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.429017Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.429139Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.429457Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.429480Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.429489Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.429495Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.429502Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.429509Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.429514Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.429523Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.429540Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.429552Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.429601Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.429609Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.42
+    LIVE :: corpus_egress :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpQbQwOx) :: the egress 
+sentinel body did not reach the run's transcript; 0 child provider turn(s) arrived (the run 
+served 2 provider request(s); the delegating tool call executed and returned; 0 delegated child 
+provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_egress-headless.txt :: 
+REFUSED
+    COMBINATION :: corpus_egress :: windows :: host-protocol :: live :: REFUSED :: obtained no 
+outbound destination beyond the parent's policy :: the egress sentinel body did not reach the 
+run's transcript; 2 child provider turn(s) arrived (the run served 4 provider request(s); the 
+delegating tool call executed and returned; 2 delegated child provider turn(s) arrived); full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_egress-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"2385327096e4","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685751,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685751,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmp7fIgRt","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmp7fIgRt","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_egress :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmp7fIgRt) :: the egress sentinel body did not 
+reach the run's transcript; 2 child provider turn(s) arrived (the run served 4 provider 
+request(s); the delegating tool call executed and returned; 2 delegated child provider turn(s) 
+arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_egress-json-stream.txt :: 
+REFUSED
+    test corpus_egress ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.67s
+
+
+        PASS [  20.535s] (19/19) wcore-cli::child_authority_corpus corpus_depth
+  stdout â”€â”€â”€
+
+    running 1 test
+    CASE :: corpus_depth :: depth :: windows :: NOT-EXPRESSIBLE
+    CENSUS :: corpus_depth :: depth :: ENFORCED :: expectation REFUSED :: seam S1-budget-rollup 
+:: canary true :: standalone-live-surface headless
+    COMBINATION :: corpus_depth :: windows :: standalone :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: ExecutionBudgetView::sub_budget(Some(wider)) at 
+the child-spawn seam; two nested agent entries against a parent that permits one; NO-CHANNEL 
+canary intact: no crates/*/src file forwards a Some(..) override into sub_budget
+    COMBINATION :: corpus_depth :: windows :: host-protocol :: in-process :: REFUSED :: obtained 
+nothing beyond the parent's remaining envelope :: 
+BudgetAuthorityCoordinator::begin_active_turn(turn, Some(wider)) â€” the session/turn seam the 
+protocol front-end drives; two nested agent entries against a parent that permits one; NO-CHANNEL 
+canary intact: no crates/*/src file forwards a Some(..) override into sub_budget
+    COMBINATION :: corpus_depth :: windows :: standalone :: live :: REFUSED :: obtained no 
+nesting depth beyond the parent's seeded envelope :: no grandchild provider turn arrived under a 
+seeded cap of 1; 0 child turn(s) did (the run served 2 provider request(s); the delegating tool 
+call executed and returned; 0 delegated child provider turn(s) arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_depth-headless.txt; 
+transcript head: exit status Some(0), terminated on its own: true--- stdout ---* parent done--- 
+stderr ---2026-07-26T13:48:03.426585Z  INFO egress security ENFORCING â€” exfil-shaped traffic to 
+non-allowlisted external hosts is blocked allowlisted=372026-07-26T13:48:03.426871Z  INFO egress 
+security ENFORCING â€” exfil-shaped traffic to non-allowlisted external hosts is blocked 
+allowlisted=372026-07-26T13:48:03.429858Z ERROR AppContainer real-spawn probe failed; sandbox 
+disabled. If the failure is transient (AV, disk contention), the probe re-runs after the 
+negative-cache TTL. error=sandbox child execution failed: AppContainer ACL lease SID/profile 
+mismatch in \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-storage-0000
+2d20-00000000000000f2.toml2026-07-26T13:48:03.429964Z  INFO postgres_schema: no DATABASE_URL / 
+POSTGRES_URL / PG_CONN_STRING set â€” tool hidden2026-07-26T13:48:03.430227Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_playback2026-07-26T13:48:03.430249Z  INFO skipping registration of tool whose 
+backend is not configured tool=spotify_devices2026-07-26T13:48:03.430264Z  INFO skipping 
+registration of tool whose backend is not configured 
+tool=spotify_queue2026-07-26T13:48:03.430277Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_search2026-07-26T13:48:03.430290Z  INFO skipping registration of 
+tool whose backend is not configured tool=spotify_playlists2026-07-26T13:48:03.430303Z  INFO 
+skipping registration of tool whose backend is not configured 
+tool=spotify_albums2026-07-26T13:48:03.430316Z  INFO skipping registration of tool whose backend 
+is not configured tool=spotify_library2026-07-26T13:48:03.430331Z  INFO skipping registration of 
+tool whose backend is not configured tool=yuanbao2026-07-26T13:48:03.430352Z  WARN image_gen: no 
+API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations 
+fallback disabled â€” tool hidden2026-07-26T13:48:03.430372Z  INFO web search: using Parallel.ai 
+free search (anonymous). Your search queries are sent to parallel.ai. Set 
+WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set 
+FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a 
+configured provider.2026-07-26T13:48:03.430462Z  WARN vision: no API key found 
+(ANTHROPIC/OPENAI/GEMINI) â€” vision tool will be hidden2026-07-26T13:48:03.430479Z  WARN 
+transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) â€” tool 
+hidden2026-07-26T13:48:03.43
+    LIVE :: corpus_depth :: windows :: headless :: wayland-core --no-tui --provider anthropic 
+"delegate the task"  (WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpA9gXIC) :: no grandchild 
+provider turn arrived under a seeded cap of 1; 0 child turn(s) did (the run served 2 provider 
+request(s); the delegating tool call executed and returned; 0 delegated child provider turn(s) 
+arrived); full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_depth-headless.txt :: 
+REFUSED
+    COMBINATION :: corpus_depth :: windows :: host-protocol :: live :: NOT-EXPRESSIBLE :: 
+obtained no verdict â€” no delegated child reached a provider turn in this run :: the json-stream 
+run served 2 provider request(s) and none carried a tool_result, so the delegating tool call was 
+never executed; an absent effect from this run would mean an attempt that never happened, not a 
+refusal; full transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_depth-json-stream.txt; 
+transcript head: {"type":"ready","version":"0.12.25","session_id":"deaf466286ce","capabilities":{"
+tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edi
+t","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"
+browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enable
+d":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-
+contract-gen/11","fixture_digest":"sha256:0704cd43a86e52da86af093f9f90c0877328e53c154bec9fddf93d24
+fd3d7209","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+","source_inputs_digest":"sha256:9d5928b47f0cf9430e57786af498f9c297a36ace1572bc964776f25a0be0f5f5"
+,"capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_nego
+tiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_exe
+cution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_r
+esolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runti
+me_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"avai
+lable","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version
+":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785073685661,"policy":{"posture":"s
+mart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_act
+ive":false}}}{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"rea
+son":"launch","effective_at_unix_ms":1785073685661,"policy":{"posture":"smart","approvals":"prompt
+","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}{"type":"work
+space_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aa
+b6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current 
+fingerprint-bound local trust decision"},"profile":"strict","backend":"fail_closed","writable_root
+s":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\.tmpsbsqes","\\\\?\\C:\\Users\\seand\\AppData\
+\Local\\Temp"],"readable_roots":["\\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp","\\\\?\\C:\\Users
+\\seand\\AppData\\Local\\Temp\\.tmpsbsqes","C:\\Users\\seand\\.cargo/bin","C:\\Users\\seand\\.rust
+up"],"capabilities":[]}}{"type":"capability_activation","capability":"pricing_refresher","stage":"
+declared"}{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","
+reason":"disabled_by_config"}{"type":"capability_activation","capability":"mid_flight_monitor","st
+age":"declared"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configu
+red"}{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}{"typ
+e":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}{"type":"capabili
+    LIVE :: corpus_depth :: windows :: json-stream :: wayland-core --json-stream --provider 
+anthropic  (stdin: one `message` command; 
+WAYLAND_HOME=C:\Users\seand\AppData\Local\Temp\.tmpsbsqes) :: 2 provider request(s) served and no 
+tool_result among them â€” the delegation was never executed, so the verdict was withheld; full 
+transcript at 
+C:\ferrox-win-p21\target\tmp\child-authority-corpus\transcripts\corpus_depth-json-stream.txt :: 
+NOT-EXPRESSIBLE
+    test corpus_depth ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 
+20.49s
+
+
+
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>

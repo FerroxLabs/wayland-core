@@ -59,6 +59,20 @@ pub struct EngineJobHandler {
     channels: Option<Arc<RwLock<ChannelManager>>>,
     slash: Option<SlashSink>,
     skill: Option<SkillSink>,
+    /// F24-CL/F24-CS — this process's inbound-polling participation, in EITHER
+    /// role.
+    ///
+    /// Carried so the claim outlives `build_headless_cron_handler_*`. The lease
+    /// releases on drop, so without an owner living as long as the pollers do,
+    /// the `cron daemon` would surrender inbound polling the instant its
+    /// handler was built and a third process could immediately start polling
+    /// alongside it — reinstating the race in a subtler form.
+    ///
+    /// F24-CS: it is a SUPERVISOR now, not a one-shot claim. `cron-daemon`
+    /// outranks a session and is outranked by the gateway, so this process
+    /// takes polling from an ordinary session and hands it to an installed
+    /// service.
+    channel_poll_lease: Option<crate::channel_lease::ChannelPollSupervisor>,
 }
 
 impl EngineJobHandler {
@@ -71,7 +85,18 @@ impl EngineJobHandler {
             channels,
             slash,
             skill,
+            channel_poll_lease: None,
         }
+    }
+
+    /// Attach the inbound-polling supervisor this process holds, so it lives as
+    /// long as the handler does. See the field docs for why that matters.
+    pub fn with_channel_poll_lease(
+        mut self,
+        supervisor: crate::channel_lease::ChannelPollSupervisor,
+    ) -> Self {
+        self.channel_poll_lease = Some(supervisor);
+        self
     }
 
     /// A handler with every surface absent — fires are logged only.
@@ -82,8 +107,129 @@ impl EngineJobHandler {
     }
 }
 
+impl EngineJobHandler {
+    /// Send a channel target, optionally carrying the delivery ledger's stable
+    /// idempotency key so the destination can recognise a replay.
+    ///
+    /// Phase 24 lane 24c. Split out of `dispatch` so that `dispatch_fire` — the
+    /// only caller that HAS a delivery identity — can hand it to the adapter.
+    /// `dispatch` has no fire context and therefore no key, which is why it
+    /// passes `None` rather than inventing one: a key that is not stable across
+    /// a restart duplicates on every recovery, which is the exact bug this
+    /// plumbing exists to close.
+    async fn send_channel(
+        &self,
+        channel_name: &str,
+        text: &str,
+        conversation_id: Option<&str>,
+        key: Option<&str>,
+    ) -> Result<(), CronError> {
+        let Some(mgr) = &self.channels else {
+            warn!(
+                target: "wcore_agent::cron",
+                channel = %channel_name,
+                "channel cron fire dropped — no ChannelManager wired"
+            );
+            // F-063: return Err so the runner does NOT persist last_fired
+            // for a no-op fire. A missing channel sink means nothing was
+            // sent; advancing the clock would make the job look healthy.
+            return Err(CronError::Dispatch("no channel sink available".to_string()));
+        };
+        // F-ML-5. This was `channel_name.to_string()` — the channel's own NAME
+        // used as the destination conversation id, which produced
+        // `PUT /rooms/mxlive/…` and a 403 against a real homeserver. An empty
+        // string is the value every adapter's default-destination fallback
+        // (`slack lib.rs:416`, `whatsapp :238`, `sms :250`) tests for, so
+        // omitting `--conversation` now reaches the configured default instead
+        // of addressing a conversation that was never named.
+        let msg = OutgoingMessage::text(
+            conversation_id.unwrap_or_default().to_string(),
+            text.to_string(),
+        );
+        let guard = mgr.read().await;
+        guard
+            .send_to_keyed(channel_name, msg, key)
+            .await
+            .map_err(|e| match e {
+                // A `Config` error (e.g. "unknown channel: X") is permanent:
+                // the channel is not registered in this process and won't be
+                // without a reconfigure. Map it to NoDispatcher so the runner
+                // advances `last_fired` (anti-hot-loop) and stages the fire,
+                // instead of re-firing every tick forever (the source of the
+                // "unknown channel: desktop" 30s retry storm). Genuine
+                // transient send failures stay `Dispatch` → retried.
+                ChannelError::Config(_) => CronError::NoDispatcher,
+                other => CronError::Dispatch(format!("channel send: {other}")),
+            })?;
+        debug!(
+            target: "wcore_agent::cron",
+            channel = %channel_name,
+            keyed = key.is_some(),
+            "channel cron fired"
+        );
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl JobHandler for EngineJobHandler {
+    /// Answers for the DESTINATION, not for this handler.
+    ///
+    /// The gateway's delivery spine reads this to decide whether an
+    /// outcome-unknown delivery may be retried. Only a channel target is a
+    /// delivery at all; for anything else the question does not arise and the
+    /// conservative answer is the correct one.
+    ///
+    /// # Answered per MESSAGE, because the guarantee is conditional
+    ///
+    /// `ChannelManager::send_to_keyed` transmits the delivery key only while the
+    /// body fits in one platform message; above `max_message_len` it splits the
+    /// body and sends the pieces unkeyed. So the per-adapter capability bit is
+    /// `true` for a send that carried no key, and a spine that retried on it
+    /// would duplicate. `Target::Channel` already carries the body, so the
+    /// honest question is available here at no cost.
+    async fn dispatch_is_idempotent(&self, target: &Target) -> bool {
+        match target {
+            Target::Channel {
+                channel_name, text, ..
+            } => match &self.channels {
+                Some(mgr) => {
+                    mgr.read()
+                        .await
+                        .supports_outbound_idempotency_for(channel_name, text)
+                        .await
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The keyed path. `dispatch` keeps the unkeyed behaviour for every caller
+    /// that has no fire identity.
+    async fn dispatch_fire(
+        &self,
+        fire: &wcore_cron::runner::FireContext<'_>,
+        target: &Target,
+    ) -> Result<(), CronError> {
+        match target {
+            Target::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            } => {
+                self.send_channel(
+                    channel_name,
+                    text,
+                    conversation_id.as_deref(),
+                    Some(&fire.delivery_id()),
+                )
+                .await
+            }
+            other => self.dispatch(other).await,
+        }
+    }
+
     async fn dispatch(&self, target: &Target) -> Result<(), CronError> {
         match target {
             Target::Slash { command } => {
@@ -111,45 +257,18 @@ impl JobHandler for EngineJobHandler {
                 }
                 Ok(())
             }
-            Target::Channel { channel_name, text } => {
-                let Some(mgr) = &self.channels else {
-                    warn!(
-                        target: "wcore_agent::cron",
-                        channel = %channel_name,
-                        "channel cron fire dropped — no ChannelManager wired"
-                    );
-                    // F-063: return Err so the runner does NOT persist last_fired
-                    // for a no-op fire. A missing channel sink means nothing was
-                    // sent; advancing the clock would make the job look healthy.
-                    return Err(CronError::Dispatch("no channel sink available".to_string()));
-                };
-                // Convention: when bootstrap-side cron fires, the
-                // `channel_name` doubles as the conversation_id of the
-                // channel's default room. Per-platform overrides live
-                // on the cron job's text or as a future `conversation_id`
-                // field; v0.8.1 uses one-room semantics.
-                let msg = OutgoingMessage::text(channel_name.clone(), text.clone());
-                let guard = mgr.read().await;
-                guard
-                    .send_to(channel_name, msg)
+            // The "channel_name doubles as the conversation_id" convention that
+            // used to live here was measured against a real homeserver on
+            // 2026-07-30 and does not hold: it produced `PUT /rooms/mxlive/…`
+            // and `403 M_FORBIDDEN`. The `conversation_id` field this comment
+            // called "future" now exists (F-ML-5).
+            Target::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            } => {
+                self.send_channel(channel_name, text, conversation_id.as_deref(), None)
                     .await
-                    .map_err(|e| match e {
-                        // A `Config` error (e.g. "unknown channel: X") is permanent:
-                        // the channel is not registered in this process and won't be
-                        // without a reconfigure. Map it to NoDispatcher so the runner
-                        // advances `last_fired` (anti-hot-loop) and stages the fire,
-                        // instead of re-firing every tick forever (the source of the
-                        // "unknown channel: desktop" 30s retry storm). Genuine
-                        // transient send failures stay `Dispatch` → retried.
-                        ChannelError::Config(_) => CronError::NoDispatcher,
-                        other => CronError::Dispatch(format!("channel send: {other}")),
-                    })?;
-                debug!(
-                    target: "wcore_agent::cron",
-                    channel = %channel_name,
-                    "channel cron fired"
-                );
-                Ok(())
             }
             Target::Skill { name, args } => {
                 if let Some(sink) = &self.skill {
@@ -201,6 +320,36 @@ impl JobHandler for EngineJobHandler {
 /// panics. The caller should treat any construction problem as non-fatal and
 /// fall back to [`EngineJobHandler::log_only`].
 pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
+    build_headless_cron_handler_with_channels(cwd, None).await
+}
+
+/// As [`build_headless_cron_handler`], but the caller may supply a
+/// [`ChannelManager`] it already owns.
+///
+/// F24-C3-H4. `gateway run` used to call [`build_headless_cron_handler`] AND
+/// build its own manager from the same directory, so one process registered
+/// every adapter twice and called `start_all()` on both — six registration
+/// events for three channels, two poll loops per account, and only ONE of the
+/// two managers carrying a subscriber. For webhook adapters that is merely
+/// wasteful; for polling adapters it is a consumption race, because Telegram's
+/// `getUpdates` offset confirm and IMAP's `\Seen` flag DESTROY the pending item
+/// server-side, so whichever manager polls first can take delivery of a message
+/// the subscriber then never sees.
+///
+/// When `channels` is `Some`, this function registers nothing and starts
+/// nothing: the caller owns the manager's whole lifecycle (registration,
+/// `start_all`, reload, shutdown) and the cron handler merely borrows it as a
+/// send path. That is the invariant — **one manager, one owner** — and it is
+/// what makes the double start unrepresentable from the gateway rather than
+/// merely absent.
+///
+/// When `channels` is `None` (the `cron daemon` path, which has no manager of
+/// its own) the previous behaviour is unchanged: build one, auto-register from
+/// `~/.wayland/channels/*.toml`, `start_all` it.
+pub async fn build_headless_cron_handler_with_channels(
+    cwd: &str,
+    channels: Option<Arc<RwLock<ChannelManager>>>,
+) -> EngineJobHandler {
     use std::sync::Arc;
 
     // Resolved config — default on any load failure so the daemon never
@@ -209,6 +358,30 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
     let config = wcore_config::config::Config::default();
 
     let cwd_path = std::path::Path::new(cwd);
+
+    // `[default] read_only` for this daemon.
+    //
+    // `Config::default()` above is a stand-in, not a resolution: it always
+    // carries `read_only = false`, so reading the posture off it would mean the
+    // daemon never honoured the operator's setting and quietly ran skill shell
+    // in a session they had made read-only. Read the merged config file
+    // directly instead.
+    //
+    // A load failure is NOT `false`. We could not take the measurement, and a
+    // posture we cannot read must not render as "off" — that is a fail-open on
+    // a safety flag. Refuse skills until the config can be read, and say so.
+    let read_only = match wcore_config::config::load_merged_config_file(Some(cwd_path)) {
+        Ok(file) => file.default.read_only,
+        Err(error) => {
+            warn!(
+                target: "wcore_agent::cron",
+                %error,
+                "cron daemon cannot read the config, so it cannot tell whether this \
+                 session is read-only — refusing skill fires until it can"
+            );
+            true
+        }
+    };
 
     // --- Skill sink (engine-less) ---------------------------------------
     // Build the catalog exactly as bootstrap does: load from disk, then widen
@@ -227,6 +400,8 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
         let deny_rules = config.tools.skills.deny.clone();
         let allow_rules = config.tools.skills.allow.clone();
         let auto_approve = config.tools.auto_approve;
+        let workspace_trust = config.workspace_trust.clone();
+        let workspace = cwd_path.to_path_buf();
         let cwd_for_cron = cwd.to_string();
         Arc::new(move |skill_name: String, args: serde_json::Value| {
             let catalog = Arc::clone(&catalog_for_cron);
@@ -234,7 +409,8 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
                 deny_rules.clone(),
                 allow_rules.clone(),
                 auto_approve,
-            );
+            )
+            .with_project_execution_trust_snapshot(&workspace, &workspace_trust);
             let cwd = cwd_for_cron.clone();
             Box::pin(async move {
                 // Aud-12 / M-18 (+ B8 follow-up): the cron runner's
@@ -279,7 +455,10 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
                         }
                     }
                 }
-                let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                // No dispatcher in this path — the sink calls `execute()`
+                // directly — so the read-only posture travels on the tool.
+                let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker)
+                    .with_read_only(read_only);
                 let input = serde_json::json!({ "skill": skill_name, "args": args });
                 let result = wcore_tools::Tool::execute(&tool, input).await;
                 if result.is_error {
@@ -292,6 +471,21 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
     };
 
     // --- Channel sink ----------------------------------------------------
+    // F24-C3-H4. If the caller already owns a manager, ADOPT it and return.
+    // Registering into it here would double-register every adapter, and
+    // `start_all`ing it here would arm the poll loops before the caller's
+    // subscriber holds a broadcast receiver — tokio's broadcast drops events
+    // published before a receiver exists, so that ordering silently loses
+    // everything that arrives in the gap.
+    if let Some(existing) = channels {
+        info!(
+            target: "wcore_agent::cron",
+            "headless cron handler: using the caller's ChannelManager; \
+             not registering or starting a second one"
+        );
+        return EngineJobHandler::new(Some(existing), None, Some(skill_sink));
+    }
+
     // Auto-register channels from ~/.wayland/channels and start their poll
     // loops so Channel cron jobs dispatch. Every failure is non-fatal — the
     // handler still has a working skill sink.
@@ -324,15 +518,47 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
         ),
     }
     let channels = Arc::new(tokio::sync::RwLock::new(channel_manager_inner));
-    if let Err(e) = channels.write().await.start_all().await {
-        warn!(
+
+    // F24-CL. This is the `cron daemon` path — a SEPARATE PROCESS from both the
+    // session and the gateway, and one that ships launchd and systemd
+    // templates, so it is routinely running unattended beside them. Polling is
+    // a destructive read, so arming a poller here while another process polls
+    // the same account destroys messages for whichever one loses the race.
+    //
+    // Losing costs this handler nothing that matters: the channel sink is used
+    // to SEND (Channel cron jobs dispatch outbound), and sending is unaffected
+    // by the lease. Only the inbound poll loops are withheld.
+    let poll_lease =
+        crate::channel_lease::attempt(&wcore_config::config::wayland_config_dir(), "cron-daemon");
+    if poll_lease.is_owner() {
+        if let Err(e) = channels.write().await.start_all().await {
+            warn!(
+                target: "wcore_agent::cron",
+                error = %e,
+                "headless cron handler: channel start_all failed; inbound polling may be partial"
+            );
+        }
+    } else {
+        info!(
             target: "wcore_agent::cron",
-            error = %e,
-            "headless cron handler: channel start_all failed; inbound polling may be partial"
+            owner_pid = ?poll_lease.owner_pid(),
+            "F24-CL: another process owns inbound polling; cron handler will send but not poll"
         );
     }
 
+    // F24-CS. Supervise the role rather than fixing it at boot: a cron daemon
+    // that lost to an ordinary session used to stay an observer for that
+    // session's whole life, and a cron daemon that lost to a gateway which then
+    // exited never took over. Both are now continuous decisions.
+    let supervisor = crate::channel_lease::ChannelPollSupervisor::spawn(
+        &wcore_config::config::wayland_config_dir(),
+        "cron-daemon",
+        poll_lease,
+        crate::channel_lease::ChannelManagerPollControl::new(Arc::clone(&channels)),
+    );
+
     EngineJobHandler::new(Some(channels), None, Some(skill_sink))
+        .with_channel_poll_lease(supervisor)
 }
 
 #[cfg(test)]
@@ -382,6 +608,7 @@ mod tests {
             .dispatch(&Target::Channel {
                 channel_name: "no-such".into(),
                 text: "hi".into(),
+                conversation_id: None,
             })
             .await;
         assert!(
@@ -405,6 +632,7 @@ mod tests {
         h.dispatch(&Target::Channel {
             channel_name: "alpha".into(),
             text: "ping".into(),
+            conversation_id: Some("alpha-room".into()),
         })
         .await
         .unwrap();
@@ -429,6 +657,7 @@ mod tests {
             .dispatch(&Target::Channel {
                 channel_name: "desktop".into(),
                 text: "ping".into(),
+                conversation_id: None,
             })
             .await;
         match result {

@@ -33,6 +33,28 @@ mod sent_index;
 pub mod smtp;
 mod uid_store;
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and the IMAP parser's
+/// `MAX_INLINE_ATTACHMENT_BYTES` is derived from it. One constant, both sites,
+/// so the advertised number and the enforced number cannot drift apart.
+///
+/// Email is the adapter whose divergence ran the OTHER way: it advertised
+/// 10 MiB while the parser has only ever inlined parts up to 2 MiB (since
+/// 2026-06-12), so it under-delivered against its own promise by 5x. The
+/// enforced 2 MiB is retained and now declared, because for email the parser's
+/// inline ceiling IS the intake bound — attachments arrive base64-inlined in
+/// the message body rather than being fetched over the network, and a part
+/// above the ceiling never becomes fetchable bytes at all. Declaring 10 MiB
+/// would advertise an intake this adapter has never performed.
+///
+/// `max_attachments` stays at email's own 20 (a mail message carries more
+/// parts than a chat message), and is enforced by the inbound media enricher.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 2 * 1024 * 1024,
+    max_attachments: 20,
+};
+
 /// Production email channel adapter.
 pub struct EmailChannel {
     name: String,
@@ -266,6 +288,7 @@ impl Channel for EmailChannel {
                     self.config.smtp.port,
                     smtp_user.clone(),
                     smtp_pass,
+                    self.config.smtp.tls_root_cert_path.as_deref(),
                 )
                 .map_err(ChannelError::from)?,
             )
@@ -387,6 +410,181 @@ impl Channel for EmailChannel {
         include_str!("schemas/email.json")
     }
 
+    /// SMTP: **all four are permanently absent, by the shape of the protocol.**
+    ///
+    /// Once a remote MTA has returned `250` for `DATA`, the message is that
+    /// MTA's property. SMTP defines no verb to alter or withdraw it, and there
+    /// is no addressable handle for the copy sitting in the recipient's
+    /// mailbox. ("Recall" in Exchange is an Exchange-internal courtesy between
+    /// mailboxes on the same organisation, not an SMTP capability, and it fails
+    /// silently the moment the recipient is elsewhere or has read the mail.)
+    ///
+    /// This adapter also runs an IMAP poll loop, and IMAP *can* delete — but
+    /// only from **our own** mailbox. Deleting our copy of a sent message is
+    /// not deleting the message; reporting it as
+    /// [`Channel::delete_message`] would be the silent lie that method's
+    /// documentation exists to forbid.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::PlatformHasNoApi;
+        wcore_channels::NativeActions::none()
+            .edit(PlatformHasNoApi)
+            .delete(PlatformHasNoApi)
+            .react(PlatformHasNoApi)
+            .typing(PlatformHasNoApi)
+            .note(
+                "SMTP defines no verb to alter or recall a message a remote MTA has \
+                 accepted, and no handle for the recipient's copy. IMAP can delete only \
+                 OUR copy, which is not the same operation.",
+            )
+    }
+
+    /// Setup and authentication probe — reference implementation for the
+    /// POLLING half of the Phase 24 channel matrix.
+    ///
+    /// The two reference adapters are deliberately different SHAPES, not two
+    /// spellings of the same shape. Discord's probe is one HTTP round trip
+    /// against a live persistent-connection API. This one has to resolve four
+    /// credential handles across two protocols and then open a real IMAP
+    /// session, so it exercises the parts of the contract a single-credential
+    /// HTTP adapter never touches: partial configuration, and an
+    /// authentication answer that costs a blocking socket.
+    ///
+    /// # Which credential is checked, and the gap this leaves
+    ///
+    /// The identity a mailbox authenticates as is the IMAP account, so IMAP is
+    /// what is logged into. SMTP's credentials are checked for PRESENCE only —
+    /// a probe that also sent through SMTP would be sending a message, which
+    /// this surface exists to avoid. An SMTP credential that is present but
+    /// wrong therefore passes this probe and fails at first send. That is a
+    /// stated gap, not an oversight; closing it needs an SMTP `NOOP`-style
+    /// handshake the sender abstraction does not currently expose.
+    async fn probe(&self) -> Result<wcore_channels::ProbeReport, ChannelError> {
+        use wcore_channels::ProbeReport;
+
+        // ---- 1. Configuration completeness. Every finding names the KEY,
+        // never a value.
+        let mut missing: Vec<String> = Vec::new();
+        if self.config.from_address.trim().is_empty() {
+            missing.push("from_address".to_string());
+        }
+        if self.config.smtp.host.trim().is_empty() {
+            missing.push("smtp.host".to_string());
+        }
+        for (label, handle) in [
+            (
+                "smtp.user_credential_handle",
+                &self.config.smtp.user_credential_handle,
+            ),
+            (
+                "smtp.password_credential_handle",
+                &self.config.smtp.password_credential_handle,
+            ),
+        ] {
+            if handle.trim().is_empty() {
+                missing.push(label.to_string());
+            } else if matches!(self.creds.get(handle), Ok(None)) {
+                missing.push(format!(
+                    "{label} -> {handle:?} absent from credentials store"
+                ));
+            }
+        }
+
+        let Some(imap_cfg) = self.config.imap.clone() else {
+            // No IMAP configured: this mailbox can send but never receives.
+            // That is a complete, legal configuration for an outbound-only
+            // channel, and it is NOT an authenticated one — there is no
+            // credential this probe can exercise without sending mail, so the
+            // honest verdict is Incomplete with the reason named, not Ok.
+            missing.push(
+                "imap (absent — outbound only; no credential can be verified without sending)"
+                    .to_string(),
+            );
+            return Ok(ProbeReport::incomplete(&self.name, "email", missing));
+        };
+
+        let user = match self.creds.get(&imap_cfg.user_credential_handle) {
+            Ok(Some(u)) => Some(u),
+            Ok(None) => {
+                missing.push(format!(
+                    "imap.user_credential_handle -> {:?} absent from credentials store",
+                    imap_cfg.user_credential_handle
+                ));
+                None
+            }
+            Err(e) => {
+                missing.push(format!("credentials store unreadable: {e}"));
+                None
+            }
+        };
+        let pass = match self.creds.get(&imap_cfg.password_credential_handle) {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => {
+                missing.push(format!(
+                    "imap.password_credential_handle -> {:?} absent from credentials store",
+                    imap_cfg.password_credential_handle
+                ));
+                None
+            }
+            Err(e) => {
+                missing.push(format!("credentials store unreadable: {e}"));
+                None
+            }
+        };
+
+        let (Some(user), Some(pass)) = (user, pass) else {
+            return Ok(ProbeReport::incomplete(&self.name, "email", missing));
+        };
+        if !missing.is_empty() {
+            // Configuration is incomplete somewhere else. Report that rather
+            // than opening a socket: an operator fixes the missing key first,
+            // and a probe that authenticates anyway just adds noise.
+            return Ok(ProbeReport::incomplete(&self.name, "email", missing));
+        }
+
+        // ---- 2. Authentication. A real IMAP LOGIN, then an immediate LOGOUT.
+        // Nothing is fetched and no mailbox state is touched, so running this
+        // against a production mailbox is safe.
+        let host = imap_cfg.host.clone();
+        let port = imap_cfg.port;
+        let mailbox = imap_cfg.mailbox.clone();
+        let identity = user.clone();
+        let outcome = tokio::task::spawn_blocking(move || -> Result<(), (bool, String)> {
+            // `(is_auth_failure, reason)` — the bool is what separates
+            // "rotate the password" from "the server was unreachable", and
+            // collapsing it would make an operator rotate a working password
+            // because a firewall was in the way.
+            let tls =
+                native_tls::TlsConnector::new().map_err(|e| (false, format!("tls init: {e}")))?;
+            let client = ::imap::connect((host.as_str(), port), host.as_str(), &tls)
+                .map_err(|e| (false, format!("connect {host}:{port}: {e}")))?;
+            let mut session = client
+                .login(&user, &pass)
+                .map_err(|(e, _)| (true, format!("imap login rejected: {e}")))?;
+            // SELECT proves the configured mailbox actually exists. A login
+            // that succeeds against a mailbox name with a typo is a channel
+            // that starts and then receives nothing, forever.
+            let select = session
+                .select(&mailbox)
+                .map_err(|e| (false, format!("select {mailbox}: {e}")));
+            let _ = session.logout();
+            select.map(|_| ())
+        })
+        .await
+        .map_err(|e| ChannelError::Other(format!("probe task panicked: {e}")))?;
+
+        match outcome {
+            Ok(()) => Ok(ProbeReport::ok(&self.name, "email", identity)),
+            Err((true, reason)) => Ok(ProbeReport::unauthenticated(&self.name, "email", reason)),
+            Err((false, reason)) => Ok(ProbeReport::unreachable(&self.name, "email", reason)),
+        }
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// the IMAP parser's inline ceiling is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
+    }
+
     /// Return the bytes of an inbound email attachment. The IMAP parser already
     /// decoded each attachment part and inlined it as a `data:<mime>;base64,…`
     /// URL (bounded — oversize parts stay metadata-only), so there is no network
@@ -497,6 +695,7 @@ mod tests {
                 port: 587,
                 user_credential_handle: "email.test.smtp_user".to_string(),
                 password_credential_handle: "email.test.smtp_pass".to_string(),
+                tls_root_cert_path: None,
             },
             imap: None,
         }
@@ -750,6 +949,40 @@ password_credential_handle = "email.acme.smtp_pass"
         assert_eq!(cfg.from_address, "bot@acme.com");
         assert_eq!(cfg.smtp.host, "smtp.acme.com");
         assert!(cfg.imap.is_none());
+        // Absent key stays absent — the extra trust anchor is opt-in, so an
+        // existing config must keep resolving to the compiled-in roots alone.
+        assert_eq!(cfg.smtp.tls_root_cert_path, None);
+    }
+
+    /// `smtp.tls_root_cert_path` survives the TOML -> `EmailConfig` hop.
+    ///
+    /// `SmtpConfig` is `deny_unknown_fields`, so before the field existed this
+    /// exact document was a hard parse ERROR. That is what makes this a real
+    /// assertion about the config plumbing rather than a restatement of serde's
+    /// defaults: it is the known-positive half of the pair with the
+    /// `assert_eq!(.., None)` above.
+    #[test]
+    fn config_carries_smtp_tls_root_cert_path() {
+        let raw = r#"
+name = "acme-email"
+platform = "email"
+
+[options]
+from_address = "bot@acme.com"
+
+[options.smtp]
+host = "smtp.acme.com"
+port = 587
+user_credential_handle = "email.acme.smtp_user"
+password_credential_handle = "email.acme.smtp_pass"
+tls_root_cert_path = "/etc/wayland/corporate-ca.pem"
+"#;
+        let outer: wcore_channels::ChannelConfig = toml::from_str(raw).unwrap();
+        let cfg: EmailConfig = outer.options.try_into().unwrap();
+        assert_eq!(
+            cfg.smtp.tls_root_cert_path.as_deref(),
+            Some("/etc/wayland/corporate-ca.pem")
+        );
     }
 
     // -----------------------------------------------------------------

@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::resolution_provenance::{LaunchBindingEvidence, ProfileSelectionSource};
+
 /// Maximum profile-name length. Generous for human-chosen names while staying
 /// well under filesystem component limits (255 bytes on ext4/APFS/NTFS).
 pub const MAX_PROFILE_NAME_LEN: usize = 64;
@@ -242,6 +244,9 @@ pub struct LaunchOutcome {
     /// that was asked for and NOT bound. A host protocol must refuse rather than
     /// serve the default home's credentials/memory under that name.
     pub unbound_selection: Option<String>,
+    /// The authority that selected the process's effective home. This records
+    /// names and source classes only; it never retains `WAYLAND_HOME` values.
+    pub binding: LaunchBindingEvidence,
 }
 
 static LAUNCH_OUTCOME: std::sync::OnceLock<LaunchOutcome> = std::sync::OnceLock::new();
@@ -260,12 +265,23 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome
     // 1. Explicit WAYLAND_HOME wins — never override it. An explicit home is an
     //    unambiguous binding, so nothing is left unbound.
     if std::env::var_os("WAYLAND_HOME").is_some() {
-        return LaunchOutcome::default();
+        return LaunchOutcome {
+            unbound_selection: None,
+            binding: LaunchBindingEvidence::ExplicitWaylandHome,
+        };
     }
 
     // 2. --profile on argv, else 3. the active pointer.
-    let Some(name) = profile_flag_from_args(args).or_else(read_active_pointer) else {
-        return LaunchOutcome::default();
+    let selection = profile_flag_from_args(args)
+        .map(|name| (name, ProfileSelectionSource::CommandLine))
+        .or_else(|| {
+            read_active_pointer().map(|name| (name, ProfileSelectionSource::ActivePointer))
+        });
+    let Some((name, source)) = selection else {
+        return LaunchOutcome {
+            unbound_selection: None,
+            binding: LaunchBindingEvidence::DefaultHome,
+        };
     };
 
     match profile_dir(&name) {
@@ -273,7 +289,10 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome
             // SAFETY: single-threaded at process entry (see the doc comment and
             // the `main()` call site). No other thread can observe the env race.
             unsafe { std::env::set_var("WAYLAND_HOME", &dir) };
-            LaunchOutcome::default()
+            LaunchOutcome {
+                unbound_selection: None,
+                binding: LaunchBindingEvidence::BoundProfile { name, source },
+            }
         }
         Ok(dir) => {
             eprintln!(
@@ -281,13 +300,15 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome
                 dir.display()
             );
             LaunchOutcome {
-                unbound_selection: Some(name),
+                unbound_selection: Some(name.clone()),
+                binding: LaunchBindingEvidence::UnboundProfile { name, source },
             }
         }
         Err(e) => {
             eprintln!("warning: ignoring invalid profile selection: {e}");
             LaunchOutcome {
-                unbound_selection: Some(name),
+                unbound_selection: Some(name.clone()),
+                binding: LaunchBindingEvidence::UnboundProfile { name, source },
             }
         }
     }
@@ -373,7 +394,10 @@ const SECRET_FILE_PREFIX: &str = "credentials";
 /// only special-cases the top level; if the credential/oauth layout ever nests
 /// (e.g. `providers/<x>/credentials.toml`), update this set AND the copy depth
 /// handling together.
-fn is_secret_entry(file_name: &str) -> bool {
+///
+/// Public because `portability` classifies peer state trees and must agree with
+/// this definition rather than growing a second, divergent one (F26-01).
+pub fn is_secret_entry(file_name: &str) -> bool {
     if SECRET_DIR_NAMES.contains(&file_name) {
         return true;
     }
@@ -592,6 +616,24 @@ pub fn delete_profile_dir(name: &str) -> Result<(), ProfileOpError> {
     if !dir.is_dir() {
         return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
     }
+    // P3 — purge the profile's confidential keys from the OS keyring FIRST.
+    // `remove_dir_all` reaches everything in the tree and nothing outside it, so
+    // a keyring-backed profile would otherwise leave its per-profile credential
+    // behind forever; one orphan per deleted profile is what filled the Windows
+    // credential store. Deliberately best-effort: a keyring we cannot reach must
+    // not make the profile undeletable, because an undeletable profile is how
+    // the orphans accumulate in the first place.
+    if let Err(error) =
+        crate::credentials::purge_profile_confidential_keys(&dir.join("credentials.toml"))
+    {
+        tracing::warn!(
+            target: "wcore_profile",
+            profile = name,
+            error = %error,
+            "could not purge this profile's confidential keys from the OS keyring; \
+             deleting the profile directory anyway"
+        );
+    }
     std::fs::remove_dir_all(&dir).map_err(ProfileOpError::io("remove profile dir"))
 }
 
@@ -620,20 +662,45 @@ pub fn delete_profile(name: &str) -> Result<(), ProfileOpError> {
 /// of the tree.
 fn copy_tree_filtered(src: &Path, dst: &Path, skip_secrets: bool) -> Result<(), ProfileOpError> {
     std::fs::create_dir_all(dst).map_err(ProfileOpError::io("create export dir"))?;
-    copy_tree_inner(src, dst, skip_secrets, true)
+    let mut sink = Vec::new();
+    copy_tree_inner(src, dst, skip_secrets, true, "", &mut None, &mut sink)
 }
 
+/// Normalize a copied entry's path to one platform-independent rendering, so a
+/// corpus exported on Windows and imported on Linux names the same items.
+fn normalized_join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn copy_tree_inner(
     src: &Path,
     dst: &Path,
     skip_secrets: bool,
     is_top_level: bool,
+    rel_prefix: &str,
+    keep: &mut Option<&dyn Fn(&str) -> bool>,
+    copied: &mut Vec<String>,
 ) -> Result<(), ProfileOpError> {
     for entry in std::fs::read_dir(src).map_err(ProfileOpError::io("read source dir"))? {
         let entry = entry.map_err(ProfileOpError::io("read source entry"))?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         if is_top_level && skip_secrets && is_secret_entry(&name_str) {
+            continue;
+        }
+        // Selection is applied at the TOP LEVEL only, on the same relative
+        // names an export publishes. A selection never reaches inside an item,
+        // so it cannot half-copy one.
+        let rel = normalized_join(rel_prefix, &name_str);
+        if is_top_level
+            && let Some(f) = keep.as_ref()
+            && !f(&rel)
+        {
             continue;
         }
         let from = entry.path();
@@ -661,9 +728,10 @@ fn copy_tree_inner(
         }
         if meta.is_dir() {
             std::fs::create_dir_all(&to).map_err(ProfileOpError::io("create dir"))?;
-            copy_tree_inner(&from, &to, skip_secrets, false)?;
+            copy_tree_inner(&from, &to, skip_secrets, false, &rel, keep, copied)?;
         } else {
             std::fs::copy(&from, &to).map_err(ProfileOpError::io("copy file"))?;
+            copied.push(rel);
         }
     }
     Ok(())
@@ -689,6 +757,72 @@ pub fn export_profile(
     }
     copy_tree_filtered(&src, dst_dir, !include_secrets)?;
     Ok(dst_dir.to_path_buf())
+}
+
+/// File name a portable corpus carries its per-item provenance records in.
+///
+/// Declared HERE, beside the export it accompanies, so the writer (the CLI) and
+/// any reader agree on one name. The record CONTENT is composed by
+/// `wcore_cli::migrate::provenance`, which owns the domain-separated digest —
+/// this crate does not grow a second definition of it.
+pub const EXPORT_PROVENANCE_FILE: &str = "PROVENANCE.json";
+
+/// The top-level entries an export would publish, in a stable order.
+///
+/// These are the identities `export --select` / `--exclude` address, so a user
+/// narrows an export using exactly the names a preview showed them. Secret
+/// entries are omitted unless `include_secrets`, so a selection can never be
+/// the thing that pulls a credential into a corpus.
+pub fn export_entries(name: &str, include_secrets: bool) -> Result<Vec<String>, ProfileOpError> {
+    let src = profile_dir(name)?;
+    if !src.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&src).map_err(ProfileOpError::io("read profile dir"))? {
+        let entry = entry.map_err(ProfileOpError::io("read profile entry"))?;
+        let name_str = entry.file_name().to_string_lossy().into_owned();
+        if !include_secrets && is_secret_entry(&name_str) {
+            continue;
+        }
+        out.push(name_str);
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Export a profile, narrowed to the top-level entries `keep` accepts.
+///
+/// Identical to [`export_profile`] in every security-relevant respect — the
+/// same secret exclusion by default, the same symlink/reparse-point refusal,
+/// the same recursive copy — and returns the normalized relative path of every
+/// FILE it copied, so the caller can attach a provenance record to each without
+/// re-walking the tree (and therefore without a second walk that could disagree
+/// with what was actually written).
+pub fn export_profile_selected(
+    name: &str,
+    dst_dir: &Path,
+    include_secrets: bool,
+    keep: Option<&dyn Fn(&str) -> bool>,
+) -> Result<Vec<String>, ProfileOpError> {
+    let src = profile_dir(name)?;
+    if !src.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    std::fs::create_dir_all(dst_dir).map_err(ProfileOpError::io("create export dir"))?;
+    let mut copied = Vec::new();
+    let mut keep = keep;
+    copy_tree_inner(
+        &src,
+        dst_dir,
+        !include_secrets,
+        true,
+        "",
+        &mut keep,
+        &mut copied,
+    )?;
+    copied.sort();
+    Ok(copied)
 }
 
 /// Import (adopt) a directory tree `src_dir` as a NEW profile `name`. The new
@@ -823,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profiles_root_ignores_wayland_home() {
         // profiles_root() must resolve identically whether or not WAYLAND_HOME
         // is set, and must NEVER be a child of it (C2).
@@ -857,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profiles_root_honors_explicit_override() {
         let root = abs_root("custom-profiles");
         let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
@@ -879,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profile_dir_case_folds_to_same_path() {
         let root = abs_root("p");
         let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
@@ -890,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn profile_dir_rejects_invalid_name() {
         let root = abs_root("p");
         let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
@@ -899,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn active_pointer_is_under_root_not_in_a_home() {
         let root = abs_root("p");
         let home = abs_root("some-home");
@@ -962,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_respects_existing_wayland_home() {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("work")).unwrap();
@@ -976,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_sets_home_from_profile_flag() {
         let root = tempdir().unwrap();
         let work = root.path().join("work");
@@ -993,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_reads_pointer_when_no_flag() {
         let root = tempdir().unwrap();
         let work = root.path().join("work");
@@ -1011,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_flag_wins_over_pointer() {
         let root = tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("flagged")).unwrap();
@@ -1029,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_falls_through_on_missing_dir() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1041,10 +1175,17 @@ mod tests {
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
         // ...and the outcome records the unbound selection so a host can refuse.
         assert_eq!(outcome.unbound_selection.as_deref(), Some("ghost"));
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::UnboundProfile {
+                name: "ghost".to_string(),
+                source: ProfileSelectionSource::CommandLine,
+            }
+        );
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_falls_through_on_invalid_name() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1054,6 +1195,13 @@ mod tests {
         let outcome = activate_for_launch_impl(argv(&["wcore", "--profile", "../escape"]));
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
         assert_eq!(outcome.unbound_selection.as_deref(), Some("../escape"));
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::UnboundProfile {
+                name: "../escape".to_string(),
+                source: ProfileSelectionSource::CommandLine,
+            }
+        );
     }
 
     /// The pointer path is a first-class selection source, so its missing-home
@@ -1061,7 +1209,7 @@ mod tests {
     /// guard misses (`wayland-core profile use X` then a bare launch when X's
     /// home is gone).
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_records_unbound_selection_from_the_active_pointer() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1083,11 +1231,18 @@ mod tests {
             Some("work"),
             "a pointer-selected missing home must be recorded, not silently ignored"
         );
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::UnboundProfile {
+                name: "work".to_string(),
+                source: ProfileSelectionSource::ActivePointer,
+            }
+        );
     }
 
     /// A cleanly bound profile (home exists) leaves nothing unbound.
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn activate_bound_profile_records_no_unbound_selection() {
         let root = tempdir().unwrap();
         let _g = EnvGuard::set(&[
@@ -1101,6 +1256,13 @@ mod tests {
             Some(root.path().join("work").into_os_string())
         );
         assert_eq!(outcome.unbound_selection, None);
+        assert_eq!(
+            outcome.binding,
+            LaunchBindingEvidence::BoundProfile {
+                name: "work".to_string(),
+                source: ProfileSelectionSource::CommandLine,
+            }
+        );
     }
 
     // --- Phase 2 management helpers ----------------------------------------
@@ -1117,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_lists_and_exists() {
         let (_g, root) = rooted();
         assert!(!profile_exists("work"));
@@ -1134,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_rejects_duplicate_and_invalid() {
         let (_g, _root) = rooted();
         create_profile("work", None).unwrap();
@@ -1149,7 +1311,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_with_base_writes_marker_and_never_copies_secrets() {
         let (_g, root) = rooted();
         let base = create_profile("base", None).unwrap();
@@ -1168,7 +1330,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn create_with_missing_base_errors_and_leaves_nothing() {
         let (_g, root) = rooted();
         assert!(matches!(
@@ -1180,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn list_skips_pointer_and_nondirs() {
         let (_g, root) = rooted();
         create_profile("work", None).unwrap();
@@ -1193,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn set_clear_and_active_name_roundtrip() {
         let (_g, _root) = rooted();
         create_profile("work", None).unwrap();
@@ -1212,7 +1374,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn set_active_refuses_missing_profile() {
         let (_g, _root) = rooted();
         assert!(matches!(
@@ -1226,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn rename_moves_dir_and_repoints_active() {
         let (_g, root) = rooted();
         create_profile("old", None).unwrap();
@@ -1241,7 +1403,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn rename_errors_on_missing_and_conflict() {
         let (_g, _root) = rooted();
         create_profile("a", None).unwrap();
@@ -1260,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn delete_dir_does_not_touch_pointer() {
         let (_g, root) = rooted();
         create_profile("work", None).unwrap();
@@ -1275,8 +1437,44 @@ mod tests {
         ));
     }
 
+    /// P3 wiring, and the failure mode that matters most about it: the purge is
+    /// BEST-EFFORT, so a profile whose keyring cannot be reached must still be
+    /// deletable.
+    ///
+    /// This is not a nicety. The leak being closed is one orphaned credential
+    /// per deleted profile; a purge that made `profile delete` FAIL on a
+    /// keyring-less host would turn that into an undeletable profile, and
+    /// undeletable profiles are how the orphans accumulate in the first place.
+    /// The fixture pins a KEYRING selection precisely so the purge takes its
+    /// keyring branch — on a headless host that branch errors, and the deletion
+    /// must survive it.
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
+    fn delete_dir_survives_a_keyring_purge_that_cannot_reach_the_keyring() {
+        let (_g, root) = rooted();
+        let dir = create_profile("keyed", None).unwrap();
+        // A marker pinning a keyring service that does not exist on any host.
+        std::fs::write(
+            dir.join(".credentials.confidential-backend.json"),
+            serde_json::json!({
+                "version": 1,
+                "backend": "keyring",
+                "service": "wayland-core.profile.deliberately-absent-0000",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(dir.join(".credentials.confidential-backend.json").exists());
+
+        delete_profile_dir("keyed").expect("a profile must stay deletable regardless");
+        assert!(
+            !root.path().join("keyed").exists(),
+            "the profile tree must be gone"
+        );
+    }
+
+    #[test]
+    #[serial(wayland_home_env)]
     fn delete_profile_clears_pointer_when_active() {
         let (_g, _root) = rooted();
         create_profile("work", None).unwrap();
@@ -1295,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn export_excludes_secrets_by_default() {
         let (_g, root) = rooted();
         let p = create_profile("work", None).unwrap();
@@ -1323,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn export_include_secrets_copies_them() {
         let (_g, _root) = rooted();
         let p = create_profile("work", None).unwrap();
@@ -1335,7 +1533,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn import_creates_profile_from_tree() {
         let (_g, _root) = rooted();
         let src = tempdir().unwrap();
@@ -1350,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn import_rejects_existing_and_bad_source() {
         let (_g, _root) = rooted();
         create_profile("taken", None).unwrap();
@@ -1368,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(wayland_home_env)]
     fn import_does_not_follow_symlinks() {
         let (_g, _root) = rooted();
         let src = tempdir().unwrap();

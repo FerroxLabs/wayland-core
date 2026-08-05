@@ -4,9 +4,12 @@ ijfw_schema: 1
 type: software
 primary_type: software
 secondary_types: []
-confidence: 0.907
-detected_at: 2026-07-13T04:27:50.434Z
+confidence: 0.943
+detected_at: 2026-08-03T23:57:18.479Z
 signals:
+  - kind: agents_md_frontmatter
+    weight: 0.9
+    value: software
   - kind: manifest
     weight: 0.9
     manifests: [Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml]
@@ -16,8 +19,8 @@ signals:
   - kind: file_extension_ratio
     weight: 0.7
     domain: software
-    ratio: 1
-    count: 1359
+    ratio: 0.997
+    count: 1882
 ---
 ## Coordination (READ EVERY TASK — multi-agent blackboard)
 
@@ -208,11 +211,21 @@ built-in tools (Read, Write, Edit, Bash, Grep, Glob, Spawn), supports MCP
 servers, skills, hooks, and long-term memory. It also exposes a JSON stream
 protocol for host integration (e.g. the Electron-based Wayland desktop app).
 
-Tech stack: Rust 2021 edition, stable toolchain, Cargo workspace under `crates/`.
+Tech stack: **Rust 2024 edition** (`Cargo.toml:156`), stable toolchain, Cargo workspace under
+`crates/` with **56 members**.
+
+> **Corrected 2026-07-29.** This line read "Rust 2021 edition" and was false. A recon lane nearly
+> published "the peer is on 2024, we are on 2021" as a competitive finding on the strength of it.
+> **Verify edition and member count against `Cargo.toml`, never against this file.**
 
 ### Crate Map
 
 Dependencies flow **downward** — never introduce circular or upward references.
+
+> **This table is PARTIAL and always has been: it names ~18 of 56 workspace members.** It is a
+> guide to the layering, not an inventory. `ls crates/` is the inventory. Do not conclude a crate
+> does not exist because it is absent here — that is a known-negative assertion against a document
+> proven incomplete.
 
 | Layer | Crate | Responsibility |
 |-------|-------|----------------|
@@ -256,6 +269,8 @@ just push              # Lint-fix → fmt → auto-commit-fixes → test → git
 ```
 
 **Pushing code: always use `just push` instead of `git push`.** It runs lint-fix → fmt → auto-commit-fixes → test → `git push`, preventing CI failures and silently fixing trivial drift before the push. Supports the same arguments as `git push`.
+
+**Sole `just push` exception — Phase 20 terminal UAT ref.** Only the human-authorized Phase 20 terminal UAT helper (`scripts/f20-native-uat-proof.mjs`) may publish the exact, already-focused-proofed and independently reviewed full SHA directly to its exact temporary UAT ref (`refs/f20-native-uat/<full-sha>`) without `just push` — because that publication must carry the reviewed bytes verbatim with no lint/fmt/commit mutation. No other ref, branch, or push may bypass `just push`.
 
 #### One-time setup: install `vx`
 
@@ -390,7 +405,15 @@ Key references in `docs/` (don't duplicate their content here):
 
 When the user corrects your approach, append a one-line rule here before ending the session. Write it concretely ("Always use X for Y"), never abstractly ("be careful with Y"). If an existing line already covers the correction, tighten it instead of adding a new one. Remove lines when the underlying issue goes away (model upgrades, refactors, process changes).
 
-- (empty)
+- When exporting a GSD program for transfer, include the entire milestone, canonical source documents, all phases and requirements, current execution state, and supporting evidence inventory; never export only the active phase unless explicitly requested.
+- **Live testing ranks at least as high as green code.** Close every Success Criterion by exercising the real shipped product — the actual CLI binary, and the actual TUI wherever a user sees or drives the behavior — with an exact invocation, an observable outcome, and a named platform. Unit and integration tests are necessary and never sufficient. Windows live runs go to SeanDesktop (`ssh SeanD@seandesktop`, PowerShell default shell, cargo at `C:\Users\seand\.cargo\bin\cargo.exe`); Linux proof stays on `hetzner-dsm:/root/wayland`. Why this rule exists: Phase 20A drove Windows and macOS acceptance targets to CI-green and nobody ever launched the binary — a passing suite proved the suite, not the product.
+- **Run `.planning/scripts/lint-plan-gates.py` over any plan set before executing it; zero HIGH is the bar.** A gate that cannot go red is worse than no gate — it manufactures confidence. Measured reality: three rounds of adversarial human review passed five phase plan sets that the linter then found **174 self-passing gates** in (68 in Phase 21 alone). The recurring shapes are a pipe that swallows the exit status, `git status --porcelain` as a gate (always exit 0), grepping an evidence file the executor itself writes, and — the expensive one — a gate that is **already green against the untouched tree**, which looks like coverage and proves nothing. Reviewers miss these not from laziness but because "can this go red?" must be asked once per gate, hundreds of times. Make it mechanical, not a judgment call.
+- **A live test proves nothing if its scenario is too clean to reach the defect — the scenario must carry state, and a comparison must be taken while the two sides can still disagree.** Live-testing is necessary and it is not sufficient. Measured twice, the same week. (a) `gateway drain` returned the per-iteration increment where its contract requires total elapsed, so it hung indefinitely whenever work was carried — and it passed the **first** live journey, because that gateway had zero pending deliveries and the drain loop broke on its first observation. A green suite, green clippy and a green *live* run all missed it. (b) A `SCANNER-AGREEMENT` gate compared a process scanner against a manual count and printed `AGREE scanner=0 manual=0` — but it ran **only after the reap**, when both sides are legitimately zero. It agreed enthusiastically while the scanner was structurally blind and could not have seen an orphan if one existed. So: ask what state the code path needs in order to be *wrong* and put that state there, and take every agreement check **while the quantity is non-zero**. An empty queue, a fresh profile, a single worker, a zero-length history, and a post-cleanup tally are all conditions under which broken code and a blind instrument both look correct.
+- **A measurement that cannot be taken must never render as `0`.** Windows orphan detection used `tasklist`, which does not print command lines, so the scanner reported a **measured zero while an orphan existed** — strictly worse than an error, because a zero reads as proof of correctness and everything downstream banks it. Fix it in the type, not the caller: the scan result became `Enumerated | CannotDetermine` **with no `count()` at all**, so "could not look" is unrepresentable as a count and prints `NOT MEASURED — <reason>`. Add an instrument self-test where one exists — the scanner must find its own process, with its own non-empty command line, because if it cannot see itself it cannot see anything.
+- **Do not park a decision on Sean. Cross-audit it, reach a definitive answer, record the evidence, and proceed.** A `checkpoint:decision` or `checkpoint:human-verify` in a plan is an instruction to *decide well*, not to stop. Put the question to the 4-way panel — Codex 5.6 Sol (`codex exec -m gpt-5.6-sol --sandbox read-only --skip-git-repo-check`), Gemini 3.1 Pro (`gemini -p … -m gemini-3.1-pro-preview -o text`), Kimi K3 (`/Users/seandonahoe/.kimi-code/bin/kimi -p … --output-format text`, absolute path required), and an internal adversarial pass — then commit to the majority position, or to the minority position when it carries the stronger evidence, and write down which and why. Live-test the decision wherever it is testable rather than reasoning about it. **Why:** 18 blocking gates across 32 plans is 18 serial waits on one human, and that — not agent throughput — is what turned Phase 20 into two weeks. **The only things still reserved to Sean** are irreversible outward actions and inputs no agent can produce: merging to main, opening a PR, tagging, releasing, closing an issue, deleting a retained evidence ref, and supplying real credentials or accounts. Everything else — architecture, scope, evidence acceptance, repair sets, cost tradeoffs — is yours to settle. Escalate only on a genuine deadlock the panel cannot break, and bring the panel's split with you.
+- **An artifact newer than its source is a build that did not happen.** `rsync -a` preserves mtimes, so syncing a tree to a build host can leave the source *older* than a `target/` artifact left from a previous run — and cargo then skips the rebuild and re-runs the **stale binary**. Lane 24e lost two mutation results to this before catching it: it was testing a mutant it thought it had reverted. The dangerous direction is the other one — when the stale binary is the *permissive* one, the same mechanism yields a false **green**. Any cross-host workflow here that `rsync`s and then runs cargo is exposed. Assert the built artifact is newer than its newest source, or force the rebuild; never infer that a build ran because the command exited 0.
+- **Two routers on one listener authorize separately.** Lane 24e shipped role gating where, with the same server and the same key, `POST /sessions` returned 403 and `POST /v1/sessions` returned **200** — both mounts shared the verifier while only one enforced. The suite passed; a **live** probe against the shipped binary found it. When a surface has more than one mount, prove the refusal on **every** mount, and treat an unmeasured transport as unproven rather than as covered by its sibling.
+- **Never trust an exit status that crossed ssh to Windows — carry it in a file instead.** Measured on `seandesktop`: `$LASTEXITCODE` is faithful *inside* PowerShell, but every non-zero status collapses to **1** crossing the ssh session boundary (2, 3, 7, 100 and 255 all arrive as 1), so only the bit `zero / non-zero` survives and a gate asserting `rc == 1` passes for every failure mode it was written to tell apart. Stdout sentinels are not sufficient either — PowerShell splices CLIXML progress records into the stream and a status line can vanish while its completion marker survives. The verified pattern: the remote side writes `WLRC=<code>` **first** and a `WLDONE` marker **last** to a status file (so a truncated file can never show a marker without its status), and a **separate** ssh call reads it back and ignores exit status entirely. Grade three states, not two: no marker = incomplete; marker without status = **UNREADABLE**; both = the true code. Verified 7/7 over 0/1/2/3/7/100/255. This composes with the scheduled-task requirement (Windows OpenSSH kills session children on disconnect) — poll for `WLDONE`, not for process absence, because a task that never started also has no process. Related syntax trap: `"...$LASTEXITCODE:TAG"` renders empty, because PowerShell reads `$VAR:` as namespace notation — always brace it, `"WLRC=${rc}"`.
 
 <!-- IJFW-MEMORY-START -->
 Project memory at .ijfw/memory/. Call `ijfw_memory_prelude` for full context.

@@ -1,0 +1,1384 @@
+HEAD=cce8e6aa
+=====SUITE wcore-agent/actor_acl_test
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling memchr v2.8.1
+   Compiling log v0.4.30
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling version_check v0.9.5
+   Compiling typenum v1.20.1
+   Compiling libm v0.2.16
+   Compiling bytes v1.11.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.32
+   Compiling parking_lot_core v0.9.12
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling generic-array v0.14.7
+   Compiling subtle v2.6.1
+   Compiling autocfg v1.5.1
+   Compiling futures-sink v0.3.32
+   Compiling futures-channel v0.3.32
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling tracing-core v0.1.36
+   Compiling foldhash v0.2.0
+   Compiling http v1.4.1
+   Compiling zmij v1.0.21
+   Compiling num-traits v0.2.19
+   Compiling cpufeatures v0.2.17
+   Compiling thiserror v2.0.18
+   Compiling syn v2.0.117
+   Compiling hashbrown v0.17.1
+   Compiling ryu v1.0.23
+   Compiling pkg-config v0.3.33
+   Compiling fnv v1.0.7
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling getrandom v0.2.17
+   Compiling jobserver v0.1.34
+   Compiling errno v0.3.14
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.1
+   Compiling cc v1.2.63
+   Compiling socket2 v0.6.4
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling http-body v1.0.1
+   Compiling ipnet v2.12.0
+   Compiling digest v0.10.7
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling percent-encoding v2.3.2
+   Compiling zerocopy v0.8.50
+   Compiling serde_json v1.0.150
+   Compiling http-body-util v0.1.3
+   Compiling getrandom v0.4.2
+   Compiling base64 v0.22.1
+   Compiling rand_core v0.10.1
+   Compiling iana-time-zone v0.1.65
+   Compiling aws-lc-rs v1.17.0
+   Compiling sha2 v0.10.9
+   Compiling stable_deref_trait v1.2.1
+   Compiling untrusted v0.9.0
+   Compiling anyhow v1.0.103
+   Compiling untrusted v0.7.1
+   Compiling either v1.16.0
+   Compiling httparse v1.10.1
+   Compiling rustls v0.23.40
+   Compiling tower-service v0.3.3
+   Compiling form_urlencoded v1.2.2
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling cmake v0.1.58
+   Compiling bitflags v2.11.1
+   Compiling indexmap v2.14.0
+   Compiling httpdate v1.0.3
+   Compiling want v0.3.1
+   Compiling litemap v0.8.2
+   Compiling writeable v0.6.3
+   Compiling sync_wrapper v1.0.2
+   Compiling fastrand v2.4.1
+   Compiling tower-layer v0.3.3
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling openssl-probe v0.2.1
+   Compiling utf8_iter v1.0.4
+   Compiling regex-syntax v0.8.10
+   Compiling base64ct v1.8.3
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling winnow v1.0.3
+   Compiling workspace-hack v0.1.0 (/root/wayland-kr07/workspace-hack)
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling option-ext v0.2.0
+   Compiling aho-corasick v1.1.4
+   Compiling dirs-sys v0.5.0
+   Compiling aws-lc-sys v0.41.0
+   Compiling ring v0.17.14
+   Compiling block-padding v0.3.3
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling dirs v6.0.0
+   Compiling mime v0.3.17
+   Compiling inout v0.1.4
+   Compiling unicase v2.9.0
+   Compiling libdbus-sys v0.2.7
+   Compiling glob v0.3.3
+   Compiling mime_guess v2.0.5
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling io-lifetimes v2.0.4
+   Compiling dbus v0.9.11
+   Compiling universal-hash v0.5.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling semver v1.0.28
+   Compiling opaque-debug v0.3.1
+   Compiling poly1305 v0.8.0
+   Compiling password-hash v0.5.0
+   Compiling synstructure v0.13.2
+   Compiling regex-automata v0.4.14
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling rtoolbox v0.0.5
+   Compiling io-extras v0.18.4
+   Compiling sha1_smol v1.0.1
+   Compiling crc32fast v1.5.0
+   Compiling uuid v1.23.2
+   Compiling rpassword v7.5.2
+   Compiling argon2 v0.5.3
+   Compiling serde_ignored v0.1.14
+   Compiling ambient-authority v0.0.2
+   Compiling cpufeatures v0.3.0
+   Compiling cap-primitives v3.4.5
+   Compiling num-conv v0.2.2
+   Compiling powerfmt v0.2.0
+   Compiling time-core v0.1.8
+   Compiling vcpkg v0.2.15
+   Compiling deranged v0.5.8
+   Compiling time-macros v0.2.27
+   Compiling num-integer v0.1.46
+   Compiling maybe-owned v0.3.4
+   Compiling cap-std v3.4.5
+   Compiling rustix v0.38.44
+   Compiling serde_derive v1.0.228
+   Compiling zeroize_derive v1.4.3
+   Compiling tokio-macros v2.7.0
+   Compiling futures-macro v0.3.32
+   Compiling tracing-attributes v0.1.31
+   Compiling zeroize v1.8.2
+   Compiling thiserror-impl v2.0.18
+   Compiling zerocopy-derive v0.8.50
+   Compiling zerofrom-derive v0.1.7
+   Compiling rustls-pki-types v1.14.1
+   Compiling futures-util v0.3.32
+   Compiling yoke-derive v0.8.2
+   Compiling async-trait v0.1.89
+   Compiling tracing v0.1.44
+   Compiling displaydoc v0.2.6
+   Compiling zerovec-derive v0.11.3
+   Compiling zerofrom v0.1.8
+   Compiling webpki-roots v1.0.7
+   Compiling rustls-native-certs v0.8.4
+   Compiling tempfile v3.27.0
+   Compiling cipher v0.4.4
+   Compiling yoke v0.8.2
+   Compiling regex v1.12.3
+   Compiling dbus-secret-service v4.1.0
+   Compiling fd-lock v4.0.4
+   Compiling chacha20 v0.9.1
+   Compiling zerotrie v0.2.4
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling fs-set-times v0.20.3
+   Compiling chacha20poly1305 v0.10.1
+   Compiling keyring v3.6.3
+   Compiling time v0.3.47
+   Compiling linux-raw-sys v0.4.15
+   Compiling zerovec v0.11.6
+   Compiling http v0.2.12
+   Compiling bumpalo v3.20.3
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling smallvec v1.15.1
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling wcore-compact v0.12.25 (/root/wayland-kr07/crates/wcore-compact)
+   Compiling futures-executor v0.3.32
+   Compiling parking_lot v0.12.5
+   Compiling futures v0.3.32
+   Compiling tokio v1.52.3
+   Compiling icu_provider v2.2.0
+   Compiling libseccomp-sys v0.3.0
+   Compiling vsimd v0.8.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling outref v0.5.2
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling base64-simd v0.8.0
+   Compiling http-body v0.4.6
+   Compiling bytes-utils v0.1.4
+   Compiling libseccomp v0.4.0
+   Compiling idna_adapter v1.2.2
+   Compiling const-oid v0.9.6
+   Compiling pin-utils v0.1.0
+   Compiling idna v1.1.0
+   Compiling xattr v1.6.1
+   Compiling rustc_version v0.4.1
+   Compiling filetime v0.2.29
+   Compiling ppv-lite86 v0.2.21
+   Compiling url v2.5.8
+   Compiling hybrid-array v0.4.12
+   Compiling simd-adler32 v0.3.9
+   Compiling home v0.5.12
+   Compiling which v6.0.3
+   Compiling tar v0.4.46
+   Compiling rand_chacha v0.3.1
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling rand v0.8.6
+   Compiling heck v0.5.0
+   Compiling cmov v0.5.4
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.0
+   Compiling ahash v0.8.12
+   Compiling encoding_rs v0.8.35
+   Compiling const-oid v0.10.2
+   Compiling getrandom v0.3.4
+   Compiling ctutils v0.4.2
+   Compiling crossbeam-utils v0.8.21
+   Compiling byteorder v1.5.0
+   Compiling adler2 v2.0.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling tinyvec v1.11.0
+   Compiling miniz_oxide v0.8.9
+   Compiling hmac v0.12.1
+   Compiling crossbeam-epoch v0.9.20
+   Compiling cranelift-srcgen v0.123.12
+   Compiling digest v0.11.3
+   Compiling cranelift-assembler-x64-meta v0.123.12
+   Compiling unicode-normalization v0.1.25
+   Compiling der v0.6.1
+   Compiling flate2 v1.1.9
+   Compiling libsqlite3-sys v0.30.1
+   Compiling chacha20 v0.10.0
+   Compiling serde_derive_internals v0.29.1
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi v0.3.18
+   Compiling schemars v0.8.22
+   Compiling rand v0.10.1
+   Compiling spki v0.6.0
+   Compiling stringprep v0.1.5
+   Compiling rand_core v0.9.5
+   Compiling hashbrown v0.14.5
+   Compiling pulley-macros v36.0.12
+   Compiling dyn-clone v1.0.20
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-api)
+   Compiling rand_chacha v0.9.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling pkcs8 v0.9.0
+   Compiling hmac v0.13.0
+   Compiling sha2 v0.11.0
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling aws-smithy-async v1.2.14
+   Compiling wcore-protocol v0.12.25 (/root/wayland-kr07/crates/wcore-protocol)
+   Compiling schemars_derive v0.8.22
+   Compiling hashlink v0.9.1
+   Compiling half v2.7.1
+   Compiling cranelift-bitset v0.123.12
+   Compiling crypto-bigint v0.4.9
+   Compiling tower-http v0.6.11
+   Compiling ff v0.12.1
+   Compiling nom v8.0.0
+   Compiling foldhash v0.1.5
+   Compiling inventory v0.3.24
+   Compiling h2 v0.4.14
+   Compiling aws-smithy-types v1.4.9
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-kr07/crates/wcore-sandbox)
+   Compiling cranelift-isle v0.123.12
+   Compiling fallible-iterator v0.3.0
+   Compiling weezl v0.1.12
+   Compiling base16ct v0.1.1
+   Compiling hex v0.4.3
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling same-file v1.0.6
+   Compiling pulley-interpreter v36.0.12
+   Compiling walkdir v2.5.0
+   Compiling sec1 v0.3.0
+   Compiling hashbrown v0.15.5
+   Compiling group v0.12.1
+   Compiling rand v0.9.4
+   Compiling sqlite-vec v0.1.9
+   Compiling cranelift-codegen-shared v0.123.12
+   Compiling target-lexicon v0.13.5
+   Compiling rand_distr v0.5.1
+   Compiling aws-smithy-schema v0.1.0
+   Compiling elliptic-curve v0.12.3
+   Compiling rfc6979 v0.3.1
+   Compiling cranelift-assembler-x64 v0.123.12
+   Compiling cranelift-entity v0.123.12
+   Compiling wcore-safety v0.12.25 (/root/wayland-kr07/crates/wcore-safety)
+   Compiling signature v1.6.4
+   Compiling bstr v1.12.1
+   Compiling cranelift-codegen-meta v0.123.12
+   Compiling zune-core v0.5.1
+   Compiling bytemuck v1.25.0
+   Compiling zip v2.4.2
+   Compiling quick-error v2.0.1
+   Compiling humantime v2.3.0
+   Compiling pom v1.1.0
+   Compiling globset v0.4.18
+   Compiling zune-jpeg v0.5.15
+   Compiling humantime-serde v1.1.1
+   Compiling ecdsa v0.14.8
+   Compiling aws-smithy-http v0.63.6
+   Compiling hyper v1.10.1
+   Compiling aws-credential-types v1.2.14
+   Compiling fdeflate v0.3.7
+   Compiling zopfli v0.8.3
+   Compiling aws-types v1.3.16
+   Compiling ecb v0.1.2
+   Compiling cbc v0.1.2
+   Compiling aes v0.8.4
+   Compiling wasmtime-internal-versioned-export-macros v36.0.12
+   Compiling gimli v0.32.3
+   Compiling md-5 v0.10.6
+   Compiling wasmtime-internal-math v36.0.12
+   Compiling fax v0.2.7
+   Compiling arbitrary v1.4.2
+   Compiling color_quant v1.1.0
+   Compiling byteorder-lite v0.1.0
+   Compiling pxfm v0.1.29
+   Compiling ttf-parser v0.25.1
+   Compiling rustc-hash v2.1.2
+   Compiling rangemap v1.7.1
+   Compiling regalloc2 v0.12.2
+   Compiling hyper-util v0.1.20
+   Compiling cranelift-control v0.123.12
+   Compiling image-webp v0.2.4
+   Compiling tiff v0.11.3
+   Compiling cranelift-codegen v0.123.12
+   Compiling gif v0.14.2
+   Compiling lopdf v0.42.0
+   Compiling rusqlite v0.32.1
+   Compiling moxcms v0.8.1
+   Compiling png v0.18.1
+   Compiling p256 v0.11.1
+   Compiling ignore v0.4.25
+   Compiling type1-encoding-parser v0.1.1
+   Compiling adobe-cmap-parser v0.4.1
+   Compiling cranelift-bforest v0.123.12
+   Compiling aws-smithy-observability v0.2.6
+   Compiling quick-xml v0.31.0
+   Compiling codepage v0.1.2
+   Compiling hashify v0.2.9
+   Compiling openssl-sys v0.9.116
+   Compiling euclid v0.20.14
+   Compiling sha1 v0.10.6
+   Compiling crypto-bigint v0.5.5
+   Compiling csv-core v0.1.13
+   Compiling mutate_once v0.1.2
+   Compiling cff-parser v0.2.0
+   Compiling postscript v0.14.1
+   Compiling wasmparser v0.236.1
+   Compiling object v0.37.3
+   Compiling mail-parser v0.11.3
+   Compiling csv v1.4.0
+   Compiling kamadak-exif v0.6.1
+   Compiling calamine v0.26.1
+   Compiling wcore-repomap v0.12.25 (/root/wayland-kr07/crates/wcore-repomap)
+   Compiling aws-sigv4 v1.4.3
+   Compiling lru v0.18.0
+   Compiling quick-xml v0.39.4
+   Compiling pdf-extract v0.12.0
+   Compiling image v0.25.10
+   Compiling wasm-encoder v0.236.1
+   Compiling signature v2.2.0
+   Compiling aws-smithy-json v0.62.7
+   Compiling cobs v0.3.0
+   Compiling num-bigint v0.4.6
+   Compiling lexical-core v0.7.6
+   Compiling wasmtime-internal-component-util v36.0.12
+   Compiling id-arena v2.3.0
+   Compiling leb128fmt v0.1.0
+   Compiling termcolor v1.4.1
+   Compiling anstyle v1.0.14
+   Compiling regex-lite v0.1.9
+   Compiling unicode-xid v0.2.6
+   Compiling simple_asn1 v0.6.4
+   Compiling postcard v1.1.3
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling pem v3.0.6
+   Compiling nom v5.1.3
+   Compiling wasmtime-internal-unwinder v36.0.12
+   Compiling bitflags v1.3.2
+   Compiling static_assertions v1.1.0
+   Compiling foreign-types-shared v0.1.1
+   Compiling thiserror v1.0.69
+   Compiling xmlparser v0.13.6
+   Compiling wasmtime-internal-component-macro v36.0.12
+   Compiling arrayvec v0.5.2
+   Compiling utf8parse v0.2.2
+   Compiling urlencoding v2.1.3
+   Compiling openssl v0.10.80
+   Compiling anstyle-parse v1.0.0
+   Compiling aws-smithy-xml v0.60.15
+   Compiling aws-smithy-query v0.60.15
+   Compiling foreign-types v0.3.2
+   Compiling wasmtime v36.0.12
+   Compiling thiserror-impl v1.0.69
+   Compiling openssl-macros v0.1.1
+   Compiling itertools v0.14.0
+   Compiling inotify-sys v0.1.5
+   Compiling wasmtime-internal-asm-macros v36.0.12
+   Compiling lazy_static v1.5.0
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling native-tls v0.2.18
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling inotify v0.11.2
+   Compiling wcore-agents-pack v0.12.25 (/root/wayland-kr07/crates/wcore-agents-pack)
+   Compiling md-5 v0.11.0
+   Compiling memfd v0.6.5
+   Compiling der_derive v0.7.3
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling notify-types v2.1.0
+   Compiling rustversion v1.0.22
+   Compiling flagset v0.4.7
+   Compiling signal-hook v0.3.18
+   Compiling system-interface v0.27.3
+   Compiling clap_lex v1.1.0
+   Compiling cap-fs-ext v3.4.5
+   Compiling wasmtime-internal-slab v36.0.12
+   Compiling utf-8 v0.7.6
+   Compiling strsim v0.11.1
+   Compiling siphasher v1.0.3
+   Compiling fallible-iterator v0.2.0
+   Compiling data-encoding v2.11.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling clap_builder v4.6.0
+   Compiling phf_shared v0.13.1
+   Compiling imap-proto v0.10.2
+   Compiling postgres-protocol v0.6.12
+   Compiling der v0.7.10
+   Compiling wit-parser v0.236.1
+   Compiling wasmprinter v0.236.1
+   Compiling convert_case v0.10.0
+   Compiling notify v8.2.0
+   Compiling wcore-dispatch v0.12.25 (/root/wayland-kr07/crates/wcore-dispatch)
+   Compiling clap_derive v4.6.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling webpki-roots v0.26.11
+   Compiling blake3 v1.8.5
+   Compiling email-encoding v0.4.1
+   Compiling email_address v0.2.9
+   Compiling quoted_printable v0.5.2
+   Compiling unicode-width v0.2.2
+   Compiling bufstream v0.1.4
+   Compiling minimal-lexical v0.2.1
+   Compiling base64 v0.13.1
+   Compiling wasmtime-environ v36.0.12
+   Compiling nom v7.1.3
+   Compiling imap v2.4.1
+   Compiling wasmtime-internal-wit-bindgen v36.0.12
+   Compiling spki v0.7.3
+   Compiling derive_more-impl v2.1.1
+   Compiling clap v4.6.1
+   Compiling postgres-types v0.2.14
+   Compiling phf v0.13.1
+   Compiling cap-rand v3.4.5
+   Compiling cap-net-ext v3.4.5
+   Compiling cap-time-ext v3.4.5
+   Compiling gethostname v1.1.0
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling whoami v2.1.2
+   Compiling is-docker v0.2.0
+   Compiling constant_time_eq v0.4.2
+   Compiling litrs v1.0.0
+   Compiling arrayvec v0.7.6
+   Compiling x11rb-protocol v0.13.2
+   Compiling rayon-core v1.13.0
+   Compiling arrayref v0.3.9
+   Compiling tokio-postgres v0.7.18
+   Compiling is-wsl v0.4.0
+   Compiling cron v0.12.1
+   Compiling document-features v0.2.12
+   Compiling derive_more v2.1.1
+   Compiling axum-core v0.4.5
+   Compiling signal-hook-mio v0.2.5
+   Compiling x509-cert v0.2.5
+   Compiling ed25519 v2.2.3
+   Compiling wcore-user-model v0.12.25 (/root/wayland-kr07/crates/wcore-user-model)
+   Compiling rstest_macros v0.26.1
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling is-terminal v0.4.17
+   Compiling plotters-backend v0.3.7
+   Compiling base64 v0.21.7
+   Compiling pathdiff v0.2.3
+   Compiling predicates-core v1.0.10
+   Compiling mockall_derive v0.14.0
+   Compiling ciborium-io v0.2.2
+   Compiling psl-types v2.0.11
+   Compiling matchit v0.7.3
+   Compiling ciborium-ll v0.2.2
+   Compiling open v5.3.5
+   Compiling psl v2.1.212
+   Compiling axum v0.7.9
+   Compiling ron v0.8.1
+   Compiling plotters-svg v0.3.7
+   Compiling proc-macro-crate v3.5.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling x11rb v0.13.2
+   Compiling crossterm v0.29.0
+   Compiling wcore-cron v0.12.25 (/root/wayland-kr07/crates/wcore-cron)
+   Compiling wcore-permissions v0.12.25 (/root/wayland-kr07/crates/wcore-permissions)
+   Compiling itertools v0.10.5
+   Compiling num_cpus v1.17.0
+   Compiling termtree v0.5.1
+   Compiling deadpool-runtime v0.1.4
+   Compiling relative-path v1.9.3
+   Compiling cast v0.3.0
+   Compiling mockall v0.14.0
+   Compiling deadpool v0.12.3
+   Compiling predicates-tree v1.0.13
+   Compiling rayon v1.12.0
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling criterion-plot v0.5.0
+   Compiling predicates v3.1.4
+   Compiling tokio-stream v0.1.18
+   Compiling assert-json-diff v2.0.2
+   Compiling tinytemplate v1.2.1
+   Compiling serial_test_derive v3.5.0
+   Compiling fragile v2.1.0
+   Compiling downcast v0.11.0
+   Compiling futures-timer v3.0.4
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling tokio-test v0.4.5
+   Compiling wiremock v0.6.5
+   Compiling serial_test v3.5.0
+   Compiling wayland-ijfw v0.12.25 (/root/wayland-kr07/crates/wayland-ijfw)
+   Compiling criterion v0.5.1
+   Compiling rstest v0.26.1
+   Compiling rustls-webpki v0.103.13
+   Compiling jsonwebtoken v10.3.0
+   Compiling cranelift-native v0.123.12
+   Compiling cranelift-frontend v0.123.12
+   Compiling wasmtime-internal-cranelift v36.0.12
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.24.0
+   Compiling hyper-rustls v0.27.9
+   Compiling lettre v0.11.22
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling tokio-tungstenite v0.24.0
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling wayland-honcho v0.12.25 (/root/wayland-kr07/crates/wayland-honcho)
+   Compiling wcore-honcho-adapter v0.12.25 (/root/wayland-kr07/crates/wcore-honcho-adapter)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-channels v0.12.25 (/root/wayland-kr07/crates/wcore-channels)
+   Compiling wcore-observability v0.12.25 (/root/wayland-kr07/crates/wcore-observability)
+   Compiling wcore-pricing v0.12.25 (/root/wayland-kr07/crates/wcore-pricing)
+   Compiling aws-config v1.8.16
+   Compiling wcore-memory v0.12.25 (/root/wayland-kr07/crates/wcore-memory)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-kr07/crates/wcore-channel-email)
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-kr07/crates/wcore-channel-sms)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-kr07/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-kr07/crates/wcore-channel-signal)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-kr07/crates/wcore-channel-discord)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-kr07/crates/wcore-channel-slack)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-kr07/crates/wcore-channel-matrix)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-kr07/crates/wcore-channel-msteams)
+   Compiling wcore-providers v0.12.25 (/root/wayland-kr07/crates/wcore-providers)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-kr07/crates/wcore-channel-telegram)
+   Compiling wcore-tools v0.12.25 (/root/wayland-kr07/crates/wcore-tools)
+   Compiling wcore-swarm v0.12.25 (/root/wayland-kr07/crates/wcore-swarm)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-kr07/crates/wcore-channels-registry)
+   Compiling wcore-plugin-wasm v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-wasm)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-kr07/crates/wcore-mcp)
+   Compiling wcore-browser v0.12.25 (/root/wayland-kr07/crates/wcore-browser)
+   Compiling wcore-cua v0.12.25 (/root/wayland-kr07/crates/wcore-cua)
+   Compiling wcore-skills v0.12.25 (/root/wayland-kr07/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (/root/wayland-kr07/crates/wcore-eval)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-kr07/crates/wcore-evolve)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-kr07/crates/wayland-ollama)
+   Compiling wcore-agent v0.12.25 (/root/wayland-kr07/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 25s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/actor_acl_test.rs (target/debug/deps/actor_acl_test-9039abe4ac7ee131)
+
+running 5 tests
+test root_actor_bypasses_deny_policy ... ok
+test sub_agent_ask_policy_falls_through_to_approval ... ok
+test sub_agent_with_allow_policy_runs_tool ... ok
+test sub_agent_with_deny_policy_short_circuits ... FAILED
+test sub_agent_without_policy_runs_tool ... ok
+
+failures:
+
+---- sub_agent_with_deny_policy_short_circuits stdout ----
+
+thread 'sub_agent_with_deny_policy_short_circuits' (3407477) panicked at crates/wcore-agent/tests/actor_acl_test.rs:153:13:
+expected deny error result; got success: tool-executed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sub_agent_with_deny_policy_short_circuits
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p wcore-agent --test actor_acl_test`
+=====RC wcore-agent/actor_acl_test rc=101
+=====SUITE wcore-agent/tool_token_bench_smoke
+   Compiling wcore-agent v0.12.25 (/root/wayland-kr07/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/tool_token_bench_smoke.rs (target/debug/deps/tool_token_bench_smoke-98d743e9b968b436)
+
+running 1 test
+test scripted_run_writes_expected_markdown ... tool_token_bench: scratch workdir = /tmp/wcore-tool-token-bench-1785242893335411055
+tool_token_bench: at least one tool returned is_error=true (see scratch workdir for details). Refusing to write markdown.
+  - Bash / echo hello: error
+FAILED
+
+failures:
+
+---- scripted_run_writes_expected_markdown stdout ----
+
+thread 'scripted_run_writes_expected_markdown' (3407632) panicked at crates/wcore-agent/tests/tool_token_bench_smoke.rs:73:5:
+tool_token_bench exited with ExitStatus(unix_wait_status(256))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    scripted_run_writes_expected_markdown
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 63.29s
+
+error: test failed, to rerun pass `-p wcore-agent --test tool_token_bench_smoke`
+=====RC wcore-agent/tool_token_bench_smoke rc=101
+=====SUITE wcore-cli/acp_engine_turn
+   Compiling libc v0.2.186
+   Compiling log v0.4.30
+   Compiling lock_api v0.4.14
+   Compiling tracing-core v0.1.36
+   Compiling ring v0.17.14
+   Compiling regex-automata v0.4.14
+   Compiling num_threads v0.1.7
+   Compiling ident_case v1.0.1
+   Compiling hashbrown v0.16.1
+   Compiling castaway v0.2.4
+   Compiling strum_macros v0.27.2
+   Compiling indoc v2.0.7
+   Compiling zopfli v0.8.3
+   Compiling regalloc2 v0.12.2
+   Compiling pulley-interpreter v36.0.12
+   Compiling darling_core v0.23.0
+   Compiling instability v0.3.12
+   Compiling tracing v0.1.44
+   Compiling compact_str v0.9.1
+   Compiling unicode-truncate v2.0.1
+   Compiling zip v2.4.2
+   Compiling wasmtime-environ v36.0.12
+   Compiling kasuari v0.4.12
+   Compiling lru v0.16.4
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling syn v1.0.109
+   Compiling line-clipping v0.3.7
+   Compiling proc-macro-error v1.0.4
+   Compiling calamine v0.26.1
+   Compiling axum-core v0.4.5
+   Compiling axum-macros v0.4.2
+   Compiling getrandom v0.2.17
+   Compiling parking_lot_core v0.9.12
+   Compiling errno v0.3.14
+   Compiling rand_core v0.6.4
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling getrandom v0.4.2
+   Compiling tokio v1.52.3
+   Compiling sha2 v0.10.9
+   Compiling dirs-sys v0.5.0
+   Compiling tempfile v3.27.0
+   Compiling dirs v6.0.0
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling regex v1.12.3
+   Compiling cipher v0.4.4
+   Compiling rand_chacha v0.3.1
+   Compiling universal-hash v0.5.1
+   Compiling dbus v0.9.11
+   Compiling poly1305 v0.8.0
+   Compiling rand v0.8.6
+   Compiling chacha20 v0.9.1
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling password-hash v0.5.0
+   Compiling time v0.3.47
+   Compiling rtoolbox v0.0.5
+   Compiling chacha20poly1305 v0.10.1
+   Compiling rpassword v7.5.2
+   Compiling wcore-compact v0.12.25 (/root/wayland-kr07/crates/wcore-compact)
+   Compiling argon2 v0.5.3
+   Compiling uuid v1.23.2
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling filetime v0.2.29
+   Compiling libseccomp v0.4.0
+   Compiling hmac v0.12.1
+   Compiling tar v0.4.46
+   Compiling getrandom v0.3.4
+   Compiling rand_core v0.9.5
+   Compiling rand v0.10.1
+   Compiling rand_chacha v0.9.0
+   Compiling crypto-bigint v0.4.9
+   Compiling dbus-secret-service v4.1.0
+   Compiling rand v0.9.4
+   Compiling ff v0.12.1
+   Compiling wcore-safety v0.12.25 (/root/wayland-kr07/crates/wcore-safety)
+   Compiling group v0.12.1
+   Compiling signature v1.6.4
+   Compiling keyring v3.6.3
+   Compiling elliptic-curve v0.12.3
+   Compiling rand_distr v0.5.1
+   Compiling rfc6979 v0.3.1
+   Compiling cbc v0.1.2
+   Compiling ecdsa v0.14.8
+   Compiling ecb v0.1.2
+   Compiling aes v0.8.4
+   Compiling globset v0.4.18
+   Compiling sha1 v0.10.6
+   Compiling md-5 v0.10.6
+   Compiling p256 v0.11.1
+   Compiling crypto-bigint v0.5.5
+   Compiling darling_macro v0.23.0
+   Compiling simple_asn1 v0.6.4
+   Compiling lopdf v0.42.0
+   Compiling ignore v0.4.25
+   Compiling cranelift-codegen v0.123.12
+   Compiling darling v0.23.0
+   Compiling strum v0.27.2
+   Compiling jsonwebtoken v10.3.0
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling rustls v0.23.40
+   Compiling wcore-protocol v0.12.25 (/root/wayland-kr07/crates/wcore-protocol)
+   Compiling tower-http v0.6.11
+   Compiling aws-smithy-async v1.2.14
+   Compiling h2 v0.4.14
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-kr07/crates/wcore-sandbox)
+   Compiling aws-smithy-types v1.4.9
+   Compiling wcore-repomap v0.12.25 (/root/wayland-kr07/crates/wcore-repomap)
+   Compiling ratatui-core v0.1.0
+   Compiling signal-hook v0.3.18
+   Compiling inotify-sys v0.1.5
+   Compiling openssl-sys v0.9.116
+   Compiling signal-hook-mio v0.2.5
+   Compiling rustls-webpki v0.103.13
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling aws-smithy-query v0.60.15
+   Compiling openssl v0.10.80
+   Compiling inotify v0.11.2
+   Compiling wasmtime-internal-jit-icache-coherence v36.0.12
+   Compiling wasmtime-internal-fiber v36.0.12
+   Compiling notify v8.2.0
+   Compiling ratatui-widgets v0.3.0
+   Compiling crossterm v0.29.0
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-sigv4 v1.4.3
+   Compiling aws-types v1.3.16
+   Compiling aws-smithy-json v0.62.7
+   Compiling postgres-protocol v0.6.12
+   Compiling pdf-extract v0.12.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling postgres-types v0.2.14
+   Compiling cap-rand v3.4.5
+   Compiling whoami v2.1.2
+   Compiling hyper v1.10.1
+   Compiling cfg_aliases v0.1.1
+   Compiling bit-vec v0.8.0
+   Compiling nix v0.28.0
+   Compiling utoipa-gen v4.3.1
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-api)
+   Compiling native-tls v0.2.18
+   Compiling ed25519-dalek v2.2.0
+   Compiling imap v2.4.1
+   Compiling bit-set v0.8.0
+   Compiling tokio-postgres v0.7.18
+   Compiling wcore-cron v0.12.25 (/root/wayland-kr07/crates/wcore-cron)
+   Compiling ratatui-macros v0.7.0
+   Compiling ratatui-crossterm v0.1.0
+   Compiling wcore-user-model v0.12.25 (/root/wayland-kr07/crates/wcore-user-model)
+   Compiling matchers v0.2.0
+   Compiling hyper-util v0.1.20
+   Compiling is-terminal v0.4.17
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.24.0
+   Compiling lettre v0.11.22
+   Compiling tracing-log v0.2.0
+   Compiling wcore-agents-pack v0.12.25 (/root/wayland-kr07/crates/wcore-agents-pack)
+   Compiling tokio-tungstenite v0.24.0
+   Compiling sharded-slab v0.1.7
+   Compiling hyper-rustls v0.27.9
+   Compiling wcore-dispatch v0.12.25 (/root/wayland-kr07/crates/wcore-dispatch)
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling axum v0.7.9
+   Compiling thread_local v1.1.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling pulldown-cmark v0.13.4
+   Compiling open v5.3.5
+   Compiling tracing-subscriber v0.3.23
+   Compiling tokio-postgres-rustls v0.13.0
+   Compiling ratatui v0.30.0
+   Compiling fancy-regex v0.16.2
+   Compiling plist v1.9.0
+   Compiling wcore-permissions v0.12.25 (/root/wayland-kr07/crates/wcore-permissions)
+   Compiling getopts v0.2.24
+   Compiling utoipa v4.2.3
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling nucleo-matcher v0.3.1
+   Compiling crossbeam-channel v0.5.15
+   Compiling tower-http v0.5.2
+   Compiling wayland-honcho v0.12.25 (/root/wayland-kr07/crates/wayland-honcho)
+   Compiling bincode v1.3.3
+   Compiling vte_generate_state_changes v0.1.2
+   Compiling smawk v0.3.2
+   Compiling unicode-linebreak v0.1.5
+   Compiling wcore-cli v0.12.25 (/root/wayland-kr07/crates/wcore-cli)
+   Compiling wcore-honcho-adapter v0.12.25 (/root/wayland-kr07/crates/wcore-honcho-adapter)
+   Compiling pulldown-cmark-escape v0.11.0
+   Compiling symlink v0.1.0
+   Compiling tracing-appender v0.2.5
+   Compiling textwrap v0.16.2
+   Compiling syntect v5.3.0
+   Compiling vte v0.11.1
+   Compiling nucleo v0.5.0
+   Compiling tui-input v0.15.3
+   Compiling wayland-browser v0.12.25 (/root/wayland-kr07/crates/wayland-browser)
+   Compiling wayland-cua v0.12.25 (/root/wayland-kr07/crates/wayland-cua)
+   Compiling wcore-pluginsrc v0.12.25 (/root/wayland-kr07/crates/wcore-pluginsrc)
+   Compiling aws-runtime v1.7.3
+   Compiling tui-tree-widget v0.24.0
+   Compiling self-replace v1.5.0
+   Compiling serial2 v0.2.37
+   Compiling sysinfo v0.33.1
+   Compiling filedescriptor v0.8.3
+   Compiling num_cpus v1.17.0
+   Compiling downcast-rs v1.2.1
+   Compiling shell-words v1.1.1
+   Compiling unicode-width v0.1.14
+   Compiling deadpool v0.12.3
+   Compiling colored v3.1.1
+   Compiling similar v2.7.0
+   Compiling vt100 v0.15.2
+   Compiling criterion v0.5.1
+   Compiling portable-pty v0.9.0
+   Compiling mockito v1.7.2
+   Compiling wiremock v0.6.5
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling serial_test v3.5.0
+   Compiling wcore-observability v0.12.25 (/root/wayland-kr07/crates/wcore-observability)
+   Compiling wcore-channels v0.12.25 (/root/wayland-kr07/crates/wcore-channels)
+   Compiling wcore-pricing v0.12.25 (/root/wayland-kr07/crates/wcore-pricing)
+   Compiling wcore-acp v0.12.25 (/root/wayland-kr07/crates/wcore-acp)
+   Compiling wcore-exec-backend v0.12.25 (/root/wayland-kr07/crates/wcore-exec-backend)
+   Compiling wcore-gateway v0.12.25 (/root/wayland-kr07/crates/wcore-gateway)
+   Compiling wcore-replay v0.12.25 (/root/wayland-kr07/crates/wcore-replay)
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-kr07/crates/wcore-eval-scenarios)
+   Compiling wcore-memory v0.12.25 (/root/wayland-kr07/crates/wcore-memory)
+   Compiling aws-config v1.8.16
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-kr07/crates/wcore-channel-sms)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-kr07/crates/wcore-channel-discord)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-kr07/crates/wcore-channel-telegram)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-kr07/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-kr07/crates/wcore-channel-signal)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-kr07/crates/wcore-channel-msteams)
+   Compiling cranelift-frontend v0.123.12
+   Compiling cranelift-native v0.123.12
+   Compiling wasmtime-internal-cranelift v36.0.12
+   Compiling wasmtime-internal-unwinder v36.0.12
+   Compiling wcore-providers v0.12.25 (/root/wayland-kr07/crates/wcore-providers)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-kr07/crates/wcore-channel-slack)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-kr07/crates/wcore-channel-matrix)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-kr07/crates/wcore-channel-email)
+   Compiling wcore-tools v0.12.25 (/root/wayland-kr07/crates/wcore-tools)
+   Compiling wcore-swarm v0.12.25 (/root/wayland-kr07/crates/wcore-swarm)
+   Compiling wasmtime v36.0.12
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-kr07/crates/wcore-channels-registry)
+   Compiling wasmtime-wasi-io v36.0.12
+   Compiling wasmtime-wasi v36.0.12
+   Compiling wcore-mcp v0.12.25 (/root/wayland-kr07/crates/wcore-mcp)
+   Compiling wcore-browser v0.12.25 (/root/wayland-kr07/crates/wcore-browser)
+   Compiling wcore-cua v0.12.25 (/root/wayland-kr07/crates/wcore-cua)
+   Compiling wcore-skills v0.12.25 (/root/wayland-kr07/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-subprocess)
+   Compiling wcore-eval v0.12.25 (/root/wayland-kr07/crates/wcore-eval)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-kr07/crates/wcore-evolve)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-kr07/crates/wayland-ollama)
+   Compiling wcore-plugin-wasm v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-wasm)
+   Compiling wcore-agent v0.12.25 (/root/wayland-kr07/crates/wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 18s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/acp_engine_turn.rs (target/debug/deps/acp_engine_turn-bc454bfc121d029b)
+
+running 2 tests
+test a2a_on_message_routes_task_to_engine ... FAILED
+test acp_turn_streams_text_then_done ... FAILED
+
+failures:
+
+---- a2a_on_message_routes_task_to_engine stdout ----
+
+thread 'a2a_on_message_routes_task_to_engine' (3459232) panicked at crates/wcore-cli/tests/acp_engine_turn.rs:151:10:
+engine-backed on_message succeeds: HandlerError("protocol error: engine init_session failed: credentials.backend is set to \"plaintext\", which cannot hold the confidential key that durable session recovery requires. Set credentials.backend to \"keyring\" or \"encrypted-file\", or disable session persistence")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- acp_turn_streams_text_then_done stdout ----
+
+thread 'acp_turn_streams_text_then_done' (3459241) panicked at crates/wcore-cli/tests/acp_engine_turn.rs:87:10:
+run_turn establishes a stream: Protocol("engine init_session failed: credentials.backend is set to \"plaintext\", which cannot hold the confidential key that durable session recovery requires. Set credentials.backend to \"keyring\" or \"encrypted-file\", or disable session persistence")
+
+
+failures:
+    a2a_on_message_routes_task_to_engine
+    acp_turn_streams_text_then_done
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `-p wcore-cli --test acp_engine_turn`
+=====RC wcore-cli/acp_engine_turn rc=101
+=====SUITE wcore-eval/acceptance_gate
+   Compiling memchr v2.8.1
+   Compiling typenum v1.20.1
+   Compiling bitflags v2.11.1
+   Compiling smallvec v1.15.1
+   Compiling subtle v2.6.1
+   Compiling serde v1.0.228
+   Compiling num-traits v0.2.19
+   Compiling cc v1.2.63
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling tracing v0.1.44
+   Compiling serde_core v1.0.228
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_normalizer v2.2.0
+   Compiling rustls v0.23.40
+   Compiling indexmap v2.14.0
+   Compiling rustix v0.38.44
+   Compiling parking_lot v0.12.5
+   Compiling futures-util v0.3.32
+   Compiling tokio v1.52.3
+   Compiling serde_json v1.0.150
+   Compiling generic-array v0.14.7
+   Compiling aho-corasick v1.1.4
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling chrono v0.4.44
+   Compiling linux-raw-sys v0.4.15
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling block-padding v0.3.3
+   Compiling ring v0.17.14
+   Compiling digest v0.10.7
+   Compiling inout v0.1.4
+   Compiling url v2.5.8
+   Compiling cipher v0.4.4
+   Compiling libsqlite3-sys v0.30.1
+   Compiling sha2 v0.10.9
+   Compiling regex-automata v0.4.14
+   Compiling universal-hash v0.5.1
+   Compiling serde_urlencoded v0.7.1
+   Compiling either v1.16.0
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling password-hash v0.5.0
+   Compiling poly1305 v0.8.0
+   Compiling libseccomp v0.4.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling chacha20 v0.9.1
+   Compiling blake2 v0.10.6
+   Compiling aead v0.5.2
+   Compiling rand_chacha v0.3.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling tempfile v3.27.0
+   Compiling fs-set-times v0.20.3
+   Compiling rustix-linux-procfs v0.1.1
+   Compiling xattr v1.6.1
+   Compiling futures-executor v0.3.32
+   Compiling cap-primitives v3.4.5
+   Compiling tar v0.4.46
+   Compiling which v6.0.3
+   Compiling futures v0.3.32
+   Compiling rand v0.8.6
+   Compiling chacha20poly1305 v0.10.1
+   Compiling argon2 v0.5.3
+   Compiling fd-lock v4.0.4
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling regex v1.12.3
+   Compiling cap-std v3.4.5
+   Compiling sqlite-vec v0.1.9
+   Compiling bstr v1.12.1
+   Compiling bumpalo v3.20.3
+   Compiling wcore-compact v0.12.25 (/root/wayland-kr07/crates/wcore-compact)
+   Compiling wcore-safety v0.12.25 (/root/wayland-kr07/crates/wcore-safety)
+   Compiling zopfli v0.8.3
+   Compiling globset v0.4.18
+   Compiling rand_distr v0.5.1
+   Compiling wcore-plugin-api v0.12.25 (/root/wayland-kr07/crates/wcore-plugin-api)
+   Compiling cbc v0.1.2
+   Compiling tokio-util v0.7.18
+   Compiling hyper v1.10.1
+   Compiling tower v0.5.3
+   Compiling wcore-protocol v0.12.25 (/root/wayland-kr07/crates/wcore-protocol)
+   Compiling rustls-webpki v0.103.13
+   Compiling ecb v0.1.2
+   Compiling aes v0.8.4
+   Compiling md-5 v0.10.6
+   Compiling nom v8.0.0
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-kr07/crates/wcore-sandbox)
+   Compiling tower-http v0.6.11
+   Compiling moxcms v0.8.1
+   Compiling hyper-util v0.1.20
+   Compiling humantime-serde v1.1.1
+   Compiling schemars v0.8.22
+   Compiling png v0.18.1
+   Compiling ignore v0.4.25
+   Compiling zip v2.4.2
+   Compiling quick-xml v0.31.0
+   Compiling hashify v0.2.9
+   Compiling euclid v0.20.14
+   Compiling csv-core v0.1.13
+   Compiling calamine v0.26.1
+   Compiling quick-xml v0.39.4
+   Compiling csv v1.4.0
+   Compiling inotify v0.11.2
+   Compiling notify-types v2.1.0
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling notify v8.2.0
+   Compiling mail-parser v0.11.3
+   Compiling lopdf v0.42.0
+   Compiling proc-macro-crate v3.5.0
+   Compiling rstest_macros v0.26.1
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling image v0.25.10
+   Compiling reqwest v0.12.28
+   Compiling rusqlite v0.32.1
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling rstest v0.26.1
+   Compiling wcore-agents-pack v0.12.25 (/root/wayland-kr07/crates/wcore-agents-pack)
+   Compiling wcore-repomap v0.12.25 (/root/wayland-kr07/crates/wcore-repomap)
+   Compiling wcore-dispatch v0.12.25 (/root/wayland-kr07/crates/wcore-dispatch)
+   Compiling pdf-extract v0.12.0
+   Compiling wcore-observability v0.12.25 (/root/wayland-kr07/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-kr07/crates/wcore-memory)
+   Compiling wcore-tools v0.12.25 (/root/wayland-kr07/crates/wcore-tools)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-kr07/crates/wcore-mcp)
+   Compiling wcore-skills v0.12.25 (/root/wayland-kr07/crates/wcore-skills)
+   Compiling wcore-eval v0.12.25 (/root/wayland-kr07/crates/wcore-eval)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.55s
+     Running tests/acceptance_gate.rs (target/debug/deps/acceptance_gate-e0097915040d8d82)
+
+running 1 test
+test acceptance_gate_meets_precision_recall_threshold ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+=====RC wcore-eval/acceptance_gate rc=0
+=====SUITE wcore-exec-backend/live_equivalence
+   Compiling mio v1.2.1
+   Compiling serde v1.0.228
+   Compiling futures-util v0.3.32
+   Compiling num-traits v0.2.19
+   Compiling futures-channel v0.3.32
+   Compiling zerocopy v0.8.50
+   Compiling getrandom v0.4.2
+   Compiling inout v0.1.4
+   Compiling curve25519-dalek v4.1.3
+   Compiling serde_ignored v0.1.14
+   Compiling cipher v0.4.4
+   Compiling tokio v1.52.3
+   Compiling chacha20 v0.9.1
+   Compiling tempfile v3.27.0
+   Compiling uuid v1.23.2
+   Compiling chacha20poly1305 v0.10.1
+   Compiling serde_urlencoded v0.7.1
+   Compiling wcore-compact v0.12.25 (/root/wayland-kr07/crates/wcore-compact)
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling chrono v0.4.44
+   Compiling ed25519-dalek v2.2.0
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.6
+   Compiling hyper v1.10.1
+   Compiling tokio-rustls v0.26.4
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling tower-http v0.6.11
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-kr07/crates/wcore-sandbox)
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-exec-backend v0.12.25 (/root/wayland-kr07/crates/wcore-exec-backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.83s
+     Running tests/live_equivalence.rs (target/debug/deps/live_equivalence-e909c2c4701a9594)
+
+running 1 test
+test the_same_task_normalizes_equal_across_every_available_backend ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+
+=====RC wcore-exec-backend/live_equivalence rc=0
+=====SUITE wcore-memory/hybrid_retriever_perf_test
+   Compiling num-traits v0.2.19
+   Compiling rustix v1.1.4
+   Compiling linux-raw-sys v0.12.1
+   Compiling tokio-util v0.7.18
+   Compiling ahash v0.8.12
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling rand_chacha v0.9.0
+   Compiling wcore-safety v0.12.25 (/root/wayland-kr07/crates/wcore-safety)
+   Compiling humantime-serde v1.1.1
+   Compiling futures-executor v0.3.32
+   Compiling bytemuck v1.25.0
+   Compiling hashbrown v0.14.5
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling serial_test v3.5.0
+   Compiling rand v0.9.4
+   Compiling reqwest v0.12.28
+   Compiling hashlink v0.9.1
+   Compiling proc-macro-crate v3.5.0
+   Compiling chrono v0.4.44
+   Compiling rand_distr v0.5.1
+   Compiling rstest_macros v0.26.1
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling tempfile v3.27.0
+   Compiling fd-lock v4.0.4
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling rusqlite v0.32.1
+   Compiling rstest v0.26.1
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-observability v0.12.25 (/root/wayland-kr07/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-kr07/crates/wcore-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.00s
+     Running tests/hybrid_retriever_perf_test.rs (target/debug/deps/hybrid_retriever_perf_test-87d26f947b3da97b)
+
+running 2 tests
+test binary_size_baseline ... ok
+test hybrid_retriever_perf_p95_under_100ms ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.38s
+
+=====RC wcore-memory/hybrid_retriever_perf_test rc=0
+=====SUITE wcore-observability/otlp_local_test
+   Compiling futures-util v0.3.32
+   Compiling num-traits v0.2.19
+   Compiling tokio v1.52.3
+   Compiling either v1.16.0
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.40
+   Compiling const-oid v0.9.6
+   Compiling serde_json v1.0.150
+   Compiling aho-corasick v1.1.4
+   Compiling inout v0.1.4
+   Compiling der v0.6.1
+   Compiling cipher v0.4.4
+   Compiling bytes-utils v0.1.4
+   Compiling chacha20 v0.9.1
+   Compiling chacha20poly1305 v0.10.1
+   Compiling spki v0.6.0
+   Compiling num-integer v0.1.46
+   Compiling chrono v0.4.44
+   Compiling pkcs8 v0.9.0
+   Compiling regex-automata v0.4.14
+   Compiling sec1 v0.3.0
+   Compiling num-bigint v0.4.6
+   Compiling elliptic-curve v0.12.3
+   Compiling rustls-webpki v0.103.13
+   Compiling ecdsa v0.14.8
+   Compiling p256 v0.11.1
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling simple_asn1 v0.6.4
+   Compiling jsonwebtoken v10.3.0
+   Compiling futures-executor v0.3.32
+   Compiling rstest v0.26.1
+   Compiling futures v0.3.32
+   Compiling serial_test v3.5.0
+   Compiling regex v1.12.3
+   Compiling wcore-compact v0.12.25 (/root/wayland-kr07/crates/wcore-compact)
+   Compiling wcore-safety v0.12.25 (/root/wayland-kr07/crates/wcore-safety)
+   Compiling tokio-util v0.7.18
+   Compiling aws-smithy-async v1.2.14
+   Compiling tower v0.5.3
+   Compiling tokio-stream v0.1.18
+   Compiling tokio-test v0.4.5
+   Compiling tower-http v0.6.11
+   Compiling aws-smithy-types v1.4.9
+   Compiling h2 v0.4.14
+   Compiling tokio-rustls v0.26.4
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling aws-smithy-query v0.60.15
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-sigv4 v1.4.3
+   Compiling aws-types v1.3.16
+   Compiling aws-smithy-json v0.62.7
+   Compiling hyper v1.10.1
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling aws-runtime v1.7.3
+   Compiling aws-sdk-ssooidc v1.100.0
+   Compiling aws-sdk-sts v1.103.0
+   Compiling aws-sdk-sso v1.98.0
+   Compiling aws-config v1.8.16
+   Compiling wcore-observability v0.12.25 (/root/wayland-kr07/crates/wcore-observability)
+   Compiling wcore-providers v0.12.25 (/root/wayland-kr07/crates/wcore-providers)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.73s
+     Running tests/otlp_local_test.rs (target/debug/deps/otlp_local_test-ef7fe48d286ea037)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=====RC wcore-observability/otlp_local_test rc=0
+=====SUITE wcore-eval-scenarios/pty_tui_smoke
+   Compiling parking_lot_core v0.9.12
+   Compiling crypto-common v0.1.7
+   Compiling mio v1.2.1
+   Compiling serde_json v1.0.150
+   Compiling ring v0.17.14
+   Compiling tempfile v3.27.0
+   Compiling password-hash v0.5.0
+   Compiling rand_chacha v0.3.1
+   Compiling keyring v3.6.3
+   Compiling nix v0.28.0
+   Compiling axum-core v0.4.5
+   Compiling vt100 v0.15.2
+   Compiling digest v0.10.7
+   Compiling parking_lot v0.12.5
+   Compiling sha2 v0.10.9
+   Compiling cipher v0.4.4
+   Compiling universal-hash v0.5.1
+   Compiling tokio v1.52.3
+   Compiling blake2 v0.10.6
+   Compiling poly1305 v0.8.0
+   Compiling aead v0.5.2
+   Compiling rand v0.8.6
+   Compiling chacha20 v0.9.1
+   Compiling curve25519-dalek v4.1.3
+   Compiling argon2 v0.5.3
+   Compiling cbc v0.1.2
+   Compiling chacha20poly1305 v0.10.1
+   Compiling ecb v0.1.2
+   Compiling aes v0.8.4
+   Compiling md-5 v0.10.6
+   Compiling tar v0.4.46
+   Compiling libseccomp v0.4.0
+   Compiling wcore-types v0.12.25 (/root/wayland-kr07/crates/wcore-types)
+   Compiling wcore-compact v0.12.25 (/root/wayland-kr07/crates/wcore-compact)
+   Compiling wcore-budget v0.12.25 (/root/wayland-kr07/crates/wcore-budget)
+   Compiling portable-pty v0.9.0
+   Compiling lopdf v0.42.0
+   Compiling rand_distr v0.5.1
+   Compiling rustls-webpki v0.103.13
+   Compiling ed25519-dalek v2.2.0
+   Compiling wcore-repomap v0.12.25 (/root/wayland-kr07/crates/wcore-repomap)
+   Compiling rustls v0.23.40
+   Compiling hyper v1.10.1
+   Compiling tower v0.5.3
+   Compiling tokio-util v0.7.18
+   Compiling wcore-protocol v0.12.25 (/root/wayland-kr07/crates/wcore-protocol)
+   Compiling tokio-rustls v0.26.4
+   Compiling tower-http v0.6.11
+   Compiling pdf-extract v0.12.0
+   Compiling wcore-sandbox v0.12.25 (/root/wayland-kr07/crates/wcore-sandbox)
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling axum v0.7.9
+   Compiling reqwest v0.12.28
+   Compiling wcore-config v0.12.25 (/root/wayland-kr07/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-kr07/crates/wcore-egress)
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-kr07/crates/wcore-eval-scenarios)
+   Compiling wcore-observability v0.12.25 (/root/wayland-kr07/crates/wcore-observability)
+   Compiling wcore-memory v0.12.25 (/root/wayland-kr07/crates/wcore-memory)
+   Compiling wcore-tools v0.12.25 (/root/wayland-kr07/crates/wcore-tools)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-kr07/crates/wcore-mcp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.75s
+     Running tests/pty_tui_smoke.rs (target/debug/deps/pty_tui_smoke-4ee67f9e01138efc)
+
+running 1 test
+test tui_boots_and_renders_workspace ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.74s
+
+=====RC wcore-eval-scenarios/pty_tui_smoke rc=0
+=====SUITE wcore-eval-scenarios/cross_session_live
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-kr07/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running tests/cross_session_live.rs (target/debug/deps/cross_session_live-e7e5ca66b1512835)
+
+running 1 test
+test memory_recall_across_sessions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=====RC wcore-eval-scenarios/cross_session_live rc=0
+=====SUITE wcore-eval-scenarios/live_personas
+   Compiling wcore-eval-scenarios v0.12.25 (/root/wayland-kr07/crates/wcore-eval-scenarios)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running tests/live_personas.rs (target/debug/deps/live_personas-a9313e7760a4cdd3)
+
+running 1 test
+test overnight_personas ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=====RC wcore-eval-scenarios/live_personas rc=0
+=====SUITE wcore-memory/bge_local_real
+   Compiling wcore-memory v0.12.25 (/root/wayland-kr07/crates/wcore-memory)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running tests/bge_local_real.rs (target/debug/deps/bge_local_real-3b3af6574c42afc0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+=====RC wcore-memory/bge_local_real rc=0
+WLDONE

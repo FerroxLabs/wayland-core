@@ -9,7 +9,12 @@ use wcore_observability::SOURCE_PRODUCT;
 use wcore_observability::cache::mark_cache_boundaries;
 use wcore_observability::cost::estimate_turn_cost;
 use wcore_observability::trace::{ToolCallTrace, TurnTrace, WorkflowDetectionRecord};
-use wcore_protocol::events::ToolCategory;
+use wcore_protocol::commands::{OperatorResolutionAuthority, ProtocolCommand};
+use wcore_protocol::events::{
+    MonitorDirective, MonitorReason, OperatorToolEffectOutcome, OperatorToolEffectResolution,
+    ToolCategory,
+};
+use wcore_providers::attempt_lifecycle::ProviderAttemptPurpose as LifecyclePurpose;
 use wcore_providers::{LlmProvider, ProviderError, create_provider};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
@@ -17,10 +22,15 @@ use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason
 use wcore_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
 
 use crate::approval::ApprovalBridge;
+use crate::budget_authority::{
+    BudgetAuthorityCoordinator, BudgetAuthorityError, BudgetAuthoritySeed,
+    SharedBudgetAuthorityCoordinator,
+};
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
 use crate::compact::{auto, emergency, estimate, micro};
 use crate::confirm::ToolConfirmer;
+use crate::journal_provider::JournaledLlmProvider;
 use crate::orchestration::ExecutionControl;
 use crate::orchestration::StreamingContext;
 use crate::orchestration::ToolCallOutcome;
@@ -28,6 +38,7 @@ use crate::orchestration::graph::{
     ExecutionGraph, GraphConfig, GraphContext, GraphError, NodeExecutor,
 };
 use crate::orchestration::intent::IntentClassifier;
+use crate::orchestration::monitor::{MidFlightMonitor, MonitorAction};
 use crate::orchestration::node_executor::{
     AgentExecutorConfig, AgentNodeExecutor, ApprovalChannel, TurnCell,
 };
@@ -37,7 +48,590 @@ use crate::orchestration::template_routing::{
 use crate::output::OutputSink;
 use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
-use crate::session::{Session, SessionManager};
+use crate::session::{ActiveSession, Session, SessionManager};
+use crate::session_journal::{
+    ApprovalDecision, ApprovalOrigin, ApprovalResolution, BudgetOwner, CheckpointOrigin,
+    CheckpointPurpose, ChildNotStartedReason, DeliveryNotStartedReason, DeliveryOrigin,
+    ExternalEffectState, ProviderAttemptNotStartedReason, SessionEvent, SessionJournal,
+    ToolEffectState, ToolNotStartedReason, ToolResolution, ToolResolutionSource, ToolUnknownReason,
+    state_payload_digest,
+};
+
+fn delivery_origin_belongs_to_turn(origin: &DeliveryOrigin, turn_id: &str) -> bool {
+    matches!(origin, DeliveryOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id)
+}
+
+#[cfg(test)]
+mod durable_session_authority_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use wcore_config::config::Config;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::spawner::{ChildOrigin, DurableChildStatus, SubAgentConfig};
+
+    use super::AgentEngine;
+    use crate::durable_spawner::{DurableSessionAuthority, DurableSpawnerError};
+    use crate::output::null_sink::NullSink;
+    use crate::spawner::AgentSpawner;
+    use crate::test_utils::ScriptedProvider;
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("hosted child completed".into()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    fn child(name: &str) -> SubAgentConfig {
+        SubAgentConfig {
+            name: name.into(),
+            prompt: "perform hosted orchestration work".into(),
+            max_turns: 1,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+        }
+    }
+
+    fn session_config(directory: &std::path::Path) -> Config {
+        Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            session: wcore_config::config::SessionConfig {
+                enabled: true,
+                directory: directory.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn fresh_engine_binds_shared_authority_only_after_canonical_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let observer = authority.clone();
+        let mut engine = AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            session_config(dir.path()),
+            ToolRegistry::new(),
+            Arc::new(NullSink),
+        );
+
+        engine
+            .install_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &engine.config.execution_policy,
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            observer.token(),
+            Err(DurableSpawnerError::AuthorityUnbound)
+        ));
+        engine
+            .init_session("test", &dir.path().to_string_lossy(), Some("f19000f"))
+            .unwrap();
+        assert_eq!(observer.token().unwrap().session_id(), "f19000f");
+    }
+
+    #[test]
+    fn resumed_engine_binds_and_session_switch_rebinds_shared_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session_a = manager
+            .create(
+                "test",
+                "model-a",
+                &dir.path().to_string_lossy(),
+                Some("f190010"),
+            )
+            .unwrap();
+        let session_b = manager
+            .create(
+                "test",
+                "model-b",
+                &dir.path().to_string_lossy(),
+                Some("f190011"),
+            )
+            .unwrap();
+        manager.persist_first_message(&session_a).unwrap();
+        manager.persist_first_message(&session_b).unwrap();
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let active_b = manager.load_for_run(&session_b.id).unwrap();
+        let mut engine = AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            session_config(dir.path()),
+            ToolRegistry::new(),
+            Arc::new(NullSink),
+            active_a,
+        );
+        let authority = DurableSessionAuthority::new();
+        let observer = authority.clone();
+
+        engine
+            .install_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &engine.config.execution_policy,
+                ),
+            )
+            .unwrap();
+        let token_a = observer.token().unwrap();
+        assert_eq!(token_a.session_id(), "f190010");
+
+        engine.switch_active_session(active_b).unwrap();
+        let token_b = observer.token().unwrap();
+        assert_eq!(token_b.session_id(), "f190011");
+        assert_ne!(token_a.generation(), token_b.generation());
+        assert!(matches!(
+            observer.with_store(&token_a, |_| Ok(())),
+            Err(DurableSpawnerError::StaleAuthority { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hosted_workflow_and_crucible_spawners_share_canonical_session_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let observer = authority.clone();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let mut engine = AgentEngine::new_with_provider(
+            Arc::clone(&provider_dyn),
+            session_config(dir.path()),
+            ToolRegistry::new(),
+            Arc::new(NullSink),
+        );
+        engine
+            .install_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &engine.config.execution_policy,
+                ),
+            )
+            .unwrap();
+        engine
+            .init_session("test", &dir.path().to_string_lossy(), Some("f190012"))
+            .unwrap();
+
+        // These are the exact transient spawners used by hosted live Workflow
+        // and hosted /crucible after provider/resolver construction.
+        let workflow_spawner = engine.govern_transient_spawner(AgentSpawner::new(
+            Arc::clone(&provider_dyn),
+            engine.config.clone(),
+        ));
+        let crucible_spawner = engine.govern_transient_spawner(AgentSpawner::new(
+            Arc::clone(&provider_dyn),
+            engine.config.clone(),
+        ));
+        assert_eq!(workflow_spawner.durable_session_id().unwrap(), "f190012");
+        assert_eq!(crucible_spawner.durable_session_id().unwrap(), "f190012");
+
+        let workflow = workflow_spawner
+            .spawn_one_with_origin(child("hosted-workflow"), ChildOrigin::Workflow)
+            .await;
+        let council = crucible_spawner
+            .spawn_one_with_origin(child("hosted-crucible"), ChildOrigin::Council)
+            .await;
+        assert!(!workflow.is_error, "{}", workflow.text);
+        assert!(!council.is_error, "{}", council.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        let token = observer.token().unwrap();
+        observer
+            .with_store(&token, |store| {
+                let records = store.list()?;
+                assert_eq!(records.len(), 2);
+                for origin in [ChildOrigin::Workflow, ChildOrigin::Council] {
+                    let record = records
+                        .iter()
+                        .find(|record| record.origin == origin)
+                        .expect("hosted origin must be durable");
+                    assert_eq!(record.parent.session_id, "f190012");
+                    assert_eq!(record.status, DurableChildStatus::Succeeded);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+fn approval_origin_belongs_to_turn(
+    state: &crate::session_journal::ReducedSessionState,
+    origin: &ApprovalOrigin,
+    turn_id: &str,
+) -> bool {
+    match origin {
+        ApprovalOrigin::Turn {
+            turn_id: origin_turn,
+        } => origin_turn == turn_id,
+        ApprovalOrigin::ProviderAttempt { attempt_id } => state
+            .provider_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.turn_id == turn_id),
+        ApprovalOrigin::ToolExecution { tool_execution_id } => state
+            .tools
+            .get(tool_execution_id)
+            .is_some_and(|tool| tool.turn_id == turn_id),
+        ApprovalOrigin::Child { child_id } => state
+            .children
+            .get(child_id)
+            .is_some_and(|child| child.turn_id == turn_id),
+        ApprovalOrigin::Delivery { delivery_id } => state
+            .deliveries
+            .get(delivery_id)
+            .is_some_and(|delivery| delivery_origin_belongs_to_turn(&delivery.origin, turn_id)),
+    }
+}
+
+fn recovered_pre_hook_consumption(
+    state: &crate::session_journal::ReducedSessionState,
+    tool: &crate::session_journal::ToolState,
+) -> Result<Option<crate::session_journal::HookPhaseConsumption>, AgentError> {
+    let Some(hook_phase_id) = tool.pre_hook_phase_id.as_ref() else {
+        return Ok(None);
+    };
+    let phase = state.hook_phases.get(hook_phase_id).ok_or_else(|| {
+        AgentError::SessionAuthority(format!(
+            "recovered tool references missing pre-hook phase {hook_phase_id}"
+        ))
+    })?;
+    let outcome_digest = match &phase.state {
+        crate::session_journal::HookPhaseState::Finished { outcome_digest, .. } => {
+            Some(outcome_digest)
+        }
+        crate::session_journal::HookPhaseState::Consumed { .. } => None,
+        _ => {
+            return Err(AgentError::SessionAuthority(format!(
+                "recovered tool pre-hook phase {hook_phase_id} is not durably finished"
+            )));
+        }
+    };
+    Ok(outcome_digest.map(
+        |outcome_digest| crate::session_journal::HookPhaseConsumption {
+            hook_phase_id: hook_phase_id.clone(),
+            outcome_digest: outcome_digest.clone(),
+        },
+    ))
+}
+
+fn terminalize_recoverable_prepared_post_hook(
+    journal: &SessionJournal,
+    tool_execution_id: &str,
+) -> Result<(), AgentError> {
+    let state = journal
+        .state()
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+    let tool = state.tools.get(tool_execution_id).ok_or_else(|| {
+        AgentError::SessionAuthority(format!(
+            "recovered post-hook references missing tool {tool_execution_id}"
+        ))
+    })?;
+    let prepared = state
+        .hook_phases
+        .iter()
+        .filter(|(_, phase)| {
+            phase.phase == crate::session_journal::ToolHookPhase::PostToolUse
+                && phase.tool_execution_id.as_deref() == Some(tool_execution_id)
+                && matches!(
+                    phase.state,
+                    crate::session_journal::HookPhaseState::Prepared
+                )
+        })
+        .map(|(phase_id, _)| phase_id.clone())
+        .collect::<Vec<_>>();
+    if prepared.len() > 1 {
+        return Err(AgentError::SessionAuthority(format!(
+            "tool {tool_execution_id} has duplicate prepared post-hook authority"
+        )));
+    }
+    let Some(hook_phase_id) = prepared.into_iter().next() else {
+        return Ok(());
+    };
+    let event = if tool.resolution_source.is_some() {
+        SessionEvent::HookPhaseNotStarted {
+            hook_phase_id,
+            reason: crate::session_journal::HookPhaseNotStartedReason::ToolOutcomeUnknown,
+        }
+    } else if matches!(tool.effect, ToolEffectState::NotStarted) {
+        SessionEvent::HookPhaseNotApplicable { hook_phase_id }
+    } else {
+        return Ok(());
+    };
+    journal
+        .append(event)
+        .map(|_| ())
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+}
+
+fn budget_owner_belongs_to_turn(
+    state: &crate::session_journal::ReducedSessionState,
+    owner: &BudgetOwner,
+    turn_id: &str,
+) -> bool {
+    match owner {
+        BudgetOwner::Session => false,
+        BudgetOwner::Turn {
+            turn_id: owner_turn,
+        } => owner_turn == turn_id,
+        BudgetOwner::ProviderAttempt { attempt_id } => state
+            .provider_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.turn_id == turn_id),
+        BudgetOwner::ToolExecution { tool_execution_id } => state
+            .tools
+            .get(tool_execution_id)
+            .is_some_and(|tool| tool.turn_id == turn_id),
+        BudgetOwner::Child { child_id } => state
+            .children
+            .get(child_id)
+            .is_some_and(|child| child.turn_id == turn_id),
+    }
+}
+
+fn intersect_recovery_allow_list(checkpoint: &[String], live: &[String]) -> Vec<String> {
+    let live = live.iter().collect::<HashSet<_>>();
+    checkpoint
+        .iter()
+        .filter(|tool| live.contains(tool))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod recovery_allow_list_tests {
+    #[test]
+    fn restart_never_restores_permission_absent_from_live_policy() {
+        let checkpoint = vec!["Read".to_string(), "Bash".to_string()];
+        let live = vec!["Read".to_string(), "Grep".to_string()];
+
+        assert_eq!(
+            super::intersect_recovery_allow_list(&checkpoint, &live),
+            vec!["Read"]
+        );
+    }
+}
+
+/// Owns one paid-provider admission until authoritative usage is settled.
+///
+/// Dropping an in-flight provider future does not prove that the provider did
+/// not receive or bill the request. If the surrounding task is aborted or
+/// panics, consume the conservative reservation instead of leaking admission
+/// capacity or pretending the unknown outcome was free.
+struct ProviderBudgetReservation {
+    owner: ProviderBudgetOwner,
+    execution_budget: crate::budget::ExecutionBudgetView,
+    reservation: Option<wcore_budget::BudgetReservation>,
+    conservative_input_tokens: u64,
+    conservative_output_tokens: u64,
+    conservative_cost_usd: f64,
+}
+
+enum ProviderBudgetOwner {
+    Durable {
+        authority: SharedBudgetAuthorityCoordinator,
+        dispatch_id: String,
+    },
+    Legacy(Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>),
+}
+
+enum ProviderBudgetMutationError {
+    Budget(wcore_budget::BudgetError),
+    Authority(BudgetAuthorityError),
+}
+
+impl ProviderBudgetReservation {
+    fn new(
+        owner: ProviderBudgetOwner,
+        execution_budget: crate::budget::ExecutionBudgetView,
+        reservation: wcore_budget::BudgetReservation,
+        conservative_input_tokens: u64,
+        conservative_output_tokens: u64,
+        conservative_cost_usd: f64,
+    ) -> Self {
+        Self {
+            owner,
+            execution_budget,
+            reservation: Some(reservation),
+            conservative_input_tokens,
+            conservative_output_tokens,
+            conservative_cost_usd,
+        }
+    }
+
+    fn settle(
+        mut self,
+        actual_input_tokens: u64,
+        actual_output_tokens: u64,
+        actual_cost_usd: f64,
+    ) -> Result<(), ProviderBudgetMutationError> {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("provider budget reservation settles exactly once");
+        match &self.owner {
+            ProviderBudgetOwner::Durable {
+                authority,
+                dispatch_id,
+            } => {
+                self.execution_budget
+                    .record_tokens(actual_input_tokens, actual_output_tokens);
+                self.execution_budget.record_cost(actual_cost_usd);
+                authority
+                    .lock()
+                    .settle_provider_dispatch(
+                        dispatch_id,
+                        reservation,
+                        actual_input_tokens,
+                        actual_output_tokens,
+                        actual_cost_usd,
+                    )
+                    .map_err(ProviderBudgetMutationError::Authority)?
+                    .map_err(ProviderBudgetMutationError::Budget)
+            }
+            ProviderBudgetOwner::Legacy(tracker) => {
+                self.execution_budget
+                    .record_tokens(actual_input_tokens, actual_output_tokens);
+                self.execution_budget.record_cost(actual_cost_usd);
+                tracker
+                    .lock()
+                    .settle_turn(
+                        reservation,
+                        actual_input_tokens,
+                        actual_output_tokens,
+                        actual_cost_usd,
+                    )
+                    .map_err(ProviderBudgetMutationError::Budget)
+            }
+        }
+    }
+
+    fn conservative_charge(&self) -> (u64, u64, f64) {
+        (
+            self.conservative_input_tokens,
+            self.conservative_output_tokens,
+            self.conservative_cost_usd,
+        )
+    }
+
+    fn release(mut self) -> Result<(), BudgetAuthorityError> {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("provider budget reservation releases exactly once");
+        match &self.owner {
+            ProviderBudgetOwner::Durable {
+                authority,
+                dispatch_id,
+            } => authority
+                .lock()
+                .release_provider_dispatch(dispatch_id, reservation),
+            ProviderBudgetOwner::Legacy(tracker) => {
+                tracker.lock().release(reservation);
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Drop for ProviderBudgetReservation {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            match &self.owner {
+                ProviderBudgetOwner::Durable {
+                    authority,
+                    dispatch_id,
+                } => {
+                    self.execution_budget.record_tokens(
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                    );
+                    self.execution_budget
+                        .record_cost(self.conservative_cost_usd);
+                    let _ = authority.lock().settle_provider_dispatch(
+                        dispatch_id,
+                        reservation,
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                        self.conservative_cost_usd,
+                    );
+                }
+                ProviderBudgetOwner::Legacy(tracker) => {
+                    self.execution_budget.record_tokens(
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                    );
+                    self.execution_budget
+                        .record_cost(self.conservative_cost_usd);
+                    let _ = tracker.lock().settle_turn(
+                        reservation,
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                        self.conservative_cost_usd,
+                    );
+                }
+            }
+        }
+    }
+}
+
+enum ConfiguredFallbackAdmissionFailure {
+    Budget(ProviderBudgetMutationError),
+    Unpriced { provider: String, model: String },
+}
+
+struct ConfiguredFallbackBudgetState {
+    current: Option<ProviderBudgetReservation>,
+    current_provider: String,
+    current_model: String,
+    failure: Option<ConfiguredFallbackAdmissionFailure>,
+}
+
+impl ConfiguredFallbackBudgetState {
+    fn new(
+        current: Option<ProviderBudgetReservation>,
+        current_provider: String,
+        current_model: String,
+    ) -> Self {
+        Self {
+            current,
+            current_provider,
+            current_model,
+            failure: None,
+        }
+    }
+}
 
 /// W7 (v0.6.3) — resolve the USD cost of one LLM turn from the
 /// `wcore-pricing` provider×model catalog.
@@ -48,12 +642,13 @@ use crate::session::{Session, SessionManager};
 /// non-fatal and falls back to the `ProviderCompat` heuristic so the
 /// budget charge still happens and the LLM call is never failed.
 ///
-/// Conversion: `estimate_cost_microcents` returns integer microcents
+/// Conversion: `estimate_cost_microcents_resolved` returns integer microcents
 /// where 1 microcent = 1e-6 cent, so 1 USD = 100 cents = 100_000_000
 /// microcents. USD = microcents / 100_000_000. (The W7 spec's
 /// `/100_000` divisor was off by 1000× — verified against
-/// `wcore_pricing::PricingCatalog::estimate_cost_microcents`, which
-/// computes `usd * 100 * 1_000_000`.)
+/// `wcore_pricing::PricingCatalog::estimate_cost_microcents_resolved`, which
+/// delegates literal models to the same `usd * 100 * 1_000_000` calculation
+/// and resolves pinned Flux models to their exact native catalog row.)
 /// Token-opt (read-once): a short human-readable label for a Grep/Glob/Bash
 /// call, used in the backref stub so the model can locate the earlier result.
 fn backref_label(name: &str, input: &serde_json::Value) -> String {
@@ -71,29 +666,109 @@ fn backref_label(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+#[cfg(test)]
 fn pricing_turn_cost_usd(
     provider: &str,
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Option<f64> {
-    match wcore_pricing::DEFAULT_CATALOG.estimate_cost_microcents(
+    match wcore_pricing::DEFAULT_CATALOG.estimate_cost_microcents_resolved(
         provider,
         model,
         input_tokens,
         output_tokens,
+        1.0,
     ) {
-        Ok(microcents) => Some(microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD),
-        Err(e) => {
+        Some(microcents) => Some(microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD),
+        None => {
             tracing::warn!(
                 provider,
                 model,
-                error = %e,
-                "W7: wcore-pricing catalog miss; falling back to ProviderCompat cost heuristic"
+                "W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic"
             );
             None
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResolvedTurnCost {
+    usd: f64,
+    priced: bool,
+}
+
+fn pricing_turn_cost_with_cache(
+    provider: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+) -> Option<ResolvedTurnCost> {
+    match wcore_pricing::DEFAULT_CATALOG.estimate_cost_with_cache_status_resolved(
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        1.0,
+    ) {
+        Some(status) => Some(ResolvedTurnCost {
+            usd: status.microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD,
+            priced: status.priced,
+        }),
+        None => {
+            tracing::warn!(
+                provider,
+                model,
+                "W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic"
+            );
+            None
+        }
+    }
+}
+
+/// Return a compat-based estimate only when the compatibility profile carries
+/// a real positive price row. Zero-valued sentinel rows mean "not priced" for
+/// remote OpenAI-compatible providers and must not silently certify a free
+/// call. A catalog row with an actual zero price remains authoritative because
+/// it is resolved before this fallback.
+fn compat_turn_cost_with_cache_usd(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> Option<f64> {
+    if compat.cost_is_known_free.unwrap_or(false) {
+        return Some(0.0);
+    }
+    let rates = [
+        compat.cost_per_input_token,
+        compat.cost_per_output_token,
+        compat.cost_per_cache_read_token,
+        compat.cost_per_cache_write_token,
+    ];
+    let valid = rates
+        .iter()
+        .flatten()
+        .all(|rate| rate.is_finite() && *rate >= 0.0);
+    let input_is_priced = compat.cost_per_input_token.is_some_and(|rate| rate > 0.0);
+    let output_is_priced = compat.cost_per_output_token.is_some_and(|rate| rate > 0.0);
+    let needs_input_price = input_tokens > 0 || cache_read_tokens > 0 || cache_write_tokens > 0;
+    let needs_output_price = output_tokens > 0;
+    (valid && (!needs_input_price || input_is_priced) && (!needs_output_price || output_is_priced))
+        .then(|| {
+            estimate_turn_cost(
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                compat,
+            )
+        })
 }
 
 /// Resolve the USD cost for one turn: try the pricing catalog first (per-model
@@ -106,7 +781,19 @@ fn pricing_turn_cost_usd(
 ///
 /// Fix(pricing-audit-2026-05-24): wiring catalog into the TurnTrace path so
 /// session_cost events reflect real per-model pricing (not compat-row fallback).
-fn resolve_turn_cost_usd(
+///
+/// `cost_is_known_free` is checked BEFORE the catalog, and that ordering is
+/// load-bearing. The catalog is keyed on provider + model NAME; it cannot see
+/// that `base_url` points somewhere else. `cost_is_known_free` is an explicit
+/// operator statement about the ENDPOINT actually being called, so it is the
+/// more specific fact and the catalog cannot outrank it. Catalog-first meant
+/// the declaration was silently discarded for every model name the bundled
+/// catalog happens to know: a loopback evaluator fixture answering as
+/// `openai/gpt-4o` was reserved at OpenAI's list price ($0.1726 for one
+/// worst-case canary turn), which tripped the F11 admission cap and stopped
+/// the provider call before it was ever sent. The compat fallback below has
+/// always returned $0 for this flag; only the ordering was wrong.
+fn resolve_turn_cost(
     provider: &str,
     model: &str,
     input_tokens: u64,
@@ -114,16 +801,63 @@ fn resolve_turn_cost_usd(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
     compat: &wcore_config::compat::ProviderCompat,
-) -> f64 {
-    pricing_turn_cost_usd(provider, model, input_tokens, output_tokens).unwrap_or_else(|| {
-        estimate_turn_cost(
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-            compat,
-        )
-    })
+) -> ResolvedTurnCost {
+    if compat.cost_is_known_free.unwrap_or(false) {
+        return ResolvedTurnCost {
+            usd: 0.0,
+            priced: true,
+        };
+    }
+
+    if let Some(resolved) = pricing_turn_cost_with_cache(
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    ) {
+        return resolved;
+    }
+
+    match compat_turn_cost_with_cache_usd(
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        compat,
+    ) {
+        Some(usd) => ResolvedTurnCost { usd, priced: true },
+        None => ResolvedTurnCost {
+            usd: 0.0,
+            priced: false,
+        },
+    }
+}
+
+/// Reserve prompt spend at the most expensive applicable input category.
+/// Before a response arrives we cannot prove how much of the prompt a provider
+/// will classify as ordinary input, cache read, or cache creation. Taking the
+/// maximum prevents a cache-write premium from crossing an admitted USD cap.
+fn resolve_conservative_reservation_cost(
+    provider: &str,
+    model: &str,
+    prompt_tokens: u64,
+    output_tokens: u64,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> ResolvedTurnCost {
+    let candidates = [
+        resolve_turn_cost(provider, model, prompt_tokens, output_tokens, 0, 0, compat),
+        resolve_turn_cost(provider, model, 0, output_tokens, prompt_tokens, 0, compat),
+        resolve_turn_cost(provider, model, 0, output_tokens, 0, prompt_tokens, compat),
+    ];
+    ResolvedTurnCost {
+        usd: candidates
+            .iter()
+            .map(|candidate| candidate.usd)
+            .fold(0.0, f64::max),
+        priced: candidates.iter().all(|candidate| candidate.priced),
+    }
 }
 
 /// Finding #174 — does this turn carry image/vision content that forbids a
@@ -853,37 +1587,18 @@ fn run_workflow_owned(
     plan: crate::orchestration::workflow::runner::WorkflowPlan,
     initial: serde_json::Value,
     parent_output: std::sync::Arc<dyn crate::output::OutputSink>,
+    lifecycle: std::sync::Arc<crate::orchestration::workflow::runner::WorkflowLifecycleEmitter>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunOwnedOutput> + Send>> {
     // Concrete boxed `Send` return type (see `synthesize_workflow_owned`).
     Box::pin(async move {
-        // ForgeFlows-Live: derive the lifecycle-event fields from the plan.
-        // `run_workflow_owned` has no turn/msg id in scope, so the stable
-        // correlation handle is the plan's own display name (the meta.name
-        // the author declared); the TUI groups runs under one MVP key today,
-        // so the name doubles as the human-readable id. `node_count` counts
-        // the AgentCall nodes — the units the runner actually dispatches and
-        // what the Workflows tab tallies (End/PassThrough/Pipeline-placeholder
-        // nodes are graph plumbing, not agents).
-        let workflow_id = plan.meta.name.clone();
-        let name = plan.meta.name.clone();
-        let node_count = plan
-            .graph
-            .nodes
-            .iter()
-            .filter(|(_, node)| matches!(node, crate::orchestration::graph::Node::AgentCall { .. }))
-            .count();
-
-        // ForgeFlows-Live: bookend the run with WorkflowStarted/Finished so
-        // hosts get a clean lifecycle signal instead of inferring it from the
-        // first `workflow:<node_id>` SubAgentEvent. Both ride the existing
-        // `sub_agent_traces` gate on the sink.
-        parent_output.emit_workflow_started(&workflow_id, &name, node_count);
+        lifecycle.start();
 
         // ForgeFlows-Live Phase 1: wire the parent sink so the live (B6) path's
         // sub-agent events relay back as `SubAgentEvent`, matching the LLM-facing
         // `WorkflowTool` surface.
         let run = crate::orchestration::workflow::runner::WorkflowRunner::new(&spawner)
             .with_parent_output(std::sync::Arc::clone(&parent_output))
+            .with_lifecycle(std::sync::Arc::clone(&lifecycle))
             .run(&plan, initial)
             .await;
 
@@ -894,7 +1609,27 @@ fn run_workflow_owned(
             Ok(result) => AgentEngine::errored_stage_ids(&result.stage_results).is_empty(),
             Err(_) => false,
         };
-        parent_output.emit_workflow_finished(&workflow_id, succeeded);
+        lifecycle.finish_remaining();
+        let (terminal_state, failure) = if succeeded {
+            (
+                wcore_protocol::events::WorkflowTerminalState::Succeeded,
+                None,
+            )
+        } else {
+            (
+                wcore_protocol::events::WorkflowTerminalState::Failed,
+                Some(wcore_protocol::events::WorkflowFailure {
+                    code: "workflow_failed".to_string(),
+                    message: run
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "one or more workflow stages failed".to_string()),
+                    retryable: false,
+                }),
+            )
+        };
+        lifecycle.finish(terminal_state, failure);
 
         (plan, run)
     })
@@ -1080,7 +1815,10 @@ mod forgeflow_final_state_tests {
 
 #[cfg(test)]
 mod w7_pricing_budget_tests {
-    use super::pricing_turn_cost_usd;
+    use super::{
+        ResolvedTurnCost, compat_turn_cost_with_cache_usd, pricing_turn_cost_usd,
+        pricing_turn_cost_with_cache, resolve_conservative_reservation_cost, resolve_turn_cost,
+    };
     use wcore_budget::{BudgetCap, BudgetTracker};
 
     /// A known provider/model with known token counts resolves to the
@@ -1123,6 +1861,142 @@ mod w7_pricing_budget_tests {
         tracker
             .charge("w7-sess", 1500, fallback_cost)
             .expect("charge must still succeed when pricing lookup misses");
+    }
+
+    #[test]
+    fn flux_pinned_model_uses_resolved_native_cache_pricing() {
+        let pinned = pricing_turn_cost_with_cache(
+            "flux-router",
+            "flux-pinned-claude-opus-4-7",
+            1_000,
+            2_000,
+            3_000,
+            4_000,
+        )
+        .expect("pinned model resolves to its native catalog row");
+        let native = pricing_turn_cost_with_cache(
+            "anthropic",
+            "claude-opus-4-7",
+            1_000,
+            2_000,
+            3_000,
+            4_000,
+        )
+        .expect("native model has a catalog row");
+
+        assert_eq!(pinned, native);
+        assert!(pinned.priced);
+        assert!(pinned.usd > 0.0);
+    }
+
+    #[test]
+    fn reservation_covers_cache_creation_premium() {
+        let compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        let ordinary = resolve_turn_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            100_000,
+            1_000,
+            0,
+            0,
+            &compat,
+        );
+        let cache_write = resolve_turn_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            0,
+            1_000,
+            0,
+            100_000,
+            &compat,
+        );
+        let reserved = resolve_conservative_reservation_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            100_000,
+            1_000,
+            &compat,
+        );
+
+        assert!(cache_write.usd > ordinary.usd);
+        assert_eq!(reserved, cache_write);
+    }
+
+    #[test]
+    fn zero_compat_sentinel_is_unpriced_not_certified_free() {
+        let compat = wcore_config::compat::ProviderCompat::openai_defaults();
+        assert!(
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat).is_none(),
+            "a zero sentinel on a catalog miss must remain unpriced"
+        );
+
+        let compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        assert!(
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat).is_some(),
+            "a positive compatibility price row is a valid fallback"
+        );
+
+        let compat = wcore_config::compat::ProviderCompat::ollama_defaults();
+        assert_eq!(
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat),
+            Some(0.0),
+            "a provider-neutral known-free declaration must preserve a real zero price"
+        );
+    }
+
+    /// A declared-free endpoint outranks the name-keyed catalog, in BOTH
+    /// directions, on one variable.
+    ///
+    /// The catalog knows `openai/gpt-4o` and prices it. Before this ordering
+    /// existed, that row won and an explicit `cost_is_known_free` was silently
+    /// discarded, so a loopback fixture answering as `gpt-4o` was admitted at
+    /// OpenAI's list price. The two halves share one instrument and differ in
+    /// exactly one field, so neither is self-passing.
+    #[test]
+    fn declared_free_endpoint_outranks_the_catalog_price() {
+        let priced = wcore_config::compat::ProviderCompat::openai_defaults();
+        let charged =
+            resolve_conservative_reservation_cost("openai", "gpt-4o", 8_000, 16_000, &priced);
+        assert!(
+            charged.priced && charged.usd > 0.0,
+            "control: the catalog prices gpt-4o, so the declaration below has \
+             something to outrank (got {charged:?})"
+        );
+
+        let declared_free = wcore_config::compat::ProviderCompat {
+            cost_is_known_free: Some(true),
+            ..priced
+        };
+        let free = resolve_conservative_reservation_cost(
+            "openai",
+            "gpt-4o",
+            8_000,
+            16_000,
+            &declared_free,
+        );
+        assert_eq!(
+            free,
+            ResolvedTurnCost {
+                usd: 0.0,
+                priced: true
+            },
+            "an explicit endpoint declaration must resolve to a known zero, not \
+             the vendor list price for the model NAME"
+        );
+    }
+
+    #[test]
+    fn partial_compat_pricing_cannot_certify_an_unpriced_output_axis() {
+        let compat = wcore_config::compat::ProviderCompat {
+            cost_per_input_token: Some(0.000_001),
+            cost_per_output_token: None,
+            ..Default::default()
+        };
+
+        assert!(
+            compat_turn_cost_with_cache_usd(1, 1_000_000, 0, 0, &compat).is_none(),
+            "a priced input axis cannot certify unknown output spend"
+        );
     }
 }
 
@@ -1246,6 +2120,30 @@ impl LoopGuard {
         }
         (self.count >= self.threshold).then_some(self.count)
     }
+
+    fn recovery_state(&self) -> crate::recovery::RecoveryLoopGuardState {
+        crate::recovery::RecoveryLoopGuardState {
+            last_signature: self.last_sig,
+            count: self.count,
+            threshold: self.threshold,
+        }
+    }
+
+    fn restore(state: &crate::recovery::RecoveryLoopGuardState) -> Result<Self, AgentError> {
+        let configured = Self::from_env();
+        if configured.threshold != state.threshold
+            || (state.threshold != 0 && state.count >= state.threshold)
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovery loop-guard authority does not match the current runtime".to_string(),
+            ));
+        }
+        Ok(Self {
+            last_sig: state.last_signature,
+            count: state.count,
+            threshold: state.threshold,
+        })
+    }
 }
 
 /// Signature of a tool call + its outcome for [`LoopGuard`]:
@@ -1338,6 +2236,28 @@ impl FailureGuard {
         }
         self.count = self.count.saturating_add(1);
         (self.count >= self.threshold).then_some(self.count)
+    }
+
+    fn recovery_state(&self) -> crate::recovery::RecoveryFailureGuardState {
+        crate::recovery::RecoveryFailureGuardState {
+            count: self.count,
+            threshold: self.threshold,
+        }
+    }
+
+    fn restore(state: &crate::recovery::RecoveryFailureGuardState) -> Result<Self, AgentError> {
+        let configured = Self::from_env();
+        if configured.threshold != state.threshold
+            || (state.threshold != 0 && state.count >= state.threshold)
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovery failure-guard authority does not match the current runtime".to_string(),
+            ));
+        }
+        Ok(Self {
+            count: state.count,
+            threshold: state.threshold,
+        })
     }
 }
 
@@ -1504,8 +2424,31 @@ mod loop_guard_tests {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancellationDescendantClosure {
+    Closed,
+    ReconciliationRequired,
+}
+
+struct UserTurnInput<'a> {
+    text: &'a str,
+    additional_content: Option<Vec<ContentBlock>>,
+}
+
+impl<'a> UserTurnInput<'a> {
+    fn new(text: &'a str, additional_content: Option<Vec<ContentBlock>>) -> Self {
+        Self {
+            text,
+            additional_content,
+        }
+    }
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
+    /// Immutable outbound authority for this session. Runtime-lazy clients
+    /// must clone this handle instead of consulting process or task globals.
+    egress_policy: wcore_egress::SharedPolicy,
     /// Wave OR: the tool registry is Arc-shared so per-turn
     /// [`AgentNodeExecutor`] adapter clones in `engine::run` can satisfy the
     /// `'static + Send + Sync` bound that `ExecutionGraph::execute` (and its
@@ -1572,6 +2515,14 @@ pub struct AgentEngine {
     hooks: Option<HookEngine>,
     session_manager: Option<SessionManager>,
     current_session: Option<Session>,
+    /// Exclusive journal writer authority for the active persisted session.
+    /// This handle must live for the same lifetime as the engine.
+    session_journal: Option<SessionJournal>,
+    /// Shared child-journal authority installed after bootstrap constructs the
+    /// canonical session journal. Transient spawner clones hold the same cell.
+    durable_session_authority: Option<crate::durable_spawner::DurableSessionAuthority>,
+    /// Durable turn currently owned by `run`; set before turn work begins.
+    active_journal_turn_id: Option<String>,
     output: Arc<dyn OutputSink>,
     current_msg_id: String,
     /// #279(c): stable per-agent-run id, minted once per run() entry and
@@ -1602,6 +2553,12 @@ pub struct AgentEngine {
     plan_active_flag: Option<Arc<AtomicBool>>,
     /// Prompt cache break detector for diagnostics.
     cache_detector: CacheBreakDetector,
+    /// F23-04 — the durable cache/compaction ledger. Arms itself lazily on the
+    /// first recorded round-trip, so it costs the constructors nothing but a
+    /// `Default`. Everything the detector above computes per turn is
+    /// accumulated here and flushed to `<wayland home>/cache-ledger/`, where
+    /// `wayland-core cache report` reads it back without an engine.
+    cache_ledger: crate::cache_ledger::CacheLedgerRecorder,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
     /// Token-opt: native Bash output compaction gate (cargo/git/test/grep).
@@ -1693,6 +2650,19 @@ pub struct AgentEngine {
     /// construction; the field is cheap-cloneable and never mutated
     /// for the engine's lifetime.
     skills_lifecycle: bool,
+    /// #170: cached `config.memory.enabled` — the opt-out the docs
+    /// advertise. Gates `fire_auto_memorize`, which previously consulted no
+    /// config field at all.
+    ///
+    /// Also the gate in `set_memory_api`, which is what stops a host
+    /// reinstating a durable backend after construction.
+    ///
+    /// Note on the division of labour, because an audit caught this comment
+    /// getting it wrong: config RESOLUTION forces
+    /// `observability.skills_lifecycle = false`; it is BOOTSTRAP's
+    /// `want_memory` that binds `NullMemory`. Read at construction and never
+    /// mutated.
+    memory_enabled: bool,
     /// F-092 (W7-N): cached `config.observability.online_evolution` flag.
     /// Gates live `EvolutionEvent` emission + Paraphrase mutator application
     /// at session-end. Default off. Opt-in via CLI `--online-evolution` or
@@ -1765,6 +2735,31 @@ pub struct AgentEngine {
     /// observability sink. `None` is the default — no caps configured,
     /// no telemetry; matches pre-M5.3 behaviour.
     budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// Production owner for crash-durable provider and execution authority.
+    /// Legacy raw fields below remain only for direct unit-test construction.
+    budget_authority: Option<SharedBudgetAuthorityCoordinator>,
+    budget_authority_seed: Option<BudgetAuthoritySeed>,
+    /// Stable tracker identity shared by the parent engine and every child it
+    /// spawns. Session persistence may be disabled for children, so deriving
+    /// admission identity from `current_session_id()` would give each child a
+    /// separate `session-unknown` envelope and bypass the parent's cap.
+    budget_session_id: Option<String>,
+    /// Session-root execution envelope installed by bootstrap. Each `run()`
+    /// derives a child view so turn usage rolls into the session root.
+    execution_budget: crate::budget::ExecutionBudgetView,
+    /// F21-02 — the sub-allocated envelope handed to THIS engine at the spawn
+    /// seam, when its delegator asked for a narrower one.
+    ///
+    /// `Some` only on a delegated child whose spawn carried a budget request.
+    /// It exists because the durable-authority path re-derives the run budget
+    /// from the shared coordinator, which answers with the PARENT's active
+    /// turn — so without holding the narrowed view here the sub-allocation
+    /// would be computed at the seam and then never bind anything.
+    narrowed_execution_budget: Option<crate::budget::ExecutionBudgetView>,
+    /// F10 production monitor instance. It is constructed with the engine so
+    /// startup activation can truthfully report readiness, then reset to the
+    /// current run's budget at each `run()` boundary.
+    midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
     /// it reaches the approval / budget pipeline. `None` (the default)
@@ -1773,6 +2768,16 @@ pub struct AgentEngine {
     /// `AgentBootstrap` when the session config enables permission
     /// enforcement).
     policy_gate: Option<crate::policy_gate::PolicyGate>,
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22 — the caller class this
+    /// engine dispatches as. `Root` for a user session; `AgentSpawner`
+    /// stamps `SubAgent` on every child engine it builds. Read at each tool
+    /// dispatch to decide whether `learned_policy` applies.
+    call_actor: wcore_permissions::CallActor,
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22 — the sub-agent learned-policy
+    /// pre-filter source. Installed by `AgentBootstrap` when the operator has
+    /// a permissions policy on disk, and inherited by every spawned child.
+    /// `None` (the default) leaves dispatch byte-identical.
+    learned_policy: Option<std::sync::Arc<wcore_permissions::LearnedPolicy>>,
     /// v0.6.4 Task 1.2 — optional plugin-contributed `AgentRegistry`.
     /// When `Some`, bootstrap has called `set_agent_registry` after applying
     /// `InitializeOutcome` via `apply_initialize_outcome`. The registry is
@@ -1821,10 +2826,38 @@ pub struct AgentEngine {
     /// preserves pre-v0.8.0 behaviour byte-identical when no backend
     /// is installed.
     user_model_backend: Option<Arc<dyn wcore_user_model::UserModelBackend>>,
+    /// 23B-C3 — user-authored corrections to the user model, paired with the
+    /// user-id they are keyed by.
+    ///
+    /// Deliberately a separate handle from `user_model_backend`: that
+    /// backend's only mutation is `observe`, an inference fold, and a
+    /// correction must not be reachable from it.
+    ///
+    /// The id is carried **with** the store rather than read from
+    /// `user_model_user_id`, so that write-bucket and read-bucket are the same
+    /// value by construction rather than by two call sites agreeing. A
+    /// correction keyed to a bucket the render site never reads is a
+    /// correction that reports success and never reaches the model, which is
+    /// precisely the defect class this work closes.
+    ///
+    /// The two values are now also equal: `bootstrap.rs` resolves the render
+    /// site's id through [`resolve_user_model_user_id`] as well. It used to
+    /// hardcode `"default"` while this field resolved `WAYLAND_USER_ID` — the
+    /// divergence 23B-C3 reported and did not fix, closed by `lane/small-defects`
+    /// with `crates/wcore-agent/tests/user_model_identity_wire.rs`. Pairing is
+    /// retained regardless: it is what keeps the guarantee local instead of
+    /// making it depend on a distant call site continuing to agree.
+    ///
+    /// `None` means no correction store opened (path unwritable); the
+    /// `/usermodel` control then refuses out loud rather than reporting a
+    /// correction it did not store.
+    user_correction_store: Option<(wcore_user_model::CorrectionStore, String)>,
     /// v0.8.0 Task M — user-id key used for write-back. Defaults to
-    /// `"default"` (mirrors the bootstrap read site at
-    /// `bootstrap.rs::user_ctx_block`); overridable via the
-    /// `WAYLAND_USER_ID` env var for multi-user / shared-host setups.
+    /// `"default"`; overridable via the `WAYLAND_USER_ID` env var for
+    /// multi-user / shared-host setups. The bootstrap READ site
+    /// (`bootstrap.rs::user_ctx_block`) resolves through the same
+    /// [`resolve_user_model_user_id`], so the bucket written here is the
+    /// bucket rendered into the prompt.
     /// Cached on the engine so the per-turn write-back doesn't pay an
     /// env-lookup tax on the hot path.
     user_model_user_id: String,
@@ -1855,9 +2888,9 @@ pub struct AgentEngine {
     /// shadows) on the pre-U6 no-op path — the bucketer still observes,
     /// but no on-disk draft is written.
     skill_drafter: Option<Arc<crate::auto_skill::SkillDrafter>>,
-    /// AUDIT A2 / B1 — session-root cooperative cancellation token.
+    /// AUDIT A2 / B1 — active-turn cooperative cancellation token.
     ///
-    /// One token per engine, threaded into every per-turn `GraphContext`
+    /// Threaded into every per-turn `GraphContext`
     /// and every per-call `ToolContext` so a host (TUI, ACP server) that
     /// fires `cancel_token()` actually reaches a running tool and stops
     /// the turn loop between iterations. Before this field the per-turn
@@ -1866,10 +2899,14 @@ pub struct AgentEngine {
     /// host cancel had no cooperative path and a wedged tool could only
     /// be escaped by killing the process.
     ///
-    /// The engine never fires it itself (that is the host's job); the
-    /// loop only *observes* it between turns and propagates a child
-    /// token into tool dispatch.
+    /// A bootstrapped engine also owns an immutable session root through
+    /// `session_runtime`; root cancellation is bridged into this token while
+    /// ordinary host cancellation remains scoped to the current turn.
     cancel_token: tokio_util::sync::CancellationToken,
+    /// Immutable session lifetime authority. It owns the budget watcher,
+    /// Dangerous lease and root-to-turn bridge. Hosts may replace
+    /// `cancel_token` for each turn, but cannot replace the session root.
+    session_runtime: Option<crate::cancel::SessionRuntimeGuard>,
     /// AUDIT B-2 / D-5 — handles for background reliability tasks
     /// (currently: the `ToolApprovalManager` TTL reaper). Kept separate
     /// from `decay_handles` so the memory-scheduler accounting that
@@ -1901,6 +2938,10 @@ pub struct AgentEngine {
     /// from disk. Only the live gate reads this; the rest of the engine uses
     /// the derived fields above.
     config: Config,
+    /// Session-scoped authority for sealing and reopening the exact prepared
+    /// provider request carried by recovery checkpoints. Successful key
+    /// resolution is cached; unavailable keys remain retryable.
+    recovery_request_protection: Arc<dyn crate::recovery_confidential::RecoveryRequestProtection>,
     /// Token-opt "compaction floor": the number of leading conversation
     /// messages that autocompact has summarized/collapsed away. Any absolute
     /// message index `< compaction_floor` no longer maps to its original
@@ -1930,6 +2971,10 @@ pub struct AgentEngine {
     /// post-tool-use, and turn-end hook phases. Drained into the next
     /// `TurnTrace.hook_actions` via `std::mem::take` at each emission site.
     pending_hook_actions: Vec<wcore_observability::trace::HookActionRecord>,
+    /// Aggregate pre/post tool-hook outcomes that have finished physically but
+    /// are not safe to replay until the same conversation checkpoint consumes
+    /// them atomically.
+    pending_hook_phase_consumptions: Vec<crate::session_journal::HookPhaseConsumption>,
     /// #282 contract V1: stable per-session conversation id for Flux sticky
     /// routing. Minted ONCE at construction with a v4 UUID and threaded onto
     /// every `LlmRequest` as `conversation_id`; the Flux provider emits it as
@@ -1978,8 +3023,27 @@ pub struct AgentEngine {
     length_wedge_fingerprint: Option<[u8; 32]>,
 }
 
+/// The protection an engine gets when nobody injected one.
+///
+/// `pub(crate)` so [`crate::bootstrap`] can ask the SAME implementation whether
+/// a session's sealed state is readable, before it builds the engine that would
+/// hold it. Two spellings of "which protection is in force" is how a resume gate
+/// and the engine it guards end up disagreeing.
+pub(crate) fn default_recovery_request_protection()
+-> Arc<dyn crate::recovery_confidential::RecoveryRequestProtection> {
+    #[cfg(test)]
+    {
+        Arc::new(crate::recovery_confidential::RecoveryRequestProtector::with_test_key(&[0x52; 32]))
+    }
+    #[cfg(not(test))]
+    {
+        Arc::new(crate::recovery_confidential::RecoveryRequestProtector::default())
+    }
+}
+
 impl Drop for AgentEngine {
     fn drop(&mut self) {
+        self.cancel_token.cancel();
         // M3.2 — abort every background decay scheduler task on shutdown.
         // `JoinHandle::abort` is safe on already-finished tasks (no-op),
         // so we don't need to inspect state.
@@ -2055,8 +3119,14 @@ const FLUFF_STOP_SEQUENCES: [&str; 4] = [
 ];
 
 /// v0.8.0 Task M — default user-id key for per-turn user-model
-/// write-back. Mirrors the bootstrap read site (`bootstrap.rs`,
-/// `user_id = "default"`). Override via the `WAYLAND_USER_ID` env var.
+/// write-back, used when `WAYLAND_USER_ID` is unset or empty.
+///
+/// This is a fallback, not a second identity: the bootstrap READ site goes
+/// through [`resolve_user_model_user_id`] too, so read and write resolve to
+/// the same bucket whether or not the variable is set. It previously hardcoded
+/// this literal at the read site only, which made the user model unreachable —
+/// and cross-readable — on exactly the shared hosts `WAYLAND_USER_ID` exists
+/// for.
 const DEFAULT_USER_MODEL_USER_ID: &str = "default";
 
 /// Stage 4c — one-shot, per-process suppression for the `/crucible` gate
@@ -2095,8 +3165,10 @@ impl AgentEngine {
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer =
-            ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
+        let confirmer = ToolConfirmer::with_policy(
+            config.smart_approval_policy(),
+            config.tools.allow_list.clone(),
+        );
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -2113,9 +3185,14 @@ impl AgentEngine {
         // tune session-end dream cadence via `[memory] dream_cycle_throttle_secs`.
         let dream_throttle_window =
             std::time::Duration::from_secs(config.memory.dream_cycle_throttle_secs);
+        // #170 — read the EFFECTIVE lifecycle gate (`[memory] enabled = false`
+        // dominates) before `config` is partially moved into the literal below.
+        let skills_lifecycle_effective = config.skills_lifecycle_enabled();
+        let memory_enabled = config.memory.enabled;
 
         Self {
             provider,
+            egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: Vec::new(),
             // Wave-6 #5: retain the boot prompt so a later rebind preserves the
@@ -2149,6 +3226,9 @@ impl AgentEngine {
             }),
             session_manager,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output,
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -2162,6 +3242,7 @@ impl AgentEngine {
             plan_state: PlanState::default(),
             plan_active_flag: None,
             cache_detector: CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
             compact_bash: config.compat.compact_bash(),
@@ -2187,7 +3268,13 @@ impl AgentEngine {
             // construction. The flag is operator-controlled and never
             // flips at runtime; caching here saves a per-turn config
             // dereference on the hot path.
-            skills_lifecycle: config.observability.skills_lifecycle,
+            // #170 — the EFFECTIVE gate, not the raw
+            // `observability.skills_lifecycle` field: `[memory] enabled =
+            // false` dominates, and this engine may be built from a `Config`
+            // that never went through resolution.
+            skills_lifecycle: skills_lifecycle_effective,
+            // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
+            memory_enabled,
             // F-092 (W7-N): cache online_evolution gate at construction.
             online_evolution: config.observability.online_evolution,
             recent_turn_traces: VecDeque::new(),
@@ -2199,12 +3286,23 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -2221,6 +3319,7 @@ impl AgentEngine {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -2232,6 +3331,7 @@ impl AgentEngine {
             // captured before the partial moves above.
             workflow_live_mode,
             config: retained_config,
+            recovery_request_protection: default_recovery_request_protection(),
             // Token-opt: no history has been collapsed yet at construction.
             compaction_floor: 0,
             // C1 / A2 — no SessionStart prelude applied at construction.
@@ -2239,6 +3339,7 @@ impl AgentEngine {
             // No hook actions have fired before the first turn.
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine.
             conversation_id: uuid::Uuid::new_v4().to_string(),
             // #282: no Flux signal-back seen yet at construction.
@@ -2253,7 +3354,9 @@ impl AgentEngine {
         }
     }
 
-    /// Create from a resumed session
+    /// Compatibility constructor for an in-memory or persistence-disabled
+    /// resumed session. Persisted runs fail closed until journal authority is
+    /// supplied through [`Self::resume_active`].
     pub fn resume(
         config: Config,
         tools: ToolRegistry,
@@ -2264,7 +3367,19 @@ impl AgentEngine {
         Self::resume_with_provider(provider, config, tools, output, session)
     }
 
-    /// Create from a resumed session with an externally-provided provider
+    /// Create from a resumed session that already owns its journal lease.
+    pub fn resume_active(
+        config: Config,
+        tools: ToolRegistry,
+        output: Arc<dyn OutputSink>,
+        active_session: ActiveSession,
+    ) -> Self {
+        let provider = create_provider(&config);
+        Self::resume_active_with_provider(provider, config, tools, output, active_session)
+    }
+
+    /// Compatibility constructor for an in-memory or persistence-disabled
+    /// resumed session with an externally-provided provider.
     pub fn resume_with_provider(
         provider: Arc<dyn LlmProvider>,
         config: Config,
@@ -2272,20 +3387,69 @@ impl AgentEngine {
         output: Arc<dyn OutputSink>,
         session: Session,
     ) -> Self {
+        Self::resume_with_provider_parts(provider, config, tools, output, session, None)
+    }
+
+    /// Create from a resumed session with externally-provided provider and
+    /// full-lifetime journal authority.
+    pub fn resume_active_with_provider(
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+        tools: ToolRegistry,
+        output: Arc<dyn OutputSink>,
+        active_session: ActiveSession,
+    ) -> Self {
+        let ActiveSession { session, journal } = active_session;
+        Self::resume_with_provider_parts(provider, config, tools, output, session, Some(journal))
+    }
+
+    fn resume_with_provider_parts(
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+        tools: ToolRegistry,
+        output: Arc<dyn OutputSink>,
+        session: Session,
+        session_journal: Option<SessionJournal>,
+    ) -> Self {
         // Dynamic Workflows B6 — capture the live confirm-gate flag and a full
         // clone of the resolved config BEFORE the partial moves below (see
         // `new_with_provider` for the rationale).
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer =
-            ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
+        let confirmer = ToolConfirmer::with_policy(
+            config.smart_approval_policy(),
+            config.tools.allow_list.clone(),
+        );
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
                 config.session.directory.clone().into(),
                 config.session.max_sessions,
             ))
+        } else {
+            None
+        };
+
+        // An engine whose durable sessions are OFF must not hold a journal.
+        //
+        // This is the resume-side half of the headless-keyring fix. `session
+        // .enabled = false` was already the documented remedy for a host that
+        // cannot protect a durable session, but it only ever removed the
+        // session MANAGER — a journal handed in from outside survived it, and
+        // `run_with_content` gates the per-turn confidential preflight on the
+        // journal, not on the manager. So a resumed conversation stayed
+        // journaled and kept failing every turn while a fresh one worked.
+        //
+        // `channel_dispatch` reaches exactly this: it builds its own
+        // `SessionManager`, calls `load_for_run_if_exists`, and passes the
+        // resulting `ActiveSession` to `AgentBootstrap::resume`, so every
+        // channel conversation that already exists on disk arrives here with a
+        // live journal regardless of the setting. Dropping the handle also
+        // releases its writer lease, which an engine that will never write to
+        // it has no business holding.
+        let session_journal = if config.session.enabled {
+            session_journal
         } else {
             None
         };
@@ -2297,9 +3461,14 @@ impl AgentEngine {
         // `new_with_provider` does. Was previously hardcoded to 1800s.
         let dream_throttle_window =
             std::time::Duration::from_secs(config.memory.dream_cycle_throttle_secs);
+        // #170 — read the EFFECTIVE lifecycle gate (`[memory] enabled = false`
+        // dominates) before `config` is partially moved into the literal below.
+        let skills_lifecycle_effective = config.skills_lifecycle_enabled();
+        let memory_enabled = config.memory.enabled;
 
         Self {
             provider,
+            egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: session.messages.clone(),
             // Wave-6 #5: retain the boot prompt so a later rebind preserves the
@@ -2332,6 +3501,9 @@ impl AgentEngine {
             }),
             session_manager,
             current_session: Some(session),
+            session_journal,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output,
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -2345,6 +3517,7 @@ impl AgentEngine {
             plan_state: PlanState::default(),
             plan_active_flag: None,
             cache_detector: CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
             compact_bash: config.compat.compact_bash(),
@@ -2367,7 +3540,13 @@ impl AgentEngine {
             #[cfg(any(test, feature = "test-utils"))]
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): cache the gate; see new_with_provider note.
-            skills_lifecycle: config.observability.skills_lifecycle,
+            // #170 — the EFFECTIVE gate, not the raw
+            // `observability.skills_lifecycle` field: `[memory] enabled =
+            // false` dominates, and this engine may be built from a `Config`
+            // that never went through resolution.
+            skills_lifecycle: skills_lifecycle_effective,
+            // #170 — the advertised memory opt-out, cached for `fire_auto_memorize`.
+            memory_enabled,
             // F-092 (W7-N): cache online_evolution gate at construction.
             online_evolution: config.observability.online_evolution,
             recent_turn_traces: VecDeque::new(),
@@ -2379,12 +3558,23 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -2401,6 +3591,7 @@ impl AgentEngine {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -2412,6 +3603,7 @@ impl AgentEngine {
             // captured before the partial moves above.
             workflow_live_mode,
             config: retained_config,
+            recovery_request_protection: default_recovery_request_protection(),
             // Token-opt: no history has been collapsed yet at construction.
             compaction_floor: 0,
             // C1 / A2 — resume populates `messages` here at construction, so
@@ -2420,6 +3612,7 @@ impl AgentEngine {
             // No hook actions have fired before the first turn.
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine. A
             // resumed session gets a fresh id (sticky routing is best-effort).
             conversation_id: uuid::Uuid::new_v4().to_string(),
@@ -2493,6 +3686,13 @@ impl AgentEngine {
         Arc::get_mut(&mut self.tools)
     }
 
+    /// Static cold-deferral policy used when a host refreshes ToolSearch after
+    /// registering tools post-bootstrap. Returning an owned copy lets callers
+    /// apply it while holding the registry's mutable borrow.
+    pub fn defer_cold_config(&self) -> wcore_config::tools::DeferColdConfig {
+        self.config.builtin_tools.defer_cold.clone()
+    }
+
     /// v0.9.1 W1 E (debt sweep): a cheap `Arc` clone of the tool
     /// registry, for hosts that need to invoke a tool directly
     /// (e.g. the TUI `/voice` slash dispatcher calls
@@ -2534,7 +3734,17 @@ impl AgentEngine {
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
         if let Some(mgr) = &self.session_manager {
-            let session = mgr.create(provider_name, &self.model, cwd, session_id)?;
+            // D3: a journaled session needs confidential recovery storage, and
+            // `credentials.backend = "plaintext"` can never provide it. That is
+            // decidable from config alone, so refuse here rather than accepting
+            // the session and failing every turn afterwards behind a message
+            // that names the wrong cause.
+            crate::recovery_confidential::reject_backend_without_confidential_storage(&self.config)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let ActiveSession { session, journal } =
+                mgr.create_for_run(provider_name, &self.model, cwd, session_id)?;
+            self.bind_budget_authority(journal.clone(), &session.id)?;
+            self.bind_fresh_durable_session_authority(journal.clone(), &session.id)?;
             // W6 F16: if a previous plan was persisted for this session id,
             // advertise resume-availability via the existing Info channel.
             // No new protocol variant (audit rev-2). Errors from the probe
@@ -2550,7 +3760,9 @@ impl AgentEngine {
                     session.id, age_secs
                 ));
             }
+            self.output.bind_session_id(&session.id);
             self.current_session = Some(session);
+            self.session_journal = Some(journal);
         }
         Ok(())
     }
@@ -2558,6 +3770,168 @@ impl AgentEngine {
     /// Get the current session ID (if sessions are enabled and initialized)
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session.as_ref().map(|s| s.id.clone())
+    }
+
+    /// Does this engine hold a durable journal writer lease?
+    ///
+    /// Test surface for the invariant "durable sessions off ⇒ no journal". The
+    /// field is private, and every *behavioural* probe of it is host-dependent
+    /// — holding a journal only changes an outcome on a host where confidential
+    /// recovery storage is unavailable, so the same assertion would pass
+    /// vacuously on a developer machine with a working OS keyring.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn has_durable_journal(&self) -> bool {
+        self.session_journal.is_some()
+    }
+
+    /// Transfer this long-running engine to another persisted session.
+    ///
+    /// Validation is completed before any live state changes. On success the
+    /// new journal becomes the sole durable authority and dropping the old
+    /// handle releases its writer lease. Session-local runtime state is reset
+    /// so the next turn cannot inherit correlations, caches, usage deltas, or
+    /// plan/compaction state from the session being left.
+    pub fn switch_active_session(&mut self, active_session: ActiveSession) -> anyhow::Result<()> {
+        // Journal writer #3, and the one the headless-keyring fix left open.
+        //
+        // Writers #1 (`init_session`) and #2 (the resume constructor) are both
+        // governed by the `session.enabled` decision `Config::resolve` now takes
+        // at startup. This one was not: it accepts an `ActiveSession` built by
+        // the CALLER and assigns `self.session_journal = Some(journal)`
+        // unconditionally. A caller that constructs its own `SessionManager` —
+        // exactly what `channel_dispatch` does, which is how writer #2 was
+        // reached — can therefore hand a live journal to an engine whose durable
+        // sessions are off, re-arming the every-turn failure the startup degrade
+        // exists to prevent.
+        //
+        // REFUSE, rather than silently dropping the journal the way writer #2
+        // does. The difference is deliberate: resume is a routine path that must
+        // keep working in degraded mode, so dropping the handle there is a
+        // graceful degrade. A *switch* is an explicit request to move onto
+        // another PERSISTED session, and on a host with durable sessions off no
+        // such session exists. Half-honouring it would leave the engine claiming
+        // to be on session B with nothing behind it — a worse lie than an error.
+        if !self.config.session.enabled {
+            anyhow::bail!(
+                "cannot switch sessions: durable session persistence is disabled for this run"
+            );
+        }
+        if self.active_journal_turn_id.is_some() {
+            anyhow::bail!("cannot switch sessions while a durable turn is active");
+        }
+        if self.budget_authority.is_some() {
+            anyhow::bail!(
+                "session switch is unavailable until the budget authority watcher/spawner rebind is sealed"
+            );
+        }
+
+        let ActiveSession {
+            mut session,
+            journal,
+        } = active_session;
+        let journal_session_id = journal.session_id()?;
+        if journal_session_id != session.id {
+            anyhow::bail!(
+                "journal session mismatch: expected {}, found {}",
+                session.id,
+                journal_session_id
+            );
+        }
+        let journal_state = journal.state()?;
+        if journal_state.session_id.as_deref() != Some(session.id.as_str())
+            || journal_state.imported_baseline.is_none()
+        {
+            anyhow::bail!(
+                "session journal '{}' has no matching canonical baseline",
+                session.id
+            );
+        }
+        // HIGH-1, the second resume surface. `AgentBootstrap::resume` covers
+        // every LAUNCH; this covers the live TUI `/resume`, which moves an
+        // already-running engine onto another persisted session without going
+        // through bootstrap at all. Same question, same answer, and it is asked
+        // here — inside the validated block, before any live state changes — so
+        // a refusal leaves the engine on the session it was already on rather
+        // than half-moved onto one it cannot read.
+        crate::recovery::admit_session_resume(
+            &self.config,
+            &journal,
+            self.recovery_request_protection.as_ref(),
+        )?;
+        let canonical_messages = journal_state
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Message>, _>>()?;
+
+        // Rebind before mutating engine state. The authority increments its
+        // generation and clears A before inspecting B, so any launch resolved
+        // under A becomes stale and a failed bind cannot expose A afterward.
+        self.bind_durable_session_authority(journal.clone(), &session.id)?;
+
+        // Everything below is infallible. Keep the validated replacement
+        // journal alive before assigning it; replacing `session_journal`
+        // releases the old session's lease only after B is fully available.
+        session.messages = canonical_messages.clone();
+        let session_id = session.id.clone();
+        let session_usage = session.total_usage.clone();
+        self.messages = canonical_messages;
+        self.total_usage = session_usage.clone();
+        self.run_usage = TokenUsage::default();
+        self.current_session = Some(session);
+        self.session_journal = Some(journal);
+        self.active_journal_turn_id = None;
+        self.current_msg_id.clear();
+        self.current_agent_run_id = None;
+        self.user_model_pin = None;
+        self.current_reasoning_effort = None;
+        self.compact_state = CompactState::new();
+        if self.plan_state.is_active {
+            self.exit_plan_mode();
+        }
+        self.plan_state = PlanState::default();
+        if let Some(flag) = &self.plan_active_flag {
+            flag.store(false, Ordering::Release);
+        }
+        self.cache_detector = CacheBreakDetector::new();
+        // F23-04: seal the outgoing session's ledger before the conversation id
+        // rotates below, so its record stays attributable to the session that
+        // produced it rather than bleeding into the next one.
+        self.cache_ledger.rotate();
+        self.per_turn_costs.clear();
+        self.mcp_curation_cache = None;
+        self.mcp_cap_cache = None;
+        self.hydrated_tool_names.clear();
+        self.recent_turn_traces.clear();
+        self.drafted_skill_signatures.clear();
+        self.mode_override = None;
+        self.current_skill_router_pick = None;
+        self.auto_skill_bucketer = Mutex::new(crate::auto_skill::Bucketer::new(3));
+        self.compaction_floor = 0;
+        self.session_start_injected_len = 0;
+        self.pending_hook_actions.clear();
+        self.pending_hook_phase_consumptions.clear();
+        self.conversation_id = uuid::Uuid::new_v4().to_string();
+        self.flux_served_window = None;
+        self.flux_context_pressure = None;
+        self.smart_compact_armed = true;
+        self.smart_compact_last_turn = None;
+        self.smart_compact_exhausted = false;
+        self.smart_compact_force = false;
+        self.length_wedge_fingerprint = None;
+        self.budget_session_id = Some(session_id.clone());
+        self.style_detector = Mutex::new(crate::style_detector::StyleDetector::new());
+        if let Some(state) = &self.session_state {
+            state.reset_for_session(
+                self.model.clone(),
+                session_usage.input_tokens,
+                session_usage.output_tokens,
+            );
+        }
+        self.clear_file_cache();
+        self.output.bind_session_id(&session_id);
+        Ok(())
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -2573,11 +3947,10 @@ impl AgentEngine {
         (self.total_usage.clone(), self.run_usage.clone())
     }
 
-    /// AUDIT A2 / B1 — clone the engine's session-root cancellation
-    /// token.
+    /// AUDIT A2 / B1 — clone the engine's active-turn cancellation token.
     ///
     /// A host (TUI, ACP server) holds the clone and calls `.cancel()` on
-    /// it to cooperatively stop a running agent. The `run()` loop checks
+    /// it to cooperatively stop the current run. The `run()` loop checks
     /// the token between turns and threads a child of it into every
     /// per-turn `GraphContext` and every per-call `ToolContext`, so a
     /// cancel reaches an in-flight tool. The token is `Arc`-backed —
@@ -2586,13 +3959,43 @@ impl AgentEngine {
         self.cancel_token.clone()
     }
 
-    /// AUDIT A2 — install an externally-owned cancellation token as the
-    /// session root. Use this when the host wants to scope agent
-    /// cancellation to a parent token (e.g. a child of the process-wide
-    /// shutdown token). Must be called before `run()`. When unused the
-    /// engine keeps the fresh token minted at construction.
+    /// Install the engine-owned session cancellation root and take ownership
+    /// of its budget watcher. Called exactly once by production bootstrap.
+    pub(crate) fn install_session_cancel_guard(
+        &mut self,
+        mut runtime: crate::cancel::SessionRuntimeGuard,
+    ) {
+        let active_turn = runtime.install_descendant_turn();
+        self.cancel_token = active_turn;
+        self.session_runtime = Some(runtime);
+    }
+
+    /// AUDIT A2 — install an externally-owned cancellation token for the next
+    /// turn. Must be called before `run()`. In a bootstrapped engine the
+    /// immutable session root is bridged into this token; cancelling this token
+    /// does not cancel or revive that root.
     pub fn set_cancel_token(&mut self, token: tokio_util::sync::CancellationToken) {
+        if let Some(runtime) = self.session_runtime.as_mut() {
+            runtime.set_active_turn(token.clone());
+        }
         self.cancel_token = token;
+    }
+
+    /// F23-04 — write this engine's cache/compaction ledger into `dir` instead
+    /// of `<wayland home>/cache-ledger`.
+    ///
+    /// Exists so the ledger's engine wiring can be tested by reading a real
+    /// file a real `run()` produced, without a process-global `WAYLAND_HOME`
+    /// that would make the suite order-dependent. Discards anything recorded
+    /// so far, so it must be called before the first turn.
+    pub fn set_cache_ledger_dir(&mut self, dir: impl Into<std::path::PathBuf>) {
+        self.cache_ledger = crate::cache_ledger::CacheLedgerRecorder::with_dir(dir);
+    }
+
+    /// Path of this engine's ledger on disk, once a round-trip has been
+    /// recorded. `None` before the first record.
+    pub fn cache_ledger_path(&self) -> Option<&std::path::Path> {
+        self.cache_ledger.path()
     }
 
     /// M5.3 — install a `BudgetTracker` to enforce per-session / per-user
@@ -2607,12 +4010,338 @@ impl AgentEngine {
         self.budget_tracker = Some(tracker);
     }
 
-    /// M5.bootstrap-wiring — read access to the optional `BudgetTracker`.
-    /// Returns `None` when bootstrap did not install one (the default
-    /// when `Config.session_cap` is `None`). Tests use this to assert
-    /// install-from-config wiring works end-to-end.
+    /// Install the sole production budget owner. A resumed engine binds
+    /// immediately; a fresh persisted engine binds after `init_session`
+    /// creates the canonical journal baseline.
+    pub(crate) fn install_budget_authority(
+        &mut self,
+        authority: SharedBudgetAuthorityCoordinator,
+        seed: BudgetAuthoritySeed,
+    ) -> anyhow::Result<()> {
+        if let (Some(session), Some(journal)) =
+            (self.current_session.as_ref(), self.session_journal.as_ref())
+        {
+            BudgetAuthorityCoordinator::bind_shared_pristine(
+                &authority,
+                seed.config(Some(journal.clone()), session.id.clone()),
+            )?;
+        }
+        self.execution_budget = authority.lock().current_execution_view()?;
+        self.budget_authority = Some(authority);
+        self.budget_authority_seed = Some(seed);
+        self.budget_tracker = None;
+        self.budget_session_id = None;
+        Ok(())
+    }
+
+    /// Install the clone-shared child authority after tools and the engine have
+    /// been constructed. Resume binds immediately; fresh sessions bind in
+    /// `init_session` after their canonical journal exists.
+    pub(crate) fn install_durable_session_authority(
+        &mut self,
+        authority: crate::durable_spawner::DurableSessionAuthority,
+        effective_policy: wcore_types::execution_policy::EffectiveExecutionPolicy,
+    ) -> anyhow::Result<()> {
+        authority.install_effective_policy(effective_policy)?;
+        if let (Some(session), Some(journal)) =
+            (self.current_session.as_ref(), self.session_journal.as_ref())
+        {
+            authority.bind(journal.clone(), &session.id)?;
+        }
+        self.durable_session_authority = Some(authority);
+        Ok(())
+    }
+
+    /// Bind the canonical child-session authority for integration fixtures
+    /// that construct an engine directly instead of through `AgentBootstrap`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn bind_test_durable_session(
+        &mut self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let authority = crate::durable_spawner::DurableSessionAuthority::new();
+        self.install_durable_session_authority(
+            authority.clone(),
+            wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                &self.config.execution_policy,
+            ),
+        )?;
+        authority.bind(journal, session_id)?;
+        Ok(())
+    }
+
+    fn bind_durable_session_authority(
+        &self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(authority) = &self.durable_session_authority {
+            authority.bind(journal, session_id)?;
+        }
+        Ok(())
+    }
+
+    fn bind_fresh_durable_session_authority(
+        &self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(authority) = &self.durable_session_authority {
+            authority.bind_fresh(journal, session_id)?;
+        }
+        Ok(())
+    }
+
+    fn bind_budget_authority(
+        &mut self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(authority) = self.budget_authority.as_ref() else {
+            return Ok(());
+        };
+        let seed = self.budget_authority_seed.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("budget authority is installed without its policy seed")
+        })?;
+        BudgetAuthorityCoordinator::bind_shared_session(
+            authority,
+            seed.config(Some(journal), session_id),
+        )?;
+        self.execution_budget = authority.lock().current_execution_view()?;
+        Ok(())
+    }
+
+    /// Attach a child engine to the parent's sole budget authority. Child
+    /// engines never bind or replace the durable session; every provider and
+    /// tool mutation commits through the inherited coordinator.
+    /// `narrowed` is the sub-allocated child envelope built at the spawn seam
+    /// (F21-02). When present it REPLACES the coordinator's current view as this
+    /// engine's envelope, because the coordinator's view is the PARENT's and
+    /// re-deriving from it would silently discard the sub-allocation. It is
+    /// already a descendant of that same view, so every charge still rolls up
+    /// into the parent's turn and the session root exactly as before — the
+    /// child simply also carries its own, stricter caps.
+    pub(crate) fn inherit_budget_authority(
+        &mut self,
+        authority: SharedBudgetAuthorityCoordinator,
+        narrowed: Option<crate::budget::ExecutionBudgetView>,
+    ) -> anyhow::Result<()> {
+        self.execution_budget = match narrowed.clone() {
+            Some(view) => view,
+            None => authority.lock().current_execution_view()?,
+        };
+        self.narrowed_execution_budget = narrowed;
+        self.budget_authority = Some(authority);
+        self.budget_authority_seed = None;
+        self.budget_tracker = None;
+        self.budget_session_id = None;
+        Ok(())
+    }
+
+    fn durable_budget_authority(
+        &self,
+    ) -> Result<Option<&SharedBudgetAuthorityCoordinator>, AgentError> {
+        let Some(authority) = self.budget_authority.as_ref() else {
+            return Ok(None);
+        };
+        if self.session_manager.is_some() && !authority.lock().is_durably_bound() {
+            return Err(AgentError::SessionAuthority(
+                "persisted session budget authority is not durably bound".to_owned(),
+            ));
+        }
+        Ok(Some(authority))
+    }
+
+    /// Bind provider reservations and interactive extensions to a stable
+    /// runtime identity shared with spawned children.
+    pub fn set_budget_session_id(&mut self, session_id: impl Into<String>) {
+        self.budget_session_id = Some(session_id.into());
+    }
+
+    fn budget_session_id(&self) -> String {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            return authority.lock().budget_session_id().to_owned();
+        }
+        self.budget_session_id
+            .clone()
+            .or_else(|| self.current_session_id())
+            .unwrap_or_else(|| "session-unknown".to_string())
+    }
+
+    /// Read access to the legacy in-memory `BudgetTracker` used by direct
+    /// engine construction and compatibility tests. Production bootstrap
+    /// installs the durable budget authority instead and clears this tracker.
     pub fn budget_tracker(&self) -> Option<&Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>> {
         self.budget_tracker.as_ref()
+    }
+
+    /// Add locally authorized headroom to this session's provider envelope.
+    /// Managed sessions reject the operation because an interactive host must
+    /// never widen an organization-controlled ceiling.
+    pub fn continue_with_additional_budget(
+        &self,
+        request_id: &str,
+        additional_tokens: u64,
+        additional_cost_usd: f64,
+    ) -> Result<(), wcore_protocol::events::BudgetGrantRefusalReason> {
+        use wcore_protocol::events::BudgetGrantRefusalReason;
+
+        fn classify_budget_grant_error(
+            error: wcore_budget::BudgetExtensionError,
+        ) -> BudgetGrantRefusalReason {
+            match error {
+                wcore_budget::BudgetExtensionError::NoExhaustedBudget => {
+                    BudgetGrantRefusalReason::NoExhaustedBudget
+                }
+                wcore_budget::BudgetExtensionError::InvalidUsd
+                | wcore_budget::BudgetExtensionError::EmptyExtension
+                | wcore_budget::BudgetExtensionError::InvalidRequestId => {
+                    BudgetGrantRefusalReason::InvalidGrant
+                }
+                wcore_budget::BudgetExtensionError::RequestIdConflict => {
+                    BudgetGrantRefusalReason::RequestIdConflict
+                }
+                wcore_budget::BudgetExtensionError::GrantLedgerCapacityExceeded => {
+                    BudgetGrantRefusalReason::LedgerCapacityExceeded
+                }
+            }
+        }
+
+        if self.config.execution_policy.is_managed() {
+            return Err(BudgetGrantRefusalReason::ManagedPolicy);
+        }
+        if let Some(authority) = self
+            .durable_budget_authority()
+            .map_err(|_| BudgetGrantRefusalReason::PersistenceFailure)?
+        {
+            let session_id = authority.lock().budget_session_id().to_owned();
+            let result = authority
+                .lock()
+                .transaction(|mutation| {
+                    mutation.provider_tracker().extend_session_idempotent(
+                        &session_id,
+                        request_id,
+                        additional_tokens,
+                        additional_cost_usd,
+                    )
+                })
+                .map_err(|_| BudgetGrantRefusalReason::PersistenceFailure)?;
+            result.map_err(classify_budget_grant_error)?;
+            return Ok(());
+        }
+        let tracker = self
+            .budget_tracker
+            .as_ref()
+            .ok_or(BudgetGrantRefusalReason::BudgetTrackerUnavailable)?;
+        let session_id = self.budget_session_id();
+        tracker
+            .lock()
+            .extend_session_idempotent(
+                &session_id,
+                request_id,
+                additional_tokens,
+                additional_cost_usd,
+            )
+            .map_err(classify_budget_grant_error)?;
+        Ok(())
+    }
+
+    /// Install the session-root execution envelope built from resolved config.
+    pub fn set_execution_budget(&mut self, budget: crate::budget::ExecutionBudgetView) {
+        self.execution_budget = budget;
+    }
+
+    pub fn execution_budget(&self) -> &crate::budget::ExecutionBudgetView {
+        &self.execution_budget
+    }
+
+    /// Bind a transient spawner to this engine's live session envelope.
+    ///
+    /// The provider tracker is optional for legacy/test engines, but execution
+    /// and cancellation authority always inherit from the parent. Callers must
+    /// not manufacture a separate provider allowance when the parent has none.
+    fn govern_transient_spawner(
+        &self,
+        spawner: crate::spawner::AgentSpawner,
+    ) -> crate::spawner::AgentSpawner {
+        // F21-02-01 — bind the transient spawner's child tool authority to THIS
+        // engine's live registry. Every transient spawner (workflow, crucible,
+        // plan synthesis, fleet) is constructed from a bare
+        // `AgentSpawner::new`, which defaults to unrestricted; without this a
+        // channel-posture or persona-narrowed engine would delegate tools it
+        // does not itself hold. `self.tools` is the parent's real, post-retain
+        // registry, so the authority is exact rather than re-derived.
+        let spawner = spawner.with_learned_policy(self.learned_policy.clone());
+        spawner.narrow_parent_tool_authority(self.tools.tool_names());
+
+        // Bind the parent repository identity so a transient child resolves the
+        // SAME shared/isolated workspace authority as the bootstrap spawner. A
+        // mutating child then allocates its standalone checkout relative to this
+        // root; the engine never rewrites the child's working directory back to
+        // the parent workspace. A contained session binds from its workspace
+        // policy root; a non-contained session (no policy) still has an
+        // authoritative parent identity — the live session directory (the same
+        // authoritative source the durable-workspace retention path reads via
+        // `base_config.session.directory`). Binding it lets non-contained
+        // transient children resolve SharedReadOnly against the real session
+        // workspace instead of failing "parent workspace authority is not bound".
+        // The session root is materialized on demand exactly as the durable
+        // checkout path does (`prepare_child_workspace`), and only when it is
+        // absolute — a relative directory would resolve against the process cwd,
+        // which must never become a child's parent identity. When the chosen
+        // root is unresolvable, keep the unbound spawner (fail-closed at spawn
+        // time) rather than losing the governed handle.
+        let spawner = {
+            let unbound = spawner.clone_for_spawn();
+            let parent_root = match self.tools.workspace_policy() {
+                Some(policy) => Some(policy.root().to_path_buf()),
+                None => {
+                    let session_root = std::path::Path::new(self.config.session.directory.as_str());
+                    if session_root.is_absolute() && std::fs::create_dir_all(session_root).is_ok() {
+                        Some(session_root.to_path_buf())
+                    } else {
+                        None
+                    }
+                }
+            };
+            match parent_root {
+                Some(root) => spawner.with_parent_workspace(root).unwrap_or(unbound),
+                None => unbound,
+            }
+        };
+        let spawner = match self.durable_session_authority.as_ref() {
+            Some(authority) => spawner
+                .with_shared_durable_session_authority(authority.clone())
+                .expect("installed durable session authority carries its effective policy"),
+            None => spawner,
+        };
+        if let Some(authority) = self.budget_authority.as_ref() {
+            let governance = crate::spawner::SpawnerBudgetGovernance::from_authority(
+                Arc::clone(authority),
+                self.cancel_token.clone(),
+            );
+            return spawner.with_budget_governance(governance);
+        }
+        match self.budget_tracker.as_ref() {
+            Some(tracker) => {
+                spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::new(
+                    Arc::clone(tracker),
+                    self.budget_session_id(),
+                    self.execution_budget.clone(),
+                    self.cancel_token.clone(),
+                ))
+            }
+            None => spawner
+                .with_cancel(self.cancel_token.clone())
+                .with_execution_budget(self.execution_budget.clone()),
+        }
+    }
+
+    pub(crate) fn midflight_monitor_constructed(&self) -> bool {
+        // The monitor is an owned field, not an inferred registration flag.
+        true
     }
 
     /// v0.6.1 CRIT-1: install a `PolicyGate` for this session. Once set,
@@ -2624,6 +4353,30 @@ impl AgentEngine {
     /// preserve v0.6.0 open-gate behaviour.
     pub fn set_policy_gate(&mut self, gate: crate::policy_gate::PolicyGate) {
         self.policy_gate = Some(gate);
+    }
+
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22: declare this engine's caller
+    /// class. `AgentSpawner` calls this on every child engine it constructs so
+    /// a delegated turn is attributable at the dispatch boundary. A user
+    /// session never calls it and stays `Root`.
+    pub fn set_call_actor(&mut self, actor: wcore_permissions::CallActor) {
+        self.call_actor = actor;
+    }
+
+    /// v0.8.0 Task I (1.D.3), wired in Phase 22: install the sub-agent
+    /// learned-policy pre-filter source. Only consulted when
+    /// `set_call_actor` has declared a sub-agent, and only ever to NARROW —
+    /// see `filter_tool_calls_by_policy`.
+    pub fn set_learned_policy(&mut self, policy: std::sync::Arc<wcore_permissions::LearnedPolicy>) {
+        self.learned_policy = Some(policy);
+    }
+
+    /// True when this engine can actually apply the learned-policy pre-filter
+    /// to the children it spawns — i.e. a policy is installed. Read by
+    /// bootstrap's capability report so `learned_policy` is only ever
+    /// advertised `ready` on a concrete construction, never on a flag.
+    pub(crate) fn learned_policy_constructed(&self) -> bool {
+        self.learned_policy.is_some()
     }
 
     /// v0.6.4 Task 1.3 — register plugin-contributed hooks into the engine's
@@ -2811,6 +4564,16 @@ impl AgentEngine {
         self.approval_bridge = bridge;
     }
 
+    /// Clone the immutable outbound policy for a runtime-lazy session client.
+    pub fn egress_policy(&self) -> wcore_egress::SharedPolicy {
+        self.egress_policy.clone()
+    }
+
+    /// Install the policy minted by `AgentBootstrap` for this exact session.
+    pub fn set_egress_policy(&mut self, policy: wcore_egress::SharedPolicy) {
+        self.egress_policy = policy;
+    }
+
     /// W7 Pre-flight 0: read access to the engine's `MemoryApi` handle.
     /// Always returns a real `Arc<dyn MemoryApi>` (never `None`) — when
     /// memory is disabled it points at a `NullMemory` no-op.
@@ -2893,6 +4656,26 @@ impl AgentEngine {
     /// installed (memory disabled, or backend init failed in bootstrap).
     pub fn user_model_backend(&self) -> Option<&Arc<dyn wcore_user_model::UserModelBackend>> {
         self.user_model_backend.as_ref()
+    }
+
+    /// 23B-C3 — install the user-authored correction store together with the
+    /// user-id the caller rendered the user-context block under. Both are
+    /// supplied by the same bootstrap scope so they cannot drift apart.
+    pub fn set_user_correction_store(
+        &mut self,
+        store: wcore_user_model::CorrectionStore,
+        user_id: impl Into<String>,
+    ) {
+        self.user_correction_store = Some((store, user_id.into()));
+    }
+
+    /// 23B-C3 — the correction store and the user-id it is keyed by. `None`
+    /// when the store could not be opened; callers must refuse rather than
+    /// report a correction as applied.
+    pub fn user_correction_store(&self) -> Option<(&wcore_user_model::CorrectionStore, &str)> {
+        self.user_correction_store
+            .as_ref()
+            .map(|(s, id)| (s, id.as_str()))
     }
 
     /// v0.8.0 Task M — override the user-id key used for write-back.
@@ -3200,7 +4983,34 @@ impl AgentEngine {
     /// W7 Pre-flight 0: replace the engine's `MemoryApi` handle.
     /// Called by `AgentBootstrap::build` when the user has opted into a
     /// real backend; otherwise the default `NullMemory` is kept.
+    ///
+    /// #170 — **refuses when `[memory] enabled = false`.** This is the single
+    /// chokepoint for the opt-out, and it is here rather than at each writer
+    /// because every durable write the engine performs goes through this one
+    /// handle: `dream_now` and `kg_ingest_facts` at session end,
+    /// `record_episode` from `write_smart_handoff` (which persists a verbatim
+    /// pre-compaction transcript), `rebind_session`, and `assert_fact` from
+    /// auto-memorize. Gating them individually would be four conditions that a
+    /// fifth writer could later forget; gating the handle covers the writers
+    /// that exist and the ones that do not yet.
+    ///
+    /// A cross-audit found this: bootstrap never installs a real backend for
+    /// an opted-out user, so the gate looked complete — but this method is
+    /// public API, and a host that calls it after construction reinstated
+    /// every one of those writes.
+    ///
+    /// Refusing rather than accepting-and-ignoring keeps `memory_api()`
+    /// honest: what a caller reads back is what the engine will actually
+    /// write through.
     pub fn set_memory_api(&mut self, api: Arc<dyn wcore_memory::MemoryApi>) {
+        if !self.memory_enabled {
+            tracing::warn!(
+                target: "wcore_agent::memory",
+                "refused to install a memory backend: `[memory] enabled = false`; \
+                 the session keeps NullMemory and records nothing"
+            );
+            return;
+        }
         self.memory_api = api;
     }
 
@@ -3403,7 +5213,7 @@ impl AgentEngine {
             .unwrap_or_else(|| std::sync::Arc::new(wcore_tools::vfs::RealFs));
         let mut ctx = wcore_tools::context::ToolContext::new(
             String::new(),
-            wcore_tools::context::ToolContext::test_default().cancel,
+            tokio_util::sync::CancellationToken::new(),
             vfs,
             None,
             std::sync::Arc::new(wcore_tools::NullToolOutputSink),
@@ -3411,6 +5221,10 @@ impl AgentEngine {
         if let Some(notifier) = self.tool_write_notifier.get() {
             ctx = ctx.with_file_write_notifier(Arc::clone(notifier));
         }
+        if let Some(policy) = self.tools.workspace_policy() {
+            ctx = ctx.with_workspace(policy);
+        }
+        ctx = ctx.with_sandbox(self.tools.sandbox_runtime());
         ctx
     }
 
@@ -3506,6 +5320,48 @@ impl AgentEngine {
         })
     }
 
+    /// Persist an interrupted turn at a real, sealed provider-dispatch
+    /// checkpoint for downstream recovery integration tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn prepare_recoverable_turn_for_test(
+        &mut self,
+        turn_id: &str,
+        input: &str,
+    ) -> Result<(), AgentError> {
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        self.append_journal_event(SessionEvent::TurnStarted {
+            turn_id: turn_id.to_owned(),
+            user_message: input.to_owned(),
+        })
+        .await?;
+        self.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: input.to_owned(),
+            }],
+        ));
+        self.sync_journal_conversation(turn_id).await?;
+
+        let request = LlmRequest {
+            model: self.config.model.clone(),
+            messages: self.messages.clone(),
+            conversation_id: Some(self.conversation_id.clone()),
+            ..Default::default()
+        };
+        self.commit_provider_recovery_checkpoint(
+            turn_id,
+            &request,
+            0,
+            0,
+            false,
+            false,
+            &LoopGuard::from_env(),
+            &FailureGuard::from_env(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// W9.1 T3 (T10b): per-turn skill-draft entry point. Pushes the
     /// just-completed `TurnTrace` into the rolling window, runs the F10
     /// `PatternDetector`, stages any newly-detected drafts as P4
@@ -3559,6 +5415,11 @@ impl AgentEngine {
                 Ok(_id) => {
                     let payload = wcore_skills::draft::render_skill_drafted_payload(&candidate);
                     self.output.emit_trace(msg_id, &payload);
+                    for activation in crate::capability_activation::successful_occurrence(
+                        wcore_protocol::events::CapabilityId::ProcedureSkillDrafting,
+                    ) {
+                        self.output.emit_capability_activation(&activation);
+                    }
                 }
                 Err(e) => {
                     // Staging failure must not break the turn — log and
@@ -3871,6 +5732,9 @@ impl AgentEngine {
         stop_reason: StopReason,
         turns: usize,
     ) {
+        if !self.skills_lifecycle {
+            return;
+        }
         let outcome = match stop_reason {
             StopReason::EndTurn | StopReason::ToolUse => crate::auto_skill::TurnOutcome::Success,
             _ => crate::auto_skill::TurnOutcome::Failure,
@@ -3908,12 +5772,33 @@ impl AgentEngine {
             return;
         };
         match drafter.draft(&trigger) {
-            Ok(res) => tracing::info!(
+            Ok(res) => {
+                tracing::info!(
+                    target: "wcore_agent::auto_skill",
+                    name = %res.name,
+                    evidence = trigger.trajectories.len(),
+                    md = %res.md_path.display(),
+                    "auto-drafted skill from observed-turn streak"
+                );
+                for activation in crate::capability_activation::successful_occurrence(
+                    wcore_protocol::events::CapabilityId::LegacyAutoSkillDrafting,
+                ) {
+                    self.output.emit_capability_activation(&activation);
+                }
+            }
+            // 23A-C1: a revoked draft is a normal, correct outcome -- the product
+            // honouring an explicit user decision -- not a fault. Logging it through
+            // the failure arm below would report "skill draft failed" for the one
+            // case where the system did exactly what it was told, and would put a
+            // warning in the user's log every time governance worked.
+            //
+            // It must also NOT emit the capability activation the `Ok` arm emits:
+            // nothing was activated.
+            Err(crate::auto_skill::DraftError::Revoked { name }) => tracing::info!(
                 target: "wcore_agent::auto_skill",
-                name = %res.name,
-                evidence = trigger.trajectories.len(),
-                md = %res.md_path.display(),
-                "auto-drafted skill from observed-turn streak"
+                name = %name,
+                signature = %trigger.signature,
+                "skill draft suppressed: revoked by the user"
             ),
             Err(e) => tracing::warn!(
                 target: "wcore_agent::auto_skill",
@@ -3937,11 +5822,25 @@ impl AgentEngine {
     /// compaction preserves the pairing. Synthetic error results are
     /// bundled into this same user message so conversation roles stay
     /// strictly alternating.
+    #[cfg(test)]
     fn push_user_turn(&mut self, user_input: &str) {
+        self.push_user_turn_with_content(user_input, Vec::new());
+    }
+
+    fn push_user_turn_with_content(
+        &mut self,
+        user_input: &str,
+        additional_content: Vec<ContentBlock>,
+    ) {
         let mut content: Vec<ContentBlock> = Self::orphan_repair_results(self.messages.last());
-        content.push(ContentBlock::Text {
-            text: user_input.to_string(),
-        });
+        // Preserve legacy empty-text turns, but do not insert a meaningless
+        // empty text block ahead of an image-only composer message.
+        if !user_input.is_empty() || additional_content.is_empty() {
+            content.push(ContentBlock::Text {
+                text: user_input.to_string(),
+            });
+        }
+        content.extend(additional_content);
         self.messages.push(Message::now(Role::User, content));
     }
 
@@ -4183,14 +6082,28 @@ impl AgentEngine {
         finish_reason: FinishReason,
         persist_session: bool,
     ) -> Result<AgentResult, AgentError> {
-        self.fire_on_session_end(turn).await;
         if persist_session {
-            self.save_session();
+            self.prepare_durable_conversation().await?;
+        } else if let Some(journal) = self.session_journal.as_ref() {
+            let state = journal
+                .state()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            self.messages = state
+                .conversation
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        }
+        self.fire_on_session_end(turn).await;
+        self.cache_ledger.finish();
+        if persist_session {
+            self.save_session_mirror();
         }
         let auto_skill_picked = self.current_skill_router_pick.clone();
         self.observe_skill_router_outcome(StopReason::MaxTurns);
         self.observe_auto_skill(user_input, auto_skill_picked, StopReason::MaxTurns, turn);
-        Ok(AgentResult {
+        let result = AgentResult {
             text: String::new(),
             stop_reason: StopReason::MaxTurns,
             finish_reason,
@@ -4199,7 +6112,19 @@ impl AgentEngine {
             turns: turn,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
-        })
+        };
+        if let Some(turn_id) = self.active_journal_turn_id.clone() {
+            self.commit_terminal_recovery_checkpoint(
+                &turn_id,
+                &result,
+                turn,
+                &LoopGuard::from_env(),
+                &FailureGuard::from_env(),
+                crate::recovery::RecoveryTerminalCompletion::Committed,
+            )
+            .await?;
+        }
+        Ok(result)
     }
 
     /// #279(a): the sole place the engine sources the active-window gauge.
@@ -4416,29 +6341,2799 @@ impl AgentEngine {
             decay_score: 1.0,
             status: EpisodeStatus::Active,
         };
-        if let Err(e) = self
+        match self
             .memory_api
             .record_episode(ep, wcore_memory::AccessToken::MainAgent)
             .await
         {
-            tracing::warn!(
-                target: "wcore_agent::memory",
-                error = %e,
-                "#280 smart handoff record_episode failed; continuing"
-            );
+            Ok(_) => {
+                for activation in crate::capability_activation::successful_occurrence(
+                    wcore_protocol::events::CapabilityId::SmartHandoff,
+                ) {
+                    self.output.emit_capability_activation(&activation);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "wcore_agent::memory",
+                    error = %e,
+                    "#280 smart handoff record_episode failed; continuing"
+                );
+            }
         }
     }
 
-    /// Run the agent loop with user input
-    pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
-        // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
-        if let Ok(mut det) = self.style_detector.lock() {
-            det.observe(user_input);
+    /// Runtime outcome proof for the `learned_policy` capability. Emitted only
+    /// after the pre-filter has actually narrowed a real dispatch away — a
+    /// construction is not an outcome, which is the whole point of the F05
+    /// stage vocabulary.
+    fn emit_learned_policy_occurrence(&self) {
+        for activation in crate::capability_activation::successful_occurrence(
+            wcore_protocol::events::CapabilityId::LearnedPolicy,
+        ) {
+            self.output.emit_capability_activation(&activation);
         }
-        // v0.8.0 Task M — per-turn user-model write-back. See
-        // `observe_user_turn` for the full contract: no-op when no
-        // backend is installed; errors are logged + swallowed.
-        self.observe_user_turn(user_input).await;
+    }
+
+    fn emit_midflight_monitor_occurrence(&self) {
+        for activation in crate::capability_activation::successful_occurrence(
+            wcore_protocol::events::CapabilityId::MidFlightMonitor,
+        ) {
+            self.output.emit_capability_activation(&activation);
+        }
+    }
+
+    /// Run one crash-recoverable user turn.
+    ///
+    /// A durable turn starts before any turn work and reaches exactly one
+    /// terminal journal transition after the exact structured conversation is
+    /// committed. In-memory/test engines without a journal retain the legacy
+    /// path unchanged.
+    pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
+        self.run_with_content(user_input, Vec::new(), msg_id).await
+    }
+
+    /// Run one user turn with provider-neutral content appended after its text.
+    ///
+    /// Host protocol adapters use this for already-validated inline images.
+    /// The active provider receives the image blocks in this turn directly;
+    /// no auxiliary vision backend or second credential is involved.
+    pub async fn run_with_content(
+        &mut self,
+        user_input: &str,
+        additional_content: Vec<ContentBlock>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        if self.session_manager.is_some()
+            && self.current_session.is_some()
+            && self.session_journal.is_none()
+        {
+            return Err(AgentError::SessionAuthority(
+                "persisted session has no exclusive journal writer lease".to_string(),
+            ));
+        }
+
+        // Renew cancellation only for a genuinely new user turn. A recovered
+        // future may already have been cancelled before its first poll and
+        // must never erase that host Stop.
+        if self.cancel_token.is_cancelled()
+            && let Some(runtime) = self.session_runtime.as_mut()
+        {
+            self.cancel_token = runtime.install_descendant_turn();
+        }
+
+        if self.session_journal.is_none() {
+            let result = self
+                .run_inner(
+                    UserTurnInput::new(user_input, Some(additional_content)),
+                    msg_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            if result.is_ok() {
+                self.observe_user_turn(user_input).await;
+            }
+            return result;
+        }
+        let recovery = self.recovery_plan()?;
+        if !matches!(
+            recovery.disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ) {
+            return Err(AgentError::SessionAuthority(format!(
+                "session has an interrupted turn at journal cursor {:?}; resume, reconcile, or cancel it before starting a new message",
+                recovery.journal_sequence
+            )));
+        }
+        self.reconcile_interrupted_journal_turns().await?;
+        // Do not accept or journal a new user turn unless its exact provider
+        // request can be protected for crash recovery. Failing here keeps an
+        // unconfigured headless/profile launch at a clean Ready boundary
+        // instead of stranding a TurnStarted that can never dispatch.
+        //
+        // UNLESS the host cannot seal a request at all, in which case this gate
+        // is the whole amnesia. It is the reason a keyless host used to have to
+        // choose between "no journal" and "every turn fails at dispatch": the
+        // preflight refuses the turn, so `Config::resolve` disabled sessions
+        // upstream to stop it being reached. Neither is necessary. The seal
+        // buys AUTOMATIC replay of an interrupted dispatch and nothing else;
+        // the write-ahead pairs that prove what executed are keyless. So on a
+        // host that cannot seal, journal the turn, decline the promise, and say
+        // so on the turn's own surface.
+        //
+        // The decision is taken from THIS engine's own protection and THIS
+        // engine's config, not from the process-global fact `Config::resolve`
+        // records. That global is right for a status surface and wrong here for
+        // two reasons: it is set by whichever config resolved first in the
+        // process, and it is a measurement of the host taken at startup, while
+        // this is a question about a key that may have been unlocked or removed
+        // since. An engine that skipped sealing because some other config
+        // resolved on a keyless path would silently stop protecting requests it
+        // can perfectly well protect.
+        //
+        // Only ONE cause degrades. `NoSecureBackendAvailable` is the host having
+        // no keyring and no unlocked vault — nobody chose it and nobody can be
+        // blamed for it. `PlaintextBackendRejected` is an operator who
+        // configured a backend that can never hold confidential material, and
+        // `SecureStoreUnreadable` is a vault opened with the wrong passphrase:
+        // both are decisions or mistakes with a specific fix, both must keep
+        // failing loudly, and neither may be quietly reinterpreted as "this
+        // host is just like a headless server".
+        match self.recovery_request_protection.preflight(&self.config) {
+            Ok(()) => {}
+            Err(
+                crate::recovery_confidential::RecoveryConfidentialError::NoSecureBackendAvailable,
+            ) => {
+                self.announce_replay_protection_unavailable_for_this_turn();
+            }
+            Err(error) => return Err(AgentError::SessionAuthority(error.to_string())),
+        }
+        let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
+        self.active_journal_turn_id = Some(turn_id.clone());
+        if let Err(error) = self
+            .append_journal_event(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                user_message: user_input.to_owned(),
+            })
+            .await
+        {
+            self.active_journal_turn_id = None;
+            return Err(error);
+        }
+        if let Err(error) = self.begin_budget_turn(&turn_id) {
+            self.active_journal_turn_id = None;
+            return Err(error);
+        }
+
+        let result = self
+            .run_inner(
+                UserTurnInput::new(user_input, Some(additional_content)),
+                msg_id,
+                Some(&turn_id),
+                None,
+                None,
+                None,
+            )
+            .await;
+        // Cancellation may drop the graph future before its pending approval
+        // or other not-started descendants get a chance to close themselves.
+        // Close only effects whose physical boundary provably was not crossed.
+        // Unknown/running descendants retain durable reconciliation authority
+        // and the original UserAborted result.
+        if matches!(result, Err(AgentError::UserAborted))
+            && matches!(
+                self.close_not_started_descendants_for_cancellation(&turn_id)
+                    .await?,
+                CancellationDescendantClosure::ReconciliationRequired
+            )
+        {
+            self.active_journal_turn_id = None;
+            return result;
+        }
+        let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
+            self.prepare_durable_conversation().await
+        } else {
+            self.sync_journal_conversation(&turn_id).await
+        };
+        if let Err(sync_error) = sync_result {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id: turn_id.clone(),
+                error: sync_error.to_string(),
+            })
+            .await?;
+            self.finish_budget_turn(&turn_id)?;
+            self.active_journal_turn_id = None;
+            return Err(sync_error);
+        }
+        self.save_session_mirror();
+        let terminal = match &result {
+            Ok(result) => SessionEvent::TurnCommitted {
+                turn_id: turn_id.clone(),
+                assistant_message: result.text.clone(),
+            },
+            Err(AgentError::UserAborted) => SessionEvent::TurnCancelled {
+                turn_id: turn_id.clone(),
+            },
+            Err(error) => SessionEvent::TurnFailed {
+                turn_id: turn_id.clone(),
+                error: error.to_string(),
+            },
+        };
+        self.append_journal_event(terminal).await?;
+        self.finish_budget_turn(&turn_id)?;
+        self.active_journal_turn_id = None;
+        if result.is_ok() {
+            // Adaptive user-model state is bootstrap input. Persisting it
+            // before this durable terminal boundary makes an equivalent
+            // crash restart rebuild a different system prompt and correctly
+            // fail strict recovery authority. Learn only after the turn is
+            // committed so an interrupted turn can reconstruct its original
+            // prompt byte-for-byte; a crash after this point is already a
+            // completed turn and needs no continuation authority.
+            self.observe_user_turn(user_input).await;
+        }
+        result
+    }
+
+    fn begin_budget_turn(&self, turn_id: &str) -> Result<(), AgentError> {
+        let Some(authority) = self.durable_budget_authority()? else {
+            return Ok(());
+        };
+        authority
+            .lock()
+            .begin_active_turn(turn_id, None)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    fn finish_budget_turn(&self, turn_id: &str) -> Result<(), AgentError> {
+        let Some(authority) = self.durable_budget_authority()? else {
+            return Ok(());
+        };
+        authority
+            .lock()
+            .finish_active_turn(turn_id)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    fn current_run_budget(&self) -> Result<crate::budget::ExecutionBudgetView, AgentError> {
+        // F21-02 — a sub-allocated child must run against ITS envelope. The
+        // durable-authority branch below re-derives from the coordinator, whose
+        // current view is the PARENT's active turn; taking it would discard the
+        // narrowing that `enter_child_budget` computed. Descending one more
+        // level keeps this run's counters off the child's own aggregate while
+        // the child's caps, the parent's turn and the session root all remain in
+        // the ancestor chain.
+        if let Some(narrowed) = self.narrowed_execution_budget.as_ref() {
+            return Ok(narrowed.sub_budget(None));
+        }
+        let Some(authority) = self.durable_budget_authority()? else {
+            return Ok(self.execution_budget.sub_budget(None));
+        };
+        let budget = authority
+            .lock()
+            .current_execution_view()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        if self.session_journal.is_some() {
+            Ok(budget)
+        } else {
+            Ok(budget.sub_budget(None))
+        }
+    }
+
+    /// The active durable session journal, if this process has one (F22-C1).
+    ///
+    /// Additive read-only accessor. `SessionJournal` is an `Arc`-shared handle,
+    /// so the clone is the SAME chain and the same writer lock — not a second
+    /// journal, which would be a second source of truth for Goal state.
+    ///
+    /// Exposed so the protocol command loop can answer host Goal control
+    /// commands. It grants no authority by itself: `SessionJournal::append`
+    /// refuses every Goal variant, so a holder of this handle still cannot mint
+    /// a Goal transition without going through `GoalKernel`.
+    #[must_use]
+    pub fn session_journal(&self) -> Option<&crate::session_journal::SessionJournal> {
+        self.session_journal.as_ref()
+    }
+
+    /// Return the fail-closed recovery decision for the active durable
+    /// session. Hosts use the same projection before offering TUI or JSON
+    /// recovery actions.
+    pub fn recovery_plan(&self) -> Result<crate::recovery::RecoveryPlan, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        crate::recovery::RecoveryPlan::from_journal(journal)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    /// Return the recovery projection at an already-observed durable cursor.
+    ///
+    /// Unlike [`Self::recovery_plan`], this never labels current-head state
+    /// with an older host cursor. The recovery layer validates the cursor and
+    /// reduces exactly the journal prefix it identifies.
+    pub fn recovery_plan_at(
+        &self,
+        cursor: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<crate::recovery::RecoveryPlan, wcore_protocol::events::RecoveryUnavailableReason>
+    {
+        let journal = self
+            .session_journal
+            .as_ref()
+            .ok_or(wcore_protocol::events::RecoveryUnavailableReason::SnapshotUnavailable)?;
+        crate::recovery::RecoveryPlan::from_journal_at(journal, cursor)
+    }
+
+    /// Validate a host cursor against the durable journal and return only
+    /// content-free lifecycle milestones after it.
+    pub fn recovery_replay_after(
+        &self,
+        after: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<
+        Vec<wcore_protocol::events::RecoveryReplayItem>,
+        wcore_protocol::events::RecoveryUnavailableReason,
+    > {
+        let journal = self
+            .session_journal
+            .as_ref()
+            .ok_or(wcore_protocol::events::RecoveryUnavailableReason::SnapshotUnavailable)?;
+        crate::recovery::RecoveryPlan::replay_after(journal, after)
+    }
+
+    /// Sanitized cumulative budget evidence for recovery UIs. Limits remain
+    /// absent until the durable budget ledger is the single restored source of
+    /// truth; publishing a fresh runtime cap here would falsely imply it had
+    /// survived the crash.
+    #[must_use]
+    pub fn recovery_budget_snapshot(&self) -> wcore_protocol::events::RecoveryBudgetSnapshot {
+        let tokens_used = self
+            .total_usage
+            .total_input_tokens()
+            .saturating_add(self.total_usage.output_tokens);
+        let cost_used_usd = self.per_turn_costs.iter().map(|turn| turn.cost_usd).sum();
+        wcore_protocol::events::RecoveryBudgetSnapshot {
+            tokens_used,
+            token_limit: None,
+            cost_used_usd,
+            cost_limit_usd: None,
+        }
+    }
+
+    /// Continue the original interrupted turn from a proven durable boundary:
+    /// either `TurnStarted` is the journal head with no later execution state,
+    /// or the exact head is a validated recovery checkpoint whose conversation
+    /// matches the reduced journal and whose descendants are terminal. The
+    /// original turn id and user message are reused; no second `TurnStarted` or
+    /// duplicate user message is appended.
+    pub async fn resume_interrupted_turn(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        let (user_message, resume_checkpoint) = match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ContinueTurnStart {
+                turn_id: recoverable_turn_id,
+                user_message,
+            } if recoverable_turn_id == turn_id => (user_message, None),
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                turn_id: recoverable_turn_id,
+                user_message,
+                checkpoint_id,
+                checkpoint,
+            } if recoverable_turn_id == turn_id => {
+                (user_message, Some((checkpoint_id, *checkpoint)))
+            }
+            crate::recovery::RecoveryDisposition::ContinueTurnStart {
+                turn_id: recoverable_turn_id,
+                ..
+            }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                turn_id: recoverable_turn_id,
+                ..
+            } => {
+                return Err(AgentError::SessionAuthority(format!(
+                    "recovery turn mismatch: expected {recoverable_turn_id}, found {turn_id}"
+                )));
+            }
+            disposition => {
+                return Err(AgentError::SessionAuthority(format!(
+                    "interrupted turn is not directly continuable: {disposition:?}"
+                )));
+            }
+        };
+
+        let mut prepared_recovery_request = None;
+        let mut recovered_provider_round = None;
+        let mut durable_provider_terminal = None;
+        if let Some((checkpoint_id, checkpoint)) = resume_checkpoint.as_ref()
+            && matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::ProviderDispatch
+            )
+        {
+            let (request, disposition) =
+                self.prepare_provider_recovery(turn_id, checkpoint_id, checkpoint)?;
+            use crate::provider_recovery::ProviderDispatchRecoveryDisposition as Disposition;
+            match disposition {
+                Disposition::SafeNoSend { .. } => {
+                    prepared_recovery_request = Some(request);
+                }
+                Disposition::StartedUnknown { .. } => {
+                    return Err(AgentError::SessionAuthority(
+                        "provider outcome remains unknown; recovery is suspended".to_string(),
+                    ));
+                }
+                Disposition::ApplyDurableSuccess { round, .. } => {
+                    prepared_recovery_request = Some(request);
+                    recovered_provider_round = Some(*round);
+                }
+                Disposition::DurableFailure { failures, .. } => {
+                    durable_provider_terminal = Some(Err(AgentError::ApiError(format!(
+                        "recovered provider dispatch failed: {}",
+                        failures
+                            .iter()
+                            .map(|failure| failure.error.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ))));
+                }
+                Disposition::DurableCancelled { .. } => {
+                    durable_provider_terminal = Some(Err(AgentError::UserAborted));
+                }
+            }
+        }
+
+        if let Some((_, checkpoint)) = resume_checkpoint.as_ref() {
+            self.conversation_id.clone_from(&checkpoint.conversation_id);
+            self.restore_recovery_posture(&checkpoint.posture)?;
+            if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::ContinueToolRound
+            ) {
+                return self
+                    .resume_recovered_tool_round(turn_id, checkpoint.clone(), msg_id)
+                    .await;
+            }
+            if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::CommitTurn
+            ) {
+                let terminal = checkpoint.terminal_result.as_ref().ok_or_else(|| {
+                    AgentError::SessionAuthority(
+                        "terminal recovery checkpoint has no result".to_string(),
+                    )
+                })?;
+                let stop_reason = match terminal.stop_reason.as_str() {
+                    "end_turn" => StopReason::EndTurn,
+                    "max_tokens" => StopReason::MaxTokens,
+                    "max_turns" => StopReason::MaxTurns,
+                    _ => {
+                        return Err(AgentError::SessionAuthority(
+                            "terminal recovery checkpoint has an invalid stop reason".to_string(),
+                        ));
+                    }
+                };
+                let result = AgentResult {
+                    text: terminal.text.clone(),
+                    stop_reason,
+                    finish_reason: terminal.finish_reason,
+                    usage: terminal.usage.clone(),
+                    usage_delta: terminal.usage_delta.clone(),
+                    turns: usize::try_from(terminal.turns).map_err(|_| {
+                        AgentError::SessionAuthority(
+                            "terminal recovery turn count exceeds usize".to_string(),
+                        )
+                    })?,
+                    active_window_percent: terminal.active_window_percent,
+                    agent_run_id: terminal.agent_run_id.clone(),
+                };
+                self.total_usage = result.usage.clone();
+                self.run_usage = result.usage_delta.clone();
+                self.current_agent_run_id.clone_from(&result.agent_run_id);
+                self.active_journal_turn_id = Some(turn_id.to_owned());
+                let cancelled = matches!(
+                    terminal.completion,
+                    crate::recovery::RecoveryTerminalCompletion::Cancelled
+                );
+                if !cancelled {
+                    self.output.emit_text_delta(&result.text, msg_id);
+                }
+                let terminal_event = if cancelled {
+                    SessionEvent::TurnCancelled {
+                        turn_id: turn_id.to_owned(),
+                    }
+                } else {
+                    SessionEvent::TurnCommitted {
+                        turn_id: turn_id.to_owned(),
+                        assistant_message: result.text.clone(),
+                    }
+                };
+                self.append_journal_event(terminal_event).await?;
+                self.finish_budget_turn(turn_id)?;
+                self.active_journal_turn_id = None;
+                self.save_session_mirror();
+                return Ok(result);
+            }
+        }
+
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        let checkpoint = resume_checkpoint.map(|(_, checkpoint)| checkpoint);
+        let result = match durable_provider_terminal {
+            Some(result) => result,
+            None => {
+                self.run_inner(
+                    UserTurnInput::new(&user_message, None),
+                    msg_id,
+                    Some(turn_id),
+                    checkpoint,
+                    prepared_recovery_request,
+                    recovered_provider_round,
+                )
+                .await
+            }
+        };
+        // Apply the same safe closure rule as a fresh run: pending/prepared
+        // descendants are cancelled, but started unknown effects keep the
+        // interrupted turn open for reconciliation.
+        if matches!(result, Err(AgentError::UserAborted))
+            && matches!(
+                self.close_not_started_descendants_for_cancellation(turn_id)
+                    .await?,
+                CancellationDescendantClosure::ReconciliationRequired
+            )
+        {
+            self.active_journal_turn_id = None;
+            return result;
+        }
+        let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
+            self.prepare_durable_conversation().await
+        } else {
+            self.sync_journal_conversation(turn_id).await
+        };
+        if let Err(sync_error) = sync_result {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id: turn_id.to_owned(),
+                error: sync_error.to_string(),
+            })
+            .await?;
+            self.finish_budget_turn(turn_id)?;
+            self.active_journal_turn_id = None;
+            return Err(sync_error);
+        }
+        self.save_session_mirror();
+        let terminal = match &result {
+            Ok(result) => SessionEvent::TurnCommitted {
+                turn_id: turn_id.to_owned(),
+                assistant_message: result.text.clone(),
+            },
+            Err(AgentError::UserAborted) => SessionEvent::TurnCancelled {
+                turn_id: turn_id.to_owned(),
+            },
+            Err(error) => SessionEvent::TurnFailed {
+                turn_id: turn_id.to_owned(),
+                error: error.to_string(),
+            },
+        };
+        self.append_journal_event(terminal).await?;
+        self.finish_budget_turn(turn_id)?;
+        self.active_journal_turn_id = None;
+        if result.is_ok() {
+            // The original process deliberately did not persist this
+            // adaptive bootstrap input before its terminal journal event.
+            // Commit the observation exactly once after recovered completion.
+            self.observe_user_turn(&user_message).await;
+        }
+        result
+    }
+
+    /// Resolve the approval gate shown by a recovery snapshot and continue the
+    /// exact committed tool round. The durable cursor and approval id are both
+    /// checked before recording the decision.
+    pub async fn resolve_interrupted_approval(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+        approval_id: &str,
+        decision: wcore_protocol::commands::RecoveredApprovalDecision,
+        answer: Option<&str>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        match &recovery.disposition {
+            crate::recovery::RecoveryDisposition::AwaitApproval {
+                turn_id: recoverable_turn_id,
+                approval_ids,
+            } if recoverable_turn_id == turn_id
+                && approval_ids.len() == 1
+                && approval_ids.first().is_some_and(|id| id == approval_id) => {}
+            crate::recovery::RecoveryDisposition::AwaitApproval { .. } => {
+                return Err(AgentError::SessionAuthority(
+                    "recovered approval authority does not match the exact pending gate"
+                        .to_string(),
+                ));
+            }
+            disposition => {
+                return Err(AgentError::SessionAuthority(format!(
+                    "interrupted turn is not awaiting approval: {disposition:?}"
+                )));
+            }
+        }
+
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let authority =
+            crate::recovery::RecoveryPlan::recovered_tool_round_authority(&journal, turn_id)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages = authority
+            .conversation
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<Message>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let tool_calls = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let Some(ContentBlock::ToolUse {
+            id, name, input, ..
+        }) = tool_calls
+            .iter()
+            .find(|call| matches!(call, ContentBlock::ToolUse { id, .. } if id == approval_id))
+        else {
+            return Err(AgentError::SessionAuthority(
+                "recovered approval id does not match any committed tool call".to_string(),
+            ));
+        };
+        if name == "AskUserQuestion" {
+            return Err(AgentError::SessionAuthority(
+                "AskUserQuestion recovery is unavailable because its answer is not durably journaled; cancel and retry the turn"
+                    .to_string(),
+            ));
+        }
+        if answer.is_some() {
+            return Err(AgentError::SessionAuthority(
+                "recovered answers are valid only for AskUserQuestion, which is not recovery-safe"
+                    .to_string(),
+            ));
+        }
+
+        let category = self
+            .tools
+            .get(name)
+            .map(|tool| tool.category_for(input))
+            .unwrap_or(ToolCategory::Exec);
+        let intent = serde_json::json!({
+            "provider_call_id": id,
+            "tool": name,
+            "category": category.to_string(),
+            "input": input,
+        });
+        let intent_digest = state_payload_digest(&intent)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let approval = state.approvals.get(approval_id).ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "recovered approval is absent from the journal".to_string(),
+            )
+        })?;
+        if approval.resolution.is_some()
+            || approval.intent_digest != intent_digest
+            || !matches!(
+                &approval.origin,
+                ApprovalOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id
+            )
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovered approval does not match the committed tool intent".to_string(),
+            ));
+        }
+        // Validate the complete prompt/policy/tool posture before recording a
+        // recovered decision. In particular, an adaptive prompt drift must
+        // not partially consume approval authority and then fail continuation.
+        self.restore_recovery_posture(&authority.checkpoint.posture)?;
+        let resolution = match decision {
+            wcore_protocol::commands::RecoveredApprovalDecision::Approve => {
+                ApprovalResolution::Decided {
+                    decision: ApprovalDecision::AllowOnce,
+                }
+            }
+            wcore_protocol::commands::RecoveredApprovalDecision::Deny => {
+                ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                }
+            }
+        };
+        self.append_journal_event(SessionEvent::ApprovalResolved {
+            approval_id: approval_id.to_owned(),
+            resolution,
+        })
+        .await?;
+
+        if matches!(
+            decision,
+            wcore_protocol::commands::RecoveredApprovalDecision::Deny
+        ) {
+            return self
+                .terminalize_recovered_denied_tool_round(
+                    turn_id,
+                    authority.checkpoint,
+                    messages,
+                    tool_calls,
+                )
+                .await;
+        }
+
+        let next = self.recovery_plan()?;
+        Box::pin(self.resume_interrupted_turn(turn_id, &next.cursor(), msg_id)).await
+    }
+
+    async fn terminalize_recovered_denied_tool_round(
+        &mut self,
+        turn_id: &str,
+        checkpoint: crate::recovery::RecoveryCheckpoint,
+        messages: Vec<Message>,
+        tool_calls: Vec<ContentBlock>,
+    ) -> Result<AgentResult, AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let denied_ids = tool_calls
+            .iter()
+            .filter_map(|call| match call {
+                ContentBlock::ToolUse { id, .. }
+                    if matches!(
+                        state
+                            .approvals
+                            .get(id)
+                            .and_then(|approval| approval.resolution.as_ref()),
+                        Some(ApprovalResolution::Decided {
+                            decision: ApprovalDecision::Deny,
+                        })
+                    ) =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if denied_ids.is_empty() {
+            return Err(AgentError::SessionAuthority(
+                "recovered cancellation has no durable denial authority".to_string(),
+            ));
+        }
+
+        // The denial applies to the committed tool round, not only the first
+        // gate encountered. Close every descendant and pair every ToolUse
+        // with one result so the durable transcript remains provider-valid.
+        // Already-completed tools retain their exact durable result; only
+        // not-started calls receive synthetic cancellation evidence. This
+        // routine is idempotent across crashes before the cancellation
+        // checkpoint: the reducer exposes only still-open work.
+        self.terminalize_interrupted_turn_for_cancellation(turn_id)
+            .await?;
+        self.messages = messages;
+        let terminal_state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let results = tool_calls
+            .iter()
+            .enumerate()
+            .map(|(ordinal, call)| {
+                let ContentBlock::ToolUse {
+                    id, name, input, ..
+                } = call
+                else {
+                    return Err(AgentError::SessionAuthority(
+                        "recovered denial authority contains a non-tool call".to_string(),
+                    ));
+                };
+                let ordinal = u64::try_from(ordinal).map_err(|_| {
+                    AgentError::SessionAuthority("recovered tool ordinal exceeds u64".to_string())
+                })?;
+                let input_digest = state_payload_digest(input)
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                let attempts = terminal_state
+                    .tools
+                    .iter()
+                    .filter(|(_, tool)| tool.turn_id == turn_id && tool.provider_call_id == *id)
+                    .collect::<Vec<_>>();
+                if attempts.iter().any(|(_, tool)| {
+                    tool.ordinal != ordinal
+                        || tool.tool != *name
+                        || tool.requested_input_digest != input_digest
+                }) {
+                    return Err(AgentError::SessionAuthority(format!(
+                        "recovered denied tool call {id} does not match its durable intent"
+                    )));
+                }
+                let retry_parents = attempts
+                    .iter()
+                    .filter_map(|(_, tool)| tool.retry_of.as_deref())
+                    .collect::<HashSet<_>>();
+                let leaves = attempts
+                    .iter()
+                    .filter(|(execution_id, _)| !retry_parents.contains(execution_id.as_str()))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if leaves.len() > 1 {
+                    return Err(AgentError::SessionAuthority(format!(
+                        "recovered denied tool call {id} has ambiguous durable retry history"
+                    )));
+                }
+                if let Some((_, tool)) = leaves.first().copied()
+                    && matches!(
+                        &tool.effect,
+                        ToolEffectState::Succeeded | ToolEffectState::Failed { .. }
+                    )
+                {
+                    let durable = tool.result.as_ref().ok_or_else(|| {
+                        AgentError::SessionAuthority(format!(
+                            "completed recovered tool call {id} has no durable result"
+                        ))
+                    })?;
+                    return Ok(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: durable
+                            .get("content")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                AgentError::SessionAuthority(format!(
+                                    "durable recovered tool result {id} has no content"
+                                ))
+                            })?
+                            .to_string(),
+                        is_error: durable
+                            .get("is_error")
+                            .and_then(serde_json::Value::as_bool)
+                            .ok_or_else(|| {
+                                AgentError::SessionAuthority(format!(
+                                    "durable recovered tool result {id} has no error status"
+                                ))
+                            })?,
+                    });
+                }
+                Ok(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: crate::output_redaction::redact_tool_output(
+                        if denied_ids.contains(id) {
+                            "Tool denied during recovery"
+                        } else {
+                            "Tool not run because the recovered tool round was denied"
+                        },
+                    ),
+                    is_error: true,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.messages.push(Message::now(Role::User, results));
+        self.conversation_id.clone_from(&checkpoint.conversation_id);
+        self.run_usage.clone_from(&checkpoint.run_usage);
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        let turns = usize::try_from(checkpoint.turn_index)
+            .map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint turn index exceeds usize".to_string(),
+                )
+            })?
+            .saturating_add(1);
+        let result = AgentResult {
+            text: String::new(),
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: self.total_usage.clone(),
+            usage_delta: checkpoint.run_usage.clone(),
+            turns,
+            active_window_percent: self.active_window_percent_now(&self.model, 0),
+            agent_run_id: self.current_agent_run_id.clone(),
+        };
+        let loop_guard = LoopGuard::restore(&checkpoint.loop_guard)?;
+        let failure_guard = FailureGuard::restore(&checkpoint.failure_guard)?;
+        self.commit_terminal_recovery_checkpoint(
+            turn_id,
+            &result,
+            turns.saturating_sub(1),
+            &loop_guard,
+            &failure_guard,
+            crate::recovery::RecoveryTerminalCompletion::Cancelled,
+        )
+        .await?;
+        self.append_journal_event(SessionEvent::TurnCancelled {
+            turn_id: turn_id.to_owned(),
+        })
+        .await?;
+        self.finish_budget_turn(turn_id)?;
+        self.active_journal_turn_id = None;
+        self.save_session_mirror();
+        Ok(result)
+    }
+
+    async fn resume_recovered_tool_round(
+        &mut self,
+        turn_id: &str,
+        checkpoint: crate::recovery::RecoveryCheckpoint,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let authority =
+            crate::recovery::RecoveryPlan::recovered_tool_round_authority(&journal, turn_id)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages = authority
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value::<Message>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let tool_calls = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if tool_calls.is_empty() {
+            return Err(AgentError::SessionAuthority(
+                "recovered tool round has no committed tool calls".to_string(),
+            ));
+        }
+        if tool_calls.iter().any(
+            |call| matches!(call, ContentBlock::ToolUse { name, .. } if name == "AskUserQuestion"),
+        ) {
+            return Err(AgentError::SessionAuthority(
+                "AskUserQuestion recovery is unavailable because its answer is not durably journaled"
+                    .to_string(),
+            ));
+        }
+
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let has_durable_denial = tool_calls.iter().any(|call| {
+            let ContentBlock::ToolUse { id, .. } = call else {
+                return false;
+            };
+            matches!(
+                state
+                    .approvals
+                    .get(id)
+                    .and_then(|approval| approval.resolution.as_ref()),
+                Some(ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                })
+            )
+        });
+        if has_durable_denial {
+            return self
+                .terminalize_recovered_denied_tool_round(turn_id, checkpoint, messages, tool_calls)
+                .await;
+        }
+        self.messages = messages;
+        self.conversation_id.clone_from(&checkpoint.conversation_id);
+        self.restore_recovery_posture(&checkpoint.posture)?;
+        self.run_usage.clone_from(&checkpoint.run_usage);
+        self.current_msg_id = msg_id.to_owned();
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        let loop_guard = LoopGuard::restore(&checkpoint.loop_guard)?;
+        let failure_guard = FailureGuard::restore(&checkpoint.failure_guard)?;
+        let approval_manager = self.approval_manager.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "recovered tool execution requires an approval manager".to_string(),
+            )
+        })?;
+        let writer = self.protocol_writer.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "recovered tool execution requires a protocol writer".to_string(),
+            )
+        })?;
+        let run_budget = self.current_run_budget()?;
+        let tool_budget = match self.budget_authority.as_ref() {
+            Some(authority) => {
+                crate::tool_budget::ToolBudgetTracker::with_budget_authority(Arc::clone(authority))
+            }
+            None => crate::tool_budget::ToolBudgetTracker::with_execution_budget(run_budget),
+        };
+        let file_write_notifier = self.tool_write_notifier().cloned();
+        let effect_scope = crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+            .for_turn(turn_id);
+        let recovered_pre_consumptions = state
+            .tools
+            .values()
+            .filter(|tool| tool.turn_id == turn_id)
+            .map(|tool| recovered_pre_hook_consumption(&state, tool))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        self.queue_durable_hook_consumptions(recovered_pre_consumptions);
+        for tool_execution_id in state
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.turn_id == turn_id)
+            .map(|(tool_execution_id, _)| tool_execution_id)
+        {
+            terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+        }
+        let mut results = Vec::with_capacity(tool_calls.len());
+
+        for (ordinal, tool_call) in tool_calls.iter().enumerate() {
+            let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = tool_call
+            else {
+                continue;
+            };
+            let ordinal = u64::try_from(ordinal).map_err(|_| {
+                AgentError::SessionAuthority("recovered tool ordinal exceeds u64".to_string())
+            })?;
+            let requested_input_digest = state_payload_digest(input)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let attempts = state
+                .tools
+                .iter()
+                .filter(|(_, tool)| tool.turn_id == turn_id && tool.provider_call_id == *id)
+                .collect::<Vec<_>>();
+            if attempts.iter().any(|(_, tool)| {
+                tool.ordinal != ordinal
+                    || tool.tool != *name
+                    || tool.requested_input_digest != requested_input_digest
+            }) {
+                return Err(AgentError::SessionAuthority(format!(
+                    "recovered tool call {id} does not match its durable ordinal or intent"
+                )));
+            }
+            let retry_parents = attempts
+                .iter()
+                .filter_map(|(_, tool)| tool.retry_of.as_deref())
+                .collect::<HashSet<_>>();
+            let leaves = attempts
+                .iter()
+                .filter(|(tool_execution_id, _)| {
+                    !retry_parents.contains(tool_execution_id.as_str())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if leaves.len() > 1 {
+                return Err(AgentError::SessionAuthority(format!(
+                    "recovered tool call {id} has ambiguous durable retry history"
+                )));
+            }
+
+            let category = self
+                .tools
+                .get(name)
+                .map(|tool| tool.category_for(input))
+                .unwrap_or(ToolCategory::Exec);
+            let approval_intent = serde_json::json!({
+                "provider_call_id": id,
+                "tool": name,
+                "category": category.to_string(),
+                "input": input,
+            });
+            let approval_intent_digest = state_payload_digest(&approval_intent)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let approval_resolution = state
+                .approvals
+                .get(id)
+                .map(|approval| {
+                    if approval.intent_digest != approval_intent_digest
+                        || !matches!(
+                            &approval.origin,
+                            ApprovalOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id
+                        )
+                    {
+                        return Err(AgentError::SessionAuthority(format!(
+                            "recovered approval for tool call {id} is not bound to its committed intent"
+                        )));
+                    }
+                    approval.resolution.clone().ok_or_else(|| {
+                        AgentError::SessionAuthority(format!(
+                            "recovered approval for tool call {id} is still pending"
+                        ))
+                    })
+                })
+                .transpose()?;
+
+            if let Some((tool_execution_id, tool)) = leaves.first().copied() {
+                let result = match (&tool.effect, tool.result.as_ref()) {
+                    (ToolEffectState::Succeeded | ToolEffectState::Failed { .. }, Some(result)) => {
+                        if matches!(
+                            approval_resolution,
+                            Some(
+                                ApprovalResolution::Decided {
+                                    decision: ApprovalDecision::Deny,
+                                } | ApprovalResolution::Cancelled
+                                    | ApprovalResolution::TimedOut
+                            )
+                        ) {
+                            return Err(AgentError::SessionAuthority(format!(
+                                "recovered tool call {id} executed after a durable non-approval"
+                            )));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: result
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| {
+                                    AgentError::SessionAuthority(format!(
+                                        "durable recovered tool result {id} has no content"
+                                    ))
+                                })?
+                                .to_string(),
+                            is_error: result
+                                .get("is_error")
+                                .and_then(serde_json::Value::as_bool)
+                                .ok_or_else(|| {
+                                    AgentError::SessionAuthority(format!(
+                                        "durable recovered tool result {id} has no error status"
+                                    ))
+                                })?,
+                        }
+                    }
+                    (ToolEffectState::Prepared, None) => {
+                        let terminal_no_start = match approval_resolution.as_ref() {
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::Deny,
+                            }) => Some((
+                                ToolNotStartedReason::ApprovalDenied {
+                                    approval_id: id.clone(),
+                                },
+                                "Tool denied during recovery".to_string(),
+                            )),
+                            Some(ApprovalResolution::Cancelled) => Some((
+                                ToolNotStartedReason::ApprovalCancelled {
+                                    approval_id: id.clone(),
+                                },
+                                "Tool approval was cancelled before recovery".to_string(),
+                            )),
+                            Some(ApprovalResolution::TimedOut) => Some((
+                                ToolNotStartedReason::ApprovalTimedOut {
+                                    approval_id: id.clone(),
+                                },
+                                "Tool approval timed out before recovery".to_string(),
+                            )),
+                            _ => None,
+                        };
+                        if let Some((reason, content)) = terminal_no_start {
+                            journal
+                                .append(SessionEvent::ToolExecutionNotStarted {
+                                    tool_execution_id: tool_execution_id.clone(),
+                                    reason,
+                                })
+                                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                            terminalize_recoverable_prepared_post_hook(
+                                &journal,
+                                tool_execution_id,
+                            )?;
+                            results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: crate::output_redaction::redact_tool_output(&content),
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                        let interrupted_reason =
+                            "process stopped before durable tool execution began".to_string();
+                        journal
+                            .append(SessionEvent::ToolExecutionNotStarted {
+                                tool_execution_id: tool_execution_id.clone(),
+                                reason: ToolNotStartedReason::Cancelled {
+                                    reason: interrupted_reason,
+                                },
+                            })
+                            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                        terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+                        let recovered_approval_call_id = matches!(
+                            approval_resolution,
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::AllowOnce
+                                    | ApprovalDecision::AllowSession,
+                            })
+                        )
+                        .then_some(id.as_str());
+                        let pre_hook_consumption = recovered_pre_hook_consumption(&state, tool)?;
+                        let outcome =
+                            crate::orchestration::execute_recovered_retry_tool_call_with_effects(
+                                &self.tools,
+                                tool_call,
+                                &approval_manager,
+                                &writer,
+                                msg_id,
+                                &self.allow_list,
+                                self.hooks.as_mut(),
+                                self.compaction_level,
+                                self.toon_enabled,
+                                Some(&tool_budget),
+                                &self.cancel_token,
+                                file_write_notifier.as_ref(),
+                                &effect_scope,
+                                ordinal,
+                                recovered_approval_call_id,
+                                id,
+                                tool_execution_id,
+                                &tool.tool,
+                                tool.ordinal,
+                                &tool.effect_contract,
+                                tool.effect_receipt.as_ref(),
+                                &tool.requested_input_digest,
+                                &tool.effective_input_digest,
+                                tool.pre_hook_phase_id.as_deref(),
+                                pre_hook_consumption,
+                            )
+                            .await
+                            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+                        self.apply_context_modifiers(&outcome.modifiers);
+                        for hook_outcome in outcome.hook_outcomes {
+                            self.apply_turn_end_outcome(hook_outcome);
+                        }
+                        results.extend(outcome.results);
+                        continue;
+                    }
+                    (ToolEffectState::NotStarted, None)
+                        if matches!(
+                            tool.not_started_reason.as_ref(),
+                            Some(ToolNotStartedReason::Cancelled { reason })
+                                if reason == "process stopped before durable tool execution began"
+                        ) =>
+                    {
+                        terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+                        if matches!(
+                            approval_resolution,
+                            Some(
+                                ApprovalResolution::Decided {
+                                    decision: ApprovalDecision::Deny,
+                                } | ApprovalResolution::Cancelled
+                                    | ApprovalResolution::TimedOut
+                            )
+                        ) {
+                            return Err(AgentError::SessionAuthority(format!(
+                                "recovered tool call {id} was retryable after a durable non-approval"
+                            )));
+                        }
+                        let recovered_approval_call_id = matches!(
+                            approval_resolution,
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::AllowOnce
+                                    | ApprovalDecision::AllowSession,
+                            })
+                        )
+                        .then_some(id.as_str());
+                        let pre_hook_consumption = recovered_pre_hook_consumption(&state, tool)?;
+                        let outcome =
+                            crate::orchestration::execute_recovered_retry_tool_call_with_effects(
+                                &self.tools,
+                                tool_call,
+                                &approval_manager,
+                                &writer,
+                                msg_id,
+                                &self.allow_list,
+                                self.hooks.as_mut(),
+                                self.compaction_level,
+                                self.toon_enabled,
+                                Some(&tool_budget),
+                                &self.cancel_token,
+                                file_write_notifier.as_ref(),
+                                &effect_scope,
+                                ordinal,
+                                recovered_approval_call_id,
+                                id,
+                                tool_execution_id,
+                                &tool.tool,
+                                tool.ordinal,
+                                &tool.effect_contract,
+                                tool.effect_receipt.as_ref(),
+                                &tool.requested_input_digest,
+                                &tool.effective_input_digest,
+                                tool.pre_hook_phase_id.as_deref(),
+                                pre_hook_consumption,
+                            )
+                            .await
+                            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+                        self.apply_context_modifiers(&outcome.modifiers);
+                        for hook_outcome in outcome.hook_outcomes {
+                            self.apply_turn_end_outcome(hook_outcome);
+                        }
+                        results.extend(outcome.results);
+                        continue;
+                    }
+                    (ToolEffectState::NotStarted, None) => ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: crate::output_redaction::redact_tool_output(&format!(
+                            "Tool was not started before recovery: {}",
+                            tool.not_started_reason.as_ref().map_or_else(
+                                || "unspecified reason".to_string(),
+                                |reason| format!("{reason:?}")
+                            )
+                        )),
+                        is_error: true,
+                    },
+                    (ToolEffectState::Running | ToolEffectState::Unknown { .. }, _) => {
+                        return Err(AgentError::SessionAuthority(format!(
+                            "recovered tool effect {tool_execution_id} requires reconciliation"
+                        )));
+                    }
+                    _ => {
+                        return Err(AgentError::SessionAuthority(format!(
+                            "recovered tool effect {tool_execution_id} has an incomplete terminal receipt"
+                        )));
+                    }
+                };
+                results.push(result);
+                continue;
+            }
+
+            let terminal_no_start = match approval_resolution.as_ref() {
+                Some(ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                }) => Some((
+                    ToolNotStartedReason::ApprovalDenied {
+                        approval_id: id.clone(),
+                    },
+                    "Tool denied during recovery".to_string(),
+                )),
+                Some(ApprovalResolution::Cancelled) => Some((
+                    ToolNotStartedReason::ApprovalCancelled {
+                        approval_id: id.clone(),
+                    },
+                    "Tool approval was cancelled before recovery".to_string(),
+                )),
+                Some(ApprovalResolution::TimedOut) => Some((
+                    ToolNotStartedReason::ApprovalTimedOut {
+                        approval_id: id.clone(),
+                    },
+                    "Tool approval timed out before recovery".to_string(),
+                )),
+                _ => None,
+            };
+            if let Some((reason, content)) = terminal_no_start {
+                results.push(crate::orchestration::record_recovered_tool_not_started(
+                    &self.tools,
+                    &effect_scope,
+                    ordinal,
+                    tool_call,
+                    reason,
+                    content,
+                ));
+                continue;
+            }
+
+            let outcome = if matches!(
+                approval_resolution,
+                Some(ApprovalResolution::Decided {
+                    decision: ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession,
+                })
+            ) {
+                crate::orchestration::execute_recovered_approved_tool_call_with_effects(
+                    &self.tools,
+                    tool_call,
+                    &approval_manager,
+                    &writer,
+                    msg_id,
+                    &self.allow_list,
+                    self.hooks.as_mut(),
+                    self.compaction_level,
+                    self.toon_enabled,
+                    Some(&tool_budget),
+                    &self.cancel_token,
+                    file_write_notifier.as_ref(),
+                    &effect_scope,
+                    ordinal,
+                    id,
+                )
+                .await
+            } else {
+                crate::orchestration::execute_tool_calls_with_approval_budget_and_effects(
+                    &self.tools,
+                    std::slice::from_ref(tool_call),
+                    &approval_manager,
+                    &writer,
+                    msg_id,
+                    &self.allow_list,
+                    self.hooks.as_mut(),
+                    self.compaction_level,
+                    self.toon_enabled,
+                    Some(&tool_budget),
+                    &self.cancel_token,
+                    file_write_notifier.as_ref(),
+                    Some(&effect_scope),
+                    Some(std::slice::from_ref(&ordinal)),
+                )
+                .await
+            }
+            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+            self.apply_context_modifiers(&outcome.modifiers);
+            for hook_outcome in outcome.hook_outcomes {
+                self.apply_turn_end_outcome(hook_outcome);
+            }
+            results.extend(outcome.results);
+        }
+
+        let unresolved = self.tool_effects_requiring_reconciliation()?;
+        if !unresolved.is_empty() {
+            return Err(AgentError::SessionAuthority(format!(
+                "recovered tool effects require reconciliation before continuation: {}",
+                unresolved.join(", ")
+            )));
+        }
+        self.dedup_repeated_tool_outputs(&mut results, &tool_calls);
+        self.messages.push(Message::now(Role::User, results));
+        self.commit_continue_loop_recovery_checkpoint(
+            turn_id,
+            usize::try_from(checkpoint.turn_index)
+                .map_err(|_| {
+                    AgentError::SessionAuthority(
+                        "recovery checkpoint turn index exceeds usize".to_string(),
+                    )
+                })?
+                .saturating_add(1),
+            &loop_guard,
+            &failure_guard,
+        )
+        .await?;
+        let next = self.recovery_plan()?;
+        Box::pin(self.resume_interrupted_turn(turn_id, &next.cursor(), msg_id)).await
+    }
+
+    /// Cancel an interrupted turn only when no external effect has an unknown
+    /// outcome. Pending approvals are durably cancelled before the terminal
+    /// turn event, so cancellation cannot strand reusable authority.
+    pub async fn cancel_interrupted_turn(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<(), AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        let recoverable_turn_id = match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ContinueTurnStart { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::AwaitApproval { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
+            crate::recovery::RecoveryDisposition::Ready => {
+                return Err(AgentError::SessionAuthority(
+                    "session has no interrupted turn to cancel".to_string(),
+                ));
+            }
+        };
+        if recoverable_turn_id != turn_id {
+            return Err(AgentError::SessionAuthority(format!(
+                "recovery turn mismatch: expected {recoverable_turn_id}, found {turn_id}"
+            )));
+        }
+
+        self.terminalize_interrupted_turn_for_cancellation(turn_id)
+            .await?;
+        self.append_journal_event(SessionEvent::TurnCancelled {
+            turn_id: turn_id.to_owned(),
+        })
+        .await?;
+        self.finish_budget_turn(turn_id)
+    }
+
+    /// Close every not-yet-started descendant before terminalizing a recovered
+    /// turn. Any started effect whose outcome is not authoritative blocks the
+    /// operation: cancellation is not evidence that a remote provider, tool,
+    /// child, or delivery did not run.
+    ///
+    /// Events are derived from a fresh reduced state and appended one at a
+    /// time. If the process dies between appends, the next cursor observes the
+    /// partial progress and this routine safely derives only the remaining
+    /// closures.
+    async fn terminalize_interrupted_turn_for_cancellation(
+        &self,
+        turn_id: &str,
+    ) -> Result<(), AgentError> {
+        match self
+            .close_not_started_descendants_for_cancellation(turn_id)
+            .await?
+        {
+            CancellationDescendantClosure::Closed => Ok(()),
+            CancellationDescendantClosure::ReconciliationRequired => {
+                Err(AgentError::SessionAuthority(
+                    "interrupted turn cannot be cancelled until started external outcomes are reconciled"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+
+    async fn close_not_started_descendants_for_cancellation(
+        &self,
+        turn_id: &str,
+    ) -> Result<CancellationDescendantClosure, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let turn = state.turns.get(turn_id).ok_or_else(|| {
+            AgentError::SessionAuthority(format!("unknown interrupted turn {turn_id}"))
+        })?;
+        if turn.completion.is_some() {
+            return Err(AgentError::SessionAuthority(format!(
+                "interrupted turn {turn_id} is already terminal"
+            )));
+        }
+
+        let has_unknown_provider = state.provider_attempts.values().any(|attempt| {
+            attempt.turn_id == turn_id && matches!(attempt.effect, ExternalEffectState::Unknown)
+        });
+        let has_unknown_tool = state.tools.values().any(|tool| {
+            tool.turn_id == turn_id
+                && matches!(
+                    tool.effect,
+                    ToolEffectState::Running | ToolEffectState::Unknown { .. }
+                )
+        });
+        let has_unknown_child = state.children.values().any(|child| {
+            child.turn_id == turn_id && matches!(child.effect, ExternalEffectState::Unknown)
+        });
+        let has_unknown_delivery = state.deliveries.values().any(|delivery| {
+            delivery_origin_belongs_to_turn(&delivery.origin, turn_id)
+                && matches!(delivery.effect, ExternalEffectState::Unknown)
+        });
+        if has_unknown_provider || has_unknown_tool || has_unknown_child || has_unknown_delivery {
+            return Ok(CancellationDescendantClosure::ReconciliationRequired);
+        }
+
+        let mut events = Vec::new();
+        events.extend(
+            state
+                .approvals
+                .iter()
+                .filter(|(_, approval)| {
+                    approval.resolution.is_none()
+                        && approval_origin_belongs_to_turn(&state, &approval.origin, turn_id)
+                })
+                .map(|(approval_id, _)| SessionEvent::ApprovalResolved {
+                    approval_id: approval_id.clone(),
+                    resolution: ApprovalResolution::Cancelled,
+                }),
+        );
+        events.extend(
+            state
+                .provider_attempts
+                .iter()
+                .filter(|(_, attempt)| {
+                    attempt.turn_id == turn_id
+                        && matches!(attempt.effect, ExternalEffectState::Prepared)
+                })
+                .map(|(attempt_id, attempt)| {
+                    let reason = ProviderAttemptNotStartedReason::Cancelled {
+                        reason: "interrupted turn cancelled during recovery".to_string(),
+                    };
+                    match attempt.dispatch_id.as_ref() {
+                        None => SessionEvent::ProviderAttemptNotStarted {
+                            attempt_id: attempt_id.clone(),
+                            reason,
+                        },
+                        Some(dispatch_id) => SessionEvent::ProviderAttemptNotStartedV2 {
+                            attempt_id: attempt_id.clone(),
+                            dispatch_id: dispatch_id.clone(),
+                            reason,
+                        },
+                    }
+                }),
+        );
+        events.extend(
+            state
+                .tools
+                .iter()
+                .filter(|(_, tool)| {
+                    tool.turn_id == turn_id && matches!(tool.effect, ToolEffectState::Prepared)
+                })
+                .map(|(tool_execution_id, tool)| {
+                    let reason = state
+                        .approvals
+                        .get(&tool.provider_call_id)
+                        .and_then(|approval| approval.resolution.as_ref())
+                        .and_then(|resolution| match resolution {
+                            ApprovalResolution::Decided {
+                                decision: ApprovalDecision::Deny,
+                            } => Some(ToolNotStartedReason::ApprovalDenied {
+                                approval_id: tool.provider_call_id.clone(),
+                            }),
+                            ApprovalResolution::Cancelled => {
+                                Some(ToolNotStartedReason::ApprovalCancelled {
+                                    approval_id: tool.provider_call_id.clone(),
+                                })
+                            }
+                            ApprovalResolution::TimedOut => {
+                                Some(ToolNotStartedReason::ApprovalTimedOut {
+                                    approval_id: tool.provider_call_id.clone(),
+                                })
+                            }
+                            ApprovalResolution::Decided { .. } => None,
+                        })
+                        .unwrap_or_else(|| ToolNotStartedReason::Cancelled {
+                            reason: "interrupted turn cancelled during recovery".to_string(),
+                        });
+                    SessionEvent::ToolExecutionNotStarted {
+                        tool_execution_id: tool_execution_id.clone(),
+                        reason,
+                    }
+                }),
+        );
+        events.extend(
+            state
+                .children
+                .iter()
+                .filter(|(_, child)| {
+                    child.turn_id == turn_id
+                        && matches!(child.effect, ExternalEffectState::Prepared)
+                })
+                .map(|(child_id, _)| SessionEvent::ChildNotStarted {
+                    child_id: child_id.clone(),
+                    reason: ChildNotStartedReason::Cancelled {
+                        reason: "interrupted turn cancelled during recovery".to_string(),
+                    },
+                }),
+        );
+        events.extend(
+            state
+                .deliveries
+                .iter()
+                .filter(|(_, delivery)| {
+                    delivery_origin_belongs_to_turn(&delivery.origin, turn_id)
+                        && matches!(delivery.effect, ExternalEffectState::Prepared)
+                })
+                .map(|(delivery_id, _)| SessionEvent::DeliveryNotStarted {
+                    delivery_id: delivery_id.clone(),
+                    reason: DeliveryNotStartedReason::Cancelled {
+                        reason: "interrupted turn cancelled during recovery".to_string(),
+                    },
+                }),
+        );
+        events.extend(
+            state
+                .budgets
+                .iter()
+                .filter(|(_, budget)| {
+                    budget.used.is_none()
+                        && !budget.released
+                        && budget_owner_belongs_to_turn(&state, &budget.owner, turn_id)
+                })
+                .map(|(reservation_id, _)| SessionEvent::BudgetReleased {
+                    event_id: format!("budget-event-{}", uuid::Uuid::new_v4()),
+                    reservation_id: reservation_id.clone(),
+                }),
+        );
+
+        for event in events {
+            self.append_journal_event(event).await?;
+        }
+        Ok(CancellationDescendantClosure::Closed)
+    }
+
+    /// Run only Core-registered authoritative reconcilers for an interrupted
+    /// tool effect. The cursor and turn id bind the action to the recovery view
+    /// the host inspected; free-form outcome claims are never accepted.
+    pub async fn reconcile_interrupted_turn(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<(), AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id: recoverable_turn_id,
+                ..
+            } if recoverable_turn_id == turn_id => {}
+            _ => {
+                return Err(AgentError::SessionAuthority(
+                    "interrupted turn has no registered authoritative reconciliation path"
+                        .to_string(),
+                ));
+            }
+        }
+        self.reconcile_interrupted_journal_turns().await
+    }
+
+    async fn append_journal_event(&self, event: SessionEvent) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        tokio::task::spawn_blocking(move || journal.append(event))
+            .await
+            .map_err(|error| {
+                AgentError::SessionAuthority(format!("journal append task failed: {error}"))
+            })?
+            .map(|_| ())
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    async fn reconcile_interrupted_journal_turns(&self) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let interrupted = state
+            .turns
+            .iter()
+            .filter(|(_, turn)| turn.completion.is_none())
+            .map(|(turn_id, _)| turn_id.clone())
+            .collect::<Vec<_>>();
+        if interrupted.len() > 1 {
+            return Err(AgentError::SessionAuthority(format!(
+                "session journal is corrupt: multiple active turns ({})",
+                interrupted.join(", ")
+            )));
+        }
+
+        let running_tool_ids = state
+            .tools
+            .iter()
+            .filter(|(_, tool)| matches!(tool.effect, ToolEffectState::Running))
+            .map(|(tool_execution_id, _)| tool_execution_id.clone())
+            .collect::<Vec<_>>();
+        for tool_execution_id in running_tool_ids {
+            self.append_journal_event(SessionEvent::ToolExecutionUnknown {
+                tool_execution_id,
+                reason: ToolUnknownReason::Interrupted,
+                evidence: serde_json::json!({
+                    "recovery": "engine_startup",
+                    "prior_state": "running",
+                }),
+            })
+            .await?;
+        }
+
+        if let Some(turn_id) = interrupted.first() {
+            let refreshed = journal
+                .state()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let prepared_tool_ids = refreshed
+                .tools
+                .iter()
+                .filter(|(_, tool)| {
+                    tool.turn_id == turn_id.as_str()
+                        && matches!(tool.effect, ToolEffectState::Prepared)
+                })
+                .map(|(tool_execution_id, _)| tool_execution_id.clone())
+                .collect::<Vec<_>>();
+            for tool_execution_id in prepared_tool_ids {
+                self.append_journal_event(SessionEvent::ToolExecutionNotStarted {
+                    tool_execution_id,
+                    reason: ToolNotStartedReason::Cancelled {
+                        reason: "interrupted before durable tool start".to_string(),
+                    },
+                })
+                .await?;
+            }
+        }
+
+        let refreshed = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let filesystem_unknowns = refreshed
+            .tools
+            .iter()
+            .filter_map(|(tool_execution_id, tool)| {
+                let reconciler = tool.effect_contract.reconciler.as_deref()?;
+                if !matches!(
+                    tool.effect_contract.kind,
+                    wcore_types::tool::ToolEffectKind::FilesystemTransactional
+                ) || reconciler != wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER
+                    || !tool.effect.requires_reconciliation()
+                {
+                    return None;
+                }
+                Some((
+                    tool_execution_id.clone(),
+                    reconciler.to_string(),
+                    tool.effect_receipt.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let tool_vfs = self
+            .tools
+            .tool_vfs()
+            .unwrap_or_else(|| Arc::new(wcore_tools::vfs::RealFs));
+        for (tool_execution_id, reconciler, encoded_receipt) in filesystem_unknowns {
+            let Some(encoded_receipt) = encoded_receipt else {
+                continue;
+            };
+            let Ok(receipt) = serde_json::from_value::<
+                wcore_tools::effects::FilesystemEffectReceiptV1,
+            >(encoded_receipt) else {
+                continue;
+            };
+            if let Some(checkpoint) = receipt.checkpoint_identity() {
+                let journal = (*journal).clone();
+                let digest = checkpoint.sha256.clone();
+                let Ok(Ok(contents)) =
+                    tokio::task::spawn_blocking(move || journal.load_effect_checkpoint(&digest))
+                        .await
+                else {
+                    continue;
+                };
+                if contents.len() as u64 != checkpoint.len {
+                    continue;
+                }
+            }
+            let Ok(reconciliation) = receipt.reconcile(tool_vfs.as_ref()).await else {
+                continue;
+            };
+            let (resolution, observed) = match reconciliation {
+                wcore_tools::effects::FilesystemReconciliation::AlreadyApplied { current } => (
+                    ToolResolution::Succeeded {
+                        result: serde_json::json!({
+                            "recovered": true,
+                            "effect_receipt": receipt,
+                        }),
+                    },
+                    current,
+                ),
+                wcore_tools::effects::FilesystemReconciliation::NotStarted { current } => (
+                    ToolResolution::NotStarted {
+                        reason: ToolNotStartedReason::Cancelled {
+                            reason: "filesystem preimage remained unchanged after interruption"
+                                .to_string(),
+                        },
+                    },
+                    current,
+                ),
+                wcore_tools::effects::FilesystemReconciliation::Conflict { .. } => continue,
+            };
+            let observed = wcore_tools::effects::FilesystemObservationReceipt::from(observed);
+            self.resolve_unknown_tool_effect(
+                tool_execution_id,
+                resolution,
+                ToolResolutionSource::Reconciler { reconciler },
+                serde_json::json!({
+                    "recovery": "engine_startup",
+                    "observed": observed,
+                }),
+            )?;
+        }
+
+        let unresolved = self.tool_effects_requiring_reconciliation()?;
+        if !unresolved.is_empty() {
+            return Err(AgentError::SessionAuthority(format!(
+                "unresolved tool effects require reconciliation before continuation: {}",
+                unresolved.join(", ")
+            )));
+        }
+
+        if let Some(turn_id) = interrupted.into_iter().next() {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id: turn_id.clone(),
+                error: "interrupted before a terminal journal event".to_string(),
+            })
+            .await?;
+            self.finish_budget_turn(&turn_id)?;
+        }
+        Ok(())
+    }
+
+    /// Return durable tool executions that must be reconciled before the
+    /// engine may start another turn. IDs are stable and sorted by the journal
+    /// reducer's `BTreeMap` ordering.
+    pub fn tool_effects_requiring_reconciliation(&self) -> Result<Vec<String>, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        Ok(state
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.effect.requires_reconciliation())
+            .map(|(tool_execution_id, _)| tool_execution_id.clone())
+            .collect())
+    }
+
+    /// Persist an explicit reconciler/operator decision for one unknown tool
+    /// effect. Continuation remains blocked until every unresolved ID has a
+    /// durable resolution.
+    pub fn resolve_unknown_tool_effect(
+        &self,
+        tool_execution_id: impl Into<String>,
+        resolution: ToolResolution,
+        source: ToolResolutionSource,
+        evidence: serde_json::Value,
+    ) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let tool_execution_id = tool_execution_id.into();
+        crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+            .resolve_tool(tool_execution_id.clone(), resolution, source, evidence)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        terminalize_recoverable_prepared_post_hook(&journal, &tool_execution_id)
+    }
+
+    /// Validate and persist one cursor-bound operator resolution against the
+    /// engine's live recovery authority. Both hosted and standalone clients
+    /// use this boundary so neither can bypass stale-cursor or evidence checks.
+    pub fn resolve_operator_tool_effect(
+        &self,
+        resolution: &OperatorToolEffectResolution,
+    ) -> Result<(), AgentError> {
+        let plan = self.recovery_plan()?;
+        let expected_cursor = plan.cursor();
+        let (expected_turn_id, expected_tool_execution_id) = match &plan.disposition {
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } => {
+                let tool_execution_id = tool_execution_ids
+                    .iter()
+                    .find(|tool_execution_id| *tool_execution_id == &resolution.tool_execution_id)
+                    .ok_or_else(|| {
+                        AgentError::SessionAuthority(
+                            "tool execution is not an unresolved effect".to_string(),
+                        )
+                    })?;
+                (turn_id.as_str(), tool_execution_id.as_str())
+            }
+            _ => {
+                return Err(AgentError::SessionAuthority(
+                    "session has no unresolved tool effect".to_string(),
+                ));
+            }
+        };
+        let authority = OperatorResolutionAuthority {
+            session_id: &plan.session_id,
+            turn_id: expected_turn_id,
+            cursor: &expected_cursor,
+            tool_execution_id: expected_tool_execution_id,
+        };
+        ProtocolCommand::ResolveUnknownToolEffect(resolution.clone())
+            .validate_operator_resolution(&authority)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+
+        let evidence = serde_json::to_value(&resolution.evidence)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let durable_resolution = match resolution.outcome {
+            OperatorToolEffectOutcome::Succeeded => ToolResolution::Succeeded {
+                result: serde_json::json!({
+                    "content": "Operator evidence confirms the interrupted tool effect succeeded",
+                    "is_error": false,
+                    "operator_resolution_evidence": evidence.clone()
+                }),
+            },
+            OperatorToolEffectOutcome::Failed => ToolResolution::Failed {
+                error: "operator evidence confirms the tool effect failed".into(),
+                result: Some(serde_json::json!({
+                    "content": "Operator evidence confirms the interrupted tool effect failed",
+                    "is_error": true,
+                    "operator_resolution_evidence": evidence.clone()
+                })),
+            },
+            OperatorToolEffectOutcome::NotStarted => ToolResolution::NotStarted {
+                reason: ToolNotStartedReason::Cancelled {
+                    reason: "operator evidence confirms the tool execution did not start".into(),
+                },
+            },
+        };
+        self.resolve_unknown_tool_effect(
+            resolution.tool_execution_id.clone(),
+            durable_resolution,
+            ToolResolutionSource::Operator {
+                operator_id: resolution.operator_id.clone(),
+            },
+            evidence,
+        )
+    }
+
+    async fn sync_journal_conversation(&self, turn_id: &str) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages_value = serde_json::Value::Array(messages.clone());
+        let messages_digest = state_payload_digest(&messages_value)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+
+        if state.conversation.len() <= messages.len()
+            && state
+                .conversation
+                .iter()
+                .zip(&messages)
+                .all(|(persisted, current)| persisted == current)
+        {
+            if state.conversation.len() == messages.len() {
+                return Ok(());
+            }
+            for (index, message) in messages
+                .iter()
+                .cloned()
+                .enumerate()
+                .skip(state.conversation.len())
+            {
+                let message_digest = state_payload_digest(&message)
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                self.append_journal_event(SessionEvent::ConversationMessageCommitted {
+                    turn_id: turn_id.to_owned(),
+                    message_index: u64::try_from(index).map_err(|_| {
+                        AgentError::SessionAuthority(
+                            "conversation message index exceeds u64".to_string(),
+                        )
+                    })?,
+                    message,
+                    message_digest,
+                })
+                .await?;
+            }
+            return Ok(());
+        }
+
+        self.append_journal_event(SessionEvent::ConversationStateCommitted {
+            turn_id: turn_id.to_owned(),
+            messages,
+            messages_digest: messages_digest.clone(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    fn recovery_posture(&self) -> Result<crate::recovery::RecoveryPosture, AgentError> {
+        let cwd = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let approval_policy = self
+            .confirmer
+            .lock()
+            .map_err(|_| {
+                AgentError::SessionAuthority(
+                    "tool confirmer lock is poisoned during checkpoint".to_string(),
+                )
+            })?
+            .approval_policy();
+        let mut tool_defs = self.tools.to_tool_defs();
+        tool_defs.sort_by(|left, right| left.name.cmp(&right.name));
+        let tool_inventory = tool_defs
+            .into_iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                    "deferred": tool.deferred,
+                    "server": tool.server,
+                })
+            })
+            .collect::<Vec<_>>();
+        let thinking = self.thinking.as_ref().map(|thinking| match thinking {
+            wcore_types::llm::ThinkingConfig::Enabled { budget_tokens } => serde_json::json!({
+                "mode": "enabled",
+                "budget_tokens": budget_tokens,
+            }),
+            wcore_types::llm::ThinkingConfig::Disabled => {
+                serde_json::json!({ "mode": "disabled" })
+            }
+        });
+        let tool_hook_authority = self.hooks.as_ref().map_or_else(
+            || serde_json::json!({}),
+            |hooks| hooks.tool_hook_authority(),
+        );
+        let authority = serde_json::json!({
+            "execution_policy": serde_json::to_value(&self.config.execution_policy)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "workspace_trust": serde_json::to_value(&self.config.workspace_trust)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "approval_policy": serde_json::to_value(approval_policy)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "cwd": cwd.to_string_lossy(),
+            "tool_inventory": tool_inventory,
+            "provider": wcore_config::config::provider_type_slug(self.config.provider),
+            "provider_label": &self.config.provider_label,
+            "provider_base_url": &self.config.base_url,
+            "provider_compat": serde_json::to_value(&self.compat)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "egress_security": serde_json::to_value(&self.config.security)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "model": &self.model,
+            "system_prompt": &self.system_prompt,
+            "max_tokens": self.max_tokens,
+            "max_tokens_explicit": self.max_tokens_explicit,
+            "temperature": self.temperature,
+            "thinking": thinking,
+            "reasoning_effort": &self.current_reasoning_effort,
+            "web_search": self.web_search,
+            "tool_hooks": tool_hook_authority,
+        });
+        let authority_digest = state_payload_digest(&authority)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let authority_component_digests = authority
+            .as_object()
+            .ok_or_else(|| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint authority is not an object".to_string(),
+                )
+            })?
+            .iter()
+            .map(|(name, value)| {
+                state_payload_digest(value)
+                    .map(|digest| (name.clone(), digest))
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        Ok(crate::recovery::RecoveryPosture {
+            plan_active: self.plan_state.is_active,
+            pre_plan_allow_list: self.plan_state.pre_plan_allow_list.clone(),
+            effective_allow_list: self.allow_list.clone(),
+            conservatively_open_breakers: self.tools.breakers_requiring_conservative_restore(),
+            authority_digest,
+            authority_component_digests,
+            tool_hook_authority_version: crate::recovery::TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
+        })
+    }
+
+    fn restore_recovery_posture(
+        &mut self,
+        posture: &crate::recovery::RecoveryPosture,
+    ) -> Result<(), AgentError> {
+        let live = self.recovery_posture()?;
+        if live.authority_digest != posture.authority_digest {
+            let changed_components = if posture.authority_component_digests.is_empty() {
+                Vec::new()
+            } else {
+                live.authority_component_digests
+                    .keys()
+                    .chain(posture.authority_component_digests.keys())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .filter(|name| {
+                        live.authority_component_digests.get(*name)
+                            != posture.authority_component_digests.get(*name)
+                    })
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+            };
+            let detail = if changed_components.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", changed_components.join(", "))
+            };
+            return Err(AgentError::SessionAuthority(format!(
+                "recovery checkpoint policy, workspace, cwd, or tool authority changed{detail}"
+            )));
+        }
+        self.tools
+            .restore_breakers_conservatively(&posture.conservatively_open_breakers)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let recovered_pre_plan_allow_list =
+            intersect_recovery_allow_list(&posture.pre_plan_allow_list, &self.allow_list);
+        let recovered_effective_allow_list =
+            intersect_recovery_allow_list(&posture.effective_allow_list, &self.allow_list);
+        self.plan_state = PlanState {
+            is_active: posture.plan_active,
+            pre_plan_allow_list: recovered_pre_plan_allow_list,
+        };
+        self.allow_list = recovered_effective_allow_list;
+        let mut confirmer = self.confirmer.lock().map_err(|_| {
+            AgentError::SessionAuthority(
+                "tool confirmer lock is poisoned during recovery".to_string(),
+            )
+        })?;
+        let policy = confirmer.approval_policy();
+        *confirmer = ToolConfirmer::with_policy(policy, self.allow_list.clone());
+        if let Some(flag) = &self.plan_active_flag {
+            flag.store(posture.plan_active, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    async fn append_recovery_checkpoint(
+        &self,
+        turn_id: &str,
+        checkpoint_id: String,
+        checkpoint: crate::recovery::RecoveryCheckpoint,
+    ) -> Result<(), AgentError> {
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        self.append_journal_event(SessionEvent::CheckpointCommitted {
+            checkpoint_id,
+            purpose: CheckpointPurpose::Recovery,
+            origin: CheckpointOrigin::Turn {
+                turn_id: turn_id.to_owned(),
+            },
+            state_digest,
+            state: checkpoint,
+        })
+        .await
+    }
+
+    fn recovery_conversation_authority(&self) -> Result<(String, u64), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest =
+            state_payload_digest(&serde_json::Value::Array(state.conversation.clone()))
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let message_count = u64::try_from(state.conversation.len()).map_err(|_| {
+            AgentError::SessionAuthority(
+                "recovery checkpoint message count exceeds u64".to_string(),
+            )
+        })?;
+        Ok((conversation_digest, message_count))
+    }
+
+    fn prepare_provider_recovery(
+        &self,
+        turn_id: &str,
+        checkpoint_id: &str,
+        checkpoint: &crate::recovery::RecoveryCheckpoint,
+    ) -> Result<
+        (
+            LlmRequest,
+            crate::provider_recovery::ProviderDispatchRecoveryDisposition,
+        ),
+        AgentError,
+    > {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "session journal is not initialized for recovery".to_string(),
+            )
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let session_id = journal
+            .session_id()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let dispatch_id = checkpoint.dispatch_id.as_deref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "provider recovery checkpoint has no dispatch identity".to_string(),
+            )
+        })?;
+        let request_digest = checkpoint.request_digest.as_deref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "provider recovery checkpoint has no request digest".to_string(),
+            )
+        })?;
+        let sealed = checkpoint.sealed_prepared_request.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "provider recovery checkpoint has no sealed request".to_string(),
+            )
+        })?;
+        let binding = crate::recovery_confidential::PreparedRequestBinding {
+            session_id: &session_id,
+            turn_id,
+            checkpoint_id,
+            checkpoint_version: checkpoint.version,
+            dispatch_id,
+            conversation_id: &checkpoint.conversation_id,
+            conversation_digest: &checkpoint.conversation_digest,
+            message_count: checkpoint.message_count,
+            request_digest,
+            turn_index: checkpoint.turn_index,
+            stream_attempt: checkpoint.stream_attempt,
+            overflow_retried: checkpoint.overflow_retried,
+            length_wedge_retried: checkpoint.length_wedge_retried,
+            posture_authority_digest: &checkpoint.posture.authority_digest,
+        };
+        let prepared = self
+            .recovery_request_protection
+            .open(&self.config, &binding, sealed)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let request = checkpoint
+            .validate_opened_prepared_request_conversation(&prepared, &state.conversation)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        if (self.budget_authority.is_some() || self.budget_tracker.is_some())
+            && request.omit_max_tokens
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovery request omits its provider output cap under active budget governance"
+                    .to_string(),
+            ));
+        }
+        let disposition = crate::provider_recovery::plan_provider_dispatch_recovery(
+            &state,
+            dispatch_id,
+            turn_id,
+            crate::session_journal::ProviderAttemptPurpose::Conversation,
+            request_digest,
+        )
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        Ok((request, disposition))
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn use_recovery_test_key(&mut self, bytes: &[u8; 32]) {
+        self.recovery_request_protection =
+            Arc::new(crate::recovery_confidential::RecoveryRequestProtector::with_test_key(bytes));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_provider_recovery_checkpoint(
+        &self,
+        turn_id: &str,
+        request: &LlmRequest,
+        turn: usize,
+        stream_attempt: u32,
+        overflow_retried: bool,
+        length_wedge_retried: bool,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+    ) -> Result<crate::recovery::RecoveryCheckpoint, AgentError> {
+        let (conversation_digest, message_count) = self.recovery_conversation_authority()?;
+        let request_digest = crate::session_journal::provider_request_digest(request)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let prepared_request = crate::session_journal::prepared_provider_request_snapshot(request)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let dispatch_id = format!("provider-dispatch-{}", uuid::Uuid::new_v4());
+        let posture = self.recovery_posture()?;
+        let turn_index = u64::try_from(turn).map_err(|_| {
+            AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+        })?;
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let session_id = journal
+            .session_id()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let binding = crate::recovery_confidential::PreparedRequestBinding {
+            session_id: &session_id,
+            turn_id,
+            checkpoint_id: &checkpoint_id,
+            checkpoint_version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            dispatch_id: &dispatch_id,
+            conversation_id: &self.conversation_id,
+            conversation_digest: &conversation_digest,
+            message_count,
+            request_digest: &request_digest,
+            turn_index,
+            stream_attempt,
+            overflow_retried,
+            length_wedge_retried,
+            posture_authority_digest: &posture.authority_digest,
+        };
+        let sealed_prepared_request = self
+            .recovery_request_protection
+            .seal(&self.config, &binding, &prepared_request)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::ProviderDispatch,
+            conversation_digest: conversation_digest.clone(),
+            message_count,
+            turn_index,
+            stream_attempt,
+            overflow_retried,
+            length_wedge_retried,
+            request_digest: Some(request_digest),
+            dispatch_id: Some(dispatch_id),
+            sealed_prepared_request: Some(sealed_prepared_request),
+            posture,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: self.run_usage.clone(),
+            terminal_result: None,
+        };
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        checkpoint
+            .validate_opened_prepared_request_conversation(&prepared_request, &state.conversation)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        self.append_recovery_checkpoint(turn_id, checkpoint_id, checkpoint.clone())
+            .await?;
+        Ok(checkpoint)
+    }
+
+    async fn commit_terminal_recovery_checkpoint(
+        &mut self,
+        turn_id: &str,
+        result: &AgentResult,
+        turn: usize,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+        completion: crate::recovery::RecoveryTerminalCompletion,
+    ) -> Result<(), AgentError> {
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest = state_payload_digest(&serde_json::Value::Array(messages.clone()))
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let message_count = u64::try_from(messages.len()).map_err(|_| {
+            AgentError::SessionAuthority(
+                "terminal recovery checkpoint message count exceeds u64".to_string(),
+            )
+        })?;
+        let stop_reason = match result.stop_reason {
+            StopReason::EndTurn => "end_turn",
+            StopReason::ToolUse => {
+                return Err(AgentError::SessionAuthority(
+                    "tool-use result cannot become a terminal recovery checkpoint".to_string(),
+                ));
+            }
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::MaxTurns => "max_turns",
+        };
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::CommitTurn,
+            conversation_digest: conversation_digest.clone(),
+            message_count,
+            turn_index: u64::try_from(turn).map_err(|_| {
+                AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+            })?,
+            stream_attempt: 0,
+            overflow_retried: false,
+            length_wedge_retried: false,
+            request_digest: None,
+            dispatch_id: None,
+            sealed_prepared_request: None,
+            posture: self.recovery_posture()?,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: result.usage_delta.clone(),
+            terminal_result: Some(crate::recovery::RecoveryTerminalResult {
+                completion,
+                text: result.text.clone(),
+                stop_reason: stop_reason.to_string(),
+                finish_reason: result.finish_reason,
+                usage: result.usage.clone(),
+                usage_delta: result.usage_delta.clone(),
+                turns: u64::try_from(result.turns).map_err(|_| {
+                    AgentError::SessionAuthority("terminal turn count exceeds u64".to_string())
+                })?,
+                active_window_percent: result.active_window_percent,
+                agent_run_id: result.agent_run_id.clone(),
+            }),
+        };
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let consumed_hook_phases = self.pending_hook_phase_consumptions.clone();
+        let result = self
+            .append_journal_event(SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: turn_id.to_owned(),
+                messages,
+                messages_digest: conversation_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            })
+            .await;
+        if result.is_ok() {
+            self.pending_hook_phase_consumptions.clear();
+        }
+        result
+    }
+
+    async fn commit_continue_loop_recovery_checkpoint(
+        &mut self,
+        turn_id: &str,
+        next_turn: usize,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+    ) -> Result<(), AgentError> {
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest = state_payload_digest(&serde_json::Value::Array(messages))
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::ContinueLoop,
+            conversation_digest: conversation_digest.clone(),
+            message_count: u64::try_from(self.messages.len()).map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint message count exceeds u64".to_string(),
+                )
+            })?,
+            turn_index: u64::try_from(next_turn).map_err(|_| {
+                AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+            })?,
+            stream_attempt: 0,
+            overflow_retried: false,
+            length_wedge_retried: false,
+            request_digest: None,
+            dispatch_id: None,
+            sealed_prepared_request: None,
+            posture: self.recovery_posture()?,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: self.run_usage.clone(),
+            terminal_result: None,
+        };
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let consumed_hook_phases = self.pending_hook_phase_consumptions.clone();
+        let result = self
+            .append_journal_event(SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: turn_id.to_owned(),
+                messages: self
+                    .messages
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+                messages_digest: conversation_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            })
+            .await;
+        if result.is_ok() {
+            self.pending_hook_phase_consumptions.clear();
+        }
+        result
+    }
+
+    async fn commit_tool_round_recovery_checkpoint(
+        &mut self,
+        turn_id: &str,
+        turn: usize,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+    ) -> Result<(), AgentError> {
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest = state_payload_digest(&serde_json::Value::Array(messages.clone()))
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::ContinueToolRound,
+            conversation_digest: conversation_digest.clone(),
+            message_count: u64::try_from(messages.len()).map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint message count exceeds u64".to_string(),
+                )
+            })?,
+            turn_index: u64::try_from(turn).map_err(|_| {
+                AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+            })?,
+            stream_attempt: 0,
+            overflow_retried: false,
+            length_wedge_retried: false,
+            request_digest: None,
+            dispatch_id: None,
+            sealed_prepared_request: None,
+            posture: self.recovery_posture()?,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: self.run_usage.clone(),
+            terminal_result: None,
+        };
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let consumed_hook_phases = self.pending_hook_phase_consumptions.clone();
+        let result = self
+            .append_journal_event(SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: turn_id.to_owned(),
+                messages,
+                messages_digest: conversation_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            })
+            .await;
+        if result.is_ok() {
+            self.pending_hook_phase_consumptions.clear();
+        }
+        result
+    }
+
+    async fn sync_active_journal_conversation(&self) -> Result<(), AgentError> {
+        let Some(turn_id) = self.active_journal_turn_id.as_deref() else {
+            return Ok(());
+        };
+        self.sync_journal_conversation(turn_id).await
+    }
+
+    /// Tell whoever is watching THIS turn that it is being recorded but cannot
+    /// resume itself.
+    ///
+    /// The host-forced degrade already announces itself once, on stderr, during
+    /// config resolution. That is the right place to explain the situation and
+    /// the wrong place to be the only mention of it: a channel gateway resolves
+    /// its config when the daemon starts and then serves turns for weeks, so
+    /// the notice reaches whoever ran `systemctl start` and nobody after. Every
+    /// person whose turn could not have been replayed arrived long after that
+    /// line scrolled away.
+    ///
+    /// So say it per turn, on the surface the turn is observable on:
+    /// [`OutputSink::emit_durability_degraded`] reaches the terminal for a
+    /// TUI/CLI run and a `ProtocolEvent::Info` for a protocol host, and `Info`
+    /// is already in the pinned contract, so no host has to learn a new frame
+    /// to receive it.
+    ///
+    /// UNCONDITIONAL, and its single caller is what makes that correct: it
+    /// fires only on the one preflight arm that means "this host has no key",
+    /// having already separated that from an operator who chose a plaintext
+    /// backend and from a vault opened with the wrong passphrase. A second
+    /// condition here would be a second opinion about a question already
+    /// answered, and the two would drift.
+    ///
+    /// An operator who wrote `[session] enabled = false` never reaches this at
+    /// all — there is no journal, so there is no journaled turn — which is the
+    /// right treatment: they asked for it and must not be nagged once per
+    /// message.
+    ///
+    /// The text says what is STILL true as well as what is lost. Its
+    /// predecessor said "this turn is not being recorded", which is now false
+    /// and was the more alarming half — a notice that overstates the loss gets
+    /// filtered as noise, and then the real loss goes unread with it.
+    ///
+    /// # The record and the notice are separate, and only one of them repeats
+    ///
+    /// The `tracing::warn!` below is the RECORD: one line per unreplayable
+    /// turn, on every surface, wherever the process routed its diagnostics.
+    /// With `RUST_LOG` unset that is the size-bounded log at
+    /// `$WAYLAND_HOME/logs/wayland-core.log` (`~/.wayland/logs/` when
+    /// `WAYLAND_HOME` is not set); with `RUST_LOG` set it is stderr, because
+    /// `RUST_LOG` is authoritative and routes everything there. Either way the
+    /// record exists per turn.
+    ///
+    /// The file is bounded and rotated by `wcore-cli`'s `log_rotate` module —
+    /// named rather than intra-doc linked, since that crate sits ABOVE this one
+    /// and the path would not resolve from here. It is the durable artifact the
+    /// gateway case actually needs: an operator debugging "which of last week's
+    /// messages could not have been recovered" reads a file, not a terminal
+    /// that scrolled away three weeks ago.
+    ///
+    /// The sink call is the NOTICE, and whether it repeats is the sink's
+    /// decision — see [`OutputSink::emit_durability_degraded`]. A protocol
+    /// host still gets it every turn (asserted by `f14_sigkill_recovery`); a
+    /// human gets it once, because they were already told at config
+    /// resolution and the condition cannot change mid-process.
+    fn announce_replay_protection_unavailable_for_this_turn(&self) {
+        tracing::warn!(
+            target: "wcore_agent::session",
+            session = %self
+                .current_session
+                .as_ref()
+                .map(|s| s.id.as_str())
+                .unwrap_or("<none>"),
+            "this turn cannot be replayed if it is interrupted: the host has no usable OS \
+             keyring and no unlocked credentials vault, so the exact provider request is not \
+             sealed. The turn IS journaled"
+        );
+        self.output.emit_durability_degraded(
+            "crash replay protection is OFF for this run: this host has no usable OS \
+             keyring and no unlocked credentials vault, so the exact provider request \
+             cannot be sealed. This turn IS being recorded — the journal keeps its \
+             provider, tool, approval and delivery boundaries — but if it is interrupted \
+             mid-dispatch it will not resume itself; you will be asked to resume, \
+             reconcile or cancel it. Set WAYLAND_VAULT_PASSPHRASE_FD or \
+             WAYLAND_VAULT_PASSPHRASE to restore replay, or \
+             [session] require_durability = true to refuse to run this way at all.",
+        );
+    }
+
+    /// Legacy loop body. `journal_turn_id` is present only for an engine that
+    /// owns durable session authority.
+    async fn run_inner(
+        &mut self,
+        user_turn: UserTurnInput<'_>,
+        msg_id: &str,
+        journal_turn_id: Option<&str>,
+        resume_checkpoint: Option<crate::recovery::RecoveryCheckpoint>,
+        mut prepared_recovery_request: Option<LlmRequest>,
+        mut recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
+    ) -> Result<AgentResult, AgentError> {
+        let UserTurnInput {
+            text: user_input,
+            additional_content: mut additional_user_content,
+        } = user_turn;
+        let resume_from_checkpoint = resume_checkpoint.is_some();
+        if self.session_manager.is_some()
+            && self.current_session.is_some()
+            && self.session_journal.is_none()
+        {
+            return Err(AgentError::SessionAuthority(
+                "persisted session has no exclusive journal writer lease".to_string(),
+            ));
+        }
+        // F11: derive the turn envelope from the live session root. Every
+        // counter recorded on this child rolls up to the bootstrap-owned root.
+        let run_budget = self.current_run_budget()?;
+        let tool_budget = match self.budget_authority.as_ref() {
+            Some(authority) => {
+                crate::tool_budget::ToolBudgetTracker::with_budget_authority(Arc::clone(authority))
+            }
+            None => {
+                crate::tool_budget::ToolBudgetTracker::with_execution_budget(run_budget.clone())
+            }
+        };
+        self.midflight_monitor = MidFlightMonitor::new(run_budget.clone());
+        // Resuming from a recovery checkpoint re-enters the already-started
+        // turn. Do not replay turn-front-door observations or selections.
+        if !resume_from_checkpoint {
+            // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
+            if let Ok(mut det) = self.style_detector.lock() {
+                det.observe(user_input);
+            }
+        }
         // v0.8.1 U1 — per-turn `SkillRouter` choose. Picks one skill
         // from the resolved catalog using a Thompson Beta scorer
         // seeded from GEPA winners + session-start prioritizer ranking
@@ -4448,10 +9143,11 @@ impl AgentEngine {
         // OR no catalog was wired OR the catalog has zero entries —
         // matches the Stub/`None` defaults for engines built outside
         // bootstrap.
-        if let Some(router) = self.skill_router.as_ref()
+        if !resume_from_checkpoint
+            && let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
-            let candidates: Vec<String> = catalog.refs().map(|r| r.name.clone()).collect();
+            let candidates: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
             if !candidates.is_empty() {
                 // `choose` lives on the `DecisionRouter` trait, in the
                 // sibling `wcore-dispatch` crate. Importing it inline
@@ -4486,13 +9182,19 @@ impl AgentEngine {
         // CORE-2: reset the run-scoped usage delta at the start of each
         // user turn; the tool loop below re-accumulates it per provider
         // round-trip alongside the session-cumulative `total_usage`.
-        self.run_usage = TokenUsage::default();
+        self.run_usage = resume_checkpoint
+            .as_ref()
+            .map_or_else(TokenUsage::default, |checkpoint| {
+                checkpoint.run_usage.clone()
+            });
         // #403: clear tool circuit breakers at the start of each user turn.
         // A transient burst of `web`/`WebFetch` failures in one turn opened the
         // breaker and, with no per-turn reset, left every web tool short-circuited
         // for the rest of the session — the chat appeared dead. Persistent
         // failures simply re-open the breaker again within this turn.
-        self.tools.reset_all_breakers();
+        if !resume_from_checkpoint {
+            self.tools.reset_all_breakers();
+        }
         // #279(c): mint a stable per-run correlation id on the first run()
         // of the session and reuse it for every subsequent turn/message.
         // Re-minted only when None (fresh engine / cleared session); persists
@@ -4500,14 +9202,22 @@ impl AgentEngine {
         if self.current_agent_run_id.is_none() {
             self.current_agent_run_id = Some(format!("agent-run-{}", uuid::Uuid::new_v4()));
         }
-        self.output.emit_stream_start(msg_id);
         // Cross-session recall (v2 memory gap fix): on a cold first turn,
         // pre-inject durable facts relevant to this message BEFORE the user
         // turn so a fresh process answers from prior-session memory without
         // relying on the model invoking `session_search`. No-op on resumed
         // sessions, with NullMemory, or when nothing relevant is stored.
-        self.recall_relevant_facts(user_input).await;
-        self.push_user_turn(user_input);
+        if !resume_from_checkpoint {
+            self.recall_relevant_facts(user_input).await;
+            self.push_user_turn_with_content(
+                user_input,
+                additional_user_content.take().unwrap_or_default(),
+            );
+            // TurnStarted is already durable. Canonical conversation sync is
+            // intentionally delayed until context and budget admission, so an
+            // over-ceiling prompt cannot replace the last resumable history.
+        }
+        self.output.emit_stream_start(msg_id);
 
         // F-030 WAL: persist the user message BEFORE any LLM call so a
         // SIGKILL mid-turn does not silently erase it.  On resume the
@@ -4520,7 +9230,9 @@ impl AgentEngine {
         //      yet (F-034 deferred write).  Call persist_first_message which
         //      does the initial session + index write AND the WAL append.
         //   b) Subsequent messages: session file exists; just append WAL.
-        if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
+        if !resume_from_checkpoint
+            && let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session)
+        {
             let is_first_message = session.messages.len() == 1; // we just pushed
             if is_first_message {
                 session.messages = self.messages.clone();
@@ -4530,7 +9242,12 @@ impl AgentEngine {
                         .emit_error(&format!("Failed to persist first message: {}", e), false);
                 }
             } else {
-                if let Err(e) = mgr.append_wal(session, user_input) {
+                let user_message = self.messages.last().ok_or_else(|| {
+                    AgentError::SessionAuthority(
+                        "user turn was not present after composer ingestion".to_string(),
+                    )
+                })?;
+                if let Err(e) = mgr.append_wal_message(session, user_message) {
                     self.output
                         .emit_error(&format!("Failed to append WAL: {}", e), false);
                 }
@@ -4560,12 +9277,17 @@ impl AgentEngine {
         // `workflow_live_mode = false` (set in `AgentSpawner::child_config`) AND
         // lack an approval manager / protocol writer, so they can never
         // recursively re-enter this gate.
-        if self.workflow_live_mode
+        if !resume_from_checkpoint
+            && self.workflow_live_mode
             && self.approval_manager.is_some()
             && self.protocol_writer.is_some()
             && crate::orchestration::intent::workflow_candidate(user_input).is_some()
             && let Some(result) = self.try_live_workflow(user_input, 0).await
         {
+            self.push_synthetic_assistant_result(&result);
+            self.sync_active_journal_conversation().await?;
+            self.output
+                .emit_text_delta(&result.text, &self.current_msg_id);
             return Ok(result);
         }
 
@@ -4576,7 +9298,7 @@ impl AgentEngine {
         // `/crucible` typed with no approver falls through to a normal turn ($0).
         // Child engines (council members) carry no protocol_writer, so they can
         // never re-enter this gate.
-        {
+        if !resume_from_checkpoint {
             let trimmed = user_input.trim_start();
             // Stage 4c — `/crucible off` silences the discovery suggestion for the
             // rest of the process. Checked BEFORE the council dispatch because
@@ -4584,20 +9306,28 @@ impl AgentEngine {
             if trimmed == "/crucible off" {
                 CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
                 let msg = "Crucible suggestions off for this session.".to_string();
-                self.output.emit_text_delta(&msg, &self.current_msg_id);
-                return Ok(self.crucible_result(msg));
+                let result = self.crucible_result(msg);
+                self.push_synthetic_assistant_result(&result);
+                self.sync_active_journal_conversation().await?;
+                self.output
+                    .emit_text_delta(&result.text, &self.current_msg_id);
+                return Ok(result);
             }
             if (trimmed == "/crucible" || trimmed.starts_with("/crucible "))
                 && self.protocol_writer.is_some()
                 && let Some(result) = self.try_crucible_council(trimmed).await
             {
+                self.push_synthetic_assistant_result(&result);
+                self.sync_active_journal_conversation().await?;
+                self.output
+                    .emit_text_delta(&result.text, &self.current_msg_id);
                 return Ok(result);
             }
         }
 
         // Stage 4c — discovery nudge: if the input is HIGH-stakes and the user
         // hasn't used (or silenced) `/crucible`, surface the council once.
-        if let Some(hint) = self.maybe_suggest_council(user_input) {
+        if !resume_from_checkpoint && let Some(hint) = self.maybe_suggest_council(user_input) {
             self.output.emit_text_delta(&hint, &self.current_msg_id);
             CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
         }
@@ -4605,12 +9335,26 @@ impl AgentEngine {
         // Runaway-loop breaker (per-run): the engine-side backstop for the
         // no-progress loops that `max_turns = None` leaves unguarded. Terminates
         // the run if the same tool call keeps producing the same result.
-        let mut loop_guard = LoopGuard::from_env();
+        let mut loop_guard = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => LoopGuard::restore(&checkpoint.loop_guard)?,
+            None => LoopGuard::from_env(),
+        };
         // #475: complementary failure-loop breaker — trips when the SAME tool
         // keeps failing with DIFFERENT (still-wrong) args, which LoopGuard's
         // signature keying misses (a validation-error retry loop).
-        let mut failure_guard = FailureGuard::from_env();
-        let mut turn: usize = 0;
+        let mut failure_guard = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => FailureGuard::restore(&checkpoint.failure_guard)?,
+            None => FailureGuard::from_env(),
+        };
+        let mut turn = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => usize::try_from(checkpoint.turn_index).map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint turn index exceeds usize".to_string(),
+                )
+            })?,
+            None => 0,
+        };
+        let mut first_recovery_checkpoint = resume_checkpoint;
         loop {
             // AUDIT A2 — cooperative cancellation check between turns.
             // A host (TUI, ACP server) that fired `cancel_token()`
@@ -4619,9 +9363,12 @@ impl AgentEngine {
             // `tool_use` left by an in-turn cancel is repaired on the
             // next `push_user_turn` / `save_session` (AUDIT D-6).
             if self.cancel_token.is_cancelled() {
+                if journal_turn_id.is_none() {
+                    self.prepare_durable_conversation().await?;
+                    self.save_session_mirror();
+                }
                 self.output
                     .emit_info("Run cancelled by host before the next turn.");
-                self.save_session();
                 return Err(AgentError::UserAborted);
             }
             // AUDIT A1 — `max_turns` is an OPTIONAL override, not the
@@ -4642,641 +9389,769 @@ impl AgentEngine {
                     .finish_run_terminated(user_input, turn, FinishReason::MaxTurns)
                     .await;
             }
-            // Fire on_turn_start hooks at the top of each iteration so Rust
-            // hooks can override the model or inject prompt messages before
-            // run_compaction + provider.stream(). Outcome is applied via
-            // apply_pre_turn_outcome (switch_model + injected_messages).
-            //
-            // AUDIT A9 — a turn-start hook that returns `block` halts
-            // the loop cleanly: operators can write a "stop after
-            // condition X" hook as a backstop.
-            if let Some(hook_engine) = self.hooks.as_ref() {
-                let ctx = TurnContext {
-                    turn,
-                    model: self.model.clone(),
-                    message_count: self.messages.len(),
-                };
-                let outcome = hook_engine.on_turn_start(turn, &ctx).await;
-                if let Some(reason) = self.apply_pre_turn_outcome(outcome) {
-                    self.output
-                        .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
-                    return self
-                        .finish_run_terminated(user_input, turn, FinishReason::Length)
-                        .await;
-                }
-            }
-
-            // Fire PreCompact plugin hooks once per turn, immediately before
-            // the compaction pass. Gated like every other phase: a no-op when
-            // no hook engine / no PreCompact hooks are registered.
-            if let Some(hook_engine) = self.hooks.as_ref() {
-                let outcome = hook_engine.run_pre_compact(turn, self.messages.len()).await;
-                for line in outcome.hook_trace {
-                    tracing::debug!(target: "wcore_agent::hooks", "{line}");
-                }
-            }
-
-            // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
-            // the turn-loop top (the tool loop lives below provider.stream in the
-            // same iteration), and the model swap was already applied above, so
-            // the Flux-aware fraction is computed against the CURRENTLY-active
-            // model. Default-OFF: `smart_compact_fraction` returns `None` on its
-            // first line when disabled, so neither memory nor the force flag is
-            // touched and `run_compaction` below behaves exactly as before. On a
-            // fire we (1) persist a non-destructive handoff Episode, then (2) set
-            // the one-shot force flag and fall straight through into the existing
-            // `run_compaction` — no new summarization / fold / emit code.
-            let smart_fired = match self.smart_compact_fraction() {
-                Some(frac) => self.smart_compact_should_fire(turn as u32, frac),
-                None => false,
-            };
-            if smart_fired {
-                self.smart_compact_force = true;
-                if self.compact_config.smart_handoff_to_memory {
-                    // Persist BEFORE run_compaction mutates the buffer so the
-                    // verbatim pre-compaction transcript is durable; errors are
-                    // swallowed and never abort the turn.
-                    self.write_smart_handoff().await;
-                }
-            }
-
-            // Run multi-level compaction before each API call.
-            // On the first turn last_input_tokens is 0 so neither
-            // autocompact nor emergency will fire.
-            //
-            // AUDIT A6 — a compaction failure (e.g. the emergency
-            // `ContextTooLong` bail) ends the session; persist + fire
-            // session-end hooks before propagating, so the error exit
-            // is consistent with every other loop-exit path.
-            if let Err(e) = self.run_compaction().await {
-                self.fire_on_session_end(turn).await;
-                self.save_session();
-                return Err(e);
-            }
-
-            // Build tool list: filter based on plan mode state
-            let tools = if self.plan_state.is_active {
-                // Plan mode: only Info-category tools (excluding EnterPlanMode)
-                self.tools.to_tool_defs_filtered(|t| {
-                    t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+            if first_recovery_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| {
+                    matches!(
+                        checkpoint.next_action,
+                        crate::recovery::RecoveryNextAction::ContinueLoop
+                    )
                 })
-            } else {
-                // Normal mode: all tools except ExitPlanMode
-                self.tools
-                    .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
-            };
-
-            // W6 F17: trim MCP tools to a curated top-K. MCP tools are
-            // identified by real provenance (`ToolDef::server.is_some()`), not
-            // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
-            // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
-            // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
-            // Audit-log recency degrades to empty/keyword-only when
-            // self.audit_log is None.
-            let tools = self.apply_mcp_curation(tools);
-
-            // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
-            // 128). MCP servers can push the total past the limit even after
-            // curation; this is the correctness guarantee, separate from the
-            // relevance trim above.
-            let tools = self.apply_provider_tool_cap(tools);
-
-            // Layer D1 (token-opt): defer cold tools to name-only stubs —
-            // only the configured hot allowlist (plus ToolSearch-hydrated
-            // tools) ships full schemas; the model hydrates a stub on demand
-            // via ToolSearch (the system prompt states that rule once,
-            // `tool_usage_guidance`). The hot/stub split is a pure function
-            // of static config + the monotonic hydrated set, so the
-            // serialized tools[] array stays byte-identical across turns
-            // (cache guard: `tools_array_byte_stable_across_roundtrips`);
-            // a hydration changes it once.
-            let tools = self.apply_tool_deferral(tools);
-
-            // Build system prompt: append plan mode instructions when active
-            let system = if self.plan_state.is_active {
-                format!(
-                    "{}\n\n{}",
-                    self.system_prompt,
-                    plan_prompt::plan_mode_instructions()
-                )
-            } else {
-                self.system_prompt.clone()
-            };
-
-            // v0.8.1 U1 — the per-turn skill-router hint (when the router is
-            // installed and picked a visible catalog skill). Cache-stability
-            // (token-opt): the hint is dynamic per turn, so appending it to the
-            // `system` string here would rewrite the cached system prefix
-            // (zone 1) every turn. Compute it now and inject it into the
-            // request's volatile message tail below instead. `None` (no router
-            // / no pick / hidden skill) leaves both system and tail untouched.
-            let skill_hint = self.skill_router_hint();
-
-            // Record prompt state for cache diagnostics
-            self.cache_detector.record_request(&system, &tools);
-
-            // W8 v0.6.3 — pick the Anthropic prompt-cache tier for this
-            // request. The agent turn loop reuses the same system prompt +
-            // tools across every turn, so the prefix is stable far longer
-            // than the 5-minute ephemeral window; `pick_cache_tier` promotes
-            // to the 1h tier once the prompt clears the 1024-token minimum.
-            // `None` stays valid (the Anthropic adapter falls back to 5m for
-            // a `None` request) but the production path now produces a real
-            // tier instead of always-`None`. Non-Anthropic providers ignore
-            // the field.
-            //
-            // AUDIT A5 — estimate the FULL request (messages + system +
-            // tool defs), not just message content. The message-only
-            // estimate undercounts the turn-1 watermark by the system
-            // prompt + tool-schema size (tens of k tokens for MCP-heavy
-            // configs).
-            let mut input_token_estimate =
-                estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
-            // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
-            // immediately AFTER the smart-routing tier swap (so it measures the
-            // POST-swap effective model's REAL window via the wcore-config
-            // context_window kernel, not the stale CompactConfig 200k default).
-            // See the `ContextWindow::resolve(..)` block just before
-            // `size_output_cap`.
-            let cache_tier = Some(wcore_providers::cache_tier::pick_cache_tier(
-                input_token_estimate,
-                AGENT_TURN_CACHE_REUSE_WINDOW_SECS,
-            ));
-
-            // Belt-and-suspenders: ensure no `tool_use` in history is
-            // orphaned before sending to the provider. Anthropic 400s
-            // on any orphan and bricks the session; the per-path fixes
-            // in the dispatch loop close the known escape paths, but
-            // this guard catches every remaining one — denial-by-
-            // reaper, partial-batch loss on cancel, system-message
-            // injection between an assistant tool_use and its result.
-            self.repair_all_orphaned_tool_uses();
-            // #285 — the reverse direction: a `tool_result` whose `tool_use`
-            // was summarized away by autocompact is orphaned and makes
-            // DeepSeek 400 the whole array. Run AFTER the forward repair so
-            // the synthetic results it just backfilled (which always have a
-            // matching tool_use) are untouched, and only true orphans are
-            // demoted to text.
-            self.repair_orphaned_tool_results();
-
-            // Output-side optimization (Part A): attach fluff stop sequences
-            // only when the route optimizes client-side. On router-optimized
-            // routes the server already trims output, so we leave the Vec
-            // empty and providers emit no stop field.
-            let stop_sequences = if self.compat.input_optimization() == "client"
-                && self.compat.supports_stop_param()
             {
-                FLUFF_STOP_SEQUENCES.iter().map(|s| s.to_string()).collect()
-            } else {
-                // Either the route is router-optimized (server trims output) or
-                // the provider rejects `stop` (e.g. xAI grok-4.3 400s on it) —
-                // leave empty so providers emit no `stop` field.
-                Vec::new()
-            };
-
-            // Finding #174: the model actually dispatched this turn. Starts as
-            // the user's configured model and is rewritten below if a routing
-            // hint selects a configured tier model. Cost/usage accounting reads
-            // THIS (not `self.model`) so attribution follows any swap.
-            let mut effective_model = self.model.clone();
-
-            // Layer E1 — the model Flux ACTUALLY routed this turn to
-            // (ProviderMeta signal-back). `None` on non-Flux paths / before
-            // the signal arrives; the cache_health_warn emission below falls
-            // back to `effective_model`.
-            let mut last_routed_model: Option<String> = None;
-
-            let mut request = LlmRequest {
-                model: self.model.clone(),
-                system,
-                messages: self.messages.clone(),
-                tools,
-                max_tokens: self.max_tokens,
-                thinking: self.thinking.clone(),
-                reasoning_effort: self.current_reasoning_effort.clone(),
-                cache_tier,
-                routing_hint: None,
-                stop_sequences,
-                web_search: self.web_search,
-                // #282: thread the stable conversation id + assembled-prompt
-                // token estimate so the Flux provider can emit the x-wl-*
-                // context-routing headers on tier-alias turns.
-                conversation_id: Some(self.conversation_id.clone()),
-                client_context_tokens: Some(input_token_estimate as u64),
-                // Crucible #3: per-session sampling temperature (council child
-                // engines set it; top-level session leaves it `None`).
-                temperature: self.temperature,
-                // #112: decided below at the sizing site, AFTER the smart-
-                // routing tier swap, so the omit decision sees the final model.
-                omit_max_tokens: false,
-            };
-
-            // Cache-stability (token-opt): inject the per-turn skill-router
-            // hint as a transient text block on the request's last user-role
-            // message. `request.messages` is a clone, so this never persists
-            // into history and never shifts the cached system/tool prefix.
-            // Done before `mark_cache_boundaries` so the tail breakpoint
-            // accounts for the final content. Skipped unless the tail is
-            // user-role (never orphans a tool_use or creates adjacent user
-            // messages).
-            if let Some(hint) = skill_hint
-                && let Some(last) = request.messages.last_mut()
-                && matches!(last.role, Role::User)
-            {
-                last.content.push(ContentBlock::Text { text: hint });
+                first_recovery_checkpoint = None;
             }
-
-            // Cache-stability (token-opt, finding #174): inject the current date
-            // as a transient text block on the request's last user-role message
-            // instead of the cached system prefix. The date value changes daily /
-            // across cross-midnight restarts; keeping it out of the prefix lets
-            // the cached system+tools prefix stay byte-stable, so Anthropic prompt
-            // caching survives cold starts. `request.messages` is a clone, so this
-            // never persists into history. Skipped unless the tail is user-role
-            // (never orphans a tool_use or creates adjacent user messages).
-            if let Some(last) = request.messages.last_mut()
-                && matches!(last.role, Role::User)
-            {
-                last.content.push(ContentBlock::Text {
-                    text: crate::context::current_date_block(&crate::context::today_string()),
-                });
-            }
-
-            // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
-            // their contributions to the request's last user-role message. Done
-            // here — after the skill hint and BEFORE `mark_cache_boundaries`, but
-            // OUTSIDE the `'stream` retry loop below (so it fires once per turn,
-            // not once per stream retry). `request.messages` is a clone, so this
-            // never persists into history and never shifts the cached system/tool
-            // prefix; placing it before the breakpoint marking lets the tail
-            // breakpoint account for the final content. The contribution is
-            // budget-capped and deduped against the last injection. No-op when no
-            // hook engine / PrePrompt hooks / dispatcher are present.
-            let pre_prompt_outcome = match self.hooks.as_ref() {
-                Some(hook_engine) => Some(hook_engine.run_pre_prompt().await),
-                None => None,
-            };
-            if let Some(outcome) = pre_prompt_outcome {
-                for line in &outcome.hook_trace {
-                    tracing::debug!(target: "wcore_agent::hooks", "{line}");
-                }
-                Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
-            }
-
-            // W1 S3: place per-message cache breakpoints when the provider
-            // honours them. Idempotent across turns: previous turns' markers
-            // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
-            // a PERMANENT anchor breakpoint is additionally pinned to an
-            // immutable already-stubbed message (pure function of the
-            // compaction markers; `request.messages` is an index-aligned
-            // clone of `self.messages`, so the index maps 1:1). The anchor
-            // keeps the long prefix cache-valid while continuous
-            // args-compaction transitions the message at the
-            // keep_recent_turns boundary inside it.
-            mark_cache_boundaries(
-                &mut request,
-                &self.compat,
-                micro::cache_anchor_index(&self.messages),
-            );
-
-            // W1 v0.6.3: stamp a smart-routing hint onto the request so
-            // `ProviderChain` can surface the router's decision in dispatch
-            // observability. Finding #174: ALSO act on the hint — swap the
-            // model to a configured tier model (cheap/balanced) before
-            // dispatch. `input_tokens`, `max_output_tokens`, and
-            // `tool_call_count` are real; `code_ratio` is conservatively zero
-            // (no code-ratio scanner) and `requires_vision` comes from
-            // `message_requires_vision` (false until an image ContentBlock
-            // exists), so this producer emits only large-context / tool-heavy /
-            // simple decisions — never a wrong hint.
-            {
-                let tool_call_count = self
-                    .messages
-                    .iter()
-                    .flat_map(|m| &m.content)
-                    .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                    .count() as u32;
-                // Vision guard input: a turn that carries image/vision content
-                // must never be downgraded (the cheap tier may not be
-                // vision-capable). The `wcore-types` message model has no image
-                // block today, so this is conservatively `false` from real
-                // content; the routing classifier promotes any vision turn to
-                // Premium anyway, which `select_tier_model` also refuses to
-                // swap. Routed through one flag so a future image ContentBlock
-                // only needs to flip this.
-                let requires_vision = message_requires_vision(&self.messages);
-                let shape = wcore_providers::RequestShape {
-                    input_tokens: input_token_estimate,
-                    max_output_tokens: request.max_tokens as usize,
-                    code_ratio: 0.0,
-                    tool_call_count,
-                    requires_vision,
-                };
-                let decision =
-                    wcore_providers::route(&shape, &wcore_providers::RoutingHeuristics::default());
-                request.routing_hint = Some(decision.to_hint());
-
-                // Finding #174: act on the hint. Opt-in + guarded — see
-                // `select_tier_model`. Only Cheap/Balanced hints with a
-                // configured tier model and no vision content swap the model;
-                // everything else leaves `request.model` (and `effective_model`)
-                // as the user's configured model.
-                if let Some(tier_model) =
-                    select_tier_model(&decision, requires_vision, &self.compat)
-                {
-                    tracing::debug!(
-                        target: "wcore_agent::routing",
-                        from = %self.model,
-                        to = %tier_model,
-                        hint = %decision.to_hint().0,
-                        "smart-routing tier swap"
-                    );
-                    request.model = tier_model.clone();
-                    effective_model = tier_model;
-                }
-            }
-
-            // #255 — pre-flight context-window overflow guard, RECOMPUTED on the
-            // POST-swap effective model. `run_compaction` above already had its
-            // chance to shrink history; if the assembled request still exceeds a
-            // safe fraction of the model that will ACTUALLY serve this request,
-            // the provider call would 400. Terminate the run cleanly instead.
-            //
-            // The denominator comes from the kernel (`ContextWindow::resolve`),
-            // which reads the post-swap model's REAL window from
-            // `wcore_config::limits` — NOT the stale `CompactConfig` 200k
-            // default that the old guard used. After a Flux/tier swap to e.g.
-            // gpt-4o (128k) the ceiling is now computed against 128k, so the
-            // guard fires at the correct count (the #255 false-negative fix).
-            //
-            // `&request.model` is the same model arg fed to `size_output_cap`
-            // below, so guard and cap agree. When the window is unknown
-            // (`input_ceiling() == None`) the guard SKIPS — fail open, identical
-            // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
-            // the provider 400 are the backstops.
-            {
-                let mut ctx = wcore_config::context_window::ContextWindow::resolve(
-                    input_token_estimate as u64,
-                    self.compat.provider_type(),
-                    &request.model,
-                    self.compact_config.context_window as u64,
-                );
-                // #282 contract V1: once Flux has SIGNALLED-BACK the real served
-                // window (`x-flux-model-window`) on a prior turn of THIS Flux
-                // route, prefer it over the alias's pre-route guess so the guard
-                // measures against the model that will actually serve the turn.
-                if wcore_providers::is_flux_tier_alias(&request.model)
-                    && let Some(window) = self.flux_served_window
-                {
-                    ctx.window = Some(window);
-                }
-                if let Some(ceiling) = ctx.input_ceiling(
-                    self.compact_config.output_reserve as u64,
-                    self.compact_config.emergency_buffer as u64,
-                ) && ctx.used_tokens >= ceiling
-                {
-                    // #636 — graceful degradation (rung 1). Before aborting, shed
-                    // the largest tool-result outputs (spilling full content to
-                    // disk, leaving a bounded `<persisted-output>` preview) so the
-                    // request drops back under the ceiling and the run CONTINUES.
-                    // Shedding rewrites `ToolResult` content in place — it never
-                    // adds or removes blocks — so tool_use/tool_result pairing is
-                    // untouched (no orphaned-tool_use 400; the reason drop-oldest
-                    // sliding-window is deferred to a later phase).
-                    //
-                    // Two message sets are shed:
-                    //   * `request.messages` — the copy actually DISPATCHED (a
-                    //     clone of history plus this turn's transient injections);
-                    //     shedding it is what makes the sent call fit. The
-                    //     continue/abort decision is taken on THIS set.
-                    //   * `self.messages` — the PERSISTED history; shedding it too
-                    //     means a saved/resumed session heals (starts already
-                    //     shrunk) instead of re-entering this guard every turn.
-                    // Both target the same oversized blocks and the spills are
-                    // idempotent (`maybe_persist_tool_result` skips already-spilled
-                    // blocks), so re-runs never re-spill or hot-loop.
-                    let storage = wcore_tools::tool_result_storage::StorageDir::os_default();
-                    let budget = wcore_tools::tool_result_storage::BudgetConfig::default();
-                    // Shed any result whose spill is a NET reduction: the
-                    // `<persisted-output>` replacement is the preview (≤
-                    // `preview_size`) plus a small fixed header, so a block over
-                    // `preview_size` + a header margin always shrinks. Keeping the
-                    // floor this low (not a large multiple) means a context that
-                    // is only marginally over the ceiling still gets reduced
-                    // instead of aborting — only genuinely tiny blocks are skipped.
-                    let min_shed = budget.preview_size + 512;
-                    // Fold the fixed system+tools token overhead into a scalar so
-                    // the shedding closure borrows nothing from `request` (the
-                    // `system`/`tools` locals were moved into `request` above).
-                    // `estimate_request_tokens(m, sys, tools)
-                    //   == estimate_tokens_from_messages(m) + overhead` exactly.
-                    let overhead =
-                        estimate::estimate_request_tokens(&[], &request.system, &request.tools);
-                    // `est` captures only `overhead` (a `u64`), so it is `Copy` —
-                    // pass it by value to both sheds and still call it below.
-                    let est = |m: &[Message]| estimate::estimate_tokens_from_messages(m) + overhead;
-                    let shed = crate::compact::degrade::shed_tool_outputs_until_under(
-                        &mut request.messages,
-                        &storage,
-                        &budget,
-                        min_shed,
-                        ceiling,
-                        est,
-                    );
-                    crate::compact::degrade::shed_tool_outputs_until_under(
-                        &mut self.messages,
-                        &storage,
-                        &budget,
-                        min_shed,
-                        ceiling,
-                        est,
-                    );
-                    // #646 — graceful degradation (rung 2). If tool-output
-                    // shedding did not bring the DISPATCHED request under the
-                    // ceiling, the overflow is conversation-heavy: a big pasted
-                    // `Text`/`Thinking` block or many non-tool messages, which
-                    // rung 1 cannot touch. Degrade the non-tool content too —
-                    // truncate an oversized non-tool block head+tail, then drop
-                    // the oldest non-essential (pairing-safe: never a
-                    // tool_use/tool_result, the system prompt, or the latest
-                    // turn) message until under the ceiling. Applied to both the
-                    // dispatched request and persisted history so a resume heals.
-                    let mut rung2_fired = false;
-                    if est(&request.messages) >= ceiling {
-                        // Cap any single non-tool block at ~`ceiling` chars
-                        // (≈ a quarter of the ceiling in tokens), so one huge
-                        // paste truncates well under the window and the
-                        // drop-oldest pass mops up any residual.
-                        let per_block_budget = ceiling as usize;
-                        // The dispatched-set result drives the user notification:
-                        // rung 2 is LOSSY (truncates pasted content, drops oldest
-                        // turns) and irreversible, unlike rung 1's disk-spill — so
-                        // it must never fire silently.
-                        rung2_fired = crate::compact::degrade::degrade_conversation_overflow(
-                            &mut request.messages,
-                            ceiling,
-                            per_block_budget,
-                            est,
-                        );
-                        crate::compact::degrade::degrade_conversation_overflow(
-                            &mut self.messages,
-                            ceiling,
-                            per_block_budget,
-                            est,
-                        );
-                    }
-                    // Decide on the DISPATCHED set: the window/ceiling are
-                    // unchanged, so only `used_tokens` moves. Re-stamp every
-                    // downstream consumer of the request size so none sees the
-                    // stale pre-shed estimate — `client_context_tokens` feeds the
-                    // Flux/OpenAI context-routing header (mirrors the compaction-
-                    // retry recount below).
-                    let sent = est(&request.messages);
-                    ctx.used_tokens = sent;
-                    input_token_estimate = sent as usize;
-                    request.client_context_tokens = Some(sent);
-                    if sent >= ceiling {
-                        // #636: is the PERSISTED history (which, unlike the
-                        // dispatched request, carries none of this turn's transient
-                        // injections) resumable? If degradation left it under the
-                        // ceiling, a resume heals — persist it. If not, saving it
-                        // would trap the resume in the same over-ceiling context, so
-                        // DON'T persist: keep the last recoverable on-disk state.
-                        let resumable = est(&self.messages) < ceiling;
-                        let tail = if resumable {
-                            "Start a new chat or raise the model's context budget; \
-                             your saved session was trimmed to stay resumable."
-                        } else {
-                            "This over-limit turn was not saved — your previous \
-                             (smaller) session is still resumable; reopen it or \
-                             start a new chat."
-                        };
-                        self.output.emit_error(
-                            &format!(
-                                "Run stopped: estimated request size ({sent} tokens) \
-                                 reached the context-window ceiling ({ceiling}) for model \
-                                 '{}' and compaction could not reduce it further. {tail}",
-                                request.model,
-                            ),
-                            false,
-                        );
-                        // Context ceiling: a bigger budget is needed, not more turns.
-                        return self
-                            .finish_run_terminated_inner(
-                                user_input,
-                                turn,
-                                FinishReason::Length,
-                                resumable,
+            let mut stream_attempt = first_recovery_checkpoint
+                .as_ref()
+                .map_or(0, |checkpoint| checkpoint.stream_attempt);
+            let mut overflow_retried = first_recovery_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.overflow_retried);
+            let mut length_wedge_retried = first_recovery_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.length_wedge_retried);
+            let mut resumed_provider_dispatch = false;
+            let mut resumed_dispatch_id = None;
+            let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
+                if let Some(checkpoint) = first_recovery_checkpoint.take() {
+                    if !matches!(
+                        checkpoint.next_action,
+                        crate::recovery::RecoveryNextAction::ProviderDispatch
+                    ) || checkpoint.turn_index
+                        != u64::try_from(turn).map_err(|_| {
+                            AgentError::SessionAuthority(
+                                "recovery turn index exceeds u64".to_string(),
                             )
-                            .await;
-                    }
-                    if shed > 0 || rung2_fired {
-                        tracing::info!(
-                            target: "wcore_agent::compact",
-                            shed,
-                            rung2_fired,
-                            ceiling,
-                            used = input_token_estimate,
-                            model = %request.model,
-                            "context overflow: degraded history to continue"
-                        );
-                        // Two distinct degradations may have fired: rung 1 spills
-                        // large tool outputs to disk (recoverable); rung 2 truncates
-                        // pasted content and/or drops the oldest turns (lossy). Name
-                        // whichever ran so the user knows what changed.
-                        let mut parts: Vec<String> = Vec::new();
-                        if shed > 0 {
-                            parts.push(format!("shed {shed} large tool output(s) to disk"));
-                        }
-                        if rung2_fired {
-                            parts.push(
-                                "truncated oversized message content and/or dropped the \
-                                 oldest turns"
-                                    .to_string(),
-                            );
-                        }
-                        self.output.emit_info(&format!(
-                            "Context exceeded the model limit; {} to continue.",
-                            parts.join(" and "),
+                        })?
+                        || checkpoint.stream_attempt != stream_attempt
+                        || checkpoint.overflow_retried != overflow_retried
+                        || checkpoint.length_wedge_retried != length_wedge_retried
+                    {
+                        return Err(AgentError::SessionAuthority(
+                            "recovery checkpoint does not match the provider loop state"
+                                .to_string(),
                         ));
                     }
-                }
-            }
-
-            // Up-front output sizing (Layer 1). Clamp `max_tokens` to the FINAL
-            // model's real output ceiling. Placed AFTER the smart-routing tier
-            // swap above so it sees `request.model` post-swap: a tier-swapped
-            // cheaper model is clamped to ITS ceiling, never over-asked at the
-            // premium model's. A known model is clamped to what it actually
-            // allows (so the generous default never 400s); an unknown/router
-            // model is clamped to a conservative floor. `self.max_tokens` is the
-            // user's CAP and always binds.
-            let requested_thinking_budget = match &request.thinking {
-                Some(wcore_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                    Some(*budget_tokens)
-                }
-                _ => None,
-            };
-            // #426 — a turn is "reasoning" if it carries either a numeric
-            // thinking budget (Anthropic/DeepSeek) or an OpenAI reasoning_effort
-            // (o-series / gpt-5). Both spend output tokens on hidden reasoning,
-            // so both must lift an unknown model off the 8192 floor.
-            let is_reasoning_turn =
-                requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
-            request.max_tokens = size_output_cap(
-                self.max_tokens,
-                self.compat.provider_type(),
-                &request.model,
-                input_token_estimate,
-                is_reasoning_turn,
-            );
-            // #112 — when the user omitted `--max-tokens`, the model is
-            // unknown to the registry, and the provider is omit-safe, OMIT the
-            // wire max-tokens field so the served model's natural ceiling
-            // applies instead of the conservative floor. `request.max_tokens`
-            // keeps the sized value above — it still feeds
-            // `fit_thinking_budget` below, the `x-wl-expected-output` header,
-            // and the #255 gauge math; only serialization is skipped.
-            request.omit_max_tokens = should_omit_max_tokens(
-                self.compat.provider_type(),
-                &request.model,
-                self.max_tokens_explicit,
-                self.compat.omit_max_tokens_when_unsized(),
-            );
-
-            // #426 / wayland#422 — separate the reasoning budget from the output
-            // budget so extended thinking can never starve the visible answer.
-            // For reasoning models `max_tokens` is the TOTAL of reasoning +
-            // visible output; without this a heavy thinking turn (especially on
-            // a router alias clamped low) spends the whole budget thinking and
-            // returns an empty, `finish_reason: length` reply. Shrink the budget
-            // to reserve `MIN_VISIBLE_OUTPUT`; if no usable budget remains, drop
-            // thinking for the turn rather than emit an empty answer.
-            if let Some(budget) = requested_thinking_budget {
-                let fitted = fit_thinking_budget(request.max_tokens, budget);
-                request.thinking = Some(if fitted >= MIN_THINKING_BUDGET {
-                    if fitted < budget {
-                        tracing::debug!(
-                            target: "wcore_agent::engine",
-                            requested = budget,
-                            fitted,
-                            max_tokens = request.max_tokens,
-                            "thinking budget shrunk to reserve visible-output room (#426)"
-                        );
-                    }
-                    wcore_types::llm::ThinkingConfig::Enabled {
-                        budget_tokens: fitted,
-                    }
-                } else {
-                    tracing::debug!(
-                        target: "wcore_agent::engine",
-                        requested = budget,
-                        max_tokens = request.max_tokens,
-                        "output budget too small for thinking + visible answer; thinking dropped for this turn (#426)"
+                    let request = prepared_recovery_request.take().ok_or_else(|| {
+                        AgentError::SessionAuthority(
+                            "recovery checkpoint is missing its validated exact provider request"
+                                .to_string(),
+                        )
+                    })?;
+                    resumed_dispatch_id = checkpoint.dispatch_id.clone();
+                    let effective_model = request.model.clone();
+                    let input_token_estimate = request.client_context_tokens.map_or_else(
+                        || {
+                            estimate::estimate_request_tokens(
+                                &request.messages,
+                                &request.system,
+                                &request.tools,
+                            ) as usize
+                        },
+                        |tokens| tokens as usize,
                     );
-                    wcore_types::llm::ThinkingConfig::Disabled
-                });
-            }
+                    resumed_provider_dispatch = true;
+                    (request, effective_model, input_token_estimate, None)
+                } else {
+                    // Fire on_turn_start hooks at the top of each iteration so Rust
+                    // hooks can override the model or inject prompt messages before
+                    // run_compaction + provider.stream(). Outcome is applied via
+                    // apply_pre_turn_outcome (switch_model + injected_messages).
+                    //
+                    // AUDIT A9 — a turn-start hook that returns `block` halts
+                    // the loop cleanly: operators can write a "stop after
+                    // condition X" hook as a backstop.
+                    let hook_block_reason = if first_recovery_checkpoint.is_none()
+                        && let Some(hook_engine) = self.hooks.as_ref()
+                    {
+                        let ctx = TurnContext {
+                            turn,
+                            model: self.model.clone(),
+                            message_count: self.messages.len(),
+                        };
+                        let outcome = hook_engine.on_turn_start(turn, &ctx).await;
+                        self.apply_pre_turn_outcome(outcome)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = hook_block_reason {
+                        self.output
+                            .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
+                        return self
+                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .await;
+                    }
+
+                    // Fire PreCompact plugin hooks once per turn, immediately before
+                    // the compaction pass. Gated like every other phase: a no-op when
+                    // no hook engine / no PreCompact hooks are registered.
+                    if first_recovery_checkpoint.is_none()
+                        && let Some(hook_engine) = self.hooks.as_ref()
+                    {
+                        let outcome = hook_engine.run_pre_compact(turn, self.messages.len()).await;
+                        for line in outcome.hook_trace {
+                            tracing::debug!(target: "wcore_agent::hooks", "{line}");
+                        }
+                    }
+
+                    // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
+                    // the turn-loop top (the tool loop lives below provider.stream in the
+                    // same iteration), and the model swap was already applied above, so
+                    // the Flux-aware fraction is computed against the CURRENTLY-active
+                    // model. Default-OFF: `smart_compact_fraction` returns `None` on its
+                    // first line when disabled, so neither memory nor the force flag is
+                    // touched and `run_compaction` below behaves exactly as before. On a
+                    // fire we (1) persist a non-destructive handoff Episode, then (2) set
+                    // the one-shot force flag and fall straight through into the existing
+                    // `run_compaction` — no new summarization / fold / emit code.
+                    let smart_fired = if first_recovery_checkpoint.is_none() {
+                        match self.smart_compact_fraction() {
+                            Some(frac) => self.smart_compact_should_fire(turn as u32, frac),
+                            None => false,
+                        }
+                    } else {
+                        false
+                    };
+                    if smart_fired {
+                        self.smart_compact_force = true;
+                        if self.compact_config.smart_handoff_to_memory {
+                            // Persist BEFORE run_compaction mutates the buffer so the
+                            // verbatim pre-compaction transcript is durable; errors are
+                            // swallowed and never abort the turn.
+                            self.write_smart_handoff().await;
+                        }
+                    }
+
+                    // Run multi-level compaction before each API call.
+                    // On the first turn last_input_tokens is 0 so neither
+                    // autocompact nor emergency will fire.
+                    //
+                    // AUDIT A6 — a compaction failure (e.g. the emergency
+                    // `ContextTooLong` bail) ends the session; persist + fire
+                    // session-end hooks before propagating, so the error exit
+                    // is consistent with every other loop-exit path.
+                    if first_recovery_checkpoint.is_none()
+                        && let Err(e) = self.run_compaction().await
+                    {
+                        self.prepare_durable_conversation().await?;
+                        self.fire_on_session_end(turn).await;
+                        self.cache_ledger.finish();
+                        self.save_session_mirror();
+                        return Err(e);
+                    }
+
+                    // Build tool list: filter based on plan mode state
+                    let tools = if self.plan_state.is_active {
+                        // Plan mode: only Info-category tools (excluding EnterPlanMode)
+                        self.tools.to_tool_defs_filtered(|t| {
+                            t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+                        })
+                    } else {
+                        // Normal mode: all tools except ExitPlanMode
+                        self.tools
+                            .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
+                    };
+
+                    // W6 F17: trim MCP tools to a curated top-K. MCP tools are
+                    // identified by real provenance (`ToolDef::server.is_some()`), not
+                    // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
+                    // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
+                    // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
+                    // Audit-log recency degrades to empty/keyword-only when
+                    // self.audit_log is None.
+                    let tools = self.apply_mcp_curation(tools);
+
+                    // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
+                    // 128). MCP servers can push the total past the limit even after
+                    // curation; this is the correctness guarantee, separate from the
+                    // relevance trim above.
+                    let tools = self.apply_provider_tool_cap(tools);
+
+                    // Layer D1 (token-opt): defer cold tools to name-only stubs —
+                    // only the configured hot allowlist (plus ToolSearch-hydrated
+                    // tools) ships full schemas; the model hydrates a stub on demand
+                    // via ToolSearch (the system prompt states that rule once,
+                    // `tool_usage_guidance`). The hot/stub split is a pure function
+                    // of static config + the monotonic hydrated set, so the
+                    // serialized tools[] array stays byte-identical across turns
+                    // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+                    // a hydration changes it once.
+                    let tools = self.apply_tool_deferral(tools);
+
+                    // Build system prompt: append plan mode instructions when active
+                    let system = if self.plan_state.is_active {
+                        format!(
+                            "{}\n\n{}",
+                            self.system_prompt,
+                            plan_prompt::plan_mode_instructions()
+                        )
+                    } else {
+                        self.system_prompt.clone()
+                    };
+
+                    // v0.8.1 U1 — the per-turn skill-router hint (when the router is
+                    // installed and picked a visible catalog skill). Cache-stability
+                    // (token-opt): the hint is dynamic per turn, so appending it to the
+                    // `system` string here would rewrite the cached system prefix
+                    // (zone 1) every turn. Compute it now and inject it into the
+                    // request's volatile message tail below instead. `None` (no router
+                    // / no pick / hidden skill) leaves both system and tail untouched.
+                    let skill_hint = self.skill_router_hint();
+
+                    // Record prompt state for cache diagnostics
+                    self.cache_detector.record_request(&system, &tools);
+
+                    // W8 v0.6.3 — pick the Anthropic prompt-cache tier for this
+                    // request. The agent turn loop reuses the same system prompt +
+                    // tools across every turn, so the prefix is stable far longer
+                    // than the 5-minute ephemeral window; `pick_cache_tier` promotes
+                    // to the 1h tier once the prompt clears the 1024-token minimum.
+                    // `None` stays valid (the Anthropic adapter falls back to 5m for
+                    // a `None` request) but the production path now produces a real
+                    // tier instead of always-`None`. Non-Anthropic providers ignore
+                    // the field.
+                    //
+                    // AUDIT A5 — estimate the FULL request (messages + system +
+                    // tool defs), not just message content. The message-only
+                    // estimate undercounts the turn-1 watermark by the system
+                    // prompt + tool-schema size (tens of k tokens for MCP-heavy
+                    // configs).
+                    let mut input_token_estimate =
+                        estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
+                    // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
+                    // immediately AFTER the smart-routing tier swap (so it measures the
+                    // POST-swap effective model's REAL window via the wcore-config
+                    // context_window kernel, not the stale CompactConfig 200k default).
+                    // See the `ContextWindow::resolve(..)` block just before
+                    // `size_output_cap`.
+                    let cache_tier = Some(wcore_providers::cache_tier::pick_cache_tier(
+                        input_token_estimate,
+                        AGENT_TURN_CACHE_REUSE_WINDOW_SECS,
+                    ));
+                    // F23-04: note the retention we are ASKING for. The
+                    // response reports cache tokens but never the requested
+                    // TTL, so "a 1h cache was requested and still missed" is
+                    // unanswerable from the response side alone.
+                    self.cache_ledger.note_retention(match cache_tier {
+                        Some(wcore_providers::cache_tier::CacheTier::Ephemeral5m) => {
+                            wcore_providers::cache_observation::CacheRetention::Ephemeral5m
+                        }
+                        Some(wcore_providers::cache_tier::CacheTier::Ephemeral1h) => {
+                            wcore_providers::cache_observation::CacheRetention::Ephemeral1h
+                        }
+                        Some(wcore_providers::cache_tier::CacheTier::None) | None => {
+                            wcore_providers::cache_observation::CacheRetention::None
+                        }
+                    });
+
+                    // Belt-and-suspenders: ensure no `tool_use` in history is
+                    // orphaned before sending to the provider. Anthropic 400s
+                    // on any orphan and bricks the session; the per-path fixes
+                    // in the dispatch loop close the known escape paths, but
+                    // this guard catches every remaining one — denial-by-
+                    // reaper, partial-batch loss on cancel, system-message
+                    // injection between an assistant tool_use and its result.
+                    self.repair_all_orphaned_tool_uses();
+                    // #285 — the reverse direction: a `tool_result` whose `tool_use`
+                    // was summarized away by autocompact is orphaned and makes
+                    // DeepSeek 400 the whole array. Run AFTER the forward repair so
+                    // the synthetic results it just backfilled (which always have a
+                    // matching tool_use) are untouched, and only true orphans are
+                    // demoted to text.
+                    self.repair_orphaned_tool_results();
+                    // Output-side optimization (Part A): attach fluff stop sequences
+                    // only when the route optimizes client-side. On router-optimized
+                    // routes the server already trims output, so we leave the Vec
+                    // empty and providers emit no stop field.
+                    let stop_sequences = if self.compat.input_optimization() == "client"
+                        && self.compat.supports_stop_param()
+                    {
+                        FLUFF_STOP_SEQUENCES.iter().map(|s| s.to_string()).collect()
+                    } else {
+                        // Either the route is router-optimized (server trims output) or
+                        // the provider rejects `stop` (e.g. xAI grok-4.3 400s on it) —
+                        // leave empty so providers emit no `stop` field.
+                        Vec::new()
+                    };
+
+                    // Finding #174: the model actually dispatched this turn. Starts as
+                    // the user's configured model and is rewritten below if a routing
+                    // hint selects a configured tier model. Cost/usage accounting reads
+                    // THIS (not `self.model`) so attribution follows any swap.
+                    let mut effective_model = self.model.clone();
+
+                    // Layer E1 — the model Flux ACTUALLY routed this turn to
+                    // (ProviderMeta signal-back). `None` on non-Flux paths / before
+                    // the signal arrives; the cache_health_warn emission below falls
+                    // back to `effective_model`.
+                    let last_routed_model: Option<String> = None;
+
+                    let mut request = LlmRequest {
+                        model: self.model.clone(),
+                        system,
+                        messages: self.messages.clone(),
+                        tools,
+                        max_tokens: self.max_tokens,
+                        thinking: self.thinking.clone(),
+                        reasoning_effort: self.current_reasoning_effort.clone(),
+                        cache_tier,
+                        routing_hint: None,
+                        stop_sequences,
+                        web_search: self.web_search,
+                        // #282: thread the stable conversation id + assembled-prompt
+                        // token estimate so the Flux provider can emit the x-wl-*
+                        // context-routing headers on tier-alias turns.
+                        conversation_id: Some(self.conversation_id.clone()),
+                        client_context_tokens: Some(input_token_estimate as u64),
+                        // Crucible #3: per-session sampling temperature (council child
+                        // engines set it; top-level session leaves it `None`).
+                        temperature: self.temperature,
+                        // #112: decided below at the sizing site, AFTER the smart-
+                        // routing tier swap, so the omit decision sees the final model.
+                        omit_max_tokens: false,
+                    };
+
+                    // Cache-stability (token-opt): inject the per-turn skill-router
+                    // hint as a transient text block on the request's last user-role
+                    // message. `request.messages` is a clone, so this never persists
+                    // into history and never shifts the cached system/tool prefix.
+                    // Done before `mark_cache_boundaries` so the tail breakpoint
+                    // accounts for the final content. Skipped unless the tail is
+                    // user-role (never orphans a tool_use or creates adjacent user
+                    // messages).
+                    if let Some(hint) = skill_hint
+                        && let Some(last) = request.messages.last_mut()
+                        && matches!(last.role, Role::User)
+                    {
+                        last.content.push(ContentBlock::Text { text: hint });
+                    }
+
+                    // Cache-stability (token-opt, finding #174): inject the current date
+                    // as a transient text block on the request's last user-role message
+                    // instead of the cached system prefix. The date value changes daily /
+                    // across cross-midnight restarts; keeping it out of the prefix lets
+                    // the cached system+tools prefix stay byte-stable, so Anthropic prompt
+                    // caching survives cold starts. `request.messages` is a clone, so this
+                    // never persists into history. Skipped unless the tail is user-role
+                    // (never orphans a tool_use or creates adjacent user messages).
+                    if let Some(last) = request.messages.last_mut()
+                        && matches!(last.role, Role::User)
+                    {
+                        last.content.push(ContentBlock::Text {
+                            text: crate::context::current_date_block(
+                                &crate::context::today_string(),
+                            ),
+                        });
+                    }
+
+                    // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
+                    // their contributions to the request's last user-role message. Done
+                    // here — after the skill hint and BEFORE `mark_cache_boundaries`, but
+                    // OUTSIDE the `'stream` retry loop below (so it fires once per turn,
+                    // not once per stream retry). `request.messages` is a clone, so this
+                    // never persists into history and never shifts the cached system/tool
+                    // prefix; placing it before the breakpoint marking lets the tail
+                    // breakpoint account for the final content. The contribution is
+                    // budget-capped and deduped against the last injection. No-op when no
+                    // hook engine / PrePrompt hooks / dispatcher are present.
+                    // A provider-dispatch checkpoint was committed after PrePrompt had
+                    // already run. Replaying the hook could repeat an external side
+                    // effect. Rebuild without it and let the request-digest check fail
+                    // closed when the original hook contributed transient content.
+                    let pre_prompt_outcome = if first_recovery_checkpoint.is_some() {
+                        None
+                    } else {
+                        match self.hooks.as_ref() {
+                            Some(hook_engine) => Some(hook_engine.run_pre_prompt().await),
+                            None => None,
+                        }
+                    };
+                    if let Some(outcome) = pre_prompt_outcome {
+                        for line in &outcome.hook_trace {
+                            tracing::debug!(target: "wcore_agent::hooks", "{line}");
+                        }
+                        Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
+                    }
+
+                    // W1 S3: place per-message cache breakpoints when the provider
+                    // honours them. Idempotent across turns: previous turns' markers
+                    // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
+                    // a PERMANENT anchor breakpoint is additionally pinned to an
+                    // immutable already-stubbed message (pure function of the
+                    // compaction markers; `request.messages` is an index-aligned
+                    // clone of `self.messages`, so the index maps 1:1). The anchor
+                    // keeps the long prefix cache-valid while continuous
+                    // args-compaction transitions the message at the
+                    // keep_recent_turns boundary inside it.
+                    mark_cache_boundaries(
+                        &mut request,
+                        &self.compat,
+                        micro::cache_anchor_index(&self.messages),
+                    );
+
+                    // W1 v0.6.3: stamp a smart-routing hint onto the request so
+                    // `ProviderChain` can surface the router's decision in dispatch
+                    // observability. Finding #174: ALSO act on the hint — swap the
+                    // model to a configured tier model (cheap/balanced) before
+                    // dispatch. `input_tokens`, `max_output_tokens`, and
+                    // `tool_call_count` are real; `code_ratio` is conservatively zero
+                    // (no code-ratio scanner) and `requires_vision` comes from
+                    // `message_requires_vision` (false until an image ContentBlock
+                    // exists), so this producer emits only large-context / tool-heavy /
+                    // simple decisions — never a wrong hint.
+                    {
+                        let tool_call_count = self
+                            .messages
+                            .iter()
+                            .flat_map(|m| &m.content)
+                            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                            .count() as u32;
+                        // Vision guard input: a turn that carries image/vision content
+                        // must never be downgraded (the cheap tier may not be
+                        // vision-capable). The `wcore-types` message model has no image
+                        // block today, so this is conservatively `false` from real
+                        // content; the routing classifier promotes any vision turn to
+                        // Premium anyway, which `select_tier_model` also refuses to
+                        // swap. Routed through one flag so a future image ContentBlock
+                        // only needs to flip this.
+                        let requires_vision = message_requires_vision(&self.messages);
+                        let shape = wcore_providers::RequestShape {
+                            input_tokens: input_token_estimate,
+                            max_output_tokens: request.max_tokens as usize,
+                            code_ratio: 0.0,
+                            tool_call_count,
+                            requires_vision,
+                        };
+                        let decision = wcore_providers::route(
+                            &shape,
+                            &wcore_providers::RoutingHeuristics::default(),
+                        );
+                        request.routing_hint = Some(decision.to_hint());
+
+                        // Finding #174: act on the hint. Opt-in + guarded — see
+                        // `select_tier_model`. Only Cheap/Balanced hints with a
+                        // configured tier model and no vision content swap the model;
+                        // everything else leaves `request.model` (and `effective_model`)
+                        // as the user's configured model.
+                        if let Some(tier_model) =
+                            select_tier_model(&decision, requires_vision, &self.compat)
+                        {
+                            tracing::debug!(
+                                target: "wcore_agent::routing",
+                                from = %self.model,
+                                to = %tier_model,
+                                hint = %decision.to_hint().0,
+                                "smart-routing tier swap"
+                            );
+                            request.model = tier_model.clone();
+                            effective_model = tier_model;
+                        }
+                    }
+
+                    // #255 — pre-flight context-window overflow guard, RECOMPUTED on the
+                    // POST-swap effective model. `run_compaction` above already had its
+                    // chance to shrink history; if the assembled request still exceeds a
+                    // safe fraction of the model that will ACTUALLY serve this request,
+                    // the provider call would 400. Terminate the run cleanly instead.
+                    //
+                    // The denominator comes from the kernel (`ContextWindow::resolve`),
+                    // which reads the post-swap model's REAL window from
+                    // `wcore_config::limits` — NOT the stale `CompactConfig` 200k
+                    // default that the old guard used. After a Flux/tier swap to e.g.
+                    // gpt-4o (128k) the ceiling is now computed against 128k, so the
+                    // guard fires at the correct count (the #255 false-negative fix).
+                    //
+                    // `&request.model` is the same model arg fed to `size_output_cap`
+                    // below, so guard and cap agree. When the window is unknown
+                    // (`input_ceiling() == None`) the guard SKIPS — fail open, identical
+                    // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
+                    // the provider 400 are the backstops.
+                    {
+                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
+                            input_token_estimate as u64,
+                            self.compat.provider_type(),
+                            &request.model,
+                            self.compact_config.context_window as u64,
+                        );
+                        // #282 contract V1: once Flux has SIGNALLED-BACK the real served
+                        // window (`x-flux-model-window`) on a prior turn of THIS Flux
+                        // route, prefer it over the alias's pre-route guess so the guard
+                        // measures against the model that will actually serve the turn.
+                        if wcore_providers::is_flux_tier_alias(&request.model)
+                            && let Some(window) = self.flux_served_window
+                        {
+                            ctx.window = Some(window);
+                        }
+                        if let Some(ceiling) = ctx.input_ceiling(
+                            self.compact_config.output_reserve as u64,
+                            self.compact_config.emergency_buffer as u64,
+                        ) && ctx.used_tokens >= ceiling
+                        {
+                            // #636 — graceful degradation (rung 1). Before aborting, shed
+                            // the largest tool-result outputs (spilling full content to
+                            // disk, leaving a bounded `<persisted-output>` preview) so the
+                            // request drops back under the ceiling and the run CONTINUES.
+                            // Shedding rewrites `ToolResult` content in place — it never
+                            // adds or removes blocks — so tool_use/tool_result pairing is
+                            // untouched (no orphaned-tool_use 400; the reason drop-oldest
+                            // sliding-window is deferred to a later phase).
+                            //
+                            // Two message sets are shed:
+                            //   * `request.messages` — the copy actually DISPATCHED (a
+                            //     clone of history plus this turn's transient injections);
+                            //     shedding it is what makes the sent call fit. The
+                            //     continue/abort decision is taken on THIS set.
+                            //   * `self.messages` — the PERSISTED history; shedding it too
+                            //     means a saved/resumed session heals (starts already
+                            //     shrunk) instead of re-entering this guard every turn.
+                            // Both target the same oversized blocks and the spills are
+                            // idempotent (`maybe_persist_tool_result` skips already-spilled
+                            // blocks), so re-runs never re-spill or hot-loop.
+                            let storage =
+                                wcore_tools::tool_result_storage::StorageDir::os_default();
+                            let budget = wcore_tools::tool_result_storage::BudgetConfig::default();
+                            // Shed any result whose spill is a NET reduction: the
+                            // `<persisted-output>` replacement is the preview (≤
+                            // `preview_size`) plus a small fixed header, so a block over
+                            // `preview_size` + a header margin always shrinks. Keeping the
+                            // floor this low (not a large multiple) means a context that
+                            // is only marginally over the ceiling still gets reduced
+                            // instead of aborting — only genuinely tiny blocks are skipped.
+                            let min_shed = budget.preview_size + 512;
+                            // Fold the fixed system+tools token overhead into a scalar so
+                            // the shedding closure borrows nothing from `request` (the
+                            // `system`/`tools` locals were moved into `request` above).
+                            // `estimate_request_tokens(m, sys, tools)
+                            //   == estimate_tokens_from_messages(m) + overhead` exactly.
+                            let overhead = estimate::estimate_request_tokens(
+                                &[],
+                                &request.system,
+                                &request.tools,
+                            );
+                            // `est` captures only `overhead` (a `u64`), so it is `Copy` —
+                            // pass it by value to both sheds and still call it below.
+                            let est = |m: &[Message]| {
+                                estimate::estimate_tokens_from_messages(m) + overhead
+                            };
+                            let shed = crate::compact::degrade::shed_tool_outputs_until_under(
+                                &mut request.messages,
+                                &storage,
+                                &budget,
+                                min_shed,
+                                ceiling,
+                                est,
+                            );
+                            crate::compact::degrade::shed_tool_outputs_until_under(
+                                &mut self.messages,
+                                &storage,
+                                &budget,
+                                min_shed,
+                                ceiling,
+                                est,
+                            );
+                            // #646 — graceful degradation (rung 2). If tool-output
+                            // shedding did not bring the DISPATCHED request under the
+                            // ceiling, the overflow is conversation-heavy: a big pasted
+                            // `Text`/`Thinking` block or many non-tool messages, which
+                            // rung 1 cannot touch. Degrade the non-tool content too —
+                            // truncate an oversized non-tool block head+tail, then drop
+                            // the oldest non-essential (pairing-safe: never a
+                            // tool_use/tool_result, the system prompt, or the latest
+                            // turn) message until under the ceiling. Applied to both the
+                            // dispatched request and persisted history so a resume heals.
+                            let mut rung2_fired = false;
+                            if est(&request.messages) >= ceiling {
+                                // Cap any single non-tool block at ~`ceiling` chars
+                                // (≈ a quarter of the ceiling in tokens), so one huge
+                                // paste truncates well under the window and the
+                                // drop-oldest pass mops up any residual.
+                                let per_block_budget = ceiling as usize;
+                                // The dispatched-set result drives the user notification:
+                                // rung 2 is LOSSY (truncates pasted content, drops oldest
+                                // turns) and irreversible, unlike rung 1's disk-spill — so
+                                // it must never fire silently.
+                                rung2_fired =
+                                    crate::compact::degrade::degrade_conversation_overflow(
+                                        &mut request.messages,
+                                        ceiling,
+                                        per_block_budget,
+                                        est,
+                                    );
+                                crate::compact::degrade::degrade_conversation_overflow(
+                                    &mut self.messages,
+                                    ceiling,
+                                    per_block_budget,
+                                    est,
+                                );
+                            }
+                            // Decide on the DISPATCHED set: the window/ceiling are
+                            // unchanged, so only `used_tokens` moves. Re-stamp every
+                            // downstream consumer of the request size so none sees the
+                            // stale pre-shed estimate — `client_context_tokens` feeds the
+                            // Flux/OpenAI context-routing header (mirrors the compaction-
+                            // retry recount below).
+                            let sent = est(&request.messages);
+                            let resumable_history = est(&self.messages) < ceiling;
+                            if sent < ceiling || resumable_history {
+                                self.sync_active_journal_conversation().await?;
+                            }
+                            ctx.used_tokens = sent;
+                            input_token_estimate = sent as usize;
+                            request.client_context_tokens = Some(sent);
+                            if sent >= ceiling {
+                                // #636: is the PERSISTED history (which, unlike the
+                                // dispatched request, carries none of this turn's transient
+                                // injections) resumable? If degradation left it under the
+                                // ceiling, a resume heals — persist it. If not, saving it
+                                // would trap the resume in the same over-ceiling context, so
+                                // DON'T persist: keep the last recoverable on-disk state.
+                                let resumable = resumable_history;
+                                let tail = if resumable {
+                                    "Start a new chat or raise the model's context budget; \
+                             your saved session was trimmed to stay resumable."
+                                } else {
+                                    "This over-limit turn was not saved — your previous \
+                             (smaller) session is still resumable; reopen it or \
+                             start a new chat."
+                                };
+                                self.output.emit_error(
+                                    &format!(
+                                        "Run stopped: estimated request size ({sent} tokens) \
+                                 reached the context-window ceiling ({ceiling}) for model \
+                                 '{}' and compaction could not reduce it further. {tail}",
+                                        request.model,
+                                    ),
+                                    false,
+                                );
+                                // Context ceiling: a bigger budget is needed, not more turns.
+                                return self
+                                    .finish_run_terminated_inner(
+                                        user_input,
+                                        turn,
+                                        FinishReason::Length,
+                                        resumable,
+                                    )
+                                    .await;
+                            }
+                            if shed > 0 || rung2_fired {
+                                tracing::info!(
+                                    target: "wcore_agent::compact",
+                                    shed,
+                                    rung2_fired,
+                                    ceiling,
+                                    used = input_token_estimate,
+                                    model = %request.model,
+                                    "context overflow: degraded history to continue"
+                                );
+                                // Two distinct degradations may have fired: rung 1 spills
+                                // large tool outputs to disk (recoverable); rung 2 truncates
+                                // pasted content and/or drops the oldest turns (lossy). Name
+                                // whichever ran so the user knows what changed.
+                                let mut parts: Vec<String> = Vec::new();
+                                if shed > 0 {
+                                    parts.push(format!("shed {shed} large tool output(s) to disk"));
+                                }
+                                if rung2_fired {
+                                    parts.push(
+                                        "truncated oversized message content and/or dropped the \
+                                 oldest turns"
+                                            .to_string(),
+                                    );
+                                }
+                                self.output.emit_info(&format!(
+                                    "Context exceeded the model limit; {} to continue.",
+                                    parts.join(" and "),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Up-front output sizing (Layer 1). Clamp `max_tokens` to the FINAL
+                    // model's real output ceiling. Placed AFTER the smart-routing tier
+                    // swap above so it sees `request.model` post-swap: a tier-swapped
+                    // cheaper model is clamped to ITS ceiling, never over-asked at the
+                    // premium model's. A known model is clamped to what it actually
+                    // allows (so the generous default never 400s); an unknown/router
+                    // model is clamped to a conservative floor. `self.max_tokens` is the
+                    // user's CAP and always binds.
+                    let requested_thinking_budget = match &request.thinking {
+                        Some(wcore_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
+                            Some(*budget_tokens)
+                        }
+                        _ => None,
+                    };
+                    // #426 — a turn is "reasoning" if it carries either a numeric
+                    // thinking budget (Anthropic/DeepSeek) or an OpenAI reasoning_effort
+                    // (o-series / gpt-5). Both spend output tokens on hidden reasoning,
+                    // so both must lift an unknown model off the 8192 floor.
+                    let is_reasoning_turn =
+                        requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
+                    request.max_tokens = size_output_cap(
+                        self.max_tokens,
+                        self.compat.provider_type(),
+                        &request.model,
+                        input_token_estimate,
+                        is_reasoning_turn,
+                    );
+                    // #112 — when the user omitted `--max-tokens`, the model is
+                    // unknown to the registry, and the provider is omit-safe, OMIT the
+                    // wire max-tokens field so the served model's natural ceiling
+                    // applies instead of the conservative floor. `request.max_tokens`
+                    // keeps the sized value above — it still feeds
+                    // `fit_thinking_budget` below, the `x-wl-expected-output` header,
+                    // and the #255 gauge math; only serialization is skipped.
+                    request.omit_max_tokens = should_omit_max_tokens(
+                        self.compat.provider_type(),
+                        &request.model,
+                        self.max_tokens_explicit,
+                        self.compat.omit_max_tokens_when_unsized(),
+                    );
+                    // A finite provider ledger can reserve only a wire-bounded output.
+                    // Keep omit-safe behavior for legacy/unmetered sessions, but force
+                    // the sized cap onto every governed provider call.
+                    if self.budget_authority.is_some() || self.budget_tracker.is_some() {
+                        request.omit_max_tokens = false;
+                    }
+
+                    // #426 / wayland#422 — separate the reasoning budget from the output
+                    // budget so extended thinking can never starve the visible answer.
+                    // For reasoning models `max_tokens` is the TOTAL of reasoning +
+                    // visible output; without this a heavy thinking turn (especially on
+                    // a router alias clamped low) spends the whole budget thinking and
+                    // returns an empty, `finish_reason: length` reply. Shrink the budget
+                    // to reserve `MIN_VISIBLE_OUTPUT`; if no usable budget remains, drop
+                    // thinking for the turn rather than emit an empty answer.
+                    if let Some(budget) = requested_thinking_budget {
+                        let fitted = fit_thinking_budget(request.max_tokens, budget);
+                        request.thinking = Some(if fitted >= MIN_THINKING_BUDGET {
+                            if fitted < budget {
+                                tracing::debug!(
+                                    target: "wcore_agent::engine",
+                                    requested = budget,
+                                    fitted,
+                                    max_tokens = request.max_tokens,
+                                    "thinking budget shrunk to reserve visible-output room (#426)"
+                                );
+                            }
+                            wcore_types::llm::ThinkingConfig::Enabled {
+                                budget_tokens: fitted,
+                            }
+                        } else {
+                            tracing::debug!(
+                                target: "wcore_agent::engine",
+                                requested = budget,
+                                max_tokens = request.max_tokens,
+                                "output budget too small for thinking + visible answer; thinking dropped for this turn (#426)"
+                            );
+                            wcore_types::llm::ThinkingConfig::Disabled
+                        });
+                    }
+                    (
+                        request,
+                        effective_model,
+                        input_token_estimate,
+                        last_routed_model,
+                    )
+                };
 
             // AUDIT A3 / E-C2 — bounded stream-level retry loop.
             //
@@ -5307,24 +10182,17 @@ impl AgentEngine {
             let stop_reason: StopReason;
             let finish_reason: FinishReason;
             let turn_usage: TokenUsage;
-            let mut stream_attempt: u32 = 0;
+            let mut provider_budget_cap_hit: Option<ProviderBudgetMutationError> = None;
             // #282 contract V1: a managed Flux client that overflows the routed
             // model's window gets a typed 409 `ProviderError::ContextOverflow`.
             // We compact the conversation and retry the SAME turn EXACTLY ONCE;
             // this guard bounds it so a persistently-overflowing turn cannot
             // infinite-loop. After the single retry, a recurring overflow is
             // surfaced as a clean terminal error below.
-            let mut overflow_retried = false;
             // LENGTH-WEDGE GATE: a turn that ends `finish_reason=length` while
             // at/over the resolved input ceiling gets ONE forced compaction +
             // retry; this guard bounds it so the turn can never loop. After
             // the single retry a recurring wedge is a clean terminal error.
-            let mut length_wedge_retried = false;
-            // Spec v1 Task 5 progress gate: consecutive failed stream attempts
-            // whose outbound context carried a failed tool round and which
-            // produced no output at all. Two in a row = no realistic chance
-            // the next full-context re-send fares better — stop instead.
-            let mut no_progress_failures: u32 = 0;
             'stream: loop {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
@@ -5339,26 +10207,125 @@ impl AgentEngine {
                 let mut attempt_usage = TokenUsage::default();
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
-                // Finding #174 (nested re-bill): set ONLY when `stream()` itself
-                // returns a retryable `Err` — i.e. the provider's HTTP ring
-                // (`builder_send_with_retry`, up to 3 sends) already spent its
-                // full retry budget on this exact request before surfacing the
-                // error here. A mid-stream `LlmEvent::Error` or a truncated
-                // stream does NOT set this: those arrive AFTER `stream()`
-                // returned `Ok(rx)` (the HTTP ring succeeded; the failure is in
-                // the SSE body), so they keep the full engine retry budget and
-                // their retryability is unchanged. When this IS set, granting a
-                // fresh full engine budget on top of an already-exhausted HTTP
-                // ring stacks 3×3=9 full-input re-sends for one logical turn;
-                // we cap the engine ring at a single retry instead (see the
-                // budget guard below).
-                let mut http_ring_exhausted = false;
+                let mut stream_failure_code: Option<String> = None;
                 // FluxRouter web_search grounding (contract §5.4): per-attempt
                 // accumulators for the end-of-stream Citations / SearchResults
                 // events. Reset each retry alongside the other accumulators.
                 let mut grounding_citations: Vec<String> = Vec::new();
                 let mut grounding_search_results: Vec<wcore_types::llm::FluxSearchResult> =
                     Vec::new();
+
+                let provider_dispatch_id = if resumed_provider_dispatch {
+                    resumed_provider_dispatch = false;
+                    Some(resumed_dispatch_id.take().ok_or_else(|| {
+                        AgentError::SessionAuthority(
+                            "recovery checkpoint is missing its provider dispatch identity"
+                                .to_string(),
+                        )
+                    })?)
+                } else if let Some(turn_id) = journal_turn_id {
+                    self.sync_journal_conversation(turn_id).await?;
+                    // Asked of this engine's own protection, for the reason the
+                    // preflight above gives. It is cheap: a successful preflight
+                    // has already cached the key, so this is a mutex lock and a
+                    // `Some` check, and it is READ-ONLY — it can never create
+                    // the key it is asking about.
+                    //
+                    // The preflight has already screened every cause that must
+                    // fail closed, so the only way to be here without a key is
+                    // the host having none.
+                    if self
+                        .recovery_request_protection
+                        .sealed_request_key_available(&self.config)
+                        .is_err()
+                    {
+                        // A `ProviderDispatch` checkpoint is REQUIRED to carry a
+                        // sealed prepared request (`recovery.rs:331`), so on a
+                        // host that cannot seal one there is no honest
+                        // checkpoint to write — and writing one without the
+                        // seal would be a durable claim that this dispatch can
+                        // be replayed, which is exactly the lie this posture
+                        // exists to avoid.
+                        //
+                        // Mint the dispatch identity directly instead. It is
+                        // not decoration: with a journal and an active turn the
+                        // provider adapter REQUIRES one (see the `ok_or_else`
+                        // below), and it is what binds every physical
+                        // retry/fallback attempt to one logical send, so the
+                        // keyless write-ahead pairs still say "these four
+                        // attempts were one dispatch" rather than "four
+                        // dispatches happened". That distinction is the whole
+                        // value of the record to whoever has to reconcile it.
+                        //
+                        // On restart `recovery_plan()` finds a `turn_started`
+                        // with no terminal and no checkpoint, which is not
+                        // `Ready`, so the honest refusal already at
+                        // `run_with_content` names the interrupted turn and
+                        // asks for a decision. Nothing auto-continues.
+                        Some(format!("provider-dispatch-{}", uuid::Uuid::new_v4()))
+                    } else {
+                        let checkpoint = self
+                            .commit_provider_recovery_checkpoint(
+                                turn_id,
+                                &request,
+                                turn,
+                                stream_attempt,
+                                overflow_retried,
+                                length_wedge_retried,
+                                &loop_guard,
+                                &failure_guard,
+                            )
+                            .await?;
+                        checkpoint.dispatch_id
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(round) = recovered_provider_round.take() {
+                    if provider_dispatch_id.as_deref() != Some(round.dispatch_id.as_str()) {
+                        return Err(AgentError::SessionAuthority(
+                            "recovered provider response does not match checkpoint dispatch"
+                                .to_string(),
+                        ));
+                    }
+                    if !round.thinking_text.is_empty() {
+                        self.output
+                            .emit_thinking(&round.thinking_text, &self.current_msg_id);
+                    }
+                    if !round.assistant_text.is_empty() {
+                        self.output
+                            .emit_text_delta(&round.assistant_text, &self.current_msg_id);
+                    }
+                    for tool_call in &round.tool_calls {
+                        if let ContentBlock::ToolUse { name, input, .. } = tool_call {
+                            self.output.emit_tool_call(
+                                name,
+                                &serde_json::to_string(input).unwrap_or_default(),
+                            );
+                        }
+                    }
+                    assistant_text = round.assistant_text;
+                    thinking_text = round.thinking_text;
+                    tool_calls = round.tool_calls;
+                    if !round.citations.is_empty() || !round.search_results.is_empty() {
+                        let block =
+                            render_grounding_sources(&round.citations, &round.search_results);
+                        self.output.emit_text_delta(&block, &self.current_msg_id);
+                        assistant_text.push_str(&block);
+                    }
+                    self.flux_context_pressure = round.provider_metadata.context_pressure;
+                    self.flux_served_window = round.provider_metadata.model_window;
+                    if round.provider_metadata.routed_model.is_some() {
+                        last_routed_model = round.provider_metadata.routed_model;
+                    }
+                    self.length_wedge_fingerprint = None;
+                    stop_reason = round.stop_reason;
+                    finish_reason = round.finish_reason;
+                    turn_usage = round.usage;
+                    self.midflight_monitor.record_stream_attempt(false, false);
+                    break 'stream;
+                }
 
                 // LENGTH-WEDGE GATE (dispatch guard) — never re-send a context
                 // that is byte-identical (on the wire) to one that already
@@ -5395,29 +10362,531 @@ impl AgentEngine {
                         .await;
                 }
 
-                // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
-                // internally and can surface a *retryable*
+                // F11 admission control: reserve the worst-case request before
+                // the provider can bill it. Retries reserve independently, so
+                // the next physical call cannot start after the session cap is
+                // exhausted. Actual usage settles this reservation below.
+                let reservation_session_id = self.budget_session_id();
+                let reserved_input = request
+                    .client_context_tokens
+                    .unwrap_or(input_token_estimate as u64);
+                let reserved_output = request.max_tokens as u64;
+                let reservation_provider = self.compat.provider_type.as_deref().unwrap_or("");
+                let reserved_cost = resolve_conservative_reservation_cost(
+                    reservation_provider,
+                    &effective_model,
+                    reserved_input,
+                    reserved_output,
+                    &self.compat,
+                );
+                // `has_monetary_cap`, not `has_session_usd_cap`: a cross-session
+                // daily ceiling is also a monetary ceiling, and an unpriced call
+                // debits $0 against it — which would let a fresh-session-per-
+                // process caller walk straight through the very ceiling the
+                // daily ledger exists to hold.
+                let monetary_cap_active = if let Some(authority) = self.budget_authority.as_ref() {
+                    authority
+                        .lock()
+                        .inspect(|tracker, _| tracker.has_monetary_cap(&reservation_session_id))
+                        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?
+                } else {
+                    self.budget_tracker.as_ref().is_some_and(|tracker| {
+                        tracker.lock().has_monetary_cap(&reservation_session_id)
+                    })
+                };
+                let strict_monetary_cap = self.config.execution_policy.is_managed()
+                    || self.config.budget.max_cost_usd.is_some()
+                    || self.config.budget.max_daily_cost_usd.is_some()
+                    || self.config.session_cap.as_ref().is_some_and(|cap| {
+                        cap.max_cost_usd.is_some() || cap.max_daily_cost_usd.is_some()
+                    });
+                if !reserved_cost.priced {
+                    if monetary_cap_active && strict_monetary_cap {
+                        self.output.emit_budget_exceeded(
+                            "unpriced_provider",
+                            &format!("{reservation_provider}/{effective_model}"),
+                            "a provider/model with known pricing",
+                        );
+                        self.output.emit_error(
+                            &format!(
+                                "Provider call not started: pricing is unavailable for \
+                                 {reservation_provider}/{effective_model}, so the explicit or \
+                                 managed USD cap cannot be enforced. Select a priced model or \
+                                 remove the explicit max_cost_usd to use token-only governance."
+                            ),
+                            false,
+                        );
+                        return self
+                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .await;
+                    }
+                    self.output.emit_info(&format!(
+                        "Pricing unavailable for {reservation_provider}/{effective_model}; \
+                         the call remains bounded by the token envelope and cost is unpriced, not $0."
+                    ));
+                }
+                let reserved_cost = reserved_cost.usd;
+                let budget_dispatch_id = provider_dispatch_id.clone().unwrap_or_else(|| {
+                    format!("provider-budget-dispatch-{}", uuid::Uuid::new_v4())
+                });
+                let durable_authority = self.budget_authority.clone();
+                let budget_reservation = if let Some(authority) = durable_authority.as_ref() {
+                    let reservation_result = authority
+                        .lock()
+                        .reserve_provider_dispatch(
+                            &budget_dispatch_id,
+                            &reservation_session_id,
+                            reserved_input,
+                            reserved_output,
+                            reserved_cost,
+                        )
+                        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                    match reservation_result {
+                        Ok(reservation) => Some(ProviderBudgetReservation::new(
+                            ProviderBudgetOwner::Durable {
+                                authority: Arc::clone(authority),
+                                dispatch_id: budget_dispatch_id.clone(),
+                            },
+                            run_budget.clone(),
+                            reservation,
+                            reserved_input,
+                            reserved_output,
+                            reserved_cost,
+                        )),
+                        Err(wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        }) => {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Provider call not started: budget cap '{kind}' would be exceeded \
+                                     (limit {limit}, reserved total {observed}). Continue with \
+                                     additional budget to authorize more work."
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
+                } else if let Some(tracker) = self.budget_tracker.clone() {
+                    let reservation_result = tracker.lock().reserve_turn(
+                        &reservation_session_id,
+                        reserved_input,
+                        reserved_output,
+                        reserved_cost,
+                    );
+                    match reservation_result {
+                        Ok(reservation) => Some(ProviderBudgetReservation::new(
+                            ProviderBudgetOwner::Legacy(tracker),
+                            run_budget.clone(),
+                            reservation,
+                            reserved_input,
+                            reserved_output,
+                            reserved_cost,
+                        )),
+                        Err(wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        }) => {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Provider call not started: budget cap '{kind}' would be exceeded \
+                                     (limit {limit}, reserved total {observed}). Continue with \
+                                     additional budget to authorize more work."
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let fallback_budget_state =
+                    Arc::new(Mutex::new(ConfiguredFallbackBudgetState::new(
+                        budget_reservation,
+                        reservation_provider.to_string(),
+                        effective_model.clone(),
+                    )));
+                let fallback_state_for_admission = Arc::clone(&fallback_budget_state);
+                let tracker_for_fallback = self.budget_tracker.clone();
+                let authority_for_fallback = durable_authority.clone();
+                let execution_for_fallback = run_budget.clone();
+                let fallback_session_id = reservation_session_id.clone();
+                let fallback_dispatch_id = budget_dispatch_id.clone();
+                let fallback_compat = self.compat.clone();
+                let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
+                    Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
+                        let mut state = fallback_state_for_admission
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(reservation) = state.current.take() {
+                            if previous_attempted {
+                                let (input_tokens, output_tokens, cost_usd) =
+                                    reservation.conservative_charge();
+                                let settle_result =
+                                    reservation.settle(input_tokens, output_tokens, cost_usd);
+                                if let Err(error) = settle_result {
+                                    state.failure =
+                                        Some(ConfiguredFallbackAdmissionFailure::Budget(error));
+                                    return Err(ProviderError::Api {
+                                        status: 400,
+                                        message: "configured fallback denied by budget".into(),
+                                    });
+                                }
+                            } else {
+                                if let Err(error) = reservation.release() {
+                                    state.failure =
+                                        Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                            ProviderBudgetMutationError::Authority(error),
+                                        ));
+                                    return Err(ProviderError::Api {
+                                        status: 400,
+                                        message: "configured fallback budget authority failed"
+                                            .into(),
+                                    });
+                                }
+                            }
+                        }
+
+                        let next_cost = resolve_conservative_reservation_cost(
+                            next_provider,
+                            next_model,
+                            reserved_input,
+                            reserved_output,
+                            &fallback_compat,
+                        );
+                        if !next_cost.priced && monetary_cap_active && strict_monetary_cap {
+                            state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
+                                provider: next_provider.to_string(),
+                                model: next_model.to_string(),
+                            });
+                            return Err(ProviderError::Api {
+                                status: 400,
+                                message: "configured fallback pricing is unavailable".into(),
+                            });
+                        }
+                        let next_cost_usd = next_cost.usd;
+                        let next_reservation =
+                            if let Some(authority) = authority_for_fallback.as_ref() {
+                                match authority.lock().reserve_provider_dispatch(
+                                    &fallback_dispatch_id,
+                                    &fallback_session_id,
+                                    reserved_input,
+                                    reserved_output,
+                                    next_cost_usd,
+                                ) {
+                                    Ok(Ok(reservation)) => Some(ProviderBudgetReservation::new(
+                                        ProviderBudgetOwner::Durable {
+                                            authority: Arc::clone(authority),
+                                            dispatch_id: fallback_dispatch_id.clone(),
+                                        },
+                                        execution_for_fallback.clone(),
+                                        reservation,
+                                        reserved_input,
+                                        reserved_output,
+                                        next_cost_usd,
+                                    )),
+                                    Ok(Err(error)) => {
+                                        state.failure =
+                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                                ProviderBudgetMutationError::Budget(error),
+                                            ));
+                                        return Err(ProviderError::Api {
+                                            status: 400,
+                                            message: "configured fallback denied by budget".into(),
+                                        });
+                                    }
+                                    Err(error) => {
+                                        state.failure =
+                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                                ProviderBudgetMutationError::Authority(error),
+                                            ));
+                                        return Err(ProviderError::Api {
+                                            status: 400,
+                                            message: "configured fallback budget authority failed"
+                                                .into(),
+                                        });
+                                    }
+                                }
+                            } else if let Some(tracker) = tracker_for_fallback.clone() {
+                                match tracker.lock().reserve_turn(
+                                    &fallback_session_id,
+                                    reserved_input,
+                                    reserved_output,
+                                    next_cost_usd,
+                                ) {
+                                    Ok(reservation) => Some(ProviderBudgetReservation::new(
+                                        ProviderBudgetOwner::Legacy(Arc::clone(&tracker)),
+                                        execution_for_fallback.clone(),
+                                        reservation,
+                                        reserved_input,
+                                        reserved_output,
+                                        next_cost_usd,
+                                    )),
+                                    Err(error) => {
+                                        state.failure =
+                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                                ProviderBudgetMutationError::Budget(error),
+                                            ));
+                                        return Err(ProviderError::Api {
+                                            status: 400,
+                                            message: "configured fallback denied by budget".into(),
+                                        });
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                        state.current = next_reservation;
+                        state.current_provider = next_provider.to_string();
+                        state.current_model = next_model.to_string();
+                        Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
+                            estimated_microcents: next_cost.priced.then(|| {
+                                (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round()
+                                    as u64
+                            }),
+                        })
+                    });
+
+                // P1 Bug#3 — `stream()` can surface a *retryable*
                 // `ProviderError::Connection` (a connection reset/drop while
-                // the request was being sent, after the provider's own retry
-                // budget was spent) as the `Err` of this call — NOT as a
+                // the request was being sent) as the `Err` of this call — NOT as a
                 // mid-stream `LlmEvent::Error`. The previous `?` short-
                 // circuited the whole turn here, bypassing the bounded
                 // `'stream` retry loop below even though the identical error
                 // arriving mid-stream WOULD be retried. Funnel a retryable
-                // provider error into the same failed-attempt classifier — but
-                // (finding #174) with a capped engine budget, since the HTTP
-                // ring already exhausted its own retries on this request (see
-                // `http_ring_exhausted` and the budget guard below).
+                // provider error into the same failed-attempt classifier. F11
+                // disables the provider's nested retry ring for this call, so
+                // each engine attempt maps to one admitted physical send.
                 // Non-retryable errors (auth/4xx/parse/prompt-too-long)
                 // propagate immediately, exactly as before.
-                let mut rx = match self.provider.stream(&request).await {
+                let attempt_output = Arc::clone(&self.output);
+                let observed_provider_failure = Arc::new(Mutex::new(None::<String>));
+                let observer_failure = Arc::clone(&observed_provider_failure);
+                let attempt_observer: Arc<
+                    dyn Fn(wcore_providers::retry::ProviderAttemptEvidence) + Send + Sync,
+                > = Arc::new(move |evidence| {
+                    if evidence.physical || evidence.failure.is_some() {
+                        *observer_failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            evidence.failure.clone();
+                    }
+                    if evidence.physical {
+                        attempt_output.emit_provider_attempt(evidence.failure.as_deref());
+                    }
+                    if evidence.retrying {
+                        attempt_output.emit_provider_retry(evidence.failure.as_deref());
+                    }
+                });
+                let attempt_provider: Arc<dyn LlmProvider> = match (
+                    self.session_journal.as_ref(),
+                    self.active_journal_turn_id.as_ref(),
+                ) {
+                    (Some(journal), Some(turn_id)) => {
+                        let dispatch_id = provider_dispatch_id.as_ref().ok_or_else(|| {
+                            AgentError::SessionAuthority(
+                                "journaled provider call has no recovery dispatch identity"
+                                    .to_string(),
+                            )
+                        })?;
+                        Arc::new(
+                            JournaledLlmProvider::new(
+                                Arc::clone(&self.provider),
+                                journal.clone(),
+                                turn_id.clone(),
+                                LifecyclePurpose::Conversation,
+                                reservation_provider,
+                                effective_model.clone(),
+                            )
+                            .with_dispatch_id(dispatch_id.clone()),
+                        )
+                    }
+                    (Some(_), None) => {
+                        return Err(AgentError::SessionAuthority(
+                            "provider call has journal authority but no active durable turn"
+                                .to_string(),
+                        ));
+                    }
+                    (None, _) => Arc::clone(&self.provider),
+                };
+                let provider_cancel = self.cancel_token.clone();
+                let provider_result = tokio::select! {
+                    biased;
+                    _ = provider_cancel.cancelled() => {
+                        {
+                            let mut fallback_state = fallback_budget_state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if let Some(reservation) = fallback_state.current.take() {
+                                // Cancellation may race a physical send. Once the
+                                // provider future has been polled, its outcome is
+                                // unknown; consume the conservative reservation so
+                                // the session neither understates possible spend
+                                // nor leaves an in-flight reservation stranded.
+                                let (input_tokens, output_tokens, cost_usd) =
+                                    reservation.conservative_charge();
+                                let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
+                            }
+                        }
+                        if journal_turn_id.is_none() {
+                            self.prepare_durable_conversation().await?;
+                            self.save_session_mirror();
+                        }
+                        self.output.emit_info("Run cancelled while waiting for the provider.");
+                        return Err(AgentError::UserAborted);
+                    }
+                    result = wcore_providers::retry::scope_configured_fallback_admitter(
+                        fallback_admitter,
+                        wcore_providers::retry::scope_max_retries(
+                            0,
+                            wcore_providers::retry::observe_provider_attempts(
+                                attempt_observer,
+                                attempt_provider.stream(&request),
+                            ),
+                        ),
+                    ) => result,
+                };
+                let (current_attempt_provider, current_attempt_model, fallback_admission_failure) = {
+                    let mut fallback_state = fallback_budget_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (
+                        fallback_state.current_provider.clone(),
+                        fallback_state.current_model.clone(),
+                        fallback_state.failure.take(),
+                    )
+                };
+                if let Some(failure) = fallback_admission_failure {
+                    match failure {
+                        ConfiguredFallbackAdmissionFailure::Budget(
+                            ProviderBudgetMutationError::Budget(
+                                wcore_budget::BudgetError::CapExceeded {
+                                    kind,
+                                    limit,
+                                    observed,
+                                },
+                            ),
+                        ) => {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Configured provider fallback not started: budget cap \
+                                     '{kind}' would be exceeded (limit {limit}, reserved total \
+                                     {observed})."
+                                ),
+                                false,
+                            );
+                        }
+                        ConfiguredFallbackAdmissionFailure::Budget(
+                            ProviderBudgetMutationError::Authority(error),
+                        ) => {
+                            return Err(AgentError::SessionAuthority(error.to_string()));
+                        }
+                        ConfiguredFallbackAdmissionFailure::Unpriced { provider, model } => {
+                            self.output.emit_budget_exceeded(
+                                "unpriced_provider",
+                                &format!("{provider}/{model}"),
+                                "a provider/model with known pricing",
+                            );
+                            self.output.emit_error(
+                                &format!(
+                                    "Configured provider fallback not started: pricing is \
+                                     unavailable for {provider}/{model}, so the explicit or \
+                                     managed USD cap cannot be enforced."
+                                ),
+                                false,
+                            );
+                        }
+                    }
+                    return self
+                        .finish_run_terminated(user_input, turn, FinishReason::Length)
+                        .await;
+                }
+                let failed_provider_reservation = if provider_result.is_err() {
+                    fallback_budget_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .current
+                        .take()
+                } else {
+                    None
+                };
+                if let Some(reservation) = failed_provider_reservation {
+                    if provider_result
+                        .as_ref()
+                        .is_err_and(|error| error.was_not_attempted())
+                    {
+                        reservation
+                            .release()
+                            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                    } else {
+                        // The provider outcome is unknown: consume the conservative
+                        // reservation rather than pretending a failed transport was
+                        // free. This bounds retry rings even when usage is absent.
+                        let (input_tokens, output_tokens, cost_usd) =
+                            reservation.conservative_charge();
+                        if let Err(err) = reservation.settle(input_tokens, output_tokens, cost_usd)
+                        {
+                            provider_budget_cap_hit = Some(err);
+                        }
+                        if let Some(error) = provider_budget_cap_hit.take() {
+                            match error {
+                                ProviderBudgetMutationError::Budget(
+                                    wcore_budget::BudgetError::CapExceeded {
+                                        kind,
+                                        limit,
+                                        observed,
+                                    },
+                                ) => {
+                                    self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                                    self.output.emit_error(
+                                        &format!(
+                                            "Run stopped after an unknown provider outcome exhausted \
+                                             budget cap '{kind}' (limit {limit}, observed {observed})."
+                                        ),
+                                        false,
+                                    );
+                                    return self
+                                        .finish_run_terminated(
+                                            user_input,
+                                            turn,
+                                            FinishReason::Length,
+                                        )
+                                        .await;
+                                }
+                                ProviderBudgetMutationError::Authority(error) => {
+                                    return Err(AgentError::SessionAuthority(error.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut rx = match provider_result {
                     Ok(rx) => rx,
+                    Err(error)
+                        if crate::journal_provider::is_journal_authority_error(
+                            &error.to_string(),
+                        ) =>
+                    {
+                        return Err(AgentError::SessionAuthority(error.to_string()));
+                    }
                     Err(e) if e.is_retryable() => {
+                        stream_failure_code = observed_provider_failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone()
+                            .or_else(|| Some(wcore_providers::retry::provider_failure_code(&e)));
                         stream_error = Some(e.to_string());
-                        // The provider's HTTP ring already retried this exact
-                        // request to exhaustion before surfacing `Err` — mark it
-                        // so the engine ring does not stack a fresh full budget.
-                        http_ring_exhausted = true;
                         // Skip the recv loop; fall through to the
                         // classifier, which retries or fails the turn.
                         // An already-closed empty receiver makes the
@@ -5435,14 +10904,18 @@ impl AgentEngine {
                         routed_model,
                         ..
                     }) if !overflow_retried => {
+                        self.output.emit_provider_failure("context_overflow");
+                        self.output.emit_provider_retry(Some("context_overflow"));
                         overflow_retried = true;
                         self.output.emit_info(&format!(
                             "context overflow on {routed_model} ({required_tokens} tokens > \
                              {model_window} window) — compacted and retrying"
                         ));
                         if let Err(e) = self.run_compaction().await {
+                            self.prepare_durable_conversation().await?;
                             self.fire_on_session_end(turn).await;
-                            self.save_session();
+                            self.cache_ledger.finish();
+                            self.save_session_mirror();
                             return Err(e);
                         }
                         // Rebuild the volatile request inputs from the compacted
@@ -5453,14 +10926,49 @@ impl AgentEngine {
                             &self.messages,
                             &request.system,
                             &request.tools,
-                        ) as u64;
+                        );
                         request.client_context_tokens = Some(recount);
+                        self.sync_active_journal_conversation().await?;
                         continue 'stream;
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        let failure = wcore_providers::retry::provider_failure_code(&e);
+                        self.output.emit_provider_failure(&failure);
+                        return Err(e.into());
+                    }
                 };
 
-                while let Some(event) = rx.recv().await {
+                loop {
+                    let receive_cancel = self.cancel_token.clone();
+                    let event = tokio::select! {
+                        biased;
+                        _ = receive_cancel.cancelled() => {
+                            if let Some(reservation) = fallback_budget_state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .current
+                                .take()
+                            {
+                                // A response stream existed, so the request
+                                // reached the provider. Usage is unavailable
+                                // after cancellation; settle the reservation
+                                // conservatively and, critically, release the
+                                // in-flight admission slot for a later turn.
+                                let (input_tokens, output_tokens, cost_usd) =
+                                    reservation.conservative_charge();
+                                let _ =
+                                    reservation.settle(input_tokens, output_tokens, cost_usd);
+                            }
+                            if journal_turn_id.is_none() {
+                                self.prepare_durable_conversation().await?;
+                                self.save_session_mirror();
+                            }
+                            self.output.emit_info("Run cancelled while receiving provider output.");
+                            return Err(AgentError::UserAborted);
+                        }
+                        event = rx.recv() => event,
+                    };
+                    let Some(event) = event else { break };
                     match event {
                         LlmEvent::TextDelta(text) => {
                             self.output.emit_text_delta(&text, &self.current_msg_id);
@@ -5505,12 +11013,20 @@ impl AgentEngine {
                             done_seen = true;
                         }
                         LlmEvent::Error(e) => {
+                            if crate::journal_provider::is_journal_authority_error(&e) {
+                                return Err(AgentError::SessionAuthority(e));
+                            }
                             // AUDIT E-C2 — do NOT immediately abort the run.
                             // Record the error and stop consuming this
                             // attempt; the retry decision below re-issues
                             // the request or fails the turn after the
                             // bounded retry budget is spent.
                             stream_error = Some(e);
+                            stream_failure_code = observed_provider_failure
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .clone()
+                                .or_else(|| Some("stream_error".to_string()));
                             break;
                         }
                         LlmEvent::Citations(urls) => {
@@ -5567,6 +11083,90 @@ impl AgentEngine {
                 // A clean `Done` is success. A mid-stream `LlmEvent::Error`
                 // OR a channel that closed with no `Done` (truncated /
                 // dropped stream) is a FAILED attempt.
+                let completed_provider_reservation = {
+                    fallback_budget_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .current
+                        .take()
+                };
+                if let Some(reservation) = completed_provider_reservation {
+                    let completed = done_seen && stream_error.is_none();
+                    let usage_authoritative = attempt_usage.input_tokens > 0
+                        || attempt_usage.output_tokens > 0
+                        || attempt_usage.cache_read_tokens > 0
+                        || attempt_usage.cache_creation_tokens > 0;
+                    let (settled_input, settled_output, settled_cost) =
+                        if completed && usage_authoritative {
+                            let input_tokens = attempt_usage
+                                .input_tokens
+                                .saturating_add(attempt_usage.cache_read_tokens)
+                                .saturating_add(attempt_usage.cache_creation_tokens);
+                            let cost = resolve_turn_cost(
+                                &current_attempt_provider,
+                                &current_attempt_model,
+                                attempt_usage.input_tokens,
+                                attempt_usage.output_tokens,
+                                attempt_usage.cache_read_tokens,
+                                attempt_usage.cache_creation_tokens,
+                                &self.compat,
+                            )
+                            .usd;
+                            (input_tokens, attempt_usage.output_tokens, cost)
+                        } else {
+                            // A failed stream OR a clean Done without non-zero usage
+                            // has unknown final billing. Consume the reservation so
+                            // endpoints that omit streaming usage cannot refund a
+                            // paid call to zero and loop through the envelope.
+                            let (input_tokens, output_tokens, cost_usd) =
+                                reservation.conservative_charge();
+                            if completed {
+                                self.output.emit_info(
+                                    "Provider completed without authoritative usage; the \
+                                 conservative reservation was charged.",
+                                );
+                            }
+                            (input_tokens, output_tokens, cost_usd)
+                        };
+                    if let Err(err) =
+                        reservation.settle(settled_input, settled_output, settled_cost)
+                    {
+                        provider_budget_cap_hit = Some(err);
+                    }
+                    if !completed && let Some(error) = provider_budget_cap_hit.take() {
+                        match error {
+                            ProviderBudgetMutationError::Budget(
+                                wcore_budget::BudgetError::CapExceeded {
+                                    kind,
+                                    limit,
+                                    observed,
+                                },
+                            ) => {
+                                self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                                self.output.emit_error(
+                                    &format!(
+                                        "Run stopped after a failed provider attempt exhausted budget \
+                                         cap '{kind}' (limit {limit}, observed {observed})."
+                                    ),
+                                    false,
+                                );
+                                return self
+                                    .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                    .await;
+                            }
+                            ProviderBudgetMutationError::Authority(error) => {
+                                return Err(AgentError::SessionAuthority(error.to_string()));
+                            }
+                        }
+                    }
+                }
+                if done_seen && stream_error.is_none() && provider_budget_cap_hit.is_some() {
+                    stop_reason = attempt_stop_reason;
+                    finish_reason = attempt_finish_reason;
+                    turn_usage = attempt_usage;
+                    self.midflight_monitor.record_stream_attempt(false, false);
+                    break 'stream;
+                }
                 if done_seen && stream_error.is_none() {
                     // LENGTH-WEDGE GATE — `finish_reason=length` while the
                     // context sits at/over the resolved input ceiling is the
@@ -5606,8 +11206,9 @@ impl AgentEngine {
                         // authoritative when present — providers can count
                         // higher than our estimate, which is exactly how a
                         // wedge slips past the pre-flight guard.
-                        let sent_tokens =
-                            attempt_usage.input_tokens.max(input_token_estimate as u64);
+                        let sent_tokens = attempt_usage
+                            .total_input_tokens()
+                            .max(input_token_estimate as u64);
                         if let Some(ceiling) = ceiling
                             && sent_tokens >= ceiling
                         {
@@ -5649,8 +11250,10 @@ impl AgentEngine {
                                 // flag the #280 smart pre-gate uses.
                                 self.smart_compact_force = true;
                                 if let Err(e) = self.run_compaction().await {
+                                    self.prepare_durable_conversation().await?;
                                     self.fire_on_session_end(turn).await;
-                                    self.save_session();
+                                    self.cache_ledger.finish();
+                                    self.save_session_mirror();
                                     return Err(e);
                                 }
                                 let history_after = request_wire_fingerprint(
@@ -5667,10 +11270,12 @@ impl AgentEngine {
                                     &self.messages,
                                     &request.system,
                                     &request.tools,
-                                ) as u64;
+                                );
                                 request.client_context_tokens = Some(recount);
                                 input_token_estimate = recount as usize;
-                                if history_after != history_before && recount < ceiling {
+                                let resumable_after_compaction = recount < ceiling;
+                                if history_after != history_before && resumable_after_compaction {
+                                    self.sync_active_journal_conversation().await?;
                                     // Compaction freed real space AND changed
                                     // the context — retry the turn. (The
                                     // dispatch guard passes because the
@@ -5695,6 +11300,9 @@ impl AgentEngine {
                                 &request.system,
                                 &request.tools,
                             ) < ceiling;
+                            if resumable {
+                                self.sync_active_journal_conversation().await?;
+                            }
                             let tail = if resumable {
                                 "Compact the conversation or start a new session."
                             } else {
@@ -5747,11 +11355,18 @@ impl AgentEngine {
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
+                    // A completed provider stream is progress even when it
+                    // ends without text. Do not carry a failed-attempt stall
+                    // into a later tool turn or user run.
+                    self.midflight_monitor.record_stream_attempt(false, false);
                     break 'stream;
                 }
                 let reason = stream_error.clone().unwrap_or_else(|| {
                     "provider stream closed before a Done event (truncated response)".to_string()
                 });
+                let failure_code =
+                    stream_failure_code.unwrap_or_else(|| "stream_truncated".to_string());
+                self.output.emit_provider_failure(&failure_code);
                 // v0.9.1.1 B6: HTTP 4xx errors (especially 400
                 // `invalid_request_error`) are NOT transient — retrying
                 // sends the same malformed request and burns the retry
@@ -5762,21 +11377,11 @@ impl AgentEngine {
                 // bounded retry for 5xx / truncated streams / network
                 // drops where the next attempt has a real chance.
                 let is_client_error = is_http_4xx_error(&reason);
-                // Finding #174 (nested re-bill cap): when the failure was an
-                // already-HTTP-exhausted provider `Err` (3 sends spent), grant
-                // the engine ring exactly ONE retry instead of the full
-                // `MAX_STREAM_RETRIES` (2). This still retries a genuinely
-                // transient single failure once — the common case — but stops
-                // the engine ring from stacking 3 attempts × 3 HTTP sends = 9
-                // full-input re-sends for one logical turn. A mid-stream error /
-                // truncated stream never sets `http_ring_exhausted`, so its
-                // retryability and budget are unchanged.
-                let effective_max_retries = if http_ring_exhausted {
-                    MAX_STREAM_RETRIES.min(1)
-                } else {
-                    MAX_STREAM_RETRIES
-                };
-                if !is_client_error && stream_attempt < effective_max_retries {
+                // F11 owns retry admission at this layer. The provider call
+                // above runs under `scope_max_retries(0)`, so one engine
+                // attempt is exactly one physical send and one reservation.
+                // Keep the complete bounded engine retry budget here.
+                if !is_client_error && stream_attempt < MAX_STREAM_RETRIES {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
                     // carries FAILED tool results, that context is
@@ -5801,31 +11406,66 @@ impl AgentEngine {
                         || !thinking_text.is_empty()
                         || !tool_calls.is_empty()
                         || attempt_usage.output_tokens > 0;
-                    if !failed_tools.is_empty() && !produced_output {
-                        no_progress_failures += 1;
-                    } else if produced_output {
-                        no_progress_failures = 0;
-                    }
-                    if no_progress_failures >= 2 {
-                        let gate_msg = format!(
-                            "Provider stream failed twice in a row with no output while \
+                    self.midflight_monitor
+                        .record_stream_attempt(!failed_tools.is_empty(), produced_output);
+                    match self.midflight_monitor.tick_provider() {
+                        MonitorAction::StopOutputStall => {
+                            let gate_msg = format!(
+                                "Provider stream failed twice in a row with no output while \
                              the last tool round had failed (`{}`) — retrying the same \
                              context is burning tokens without progress. Fix the failing \
                              tool call (see its error above) or try a different approach. \
                              (last stream error: {reason})",
-                            failed_tools.join("`, `"),
-                        );
-                        self.output.emit_error(&gate_msg, false);
-                        return Err(AgentError::ApiError(gate_msg));
+                                failed_tools.join("`, `"),
+                            );
+                            self.output.emit_midflight_monitor_decision(
+                                MonitorDirective::Stop,
+                                MonitorReason::OutputStall,
+                            );
+                            self.output.emit_error(&gate_msg, false);
+                            self.emit_midflight_monitor_occurrence();
+                            return Err(AgentError::ApiError(gate_msg));
+                        }
+                        MonitorAction::CancelBudget { reason } => {
+                            let observed = run_budget.observed_for(reason);
+                            let limit = run_budget.limit_for(reason);
+                            self.output.emit_budget_exceeded(reason, &observed, &limit);
+                            self.output.emit_midflight_monitor_decision(
+                                MonitorDirective::Stop,
+                                MonitorReason::BudgetExceeded,
+                            );
+                            self.emit_midflight_monitor_occurrence();
+                            return self
+                                .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                                .await;
+                        }
+                        MonitorAction::ReplanRepeatedError
+                        | MonitorAction::StopRepeatedError
+                        | MonitorAction::ReplanRepeatedRoute
+                        | MonitorAction::StopRepeatedRoute => {}
+                        MonitorAction::Continue => {}
                     }
                     stream_attempt += 1;
+                    self.output.emit_provider_retry(Some(failure_code.as_str()));
                     // Linear backoff: 500ms, 1000ms.
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying \
-                         (attempt {stream_attempt}/{effective_max_retries})…"
+                         (attempt {stream_attempt}/{MAX_STREAM_RETRIES})…"
                     ));
-                    tokio::time::sleep(backoff).await;
+                    let backoff_cancel = self.cancel_token.clone();
+                    tokio::select! {
+                        biased;
+                        _ = backoff_cancel.cancelled() => {
+                            if journal_turn_id.is_none() {
+                                self.prepare_durable_conversation().await?;
+                                self.save_session_mirror();
+                            }
+                            self.output.emit_info("Run cancelled during provider retry backoff.");
+                            return Err(AgentError::UserAborted);
+                        }
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
                     continue 'stream;
                 }
                 // Retry budget exhausted — fail the turn. The provider
@@ -5854,68 +11494,12 @@ impl AgentEngine {
             // live introspection state so `wayland_status` /
             // `wayland_telemetry_query` report non-zero token counters.
             if let Some(state) = &self.session_state {
-                state.add_token_usage(turn_usage.input_tokens, turn_usage.output_tokens);
+                state.add_token_usage(turn_usage.total_input_tokens(), turn_usage.output_tokens);
             }
 
-            // M5.3 — charge the per-session/per-user budget tracker after the
-            // turn's usage is finalized. Sink-side `BudgetEvent::Charge`
-            // emission happens inside `tracker.charge`.
-            //
-            // AUDIT E-C1 — the `charge()` result is now HONORED. Before,
-            // it was discarded (`let _ = ...`), so a configured
-            // `max_cost_usd` / `max_tokens` cap did nothing and a
-            // runaway tool-call loop burned unbounded cost. The
-            // provider already billed THIS turn, so the cap cannot
-            // un-spend it — but `BudgetError::CapExceeded` is captured
-            // here and, once the assistant message is committed below,
-            // the loop terminates cleanly with a user-visible reason
-            // instead of starting another (paid) turn.
-            //
-            // W7 (v0.6.3) — turn cost is resolved from the `wcore-pricing`
-            // provider×model catalog. A catalog miss is non-fatal: it logs
-            // a warning and falls back to the `ProviderCompat` heuristic so
-            // the charge still happens.
-            let mut budget_cap_hit: Option<wcore_budget::BudgetError> = None;
-            if let Some(tracker) = self.budget_tracker.as_ref() {
-                let session_id = self
-                    .current_session_id()
-                    .unwrap_or_else(|| "session-unknown".to_string());
-                let turn_tokens = turn_usage
-                    .input_tokens
-                    .saturating_add(turn_usage.output_tokens);
-                let provider = self.compat.provider_type.as_deref().unwrap_or("");
-                // Finding #174: charge the budget against the model ACTUALLY
-                // dispatched (`effective_model`), so a tier-swapped cheap turn
-                // is billed at the cheap model's catalog rate, not the premium
-                // model's.
-                let catalog_cost = pricing_turn_cost_usd(
-                    provider,
-                    &effective_model,
-                    turn_usage.input_tokens,
-                    turn_usage.output_tokens,
-                );
-                if catalog_cost.is_none() {
-                    // Emit host-visible info on catalog miss so operators know to add
-                    // a pricing.toml entry. The tracing::warn! in pricing_turn_cost_usd
-                    // covers log files; this makes it visible in --json-stream output.
-                    self.output.emit_info(&format!(
-                        "cost-catalog miss for {provider}/{model} — billing at compat-fallback rate; add to pricing.toml",
-                        model = &effective_model,
-                    ));
-                }
-                let turn_cost = catalog_cost.unwrap_or_else(|| {
-                    estimate_turn_cost(
-                        turn_usage.input_tokens,
-                        turn_usage.output_tokens,
-                        turn_usage.cache_read_tokens,
-                        turn_usage.cache_creation_tokens,
-                        &self.compat,
-                    )
-                });
-                if let Err(e) = tracker.lock().charge(&session_id, turn_tokens, turn_cost) {
-                    budget_cap_hit = Some(e);
-                }
-            }
+            // The tracker reservation and execution-budget usage were settled
+            // transactionally inside the provider-attempt loop.
+            let budget_cap_hit = provider_budget_cap_hit;
 
             // Track per-turn input tokens for compaction watermarks.
             //
@@ -5925,7 +11509,8 @@ impl AgentEngine {
             // with prefix caching) underreport prompt_tokens, so over-
             // estimating here ensures we never blow the context window.
             let local_estimate = estimate::estimate_tokens_from_messages(&self.messages);
-            let effective_watermark = turn_usage.input_tokens.max(local_estimate);
+            let provider_input = turn_usage.total_input_tokens();
+            let effective_watermark = provider_input.max(local_estimate);
 
             // AUTO-trigger watermark (finding #174): track REAL token
             // pressure so auto-compaction doesn't fire prematurely. The
@@ -5942,8 +11527,8 @@ impl AgentEngine {
                 &self.messages,
                 self.compat.replays_thinking_in_history(),
             );
-            let auto_watermark = if turn_usage.input_tokens > 0 {
-                turn_usage.input_tokens
+            let auto_watermark = if provider_input > 0 {
+                provider_input
             } else {
                 auto_estimate
             };
@@ -5958,15 +11543,15 @@ impl AgentEngine {
             // `/doctor` output and log files, but stays out of the transcript.
             // Same pattern as F10's plugin-hook lifecycle classifier
             // (`run_post_tool_use` routes to `hook_trace`, never `log_lines`).
-            if local_estimate > turn_usage.input_tokens
-                && local_estimate.saturating_sub(turn_usage.input_tokens) > 10_000
+            if local_estimate > provider_input
+                && local_estimate.saturating_sub(provider_input) > 10_000
             {
                 tracing::debug!(
-                    provider_reported = turn_usage.input_tokens,
+                    provider_reported = provider_input,
                     local_estimate = local_estimate,
                     effective = effective_watermark,
                     "Token watermark override: provider={}, local_estimate={}, using={}",
-                    turn_usage.input_tokens,
+                    provider_input,
                     local_estimate,
                     effective_watermark
                 );
@@ -5981,8 +11566,13 @@ impl AgentEngine {
                 cache_read_tokens: turn_usage.cache_read_tokens,
                 cache_creation_tokens: turn_usage.cache_creation_tokens,
             };
-            if let Some(diagnostic) = self.cache_detector.check_response(cache_stats.clone()) {
-                match &diagnostic {
+            // F23-04: bound rather than consumed inline, because the ledger
+            // below needs the same diagnostic. `check_response` is stateful
+            // (it advances the round-trip counter and the prompt snapshot), so
+            // calling it twice would silently corrupt the detector.
+            let cache_diagnostic = self.cache_detector.check_response(cache_stats.clone());
+            if let Some(diagnostic) = cache_diagnostic.as_ref() {
+                match diagnostic {
                     CacheDiagnostic::FullMiss { cause } => {
                         // #101: a full cache miss is diagnostic telemetry, NOT a
                         // user error. A `TtlExpiry` (the prompt cache's TTL lapsed
@@ -6048,6 +11638,12 @@ impl AgentEngine {
                 );
             }
 
+            // ── F23-04 — record this round-trip into the cache/compaction
+            // ledger. Everything above computes quality, invalidation and
+            // pressure and then throws them away at the end of the turn; this
+            // is the one place the four criterion clauses are made durable.
+            self.record_cache_ledger_turn(turn, &turn_usage, &effective_model, &cache_diagnostic);
+
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
             if !thinking_text.is_empty() {
                 assistant_content.push(ContentBlock::Thinking {
@@ -6089,13 +11685,12 @@ impl AgentEngine {
                 let result = TurnResult {
                     turn,
                     tool_call_count: tool_calls.len(),
-                    input_tokens: turn_usage.input_tokens,
+                    input_tokens: turn_usage.total_input_tokens(),
                     output_tokens: turn_usage.output_tokens,
                 };
                 let outcome = hook_engine.on_turn_end(turn, &result).await;
                 self.apply_turn_end_outcome(outcome);
             }
-
             // AUDIT E-C1 — budget cap honored. The provider already
             // billed this turn; running its tool calls (and another
             // turn after) would burn more cost past the cap. Terminate
@@ -6103,11 +11698,18 @@ impl AgentEngine {
             // blocks (those tools never run), emit a `BudgetExceeded`
             // event + a user-visible error, and finish cleanly.
             if let Some(err) = budget_cap_hit {
-                let wcore_budget::BudgetError::CapExceeded {
-                    kind,
-                    limit,
-                    observed,
-                } = err;
+                let (kind, limit, observed) = match err {
+                    ProviderBudgetMutationError::Budget(
+                        wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        },
+                    ) => (kind, limit, observed),
+                    ProviderBudgetMutationError::Authority(error) => {
+                        return Err(AgentError::SessionAuthority(error.to_string()));
+                    }
+                };
                 self.repair_orphaned_tool_use();
                 self.output.emit_budget_exceeded(&kind, &observed, &limit);
                 self.output.emit_error(
@@ -6123,9 +11725,30 @@ impl AgentEngine {
                     .await;
             }
 
+            if !tool_calls.is_empty()
+                && let Some(turn_id) = journal_turn_id
+            {
+                self.commit_tool_round_recovery_checkpoint(
+                    turn_id,
+                    turn,
+                    &loop_guard,
+                    &failure_guard,
+                )
+                .await?;
+            }
+
             if tool_calls.is_empty() {
                 // W1 F9: emit the final turn's trace before returning so
                 // single-turn sessions still produce exactly one TurnTrace.
+                let resolved_cost = resolve_turn_cost(
+                    self.compat.provider_type(),
+                    &effective_model,
+                    turn_usage.input_tokens,
+                    turn_usage.output_tokens,
+                    turn_usage.cache_read_tokens,
+                    turn_usage.cache_creation_tokens,
+                    &self.compat,
+                );
                 let trace = TurnTrace {
                     turn,
                     // Finding #174: attribute to the model ACTUALLY dispatched
@@ -6141,20 +11764,14 @@ impl AgentEngine {
                     cache_hit_rate: TurnTrace::cache_hit_rate_from(
                         turn_usage.input_tokens,
                         turn_usage.cache_read_tokens,
+                        turn_usage.cache_creation_tokens,
                     ),
-                    // Fix(pricing-audit-2026-05-24): use resolve_turn_cost_usd which tries
+                    // Fix(pricing-audit-2026-05-24): use resolve_turn_cost, which tries
                     // the pricing catalog first, then falls back to estimate_turn_cost.
                     // Previously estimate_turn_cost used compat rows directly — with
                     // openai_defaults() now at $0/$0 sentinel, that always returned $0.
-                    cost_usd: resolve_turn_cost_usd(
-                        self.compat.provider_type(),
-                        &effective_model,
-                        turn_usage.input_tokens,
-                        turn_usage.output_tokens,
-                        turn_usage.cache_read_tokens,
-                        turn_usage.cache_creation_tokens,
-                        &self.compat,
-                    ),
+                    cost_usd: resolved_cost.usd,
+                    cost_priced: resolved_cost.priced,
                     tool_calls: vec![],
                     // Drain hook actions fired this turn into the trace.
                     // partial: populated in a future pass when a streaming-drain trigger exists
@@ -6172,6 +11789,7 @@ impl AgentEngine {
                     model: trace.model.clone(),
                     provider: trace.provider.clone(),
                     cost_usd: trace.cost_usd,
+                    priced: trace.cost_priced,
                 });
                 // W9.1 T3 (T10b): feed the trace into the F10 detect flow
                 // even on the no-tool-calls early-return path. Pattern
@@ -6188,8 +11806,11 @@ impl AgentEngine {
                 // user-visible Info event (and into the message tail in
                 // case the host resumes the session).
                 self.drain_and_inject_external_edits();
+                if journal_turn_id.is_none() {
+                    self.prepare_durable_conversation().await?;
+                }
                 self.fire_on_session_end(turn + 1).await;
-                self.save_session();
+                self.cache_ledger.finish();
                 // v0.8.1 U6 — snapshot the U1 pick BEFORE
                 // `observe_skill_router_outcome` clears it, so the
                 // autonomous-skill bucketer can record which catalog
@@ -6205,7 +11826,7 @@ impl AgentEngine {
                 // triggers a draft + PromptStore record. Failure logged
                 // and swallowed — the user's turn must complete.
                 self.observe_auto_skill(user_input, auto_skill_picked, stop_reason, turn + 1);
-                return Ok(AgentResult {
+                let result = AgentResult {
                     text: assistant_text,
                     stop_reason,
                     finish_reason,
@@ -6215,7 +11836,20 @@ impl AgentEngine {
                     active_window_percent: self
                         .active_window_percent_now(&effective_model, input_token_estimate as u64),
                     agent_run_id: self.current_agent_run_id.clone(),
-                });
+                };
+                if let Some(turn_id) = journal_turn_id {
+                    self.commit_terminal_recovery_checkpoint(
+                        turn_id,
+                        &result,
+                        turn,
+                        &loop_guard,
+                        &failure_guard,
+                        crate::recovery::RecoveryTerminalCompletion::Committed,
+                    )
+                    .await?;
+                }
+                self.save_session_mirror();
+                return Ok(result);
             }
 
             // Wave OR (W8b.2.B.1): per-turn dispatch flows through
@@ -6294,17 +11928,25 @@ impl AgentEngine {
                     .as_ref()
                     .expect("protocol writer required for approval")
                     .clone();
-                // SAFETY: see confirm_call in orchestration/mod.rs —
-                // ToolConfirmer's critical sections cannot panic so
-                // the std::sync::Mutex can never be poisoned.
-                let auto_approve = self.confirmer.lock().unwrap().is_auto_approve();
                 ApprovalChannel {
                     manager: mgr.clone(),
                     writer,
                     msg_id: self.current_msg_id.clone(),
-                    auto_approve,
                 }
             });
+            let effect_scope = match (self.session_journal.as_ref(), journal_turn_id) {
+                (Some(journal), Some(turn_id)) => Some(
+                    crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+                        .for_turn(turn_id),
+                ),
+                (Some(_), None) => {
+                    return Err(AgentError::SessionAuthority(
+                        "tool dispatch has journal authority but no active durable turn"
+                            .to_string(),
+                    ));
+                }
+                (None, _) => None,
+            };
             let exec_cfg = AgentExecutorConfig {
                 tools: self.tools.clone(),
                 confirmer: self.confirmer.clone(),
@@ -6317,18 +11959,20 @@ impl AgentEngine {
                 // buffered-output behaviour (None). The dispatcher further
                 // gates per-tool on `tool.supports_streaming()`.
                 streaming: build_turn_streaming_context(&self.output, &self.current_msg_id),
+                tool_budget: Some(tool_budget.clone()),
                 approval: approval_channel,
                 allow_list: self.allow_list.clone(),
                 // v0.6.1 CRIT-1: clone the optional gate into the per-turn
                 // config. `PolicyGate` is `Clone` (Arc<PolicyEngine> +
                 // Actor). `None` preserves v0.6.0 open-gate behaviour.
                 policy_gate: self.policy_gate.clone(),
-                // v0.8.0 Task I (1.D.3): top-level engine dispatch is
-                // Root by default. Sub-agent spawners that drive
-                // `dispatch_once` directly set `actor` +
-                // `learned_policy` themselves.
-                actor: wcore_permissions::CallActor::Root,
-                learned_policy: None,
+                // v0.8.0 Task I (1.D.3), wired in Phase 22. A user session
+                // dispatches as `Root` and the pre-filter never applies to
+                // it; `AgentSpawner` stamps `SubAgent` + the inherited
+                // policy on each child engine, so a delegated turn arrives
+                // here already carrying both.
+                actor: self.call_actor.clone(),
+                learned_policy: self.learned_policy.clone(),
                 // AUDIT B-1 — thread a child of the session-root
                 // cancel token into tool dispatch so a host cancel
                 // reaches a running tool and the per-category dispatch
@@ -6339,6 +11983,8 @@ impl AgentEngine {
                 // Write/Edit self-originated writes are suppressed by the
                 // file watcher instead of re-entering context as user edits.
                 file_write_notifier: self.tool_write_notifier().cloned(),
+                #[cfg(test)]
+                dispatcher_crash_cut: crate::orchestration::take_dispatcher_crash_cut(),
             };
             // Move tool_calls + hooks into the per-turn cell. The
             // adapter's `run_agent` consumes `tool_calls` once; hooks
@@ -6348,8 +11994,9 @@ impl AgentEngine {
                 tool_calls.clone(),
                 self.hooks.take(),
             )));
-            let executor: Arc<dyn NodeExecutor> =
-                Arc::new(AgentNodeExecutor::new(exec_cfg, cell.clone()));
+            let executor: Arc<dyn NodeExecutor> = Arc::new(
+                AgentNodeExecutor::new(exec_cfg, cell.clone()).with_effect_scope(effect_scope),
+            );
             // v0.8.0 Task K: route via the unified selector. When the
             // engine has a wired `TemplateRouter`, lock it for the
             // single `choose` call (the scorer mutates RNG state); the
@@ -6444,6 +12091,7 @@ impl AgentEngine {
                             modifiers: vec![],
                             hook_outcomes: vec![],
                             cancelled_ids: vec![],
+                            learned_policy_denials: 0,
                         })
                     }
                 },
@@ -6454,16 +12102,31 @@ impl AgentEngine {
             let outcome = match exit {
                 GraphExit::Continue(o) => o,
                 GraphExit::Aborted => {
+                    if journal_turn_id.is_none() {
+                        self.prepare_durable_conversation().await?;
+                        self.save_session_mirror();
+                    }
                     self.fire_on_session_end(turn + 1).await;
-                    self.save_session();
+                    self.cache_ledger.finish();
                     return Err(AgentError::UserAborted);
                 }
                 GraphExit::Failed(msg) => {
+                    self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
-                    self.save_session();
+                    self.cache_ledger.finish();
+                    self.save_session_mirror();
                     return Err(AgentError::ApiError(msg));
                 }
             };
+
+            // Phase 22 (22-02 Task 3) — `learned_policy`'s runtime outcome proof.
+            // Emitted here and only here, because this is the first point at
+            // which a REAL narrowing has already happened: the denied calls
+            // never dispatched, and their error results are in `outcome`.
+            // Construction alone never reaches this line.
+            if outcome.learned_policy_denials > 0 {
+                self.emit_learned_policy_occurrence();
+            }
 
             // Apply any context modifiers from skill executions before the next turn
             self.apply_context_modifiers(&outcome.modifiers);
@@ -6473,6 +12136,9 @@ impl AgentEngine {
             // already drained at the orchestration layer.
             for hook_outcome in outcome.hook_outcomes {
                 self.apply_turn_end_outcome(hook_outcome);
+            }
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
             }
 
             // W1 F9: pre-populate ToolCallTrace stubs from the LLM-requested
@@ -6515,6 +12181,7 @@ impl AgentEngine {
             // #475 failure-loop breaker: set to the offending (tool, failure-count)
             // the first time a tool's consecutive-error streak trips the threshold.
             let mut failure_break: Option<(String, u32)> = None;
+            let mut monitor_replan: Option<MonitorReason> = None;
             // Display tool results AND populate the matching ToolCallTrace.
             for result in &outcome.results {
                 if let ContentBlock::ToolResult {
@@ -6534,23 +12201,21 @@ impl AgentEngine {
                             None
                         })
                         .unwrap_or("unknown");
+                    let tool_input = tool_calls
+                        .iter()
+                        .find_map(|call| match call {
+                            ContentBlock::ToolUse { id, input, .. } if id == tool_use_id => {
+                                Some(input)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(&serde_json::Value::Null);
 
                     // Runaway-loop breaker: signature this call+outcome and trip
                     // if the same (tool, args, result) has repeated consecutively
                     // past the threshold. Checked once; the first trip wins.
                     if loop_break.is_none() {
-                        let tool_input = tool_calls.iter().find_map(|c| match c {
-                            ContentBlock::ToolUse { id, input, .. } if id == tool_use_id => {
-                                Some(input)
-                            }
-                            _ => None,
-                        });
-                        let sig = loop_call_signature(
-                            tool_name,
-                            tool_input.unwrap_or(&serde_json::Value::Null),
-                            *is_error,
-                            content,
-                        );
+                        let sig = loop_call_signature(tool_name, tool_input, *is_error, content);
                         if let Some(count) = loop_guard.observe(sig) {
                             loop_break = Some((tool_name.to_string(), count));
                         }
@@ -6580,6 +12245,12 @@ impl AgentEngine {
                     {
                         failure_break = Some((tool_name.to_string(), count));
                     }
+
+                    if *is_error {
+                        self.midflight_monitor.record_tool_error(tool_name, content);
+                    }
+                    self.midflight_monitor
+                        .record_tool_outcome(tool_name, tool_input, *is_error, content);
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
 
@@ -6743,10 +12414,99 @@ impl AgentEngine {
                     .await;
             }
 
+            // Existing failure/loop guards establish ownership first. Only
+            // after neither guard terminates may the monitor claim that its
+            // replan directive changed the next turn.
+            match self.midflight_monitor.tick() {
+                MonitorAction::Continue => {}
+                MonitorAction::ReplanRepeatedError => {
+                    monitor_replan = Some(MonitorReason::RepeatedError);
+                    self.output.emit_info(
+                        "Mid-flight monitor: the same underlying tool error repeated. \
+                         The next turn must change strategy instead of retrying it.",
+                    );
+                }
+                MonitorAction::StopRepeatedError => {
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_midflight_monitor_decision(
+                        MonitorDirective::Stop,
+                        MonitorReason::RepeatedError,
+                    );
+                    self.output.emit_error(
+                        "Run stopped: the same underlying tool error repeated after the \
+                         mid-flight monitor required a strategy change. Continue with a \
+                         materially different approach or explain the blocker.",
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::MaxTurns)
+                        .await;
+                }
+                MonitorAction::ReplanRepeatedRoute => {
+                    monitor_replan = Some(MonitorReason::RepeatedToolRoute);
+                    self.output.emit_info(
+                        "Mid-flight monitor: the same normalized tool route repeated without \
+                         progress. The next turn must materially change the tool sequence, \
+                         arguments, or strategy.",
+                    );
+                }
+                MonitorAction::StopRepeatedRoute => {
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_midflight_monitor_decision(
+                        MonitorDirective::Stop,
+                        MonitorReason::RepeatedToolRoute,
+                    );
+                    self.output.emit_error(
+                        "Run stopped: the same normalized tool route repeated after the \
+                         mid-flight monitor required a strategy change. Continue with a \
+                         materially different tool sequence or explain the blocker.",
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::MaxTurns)
+                        .await;
+                }
+                MonitorAction::CancelBudget { reason } => {
+                    let observed = run_budget.observed_for(reason);
+                    let limit = run_budget.limit_for(reason);
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_budget_exceeded(reason, &observed, &limit);
+                    self.output.emit_midflight_monitor_decision(
+                        MonitorDirective::Stop,
+                        MonitorReason::BudgetExceeded,
+                    );
+                    self.output.emit_error(
+                        &format!(
+                            "Run stopped: execution budget cap '{reason}' exceeded \
+                             (limit {limit}, observed {observed})."
+                        ),
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                        .await;
+                }
+                MonitorAction::StopOutputStall => {
+                    // Provider stalls terminate inside the stream retry loop.
+                }
+            }
+
             // W1 F9: emit one TurnTrace per turn. Hosts that opt in via
             // capabilities.structured_traces consume it; others receive a
             // no-op (ProtocolSink only emits when its builder was configured;
             // terminal / null sinks default to no-op via the trait).
+            let resolved_cost = resolve_turn_cost(
+                self.compat.provider_type(),
+                &effective_model,
+                turn_usage.input_tokens,
+                turn_usage.output_tokens,
+                turn_usage.cache_read_tokens,
+                turn_usage.cache_creation_tokens,
+                &self.compat,
+            );
             let trace = TurnTrace {
                 turn,
                 // Finding #174: attribute to the dispatched model (see the
@@ -6760,17 +12520,11 @@ impl AgentEngine {
                 cache_hit_rate: TurnTrace::cache_hit_rate_from(
                     turn_usage.input_tokens,
                     turn_usage.cache_read_tokens,
+                    turn_usage.cache_creation_tokens,
                 ),
                 // Fix(pricing-audit-2026-05-24): catalog-first cost resolution.
-                cost_usd: resolve_turn_cost_usd(
-                    self.compat.provider_type(),
-                    &effective_model,
-                    turn_usage.input_tokens,
-                    turn_usage.output_tokens,
-                    turn_usage.cache_read_tokens,
-                    turn_usage.cache_creation_tokens,
-                    &self.compat,
-                ),
+                cost_usd: resolved_cost.usd,
+                cost_priced: resolved_cost.priced,
                 tool_calls: tool_call_traces,
                 // Drain hook actions fired this turn into the trace.
                 // partial: populated in a future pass when a streaming-drain trigger exists
@@ -6788,6 +12542,7 @@ impl AgentEngine {
                 model: trace.model.clone(),
                 provider: trace.provider.clone(),
                 cost_usd: trace.cost_usd,
+                priced: trace.cost_priced,
             });
             // W9.1 T3 (T10b): feed the trace into the F10 detect+stage+emit
             // flow. Consumes `trace` — every read above this line has
@@ -6828,15 +12583,62 @@ impl AgentEngine {
             // full output via `emit_tool_result` above; only the model's copy is
             // deduped.
             self.dedup_repeated_tool_outputs(&mut tool_results_content, &tool_calls);
+            if let Some(reason) = monitor_replan {
+                let directive = match reason {
+                    MonitorReason::RepeatedError => {
+                        "Mid-flight monitor directive: repeated attempts are failing for the \
+                         same root cause. Do not repeat the same call or argument pattern; \
+                         inspect the error, choose a materially different approach, or explain \
+                         the blocker."
+                    }
+                    MonitorReason::RepeatedToolRoute => {
+                        "Mid-flight monitor directive: this normalized tool route is repeating \
+                         without progress. Materially change the tool sequence, arguments, or \
+                         strategy; do not repeat the same route."
+                    }
+                    MonitorReason::OutputStall | MonitorReason::BudgetExceeded => {
+                        "Mid-flight monitor directive: materially change strategy before \
+                         continuing."
+                    }
+                };
+                tool_results_content.push(ContentBlock::Text {
+                    text: directive.to_string(),
+                });
+            }
             if let Some(edit_msg) = self.drain_external_edits_message() {
                 tool_results_content.push(ContentBlock::Text { text: edit_msg });
             }
 
             self.messages
                 .push(Message::now(Role::User, tool_results_content));
+            if let Some(turn_id) = journal_turn_id {
+                self.commit_continue_loop_recovery_checkpoint(
+                    turn_id,
+                    turn.saturating_add(1),
+                    &loop_guard,
+                    &failure_guard,
+                )
+                .await?;
+                let unresolved = self.tool_effects_requiring_reconciliation()?;
+                if !unresolved.is_empty() {
+                    return Err(AgentError::SessionAuthority(format!(
+                        "unresolved tool effects require reconciliation before continuation: {}",
+                        unresolved.join(", ")
+                    )));
+                }
+            }
+            if let Some(reason) = monitor_replan {
+                // The directive now exists in the committed transcript and
+                // will affect the next provider request, so the monitor owns
+                // a real outcome change rather than merely an intention.
+                self.output
+                    .emit_midflight_monitor_decision(MonitorDirective::Replan, reason);
+                self.emit_midflight_monitor_occurrence();
+            }
 
             // Save session after each turn
-            self.save_session();
+            self.prepare_durable_conversation().await?;
+            self.save_session_mirror();
             turn += 1;
         }
     }
@@ -6875,10 +12677,12 @@ impl AgentEngine {
             std::sync::Arc::clone(&self.provider),
             self.config.clone(),
         )
-        // Bind sub-agents to the engine's cancel token so a host cancel stops
-        // the whole workflow rather than letting 20+ sub-agents run to
-        // completion and burn LLM calls.
-        .with_cancel(self.cancel_token.clone());
+        .with_sandbox_runtime(self.tools.sandbox_runtime())
+        .with_egress_policy(self.egress_policy.clone())
+        .with_approval_manager(std::sync::Arc::clone(manager));
+        // Bind sub-agents to the same provider, execution, and cancellation
+        // envelope used by every other transient orchestration path.
+        let spawner = self.govern_transient_spawner(spawner);
 
         // (b) Synthesise the plan on a DETACHED task. The synthesis sub-agent
         // runs its own `engine.run`, which the compiler cannot prove never
@@ -7001,16 +12805,28 @@ impl AgentEngine {
                 // ownership of the plan + spawner and returns them with the
                 // run result so the caller can render the per-stage summary.
                 //
-                // Snapshot the workflow id BEFORE the spawn moves `plan`. It
-                // must equal the `workflow_id` `run_workflow_owned` emits in
-                // `WorkflowStarted` (which is `plan.meta.name`) so the join-
-                // failure arm below can emit the matching `WorkflowFinished`.
-                let workflow_id = plan.meta.name.clone();
+                let node_count = plan.graph.nodes.len();
+                let node_ids = plan
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|(node_id, _)| node_id.clone())
+                    .collect();
+                let lifecycle = std::sync::Arc::new(
+                    crate::orchestration::workflow::runner::WorkflowLifecycleEmitter::new(
+                        std::sync::Arc::clone(&self.output),
+                        plan.meta.name.clone(),
+                        plan.meta.name.clone(),
+                        node_count,
+                        node_ids,
+                    ),
+                );
                 match tokio::spawn(run_workflow_owned(
                     spawner,
                     plan,
                     initial_state,
                     std::sync::Arc::clone(&self.output),
+                    std::sync::Arc::clone(&lifecycle),
                 ))
                 .await
                 {
@@ -7063,7 +12879,16 @@ impl AgentEngine {
                         // WorkflowView stays `finished: None` (orange/running)
                         // forever. Emit it here with the SAME `workflow_id` so
                         // the card resolves to "failed".
-                        self.output.emit_workflow_finished(&workflow_id, false);
+                        lifecycle.fail_active_children(&join_err.to_string());
+                        lifecycle.finish_remaining();
+                        lifecycle.finish(
+                            wcore_protocol::events::WorkflowTerminalState::Failed,
+                            Some(wcore_protocol::events::WorkflowFailure {
+                                code: "workflow_task_interrupted".to_string(),
+                                message: join_err.to_string(),
+                                retryable: false,
+                            }),
+                        );
                         // GAP-8: the gate already emitted a `ToolRequest` proposal
                         // card for `call_id`, and the user `Approved` it. A
                         // JoinError (the detached run task panicked or was
@@ -7156,7 +12981,6 @@ impl AgentEngine {
             let msg = "Usage: /crucible <task> — convene a cross-vendor council to \
                        cross-check an answer."
                 .to_string();
-            self.output.emit_text_delta(&msg, &self.current_msg_id);
             return Some(self.crucible_result(msg));
         }
 
@@ -7169,13 +12993,13 @@ impl AgentEngine {
             base.clone(),
             providers.clone(),
         )
+        .with_egress_policy(self.egress_policy.clone())
         .resolvable_specs(&candidates);
         if runnable.is_empty() {
             let msg = "crucible: no runnable council candidates — connect a provider \
                        Crucible can run (e.g. a Flux key) or set `proposers` / \
                        `candidate_pool` under `[crucible]` with keyed providers."
                 .to_string();
-            self.output.emit_text_delta(&msg, &self.current_msg_id);
             return Some(self.crucible_result(msg));
         }
 
@@ -7186,17 +13010,26 @@ impl AgentEngine {
         // yet aggregate across calls in a session — cross-session/process daily
         // spend persistence is the Stage 6 deliverable (spec §9, "Cross-process
         // daily-spend"). Until then each council is bounded by its per-run cap.
-        let mut spawner = crate::spawner::AgentSpawner::new(
+        let spawner = crate::spawner::AgentSpawner::new(
             std::sync::Arc::clone(&self.provider),
             self.config.clone(),
         )
+        .with_sandbox_runtime(self.tools.sandbox_runtime())
+        .with_egress_policy(self.egress_policy.clone())
         .with_provider_resolver(std::sync::Arc::new(
             crate::orchestration::council::CouncilProviderResolver::new(
                 base.clone(),
                 providers.clone(),
-            ),
-        ))
-        .with_cancel(self.cancel_token.clone());
+            )
+            .with_egress_policy(self.egress_policy.clone()),
+        ));
+        // A council may select different keyed providers, but every physical
+        // call remains inside the parent's provider/session allowance and every
+        // child shares the parent's execution and cancellation envelope.
+        let mut spawner = self.govern_transient_spawner(spawner);
+        if let Some(manager) = &self.approval_manager {
+            spawner = spawner.with_approval_manager(std::sync::Arc::clone(manager));
+        }
         if cfg.daily_cap_usd.is_some() || cfg.max_cost_usd.is_some() {
             let tracker = std::sync::Arc::new(parking_lot::Mutex::new(
                 wcore_budget::BudgetTracker::new(wcore_budget::BudgetCap::default()),
@@ -7281,11 +13114,13 @@ impl AgentEngine {
         };
         let base_refilter = base.clone();
         let providers_refilter = providers.clone();
+        let refilter_egress_policy = self.egress_policy.clone();
         let refilter = move |specs: &[String]| {
             crate::orchestration::council::CouncilProviderResolver::new(
                 base_refilter.clone(),
                 providers_refilter.clone(),
             )
+            .with_egress_policy(refilter_egress_policy.clone())
             .resolvable_specs(specs)
         };
 
@@ -7317,7 +13152,6 @@ impl AgentEngine {
                     reason: "Crucible declined — no spend.".to_string(),
                 });
                 let msg = "crucible: cancelled — no spend.".to_string();
-                self.output.emit_text_delta(&msg, &self.current_msg_id);
                 Some(self.crucible_result(msg))
             }
             Ok(CouncilRunResult::Direct { spec, text }) => {
@@ -7330,7 +13164,6 @@ impl AgentEngine {
                     output_type: OutputType::Text,
                     metadata: None,
                 });
-                self.output.emit_text_delta(&text, &self.current_msg_id);
                 Some(self.crucible_result(text))
             }
             Ok(CouncilRunResult::Council { plan: _, outcome }) => {
@@ -7343,8 +13176,6 @@ impl AgentEngine {
                     output_type: OutputType::Text,
                     metadata: None,
                 });
-                self.output
-                    .emit_text_delta(&outcome.final_text, &self.current_msg_id);
                 Some(self.crucible_result(outcome.final_text))
             }
             Err(e) => {
@@ -7358,7 +13189,6 @@ impl AgentEngine {
                     output_type: OutputType::Text,
                     metadata: None,
                 });
-                self.output.emit_text_delta(&msg, &self.current_msg_id);
                 Some(self.crucible_result(msg))
             }
         }
@@ -7380,9 +13210,20 @@ impl AgentEngine {
         }
     }
 
+    /// Persist the assistant side of a pre-loop workflow/Crucible result in
+    /// the same provider-neutral conversation used by ordinary model turns.
+    fn push_synthetic_assistant_result(&mut self, result: &AgentResult) {
+        self.messages.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: result.text.clone(),
+            }],
+        ));
+    }
+
     /// Dynamic Workflows B6 — render a completed (or failed) workflow run into
-    /// the assistant turn output. Emits the rendered text as a delta on the
-    /// current msg so streaming hosts see it, then returns the `AgentResult`.
+    /// the assistant turn output. The caller journals the returned structured
+    /// assistant message before exposing its text to streaming hosts.
     fn surface_workflow_result(
         &self,
         plan: &crate::orchestration::workflow::runner::WorkflowPlan,
@@ -7433,7 +13274,6 @@ impl AgentEngine {
             }
             Err(e) => format!("Workflow `{}` failed: {}", plan.meta.name, e),
         };
-        self.output.emit_text_delta(&text, &self.current_msg_id);
         AgentResult {
             text,
             stop_reason: StopReason::EndTurn,
@@ -7557,6 +13397,181 @@ impl AgentEngine {
             .collect()
     }
 
+    // ── F23-04: cache / compaction ledger recording ─────────────────────────
+
+    /// The autocompact trigger threshold, as tokens, for this engine's config.
+    fn autocompact_threshold_tokens(&self) -> u64 {
+        auto::autocompact_threshold(&self.compact_config) as u64
+    }
+
+    /// The emergency hard-stop limit, as tokens, for this engine's config.
+    fn emergency_limit_tokens(&self) -> u64 {
+        emergency::emergency_limit(&self.compact_config) as u64
+    }
+
+    /// Record one completed LLM round-trip into the cache/compaction ledger.
+    ///
+    /// Three things here are deliberate and are the substance of Success
+    /// Criterion 4's "cost truth" and "invalidation" clauses:
+    ///
+    /// 1. **The uncached counterfactual is priced through the same catalog**
+    ///    as the real cost, with every cached token moved back into the plain
+    ///    input bucket. A "saving" derived from a different price source than
+    ///    the spend it is subtracted from is not a measurement.
+    /// 2. **`priced` is carried, not discarded.** `resolve_turn_cost` already
+    ///    knows whether the catalog could price this provider×model;
+    ///    forgetting that turns "we cannot price this" into "$0.00 spent".
+    /// 3. **A miss on the round-trip after a compaction is attributed to
+    ///    [`InvalidationCause::HistoryRewritten`]**, overriding the
+    ///    prompt/tool-hash guess. Compaction replaces the message history
+    ///    wholesale, so that miss is self-inflicted and known — reporting it
+    ///    as "system prompt drift" would send an operator hunting a bug that
+    ///    is not there. This is also the only place the cache and compaction
+    ///    halves of the criterion actually meet.
+    fn record_cache_ledger_turn(
+        &mut self,
+        turn: usize,
+        turn_usage: &TokenUsage,
+        effective_model: &str,
+        diagnostic: &Option<CacheDiagnostic>,
+    ) {
+        use crate::cache_ledger::{CostSource, TurnSample, cause_of_diagnostic};
+        use wcore_providers::cache_observation::InvalidationCause;
+
+        if !crate::cache_ledger::recording_enabled() {
+            return;
+        }
+
+        let provider = self.compat.provider_type().to_string();
+        let resolved = resolve_turn_cost(
+            &provider,
+            effective_model,
+            turn_usage.input_tokens,
+            turn_usage.output_tokens,
+            turn_usage.cache_read_tokens,
+            turn_usage.cache_creation_tokens,
+            &self.compat,
+        );
+        // `resolve_turn_cost` reports `priced = true` for BOTH an exact catalog
+        // row and the `ProviderCompat` family fallback. Ask the catalog
+        // separately so the ledger can tell an operator which one they are
+        // looking at — measured: model `test-model` came back `priced = true`
+        // at Anthropic's generic rate, which is an estimate, not spend.
+        let cost_source = if pricing_turn_cost_with_cache(
+            &provider,
+            effective_model,
+            turn_usage.input_tokens,
+            turn_usage.output_tokens,
+            turn_usage.cache_read_tokens,
+            turn_usage.cache_creation_tokens,
+        )
+        .is_some()
+        {
+            CostSource::Catalog
+        } else if resolved.priced {
+            CostSource::ProviderDefaults
+        } else {
+            CostSource::Unpriced
+        };
+        // The counterfactual: the same work with no prompt cache at all, so
+        // every cached token is billed as ordinary input.
+        let uncached_input = turn_usage
+            .input_tokens
+            .saturating_add(turn_usage.cache_read_tokens)
+            .saturating_add(turn_usage.cache_creation_tokens);
+        let uncached = resolve_turn_cost(
+            &provider,
+            effective_model,
+            uncached_input,
+            turn_usage.output_tokens,
+            0,
+            0,
+            &self.compat,
+        );
+
+        let round_trip = self.cache_ledger.next_round_trip();
+        let mut cause = diagnostic.as_ref().and_then(cause_of_diagnostic);
+        if turn_usage.cache_read_tokens == 0
+            && cause.is_some()
+            && self.cache_ledger.compacted_since_last_round_trip()
+        {
+            cause = Some(InvalidationCause::HistoryRewritten);
+        }
+        // MEASURED on a live Ollama session: round-trip 1 recorded NO cause at
+        // all. `CacheBreakDetector::compute_diagnostic` returns
+        // `Healthy { hit_rate: 0.0 }` for the first request because it has no
+        // previous turn to compare against, so `CacheBreakCause::FirstRequest`
+        // is unreachable from the engine and the opening round-trip — always a
+        // miss — arrived at the ledger unattributed.
+        //
+        // Attribute it here, and ONLY in the case the vocabulary actually
+        // describes: neither a read nor a write happened, so no cache marker
+        // was honoured. A round-trip that WROTE cache is a normal cold open and
+        // is deliberately left unattributed rather than mislabelled `no_marker`.
+        if cause.is_none()
+            && round_trip == 1
+            && turn_usage.cache_read_tokens == 0
+            && turn_usage.cache_creation_tokens == 0
+        {
+            cause = Some(InvalidationCause::NoMarker);
+        }
+
+        let sample = TurnSample {
+            turn: turn as u64,
+            round_trip,
+            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            provider,
+            model: effective_model.to_string(),
+            retention: self.cache_ledger.pending_retention(),
+            uncached_input_tokens: turn_usage.input_tokens,
+            cache_read_tokens: turn_usage.cache_read_tokens,
+            cache_write_tokens: turn_usage.cache_creation_tokens,
+            output_tokens: turn_usage.output_tokens,
+            invalidation_cause: cause,
+            cost_usd: resolved.usd,
+            cost_source,
+            uncached_equivalent_usd: uncached.usd,
+            watermark_tokens: self.compact_state.last_real_input_tokens,
+            conservative_watermark_tokens: self.compact_state.last_input_tokens,
+            autocompact_threshold_tokens: self.autocompact_threshold_tokens(),
+            emergency_limit_tokens: self.emergency_limit_tokens(),
+        };
+        let session_id = self.conversation_id.clone();
+        self.cache_ledger.record_turn(&session_id, sample);
+    }
+
+    /// Record one compaction attempt into the ledger.
+    fn record_cache_ledger_compaction(
+        &mut self,
+        kind: crate::cache_ledger::CompactionKind,
+        trigger: crate::cache_ledger::CompactionTrigger,
+        pre_tokens: u64,
+        tokens_freed: u64,
+        items_collapsed: u64,
+        error: Option<String>,
+    ) {
+        if !crate::cache_ledger::recording_enabled() {
+            return;
+        }
+        // Compaction runs at the TOP of a turn, before the next request, so
+        // "round-trips already recorded" is exactly "after round-trip N".
+        let after_round_trip = self.cache_ledger.next_round_trip().saturating_sub(1);
+        let event = crate::cache_ledger::CompactionEvent {
+            after_round_trip,
+            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            kind,
+            trigger,
+            watermark_tokens: self.compact_state.last_real_input_tokens,
+            threshold_tokens: self.autocompact_threshold_tokens(),
+            pre_tokens,
+            tokens_freed,
+            items_collapsed,
+            error,
+        };
+        let session_id = self.conversation_id.clone();
+        self.cache_ledger.record_compaction(&session_id, event);
+    }
+
     /// Run the multi-level compaction pipeline before each API call.
     ///
     /// Execution order: tool-call-args hygiene → microcompact → autocompact →
@@ -7594,6 +13609,18 @@ impl AgentEngine {
                 // the read content a cached diff base references. Bump the file
                 // cache's compaction generation so those bases stop qualifying.
                 self.bump_file_cache_generation();
+                // F23-04: a microcompact is the cheapest pressure relief the
+                // engine has and it happens silently under the autocompact
+                // threshold. Recording it is what makes "why did the cache miss
+                // when the watermark never crossed anything?" answerable.
+                self.record_cache_ledger_compaction(
+                    crate::cache_ledger::CompactionKind::Micro,
+                    crate::cache_ledger::CompactionTrigger::MicroHeuristic,
+                    self.compact_state.last_real_input_tokens,
+                    result.estimated_tokens_freed as u64,
+                    result.cleared_count as u64,
+                    None,
+                );
             }
         }
 
@@ -7615,7 +13642,25 @@ impl AgentEngine {
                 &self.compact_config,
             );
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
-            let provider = Arc::clone(&self.provider);
+            let provider: Arc<dyn LlmProvider> = match (
+                self.session_journal.as_ref(),
+                self.active_journal_turn_id.as_ref(),
+            ) {
+                (Some(journal), Some(turn_id)) => Arc::new(JournaledLlmProvider::new(
+                    Arc::clone(&self.provider),
+                    journal.clone(),
+                    turn_id.clone(),
+                    LifecyclePurpose::Compaction,
+                    self.compat.provider_type(),
+                    self.model.clone(),
+                )),
+                (Some(_), None) => {
+                    return Err(AgentError::SessionAuthority(
+                        "compaction has journal authority but no active durable turn".to_string(),
+                    ));
+                }
+                (None, _) => Arc::clone(&self.provider),
+            };
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
             // loop, AFTER `push_user_turn` appended the user's live
             // instruction. Summarizing ALL of `self.messages` therefore
@@ -7645,6 +13690,8 @@ impl AgentEngine {
                     ));
                     // #279(d): capture before `result` is moved into `folded`.
                     let result_pre_compact_tokens = result.pre_compact_tokens;
+                    // F23-04: same reason — needed by the ledger record below.
+                    let result_messages_summarized = result.messages_summarized as u64;
                     // AUDIT A7 — `autocompact` returns `[boundary(User),
                     // summary(User)]`; appending the live user turn
                     // would then yield three consecutive `User`
@@ -7738,8 +13785,25 @@ impl AgentEngine {
                     // prefix, so any read base cached before now is no longer in
                     // the visible transcript. Invalidate diff bases.
                     self.bump_file_cache_generation();
+                    // F23-04: this is the compaction↔cache join. The whole
+                    // message prefix has just been replaced, so the next
+                    // round-trip's cache miss is self-inflicted and the ledger
+                    // must attribute it to `history_rewritten` rather than to
+                    // the hash comparison's guess.
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::Auto,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        result_pre_compact_tokens,
+                        tokens_freed,
+                        result_messages_summarized,
+                        None,
+                    );
                 }
-                Err(auto::CompactError::CircuitBroken { .. }) => {
+                Err(auto::CompactError::CircuitBroken { failures }) => {
                     // Already tripped; logged at circuit-breaker level.
                     // AUDIT A4 — restore the carved-out live user turn:
                     // compaction did not run, the conversation must be
@@ -7747,6 +13811,32 @@ impl AgentEngine {
                     if let Some(turn) = live_user_turn {
                         self.messages.push(turn);
                     }
+                    // F23-04: a compactor that cannot run is the sharpest
+                    // token-pressure fact there is — pressure keeps rising with
+                    // no relief available. Silence here is how a session walks
+                    // into the emergency hard stop with nothing to explain it.
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::AutoFailed,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        self.compact_state.last_real_input_tokens,
+                        0,
+                        0,
+                        Some(format!(
+                            "circuit breaker tripped after {failures} consecutive failures"
+                        )),
+                    );
+                }
+                Err(error)
+                    if crate::journal_provider::is_journal_authority_error(&error.to_string()) =>
+                {
+                    if let Some(turn) = live_user_turn {
+                        self.messages.push(turn);
+                    }
+                    return Err(AgentError::SessionAuthority(error.to_string()));
                 }
                 Err(e) => {
                     self.output
@@ -7756,6 +13846,20 @@ impl AgentEngine {
                     if let Some(turn) = live_user_turn {
                         self.messages.push(turn);
                     }
+                    // F23-04: record the failure with its reason. `emit_error`
+                    // reaches the live surface only; nothing survived the turn.
+                    self.record_cache_ledger_compaction(
+                        crate::cache_ledger::CompactionKind::AutoFailed,
+                        if smart_drove {
+                            crate::cache_ledger::CompactionTrigger::SmartForce
+                        } else {
+                            crate::cache_ledger::CompactionTrigger::Watermark
+                        },
+                        self.compact_state.last_real_input_tokens,
+                        0,
+                        0,
+                        Some(e.to_string()),
+                    );
                 }
             }
         } else if should_compact {
@@ -8030,7 +14134,32 @@ impl AgentEngine {
         // Clone the Arc so the search awaits don't hold a borrow of `self`
         // across the `self.messages.push` below.
         let memory_api = self.memory_api.clone();
+
+        // 23B-C3 — activation. This injection puts durable memory into the
+        // user's prompt without the user asking for it on this turn, and until
+        // now it reported that to nobody but a `tracing::debug!` line. The log
+        // below is both halves of the criterion's "activation" clause: the off
+        // switch is honoured HERE, before any search runs, and what actually
+        // went in is recorded at the point of injection rather than recomputed
+        // afterwards (a second computation could disagree with what was sent).
+        let activation = memory_api.activation_log();
+        if let Some(log) = activation.as_ref()
+            && !log.enabled()
+        {
+            log.record(wcore_memory::RecallActivation::disabled(
+                chrono::Utc::now().timestamp(),
+                query,
+            ));
+            tracing::debug!(
+                target: "wcore_agent::memory",
+                "session-start recall is switched off by the user; injecting nothing"
+            );
+            return;
+        }
+
         let mut previews: Vec<String> = Vec::new();
+        let mut activated: Vec<wcore_memory::ActivatedItem> = Vec::new();
+        let mut exclusions: Vec<wcore_memory::RecallExclusion> = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for tier in [Tier::Project, Tier::Global] {
             let q = Query {
@@ -8042,13 +14171,29 @@ impl AgentEngine {
                 kg_depth: 1,
                 token_budget: None,
             };
-            match memory_api.search(q, AccessToken::MainAgent).await {
-                Ok(hits) => {
+            // `search_with_provenance` returns the SAME hits `search` does
+            // (both run the episodic fusion then append the semantic-fact
+            // pass), plus the exclusions a privacy scope or retention bound
+            // caused. Taking the reporting variant here is what lets
+            // `/memory activation` tell a user what was WITHHELD from their
+            // prompt, which nothing else in the system can answer.
+            match memory_api
+                .search_with_provenance(q, AccessToken::MainAgent)
+                .await
+            {
+                Ok((hits, report)) => {
+                    exclusions.extend(report.exclusions);
                     for h in hits {
                         // Only durable facts are worth pre-injecting; episodic
                         // previews are noisier and the model can still reach
                         // them via `session_search` on demand.
                         if h.partition == Partition::Semantic && seen.insert(h.preview.clone()) {
+                            activated.push(wcore_memory::ActivatedItem {
+                                id: h.id.clone(),
+                                partition: h.partition,
+                                tier: h.tier,
+                                preview: h.preview.clone(),
+                            });
                             previews.push(h.preview);
                         }
                     }
@@ -8062,11 +14207,34 @@ impl AgentEngine {
             }
         }
         if previews.is_empty() {
+            // Record the empty activation before returning. "This turn
+            // injected nothing, and here is what was excluded" is a different
+            // and more useful answer than the silence this path used to give,
+            // and it is the answer a user needs when a privacy scope is why.
+            if let Some(log) = activation.as_ref() {
+                log.record(wcore_memory::RecallActivation {
+                    at: chrono::Utc::now().timestamp(),
+                    query: query.to_string(),
+                    enabled: true,
+                    injected: Vec::new(),
+                    excluded: exclusions,
+                });
+            }
             return;
         }
         // Cap to keep the injection tight; top hits are first (search returns
         // facts ranked by embedding similarity to the query).
         previews.truncate(6);
+        activated.truncate(6);
+        if let Some(log) = activation.as_ref() {
+            log.record(wcore_memory::RecallActivation {
+                at: chrono::Utc::now().timestamp(),
+                query: query.to_string(),
+                enabled: true,
+                injected: activated,
+                excluded: exclusions,
+            });
+        }
         // HIGH-3 / F1: recalled previews are untrusted memory content. Defang any
         // host trust-tag delimiters so a stored fact can't forge or escape this
         // <system-reminder> block. Same helper as the plugin-hook envelope (DRY).
@@ -8176,9 +14344,24 @@ impl AgentEngine {
     /// Returns the block reason when set so the caller can terminate;
     /// `None` means proceed. `modified_input` remains a pre-tool-use
     /// concern and is still ignored here.
+    fn queue_durable_hook_consumptions(
+        &mut self,
+        consumptions: impl IntoIterator<Item = crate::session_journal::HookPhaseConsumption>,
+    ) {
+        for consumption in consumptions {
+            if !self.pending_hook_phase_consumptions.iter().any(|pending| {
+                pending.hook_phase_id == consumption.hook_phase_id
+                    && pending.outcome_digest == consumption.outcome_digest
+            }) {
+                self.pending_hook_phase_consumptions.push(consumption);
+            }
+        }
+    }
+
     fn apply_pre_turn_outcome(&mut self, mut outcome: crate::hooks::HookOutcome) -> Option<String> {
         // Accumulate fired hook actions for the next TurnTrace.
         self.pending_hook_actions.append(&mut outcome.fired_actions);
+        self.queue_durable_hook_consumptions(outcome.durable_hook_phases.drain(..));
         if let Some(new_model) = outcome.switch_model {
             // D014: an explicit user `/model` pin outranks a hook switch_model.
             self.apply_switch_model(new_model);
@@ -8210,6 +14393,7 @@ impl AgentEngine {
         // outcomes also flow through here (engine.rs turn-end loop), so this
         // covers the post-tool-use phase too.
         self.pending_hook_actions.append(&mut outcome.fired_actions);
+        self.queue_durable_hook_consumptions(outcome.durable_hook_phases.drain(..));
         if let Some(new_model) = outcome.switch_model {
             // D014: an explicit user `/model` pin outranks a hook switch_model.
             self.apply_switch_model(new_model);
@@ -8241,7 +14425,7 @@ impl AgentEngine {
         if let Some(hook_engine) = self.hooks.as_ref() {
             let summary = SessionEndSummary {
                 turns,
-                total_input_tokens: self.total_usage.input_tokens,
+                total_input_tokens: self.total_usage.total_input_tokens(),
                 total_output_tokens: self.total_usage.output_tokens,
             };
             let outcome = hook_engine.on_session_end(&summary).await;
@@ -8279,10 +14463,19 @@ impl AgentEngine {
 
         // W3 (v0.6.3 B.1): fire the auto-memorize SessionEnd trigger.
         // `AutoMemorizer` existed but `run_session_end` was never invoked
-        // on the production path. It is consent-gated internally (OFF
-        // unless the user creates the opt-in consent file) and uses the
-        // episodic/fact partitions — no KG dependency. Non-fatal: a memory
-        // failure must not block session teardown.
+        // on the production path. It uses the episodic/fact partitions — no
+        // KG dependency. Non-fatal: a memory failure must not block session
+        // teardown.
+        //
+        // Consent: NOT opt-in. As of the 2026-06-04 smart default,
+        // `auto_memorize::consent_granted` returns `true` for an ABSENT
+        // decision file, so this writes `Tier::Project` facts by default.
+        // That default is deliberate and documented; what was NOT is that this
+        // path also consulted no config field — in particular not
+        // `[memory] enabled`, which the docs advertise as the opt-out. #170
+        // closes that: `fire_auto_memorize` now returns early on the cached
+        // `memory_enabled`, and config resolution independently forces
+        // `NullMemory` for an opted-out user.
         self.fire_auto_memorize().await;
 
         // Wave W3 (closes B.1): direct invocation of W9 Curator + PUM
@@ -8649,6 +14842,21 @@ impl AgentEngine {
         use wcore_memory::auto_memorize::{AutoMemorize, FactCandidate, SessionDigest};
         use wcore_memory::fact_extractor::FactExtractor;
 
+        // #170 — `[memory] enabled = false` is the opt-out the docs advertise,
+        // and this path used to consult no config field at all. Bootstrap now
+        // binds `NullMemory` for an opted-out user and `set_memory_api`
+        // refuses to replace it, so the writes below could not land anyway.
+        // Stated here regardless: returning before extraction means an
+        // opted-out session does no fact-extraction work at all, and it gives
+        // the refusal a name at the site that would otherwise do the writing.
+        if !self.memory_enabled {
+            tracing::debug!(
+                target: "wcore_agent::memory",
+                "auto-memorize refused: [memory] enabled = false"
+            );
+            return;
+        }
+
         // Gather plain-text content surfaced during the session. Tool-use /
         // tool-result / thinking blocks are skipped — the extractor scores
         // natural-language assertions, not tool plumbing.
@@ -8675,6 +14883,9 @@ impl AgentEngine {
             .map(|s| s.id.clone())
             .unwrap_or_default();
         let turn_count = self.recent_turn_traces.len() as u32;
+        // Kept for the skip-report level decision below; `digest` consumes the
+        // vector.
+        let considered = fact_candidates.len();
         let digest = SessionDigest {
             session_id,
             turn_count,
@@ -8693,12 +14904,36 @@ impl AgentEngine {
             // #664: the SkipReason was computed then discarded, so facts were
             // silently not saved. Surface WHY so an operator can see that
             // auto-memorize skipped (e.g. consent not granted / below threshold).
-            tracing::info!(
-                target: "wcore_agent::memory",
-                skip_reason = ?report.skipped_reason,
-                candidates = report.facts_persisted,
-                "auto-memorize skipped this session; no facts saved"
-            );
+            //
+            // #147: this runs at the end of EVERY turn, not once per session,
+            // so at INFO it emitted one line per turn — measured 9 identical
+            // `candidates=0` lines in a 9-turn run, the only per-turn record in
+            // the diagnostics log. Nothing was extracted, nothing was dropped,
+            // and nothing was decided: there is no event there to report.
+            //
+            // The #664 question is "why were MY facts not saved", which only
+            // has content when there were facts. So the level follows the
+            // evidence: INFO when candidates existed and were rejected (an
+            // operator-visible decision), DEBUG when the turn produced none
+            // (`RUST_LOG=debug` still shows it). `candidates` is also corrected
+            // here — it reported `facts_persisted`, which is 0 by construction
+            // on every skip path and so could never distinguish the two cases
+            // this branch now separates.
+            if considered > 0 {
+                tracing::info!(
+                    target: "wcore_agent::memory",
+                    skip_reason = ?report.skipped_reason,
+                    candidates = considered,
+                    "auto-memorize skipped this session; no facts saved"
+                );
+            } else {
+                tracing::debug!(
+                    target: "wcore_agent::memory",
+                    skip_reason = ?report.skipped_reason,
+                    candidates = 0,
+                    "auto-memorize skipped this session; no facts saved"
+                );
+            }
             return;
         }
 
@@ -9192,8 +15427,8 @@ impl AgentEngine {
     ///    about to call it.
     /// 3. Catalog mode (default): the remaining deferred defs are removed
     ///    from the array entirely and folded into ONE sorted name-only
-    ///    inventory line on ToolSearch's description (openclaw parity —
-    ///    per-tool stubs measured MORE expensive than the hot schemas).
+    ///    inventory line on ToolSearch's description (per-tool stubs measured
+    ///    MORE expensive than the hot schemas).
     ///    A hydrated tool leaves the catalog line and ships full, in the
     ///    same one-turn tools[] change as its admission. Catalog off:
     ///    deferred defs stay as per-tool stub entries.
@@ -9268,28 +15503,21 @@ impl AgentEngine {
         self.audit_log = Some(log);
     }
 
-    fn save_session(&mut self) {
-        // AUDIT D-6 — never persist a trailing assistant message whose
-        // `tool_use` blocks have no following `tool_result`. The graph
-        // `Cancelled` / `Quit` exits call `save_session()` after the
-        // assistant message (with `tool_use`) is pushed but before the
-        // tool-results message — that orphaned shape is Anthropic-invalid
-        // and any consumer reading the session file without going
-        // through `push_user_turn` (inspector, export, re-send) would
-        // choke on it. Repair in-memory first so the on-disk copy is
-        // always a valid alternating message list. No-op when there is
-        // nothing dangling.
+    async fn prepare_durable_conversation(&mut self) -> Result<(), AgentError> {
         self.repair_orphaned_tool_use();
+        self.sync_active_journal_conversation().await
+    }
+
+    /// Write the compatibility snapshot without mutating conversation state.
+    /// Durable execution paths call `prepare_durable_conversation` first.
+    fn save_session_mirror(&mut self) {
         if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.updated_at = chrono::Utc::now();
-            if let Err(e) = mgr.save(session) {
+            if let Err(e) = mgr.save_and_clear_wal(session) {
                 self.output
                     .emit_error(&format!("Failed to save session: {}", e), false);
-            } else {
-                // F-030: full save succeeded; the WAL is now redundant.
-                mgr.delete_wal(session);
             }
             if let Err(e) = mgr.update_index_for(session) {
                 self.output
@@ -9970,6 +16198,7 @@ mod set_config_tests {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -9988,6 +16217,9 @@ mod set_config_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -10001,6 +16233,7 @@ mod set_config_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -10021,6 +16254,7 @@ mod set_config_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -10033,12 +16267,23 @@ mod set_config_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -10055,6 +16300,7 @@ mod set_config_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -10064,10 +16310,14 @@ mod set_config_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -11632,6 +17882,7 @@ mod phase6_tests {
     fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -11650,6 +17901,9 @@ mod phase6_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -11663,6 +17917,7 @@ mod phase6_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -11683,6 +17938,7 @@ mod phase6_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -11696,12 +17952,23 @@ mod phase6_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -11718,6 +17985,7 @@ mod phase6_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -11727,10 +17995,14 @@ mod phase6_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -11881,7 +18153,7 @@ mod compact_tests {
     use wcore_types::message::FinishReason;
     // v0.8.0 Task M: inline-test fixture builders need access to the
     // engine-private user-id resolver.
-    use super::resolve_user_model_user_id;
+    use super::{message_requires_vision, resolve_user_model_user_id};
     use wcore_types::message::{ContentBlock, Message, Role};
 
     use crate::approval::ApprovalBridge;
@@ -11930,6 +18202,7 @@ mod compact_tests {
     ) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages,
@@ -11948,6 +18221,9 @@ mod compact_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -11961,6 +18237,7 @@ mod compact_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -11981,6 +18258,7 @@ mod compact_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -11994,12 +18272,23 @@ mod compact_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -12016,6 +18305,7 @@ mod compact_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -12025,10 +18315,14 @@ mod compact_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -12078,6 +18372,50 @@ mod compact_tests {
         assert_eq!(m.role, Role::User);
         assert_eq!(m.content.len(), 1);
         assert!(matches!(&m.content[0], ContentBlock::Text { text } if text == "hello"));
+    }
+
+    #[test]
+    fn push_user_turn_preserves_text_then_image_wire_order() {
+        let mut engine = engine_with_history(vec![]);
+        let images = vec![
+            ContentBlock::Image {
+                mime: "image/png".into(),
+                data: "cG5n".into(),
+            },
+            ContentBlock::Image {
+                mime: "image/jpeg".into(),
+                data: "anBlZw==".into(),
+            },
+        ];
+        engine.push_user_turn_with_content("describe both", images.clone());
+
+        let content = &engine.messages[0].content;
+        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "describe both"));
+        assert!(matches!(
+            &content[1],
+            ContentBlock::Image { mime, data } if mime == "image/png" && data == "cG5n"
+        ));
+        assert!(matches!(
+            &content[2],
+            ContentBlock::Image { mime, data } if mime == "image/jpeg" && data == "anBlZw=="
+        ));
+        assert!(message_requires_vision(&engine.messages));
+    }
+
+    #[test]
+    fn push_user_turn_image_only_has_no_empty_text_block() {
+        let mut engine = engine_with_history(vec![]);
+        let image = ContentBlock::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        };
+        engine.push_user_turn_with_content("", vec![image.clone()]);
+
+        assert!(matches!(
+            engine.messages[0].content.as_slice(),
+            [ContentBlock::Image { mime, data }] if mime == "image/png" && data == "cG5n"
+        ));
+        assert!(message_requires_vision(&engine.messages));
     }
 
     #[test]
@@ -13258,6 +19596,7 @@ mod plan_mode_tests {
         let flag = Arc::new(AtomicBool::new(false));
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -13276,6 +19615,9 @@ mod plan_mode_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -13289,6 +19631,7 @@ mod plan_mode_tests {
             plan_state: PlanState::default(),
             plan_active_flag: Some(flag),
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -13309,6 +19652,7 @@ mod plan_mode_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -13322,12 +19666,23 @@ mod plan_mode_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -13344,6 +19699,7 @@ mod plan_mode_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -13353,10 +19709,14 @@ mod plan_mode_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -13689,6 +20049,7 @@ mod hook_integration_tests {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -13707,6 +20068,9 @@ mod hook_integration_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -13720,6 +20084,7 @@ mod hook_integration_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -13740,6 +20105,7 @@ mod hook_integration_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -13753,12 +20119,23 @@ mod hook_integration_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -13775,6 +20152,7 @@ mod hook_integration_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -13784,10 +20162,14 @@ mod hook_integration_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -14144,6 +20526,9 @@ mod hook_integration_tests {
     #[derive(Default)]
     struct FactCountingMem {
         fact_writes: std::sync::atomic::AtomicU64,
+        /// #170: episode writes, so the opt-out test can observe the
+        /// `write_smart_handoff` / verbatim-transcript path too, not just facts.
+        episode_writes: std::sync::atomic::AtomicU64,
     }
 
     #[async_trait::async_trait]
@@ -14153,6 +20538,8 @@ mod hook_integration_tests {
             _: wcore_memory::v2_types::Episode,
             _: wcore_memory::AccessToken,
         ) -> wcore_memory::error::Result<wcore_memory::v2_types::EpisodeId> {
+            self.episode_writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(wcore_memory::v2_types::EpisodeId::default())
         }
         async fn assert_fact(
@@ -14336,6 +20723,243 @@ mod hook_integration_tests {
         assert_eq!(
             writes, 1,
             "the extracted fact must be persisted via assert_fact when consent is granted"
+        );
+    }
+
+    /// #170 — `[memory] enabled = false` must stop auto-memorize from
+    /// recording, and must do so on the engine itself.
+    ///
+    /// The two W3 tests above gate on CONSENT (`WAYLAND_AUTO_MEMORIZE` / the
+    /// decision file). Neither could see this defect, because
+    /// `fire_auto_memorize` consulted no config field at all: with consent
+    /// granted — which is the default, since an absent decision file means ON
+    /// — it wrote `Tier::Project` facts through whatever `MemoryApi` the
+    /// engine happened to hold. Config resolution now also forces `NullMemory`
+    /// for an opted-out user, but a host can install a real handle through
+    /// `set_memory_api()` afterwards, so the refusal is asserted here against
+    /// a real, counting handle rather than inferred from `NullMemory` being a
+    /// no-op.
+    ///
+    /// Both directions, same fixture: consent is granted throughout and the
+    /// ONLY thing that differs between the two halves is the opt-out. That
+    /// makes the control exact — a refusal that also fired with memory on
+    /// would be indistinguishable from auto-memorize simply being broken,
+    /// which is the shape of vacuous gate this project keeps finding.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn memory_opt_out_refuses_auto_memorize_with_consent_granted() {
+        let prior_env = std::env::var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE).ok();
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
+        unsafe {
+            std::env::remove_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE);
+        }
+        let consent_path = wcore_memory::auto_memorize::consent_file_path();
+        let consent_existed = consent_path.is_file();
+        if !consent_existed {
+            if let Some(parent) = consent_path.parent() {
+                std::fs::create_dir_all(parent).expect("create consent dir");
+            }
+            std::fs::write(&consent_path, b"opt-in").expect("write consent file");
+        }
+
+        // "X uses Y" is a default FactExtractor pattern at confidence 0.70,
+        // which clears the 0.5 min_confidence threshold — the same phrase the
+        // positive control above relies on.
+        let messages = vec![Message::new(
+            super::Role::Assistant,
+            vec![super::ContentBlock::Text {
+                text: "wayland uses tokio".into(),
+            }],
+        )];
+
+        // Opted OUT. Note the ORDER: the backend is installed while memory is
+        // still on, and the opt-out is applied afterwards. `set_memory_api`
+        // now refuses a durable backend outright (see the test above), which
+        // would make this pass without `fire_auto_memorize` doing anything —
+        // and then the early return could be deleted with the suite still
+        // green. Installing first keeps the two gates independently covered.
+        let opted_out_counter = Arc::new(FactCountingMem::default());
+        let mut engine = make_engine("m");
+        engine.set_memory_api(opted_out_counter.clone());
+        engine.memory_enabled = false;
+        engine.messages = messages.clone();
+        engine.fire_auto_memorize().await;
+        let opted_out_writes = opted_out_counter
+            .fact_writes
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Opted IN — the control.
+        let opted_in_counter = Arc::new(FactCountingMem::default());
+        let mut engine = make_engine("m");
+        engine.memory_enabled = true;
+        engine.set_memory_api(opted_in_counter.clone());
+        engine.messages = messages;
+        engine.fire_auto_memorize().await;
+        let opted_in_writes = opted_in_counter
+            .fact_writes
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        // Restore fixture state before asserting so a failure does not leak
+        // into the user's config dir.
+        if !consent_existed {
+            let _ = std::fs::remove_file(&consent_path);
+        }
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
+        unsafe {
+            if let Some(v) = prior_env {
+                std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, v);
+            }
+        }
+
+        assert_eq!(
+            opted_out_writes, 0,
+            "`[memory] enabled = false` must persist nothing — consent being \
+             granted is not permission to record for a user who switched \
+             memory off"
+        );
+        assert_eq!(
+            opted_in_writes, 1,
+            "and the control must still record: if this half goes to 0 the \
+             refusal above proves nothing"
+        );
+    }
+
+    /// #170 — the host bypass. `set_memory_api()` must refuse to install a
+    /// durable backend on an engine whose config says memory is off.
+    ///
+    /// This is the gap a four-way cross audit found, unanimously, in the
+    /// first version of this fix: bootstrap never hands an opted-out user a
+    /// real backend, so every test passed — but `set_memory_api` is public
+    /// API, and a host calling it after construction reinstated EVERY durable
+    /// write the engine performs. All of them go through this one handle:
+    /// `dream_now` and `kg_ingest_facts` at session end, `record_episode` from
+    /// `write_smart_handoff` (a verbatim pre-compaction transcript),
+    /// `rebind_session`, and `assert_fact`. Gating the handle closes all of
+    /// them at once.
+    ///
+    /// The assertion is on OBSERVED WRITES through the engine's own handle,
+    /// not on pointer identity — a refusal that installed the backend but
+    /// happened to write nothing today would be indistinguishable from one
+    /// that never installed it, and the first regresses silently.
+    #[tokio::test]
+    async fn set_memory_api_refuses_a_durable_backend_when_memory_is_off() {
+        async fn writes_through(memory_enabled: bool) -> (u64, u64) {
+            let counter = Arc::new(FactCountingMem::default());
+            let mut engine = make_engine("m");
+            engine.memory_enabled = memory_enabled;
+            engine.set_memory_api(counter.clone());
+
+            // Drive the handle the way every session-end writer does.
+            let episode = wcore_memory::v2_types::Episode {
+                id: wcore_memory::v2_types::EpisodeId::new(),
+                tier: wcore_memory::v2_types::Tier::Project,
+                ts: 1_700_000_000,
+                episode_type: "compaction_handoff".into(),
+                summary: "verbatim transcript".into(),
+                atomic_facts: Vec::new(),
+                source: "test".into(),
+                source_product: "wcore-agent-test".into(),
+                session_id: None,
+                project_root: None,
+                decay_score: 1.0,
+                status: wcore_memory::v2_types::EpisodeStatus::Active,
+            };
+            let _ = engine
+                .memory_api()
+                .record_episode(episode, wcore_memory::AccessToken::MainAgent)
+                .await;
+            let _ = engine
+                .memory_api()
+                .assert_fact(
+                    wcore_memory::v2_types::Fact {
+                        id: wcore_memory::v2_types::FactId::new(),
+                        tier: wcore_memory::v2_types::Tier::Project,
+                        ts: 1_700_000_000,
+                        subject: "wayland".into(),
+                        predicate: "uses".into(),
+                        object: "tokio".into(),
+                        confidence: 0.7,
+                        source_episode: None,
+                        superseded_by: None,
+                    },
+                    wcore_memory::AccessToken::System,
+                )
+                .await;
+            (
+                counter
+                    .episode_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                counter
+                    .fact_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            )
+        }
+
+        let (episodes, facts) = writes_through(false).await;
+        assert_eq!(
+            (episodes, facts),
+            (0, 0),
+            "a host must not be able to reinstate durable writes for a user \
+             who set `[memory] enabled = false`"
+        );
+
+        let (episodes, facts) = writes_through(true).await;
+        assert_eq!(
+            (episodes, facts),
+            (1, 1),
+            "and a host MUST still be able to install a real backend when \
+             memory is on — without this half the refusal above is satisfied \
+             by `set_memory_api` being broken outright"
+        );
+    }
+
+    /// #170 — the engine's cached skills-lifecycle gate must come from the
+    /// EFFECTIVE value (`Config::skills_lifecycle_enabled()`), not the raw
+    /// `observability.skills_lifecycle` field.
+    ///
+    /// This is the path the bootstrap test cannot reach. Bootstrap forces
+    /// `skills_lifecycle = false` on its own config when memory ends up
+    /// unconstructed (the F05 fail-closed block), so a bootstrapped engine is
+    /// correct either way. An engine built DIRECTLY from a `Config` — which is
+    /// public API, and what a programmatic host does — gets no such
+    /// correction: with the raw field it would cache `true` and keep running
+    /// the per-turn skill-draft path and the session-end `Curator`, both of
+    /// which write durable artifacts derived from the user's session, for a
+    /// user who set `[memory] enabled = false`.
+    ///
+    /// A mutation run is what surfaced this. Dropping `&& self.memory.enabled`
+    /// from the accessor left every other test in this change green, because
+    /// none of them read the accessor — the gate had no coverage at all. This
+    /// test exists to kill that mutant.
+    #[test]
+    fn engine_caches_the_effective_lifecycle_gate_not_the_raw_field() {
+        fn build(memory_enabled: bool) -> super::AgentEngine {
+            let mut config = wcore_config::config::Config {
+                api_key: "sk-test".into(),
+                ..Default::default()
+            };
+            config.memory.enabled = memory_enabled;
+            // The stock default, restated so the test fails loudly if it ever
+            // changes rather than silently proving nothing.
+            config.observability.skills_lifecycle = true;
+            super::AgentEngine::new_with_provider(
+                Arc::new(NullProvider),
+                config,
+                ToolRegistry::new(),
+                Arc::new(crate::output::null_sink::NullSink),
+            )
+        }
+
+        assert!(
+            !build(false).skills_lifecycle,
+            "`[memory] enabled = false` must switch the lifecycle gate off \
+             even when the engine is built straight from a Config that never \
+             went through resolution or bootstrap"
+        );
+        assert!(
+            build(true).skills_lifecycle,
+            "and a stock config must keep it on — otherwise the assertion \
+             above is satisfied by a gate that is simply always closed"
         );
     }
 }
@@ -14530,6 +21154,7 @@ mod approval_bridge_engine_tests {
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -14548,6 +21173,9 @@ mod approval_bridge_engine_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -14561,6 +21189,7 @@ mod approval_bridge_engine_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -14581,6 +21210,7 @@ mod approval_bridge_engine_tests {
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             // W9.1 T3 (T10b): inline-test fixture default — gate off.
             skills_lifecycle: false,
+            memory_enabled: true,
             // F-092 (W7-N): inline-test fixture default — gate off.
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
@@ -14594,12 +21224,23 @@ mod approval_bridge_engine_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
             // v0.8.1 U1 — installed post-construction by
             // `AgentBootstrap::build` (see `set_skill_router`). `None`
@@ -14616,6 +21257,7 @@ mod approval_bridge_engine_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -14625,10 +21267,14 @@ mod approval_bridge_engine_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -15136,6 +21782,9 @@ mod approval_bridge_engine_tests {
         }
 
         let mut engine = make_engine();
+        let sink = crate::test_utils::TestSink::new();
+        let activation_events = sink.handle();
+        engine.output = Arc::new(sink);
         let mem = Arc::new(CapturingMemory::default());
         engine.memory_api = mem.clone();
         engine.conversation_id = "conv-280".into();
@@ -15168,6 +21817,13 @@ mod approval_bridge_engine_tests {
         assert!(ep.summary.contains("looking into it"));
         // Non-destructive: the buffer was not touched.
         assert_eq!(engine.messages.len(), before);
+        let events = activation_events.snapshot();
+        let stages: Vec<&str> = events
+            .iter()
+            .filter(|event| event["capability"] == "smart_handoff")
+            .filter_map(|event| event["stage"].as_str())
+            .collect();
+        assert_eq!(stages, ["reached", "outcome_changed", "observed"]);
     }
 
     /// A memory backend that errors must NOT abort the handoff path — the error
@@ -15281,6 +21937,9 @@ mod approval_bridge_engine_tests {
         }
 
         let mut engine = make_engine();
+        let sink = crate::test_utils::TestSink::new();
+        let activation_events = sink.handle();
+        engine.output = Arc::new(sink);
         engine.memory_api = Arc::new(FailingMemory::default());
         engine.messages = vec![Message::now(
             Role::User,
@@ -15291,6 +21950,13 @@ mod approval_bridge_engine_tests {
         // Must not panic / propagate.
         engine.write_smart_handoff().await;
         assert_eq!(engine.messages.len(), 1);
+        assert!(
+            activation_events
+                .snapshot()
+                .iter()
+                .all(|event| event["capability"] != "smart_handoff"),
+            "a failed memory write must not claim a capability outcome"
+        );
     }
 
     // --- #280 smart compaction through run_compaction() (integration) ------
@@ -15470,6 +22136,8 @@ pub enum AgentError {
     Provider(#[from] ProviderError),
     #[error("User aborted the session")]
     UserAborted,
+    #[error("Session persistence authority unavailable: {0}")]
+    SessionAuthority(String),
     #[error("Context window nearly full ({input_tokens} tokens used, limit {limit})")]
     ContextTooLong { input_tokens: u64, limit: usize },
 }
@@ -15478,8 +22146,9 @@ pub enum AgentError {
 mod user_model_writeback_tests {
     //! v0.8.0 Task M — per-turn observation write-back into
     //! `UserModelBackend`. Closes the v0.7.0 deferment where the
-    //! user-model layer was bootstrap-only-read: `engine.run()` now
-    //! observes on every user turn so the backend keeps learning.
+    //! user-model layer was bootstrap-only-read: `engine.run()` observes
+    //! every successfully completed user turn so the backend keeps learning
+    //! without changing crash-recovery bootstrap input mid-turn.
 
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -15532,9 +22201,21 @@ mod user_model_writeback_tests {
         }
     }
 
+    struct StallingProvider;
+    #[async_trait]
+    impl LlmProvider for StallingProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            std::future::pending().await
+        }
+    }
+
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -15553,6 +22234,9 @@ mod user_model_writeback_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            durable_session_authority: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -15566,6 +22250,7 @@ mod user_model_writeback_tests {
             plan_state: Default::default(),
             plan_active_flag: None,
             cache_detector: super::CacheBreakDetector::new(),
+            cache_ledger: crate::cache_ledger::CacheLedgerRecorder::default(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
             compact_bash: false,
@@ -15585,6 +22270,7 @@ mod user_model_writeback_tests {
             #[cfg(any(test, feature = "test-utils"))]
             test_sink_handle: crate::test_utils::TestSinkHandle::default(),
             skills_lifecycle: false,
+            memory_enabled: true,
             online_evolution: false,
             recent_turn_traces: std::collections::VecDeque::new(),
             drafted_skill_signatures: std::collections::HashSet::new(),
@@ -15594,13 +22280,24 @@ mod user_model_writeback_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
+            narrowed_execution_budget: None,
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
+            call_actor: wcore_permissions::CallActor::Root,
+            learned_policy: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
             template_router: None,
             user_model_backend: None,
+            user_correction_store: None,
             user_model_user_id: "test-user".to_string(),
             // v0.8.1 U1 — test harness defaults to no router; the
             // router-specific tests below install one explicitly.
@@ -15614,6 +22311,7 @@ mod user_model_writeback_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -15623,10 +22321,14 @@ mod user_model_writeback_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -15675,6 +22377,34 @@ mod user_model_writeback_tests {
             brief.style.terseness > 0.0,
             "terse-message stream must produce a positive terseness axis; got {}",
             brief.style.terseness
+        );
+    }
+
+    /// An interrupted turn must not mutate adaptive bootstrap input. The
+    /// restart has to reconstruct the exact system prompt protected by its
+    /// recovery checkpoint; persisting a style observation before the turn's
+    /// terminal journal event made that prompt differ after SIGKILL.
+    #[tokio::test]
+    async fn interrupted_turn_does_not_persist_user_model_observation() {
+        let backend = Arc::new(LocalBackend::in_memory());
+        let mut engine = make_engine();
+        engine.provider = Arc::new(StallingProvider);
+        engine.set_user_model_backend(backend.clone());
+
+        let interrupted = tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            engine.run("remember my terse style", "interrupted-style-turn"),
+        )
+        .await;
+        assert!(
+            interrupted.is_err(),
+            "provider fixture must remain in flight"
+        );
+
+        let brief = backend.brief("test-user").await.unwrap();
+        assert_eq!(
+            brief.last_observed_ts, 0,
+            "an unterminated turn must not change restart-time user context"
         );
     }
 
@@ -15911,6 +22641,7 @@ mod user_model_writeback_tests {
             source: SkillSource::Project,
             loaded_from: LoadedFrom::Skills,
             file_path: std::path::PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            skill_root: None,
             content_length_hint: 0,
             user_invocable: true,
             disable_model_invocation,
@@ -16035,25 +22766,86 @@ mod user_model_writeback_tests {
         );
     }
 
+    #[test]
+    fn auto_skill_lifecycle_off_blocks_injected_drafter_before_bucketing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let generated_name = "auto-code-refactor";
+        let skill_dir = tmp.path().join("skills").join(generated_name);
+        let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
+        let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
+        let drafter = Arc::new(crate::auto_skill::SkillDrafter::with_loader_root(
+            tmp.path().join("legacy-unused"),
+            tmp.path().to_path_buf(),
+            Some(store.clone()),
+        ));
+        let mut engine = make_engine();
+        assert!(
+            !engine.skills_lifecycle,
+            "fixture must exercise the off path"
+        );
+        engine.set_skill_drafter(drafter);
+
+        for input in [
+            "refactor the code",
+            "the code refactor",
+            "please refactor code",
+        ] {
+            engine.observe_auto_skill(input, None, StopReason::EndTurn, 1);
+        }
+
+        assert!(
+            !skill_dir.exists(),
+            "lifecycle-off observation must not write generated content"
+        );
+        assert!(
+            store
+                .best_for_skill(generated_name, "auto_drafter", 10)
+                .unwrap()
+                .is_empty(),
+            "lifecycle-off observation must not record PromptStore candidates"
+        );
+        // Prove the disabled calls never reached the bucketer. If they had,
+        // either of the first two enabled calls would complete the threshold
+        // of three and write a draft.
+        engine.skills_lifecycle = true;
+        for input in ["refactor the code", "the code refactor"] {
+            engine.observe_auto_skill(input, None, StopReason::EndTurn, 1);
+            assert!(
+                !skill_dir.exists(),
+                "disabled observations must not pre-seed the bucketer"
+            );
+        }
+        engine.observe_auto_skill("please refactor code", None, StopReason::EndTurn, 1);
+        assert!(
+            skill_dir.join("SKILL.md").is_file(),
+            "the third enabled observation should prove the fixture can draft"
+        );
+    }
+
     /// Three consecutive successful turns on the same task signature,
     /// with a drafter installed, produces an on-disk auto-draft file
     /// AND a PromptStore record. Closes the v0.8.1 U6 wire end-to-end.
     #[test]
     fn auto_skill_three_successes_writes_draft_to_disk() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("auto");
+        let skill_dir = tmp.path().join("skills");
 
         // Real PromptStore against an in-memory Db so we can also
         // assert the row landed.
         let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
         let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
-        let drafter = Arc::new(crate::auto_skill::SkillDrafter::new(
-            skill_dir.clone(),
+        let drafter = Arc::new(crate::auto_skill::SkillDrafter::with_loader_root(
+            tmp.path().join("legacy-unused"),
+            tmp.path().to_path_buf(),
             Some(store.clone()),
         ));
 
         let mut engine = make_engine();
+        engine.skills_lifecycle = true;
         engine.set_skill_drafter(drafter);
+        let sink = crate::test_utils::TestSink::new();
+        let activation_events = sink.handle();
+        engine.output = Arc::new(sink);
         assert!(engine.skill_drafter().is_some());
 
         // Three successive successes that ALL normalize to the same
@@ -16113,6 +22905,13 @@ mod user_model_writeback_tests {
             all_rows.iter().any(|r| r.scorer == "auto_drafter"),
             "PromptStore row must use scorer='auto_drafter'"
         );
+        let events = activation_events.snapshot();
+        let stages: Vec<&str> = events
+            .iter()
+            .filter(|event| event["capability"] == "legacy_auto_skill_drafting")
+            .filter_map(|event| event["stage"].as_str())
+            .collect();
+        assert_eq!(stages, ["reached", "outcome_changed", "observed"]);
     }
 
     /// A failure breaks the streak: 2 successes + 1 failure + 1 success
@@ -16164,10 +22963,16 @@ mod audit_2026_05_22_tests {
 
     use async_trait::async_trait;
     use serde_json::json;
+    use wcore_egress::{AllowAllPolicy, EgressClient};
+    use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
     use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::Tool;
     use wcore_tools::registry::ToolRegistry;
+    use wcore_tools::vfs::{FileContentIdentity, RealFs, VirtualFs};
     use wcore_types::llm::{LlmEvent, LlmRequest};
-    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::approval::ApprovalBridge;
     use crate::confirm::ToolConfirmer;
@@ -16176,6 +22981,104 @@ mod audit_2026_05_22_tests {
     struct NullOutput;
     impl OutputSink for NullOutput {
         fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct RecoveryTextSink {
+        deltas: Mutex<Vec<(String, String)>>,
+    }
+
+    impl OutputSink for RecoveryTextSink {
+        fn emit_text_delta(&self, text: &str, msg_id: &str) {
+            self.deltas
+                .lock()
+                .unwrap()
+                .push((text.to_string(), msg_id.to_string()));
+        }
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    struct NullEmitter;
+    impl wcore_protocol::writer::ProtocolEmitter for NullEmitter {
+        fn emit(&self, _event: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ApprovalRequestEmitter {
+        seen: Arc<tokio::sync::Notify>,
+    }
+
+    impl wcore_protocol::writer::ProtocolEmitter for ApprovalRequestEmitter {
+        fn emit(&self, event: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            if matches!(
+                event,
+                wcore_protocol::events::ProtocolEvent::ToolRequest { .. }
+            ) {
+                self.seen.notify_one();
+            }
+            Ok(())
+        }
+    }
+
+    struct JournalOrderSink {
+        journal: crate::session_journal::SessionJournal,
+        observed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl OutputSink for JournalOrderSink {
+        fn emit_text_delta(&self, text: &str, _: &str) {
+            let state = self.journal.state().unwrap();
+            let message: wcore_types::message::Message = serde_json::from_value(
+                state
+                    .conversation
+                    .last()
+                    .cloned()
+                    .expect("assistant message must be durable before output"),
+            )
+            .unwrap();
+            assert_eq!(message.role, wcore_types::message::Role::Assistant);
+            assert!(matches!(
+                message.content.as_slice(),
+                [wcore_types::message::ContentBlock::Text { text: durable }] if durable == text
+            ));
+            self.observed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         fn emit_thinking(&self, _: &str, _: &str) {}
         fn emit_tool_call(&self, _: &str, _: &str) {}
         fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
@@ -16205,6 +23108,50 @@ mod audit_2026_05_22_tests {
     struct ScriptedProvider {
         scripts: Mutex<std::collections::VecDeque<Script>>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        physical_url: Option<String>,
+    }
+
+    struct BlockingThenScriptedProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+        physical_url: Option<String>,
+    }
+
+    impl BlockingThenScriptedProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                entered: Arc::new(tokio::sync::Notify::new()),
+                physical_url: None,
+            }
+        }
+
+        fn with_physical_url(mut self, url: String) -> Self {
+            self.physical_url = Some(url);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingThenScriptedProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                return std::future::pending().await;
+            }
+            accept_physical_attempt(self.physical_url.as_deref()).await?;
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("session alive".into()))
+                .await
+                .expect("test receiver must remain live");
+            tx.send(done_endturn())
+                .await
+                .expect("test receiver must remain live");
+            Ok(rx)
+        }
     }
 
     impl ScriptedProvider {
@@ -16212,8 +23159,15 @@ mod audit_2026_05_22_tests {
             Self {
                 scripts: Mutex::new(scripts.into_iter().collect()),
                 calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                physical_url: None,
             }
         }
+
+        fn with_physical_url(mut self, url: String) -> Self {
+            self.physical_url = Some(url);
+            self
+        }
+
         fn call_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
             Arc::clone(&self.calls)
         }
@@ -16226,6 +23180,7 @@ mod audit_2026_05_22_tests {
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            accept_physical_attempt(self.physical_url.as_deref()).await?;
             let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             tokio::spawn(async move {
@@ -16237,6 +23192,31 @@ mod audit_2026_05_22_tests {
             });
             Ok(rx)
         }
+    }
+
+    async fn accept_physical_attempt(url: Option<&str>) -> Result<(), ProviderError> {
+        let Some(url) = url else {
+            return Ok(());
+        };
+        let client = EgressClient::new().with_policy(Arc::new(AllowAllPolicy));
+        let response = scope_max_retries(0, builder_send_with_retry(client.get(url))).await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ProviderError::Api {
+                status: response.status().as_u16(),
+                message: "fixture response".into(),
+            })
+        }
+    }
+
+    async fn physical_attempt_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        server
     }
 
     fn done_endturn() -> LlmEvent {
@@ -16352,6 +23332,169 @@ mod audit_2026_05_22_tests {
         );
     }
 
+    #[tokio::test]
+    async fn engine_owned_budget_guard_cancels_current_host_turn() {
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let budget = crate::budget::ExecutionBudget {
+            max_wall_time: Some(std::time::Duration::from_millis(20)),
+            ..Default::default()
+        }
+        .start_root();
+        let session_root = tokio_util::sync::CancellationToken::new();
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(session_root.clone());
+        let runtime = session_guard.observer();
+        session_guard.attach_budget_with_callback(budget, |_| {});
+        engine.install_session_cancel_guard(session_guard);
+        let host_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(host_turn.clone());
+
+        tokio::time::timeout(std::time::Duration::from_millis(250), host_turn.cancelled())
+            .await
+            .expect("budget expiry must reach the active host turn");
+        assert!(session_root.is_cancelled());
+        assert!(engine.cancel_token().is_cancelled());
+        assert!(runtime.active_turn_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn host_turn_cancel_does_not_terminalize_session_root() {
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let budget = crate::budget::ExecutionBudget::default().start_root();
+        let root = tokio_util::sync::CancellationToken::new();
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        let runtime = session_guard.observer();
+        session_guard.attach_budget_with_callback(budget, |_| {});
+        engine.install_session_cancel_guard(session_guard);
+        let host_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(host_turn.clone());
+
+        host_turn.cancel();
+        tokio::task::yield_now().await;
+
+        assert!(engine.cancel_token().is_cancelled());
+        assert!(runtime.active_turn_token().is_cancelled());
+        assert!(
+            !root.is_cancelled(),
+            "ordinary host cancellation must stop only the current turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_control_stop_allows_the_next_run() {
+        let provider = Arc::new(BlockingThenScriptedProvider::new());
+        let entered = Arc::clone(&provider.entered);
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(100_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+        let root = tokio_util::sync::CancellationToken::new();
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        let control = session_guard.control();
+        session_guard.attach_budget_with_callback(
+            crate::budget::ExecutionBudget::default().start_root(),
+            |_| {},
+        );
+        engine.install_session_cancel_guard(session_guard);
+        let run = tokio::spawn(async move {
+            let result = engine.run("blocked message", "m-blocked").await;
+            (engine, result)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the first provider call must be in flight");
+
+        control.cancel_active_turn();
+
+        let (mut engine, stopped) = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+            .await
+            .expect("turn-only Stop must interrupt the in-flight provider")
+            .expect("run task must join");
+        assert!(matches!(stopped, Err(super::AgentError::UserAborted)));
+        assert!(!root.is_cancelled());
+        assert_eq!(
+            tracker.lock().reserved_totals("session-unknown"),
+            (0, 0.0),
+            "cancelling an in-flight provider call must not strand its reservation"
+        );
+        let result = engine
+            .run("next message", "m-next")
+            .await
+            .expect("a turn-only Stop must not strand the session");
+        assert_eq!(result.text, "session alive");
+        assert!(!engine.cancel_token().is_cancelled());
+        assert!(!control.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn dropping_engine_terminalizes_owned_session_root() {
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let root = tokio_util::sync::CancellationToken::new();
+        let budget = crate::budget::ExecutionBudget::default().start_root();
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        session_guard.attach_budget_with_callback(budget, |_| {});
+        engine.install_session_cancel_guard(session_guard);
+
+        drop(engine);
+
+        assert!(
+            root.is_cancelled(),
+            "moving the engine out of BootstrapResult must leave it as the session lifetime owner"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dangerous_lease_uses_monotonic_deadline_and_stays_terminal() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+
+        let grant = resolve_dangerous_launch(
+            &BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default),
+            DangerousLaunchRequest::cli(1, "test-activation"),
+            9_999_999_999_000,
+        )
+        .expect("trusted local request must resolve");
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let root = tokio_util::sync::CancellationToken::new();
+        let budget = crate::budget::ExecutionBudget::default().start_root();
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        session_guard.attach_budget_with_callback(budget, |_| {});
+        let armed_at = tokio::time::Instant::now();
+        session_guard
+            .arm_dangerous_lease(&grant)
+            .expect("validated TTL must fit the monotonic clock");
+        let deadline = session_guard
+            .dangerous_deadline()
+            .expect("lease must expose its armed monotonic deadline");
+        assert!(deadline > armed_at);
+        assert!(deadline <= armed_at + std::time::Duration::from_secs(1));
+        engine.install_session_cancel_guard(session_guard);
+        let active_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(active_turn.clone());
+
+        let remaining = deadline.duration_since(armed_at);
+        tokio::time::advance(remaining - std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!root.is_cancelled());
+        assert!(!active_turn.is_cancelled());
+
+        tokio::time::sleep_until(deadline).await;
+        tokio::task::yield_now().await;
+        assert!(root.is_cancelled());
+        assert!(active_turn.is_cancelled());
+
+        let replacement_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(replacement_turn.clone());
+        assert!(
+            replacement_turn.is_cancelled(),
+            "an expired Dangerous session cannot be revived by a new host turn"
+        );
+    }
+
     // --- A3 / E-C2: truncated stream + mid-stream-error retry -------------
 
     #[tokio::test]
@@ -16425,13 +23568,10 @@ mod audit_2026_05_22_tests {
         );
     }
 
-    // --- Finding #174: nested re-bill cap on an HTTP-ring-exhausted Err ----
+    // --- F11: one admitted physical send per engine attempt ---------------
 
-    /// Models the engine entry point that triggers the worst nesting:
-    /// `stream()` itself returns `Err(ProviderError::Connection)` — i.e. the
-    /// provider's HTTP ring (`builder_send_with_retry`) already spent its full
-    /// 3-send budget on this request before surfacing the error. Returns that
-    /// `Err` for the first `fail_calls` calls, then a clean `Done` stream.
+    /// Returns a retryable `Err` for the first `fail_calls` admitted physical
+    /// sends, then a clean `Done` stream.
     struct StreamErrProvider {
         fail_calls: usize,
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -16455,9 +23595,7 @@ mod audit_2026_05_22_tests {
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_calls {
-                // A retryable Connection error surfaced from `stream()` itself:
-                // the HTTP ring already exhausted its budget on this request.
-                return Err(ProviderError::Connection("http ring exhausted".into()));
+                return Err(ProviderError::Connection("physical send failed".into()));
             }
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             tokio::spawn(async move {
@@ -16469,14 +23607,10 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
-    async fn http_exhausted_stream_err_grants_only_one_engine_retry() {
-        // Finding #174 — when `stream()` returns a retryable `Err` (the HTTP
-        // ring already spent its 3-send budget), the engine ring must NOT stack
-        // a fresh full `MAX_STREAM_RETRIES` budget on top. Without the cap a
-        // permanent HTTP-exhausted failure would drive 3 engine attempts (1 +
-        // 2 retries); with the cap it is bounded to 2 (1 + 1 retry), each of
-        // which would re-enter the HTTP ring's 3 sends — so the worst case
-        // drops from 9 full-input re-sends to 6 for one logical turn.
+    async fn retryable_stream_err_uses_the_bounded_engine_retry_budget() {
+        // The provider ring is disabled for production engine calls. A
+        // permanent retryable failure therefore gets exactly three physical
+        // sends: the initial attempt plus two engine-owned retries.
         let provider = Arc::new(StreamErrProvider::new(usize::MAX)); // always fails
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
@@ -16487,17 +23621,13 @@ mod audit_2026_05_22_tests {
         );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "an HTTP-ring-exhausted Err must get exactly 1 engine retry \
-             (2 attempts), NOT the full 3 — that is the nested re-bill cap"
+            3,
+            "the engine must make 1 initial send plus 2 bounded retries"
         );
     }
 
     #[tokio::test]
-    async fn http_exhausted_stream_err_still_retries_a_single_transient_failure() {
-        // Finding #174 normal-case guard — the cap must NOT kill resilience for
-        // a genuinely transient single failure. One HTTP-exhausted `Err`
-        // followed by a clean stream must still be retried and recover.
+    async fn retryable_stream_err_recovers_after_one_transient_failure() {
         let provider = Arc::new(StreamErrProvider::new(1)); // fail once, then ok
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
@@ -16511,6 +23641,289 @@ mod audit_2026_05_22_tests {
             2,
             "1 initial attempt + 1 retry recovers the single transient failure"
         );
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_is_not_sent_when_its_reservation_exceeds_cap() {
+        let primary = Arc::new(StreamErrProvider::new(usize::MAX));
+        let primary_calls = primary.call_counter();
+        let fallback = Arc::new(StreamErrProvider::new(0));
+        let fallback_calls = fallback.call_counter();
+        let primary_provider: Arc<dyn LlmProvider> = primary;
+        let fallback_provider: Arc<dyn LlmProvider> = fallback;
+        let chain = wcore_providers::ProviderChain::new(vec![
+            ("primary", primary_provider),
+            ("fallback", fallback_provider),
+        ]);
+        let mut engine = engine_with(Arc::new(chain));
+        engine.max_tokens = 1;
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(1)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("fallback budget denial is a clean termination");
+
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+        assert!(
+            tracker.lock().session_totals(&session_id).0 > 0,
+            "the ambiguous failed primary send must be conservatively charged"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_key_releases_primary_reservation_before_fallback() {
+        struct MissingKeyProvider {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for MissingKeyProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let primary: Arc<dyn LlmProvider> = Arc::new(MissingKeyProvider {
+            calls: Arc::clone(&primary_calls),
+        });
+        let fallback = Arc::new(StreamErrProvider::new(0));
+        let fallback_calls = fallback.call_counter();
+        let fallback_provider: Arc<dyn LlmProvider> = fallback;
+        let resilient = wcore_providers::ResilientProvider::new_with_fallback_identities(
+            "primary",
+            primary,
+            vec![(
+                "haiku".into(),
+                "anthropic".into(),
+                "claude-haiku-4-5".into(),
+                fallback_provider,
+            )],
+            wcore_providers::CircuitConfig::default(),
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        );
+        let mut engine = engine_with(Arc::new(resilient));
+        engine.set_model("claude-opus-4-6");
+        engine.compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        engine.max_tokens = 1;
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(1)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("pre-send primary failure must leave room for fallback");
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let (charged_tokens, charged_cost) = {
+            let tracker = tracker.lock();
+            assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+            tracker.session_totals(&session_id)
+        };
+        let charged_input = charged_tokens.saturating_sub(1);
+        let expected_fallback_cost = super::resolve_conservative_reservation_cost(
+            "anthropic",
+            "claude-haiku-4-5",
+            charged_input,
+            1,
+            &engine.compat,
+        )
+        .usd;
+        let wrong_primary_cost = super::resolve_conservative_reservation_cost(
+            "anthropic",
+            "claude-opus-4-6",
+            charged_input,
+            1,
+            &engine.compat,
+        )
+        .usd;
+        assert!((charged_cost - expected_fallback_cost).abs() < 1e-12);
+        assert!(
+            (charged_cost - wrong_primary_cost).abs() > 1e-9,
+            "fallback settlement must use the served Haiku SKU, not the primary Opus SKU"
+        );
+        let usd_cap = (expected_fallback_cost + wrong_primary_cost) / 2.0;
+        let expensive_primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let expensive_primary: Arc<dyn LlmProvider> = Arc::new(MissingKeyProvider {
+            calls: Arc::clone(&expensive_primary_calls),
+        });
+        let expensive_fallback = Arc::new(StreamErrProvider::new(0));
+        let expensive_fallback_calls = expensive_fallback.call_counter();
+        let expensive_fallback_provider: Arc<dyn LlmProvider> = expensive_fallback;
+        let expensive_resilient = wcore_providers::ResilientProvider::new_with_fallback_identities(
+            "primary",
+            expensive_primary,
+            vec![(
+                "opus".into(),
+                "anthropic".into(),
+                "claude-opus-4-6".into(),
+                expensive_fallback_provider,
+            )],
+            wcore_providers::CircuitConfig::default(),
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        );
+        let mut expensive_engine = engine_with(Arc::new(expensive_resilient));
+        expensive_engine.set_model("claude-haiku-4-5");
+        expensive_engine.compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        expensive_engine.max_tokens = 1;
+        expensive_engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_usd(usd_cap)
+                    .build(),
+            ),
+        )));
+
+        let denied = expensive_engine
+            .run("task", "m-2")
+            .await
+            .expect("higher-priced fallback denial is a clean termination");
+
+        assert_eq!(denied.stop_reason, StopReason::MaxTurns);
+        assert_eq!(
+            expensive_primary_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            expensive_fallback_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the higher-priced Opus fallback must be denied before dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_key_without_fallback_releases_the_provider_reservation() {
+        struct MissingKeyProvider;
+        #[async_trait]
+        impl LlmProvider for MissingKeyProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let mut engine = engine_with(Arc::new(MissingKeyProvider));
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(100)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+        assert_eq!(tracker.session_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn missing_key_in_final_fallback_releases_every_provider_reservation() {
+        struct MissingKeyProvider;
+        #[async_trait]
+        impl LlmProvider for MissingKeyProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let resilient = wcore_providers::ResilientProvider::new_with_fallback_identities(
+            "primary",
+            Arc::new(MissingKeyProvider),
+            vec![(
+                "fallback".into(),
+                "anthropic".into(),
+                "claude-haiku-4-5".into(),
+                Arc::new(MissingKeyProvider) as Arc<dyn LlmProvider>,
+            )],
+            wcore_providers::CircuitConfig::default(),
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        );
+        let mut engine = engine_with(Arc::new(resilient));
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(100)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+        assert_eq!(tracker.session_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn open_circuit_without_fallback_releases_the_provider_reservation() {
+        let primary = Arc::new(StreamErrProvider::new(usize::MAX));
+        let primary_calls = primary.call_counter();
+        let resilient = Arc::new(wcore_providers::ResilientProvider::new(
+            "primary",
+            primary,
+            Vec::new(),
+            wcore_providers::CircuitConfig {
+                fail_threshold: 1,
+                window: std::time::Duration::from_secs(30),
+                cooldown: std::time::Duration::from_secs(60),
+            },
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        ));
+        assert!(resilient.stream(&LlmRequest::default()).await.is_err());
+
+        let mut engine = engine_with(resilient);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(100)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+        assert_eq!(
+            primary_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the open circuit must skip the physical provider send"
+        );
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+        assert_eq!(tracker.session_totals(&session_id), (0, 0.0));
     }
 
     // --- E-C1: budget cap halts the loop ---------------------------------
@@ -16543,7 +23956,7 @@ mod audit_2026_05_22_tests {
         ]]));
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
-        // 1-token cap — the very first turn's 20k-token charge trips it.
+        // 1-token cap — admission must reject the first paid call up front.
         let cap = wcore_budget::BudgetCap::builder()
             .per_session_tokens(1)
             .build();
@@ -16562,9 +23975,503 @@ mod audit_2026_05_22_tests {
         );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "pre-call reservation must prevent the provider from starting"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_reservation_settles_to_actual_usage() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("done".into()),
+            done_endturn_with(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_tokens: 3,
+                cache_read_tokens: 7,
+            }),
+        ]]));
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(tracker.clone());
+
+        engine.run("task", "m-1").await.expect("clean run");
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        assert_eq!(tracker.lock().session_totals(&session_id).0, 25);
+        assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn missing_provider_usage_consumes_the_conservative_reservation() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("done".into()),
+            done_endturn(),
+        ]]));
+        let mut engine = engine_with(provider);
+        engine.max_tokens = 10;
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(tracker.clone());
+
+        engine.run("task", "m-1").await.expect("clean run");
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let (charged_tokens, _) = tracker.lock().session_totals(&session_id);
+        assert!(
+            charged_tokens >= 10,
+            "a clean Done without usage must not refund the reservation to zero"
+        );
+        assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn durable_image_turn_is_preserved_and_pre_checkpoint_crash_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("anthropic", "vision-model", "/tmp", Some("f27a110001"))
+            .unwrap();
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(Vec::new())));
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+
+        let turn_id = "turn-with-image";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "describe this".into(),
+            })
+            .await
+            .unwrap();
+        engine.push_user_turn_with_content(
+            "describe this",
+            vec![ContentBlock::Image {
+                mime: "image/png".into(),
+                data: "iVBORw0KGgoAAA==".into(),
+            }],
+        );
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        let canonical: Message = serde_json::from_value(state.conversation[0].clone()).unwrap();
+        assert!(matches!(
+            canonical.content.as_slice(),
+            [ContentBlock::Text { text }, ContentBlock::Image { mime, data }]
+                if text == "describe this"
+                    && mime == "image/png"
+                    && data == "iVBORw0KGgoAAA=="
+        ));
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            recovery.disposition,
+            crate::recovery::RecoveryDisposition::Blocked {
+                reason: crate::recovery::RecoveryBlocker::ContextCheckpointMissing,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_durable_provider_success_without_redispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x71; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14b0001"))
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "recover paid provider result".into(),
+            }],
+        );
+        active.session.messages.push(user_message.clone());
+        manager.persist_first_message(&active.session).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let budget_seed = crate::budget_authority::BudgetAuthoritySeed {
+            provider_caps: wcore_budget::BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(10.0)
+                .build(),
+            preserve_committed_session_extensions: true,
+            execution_policy: wcore_budget::ExecutionBudget {
+                max_tokens_in: Some(100),
+                max_tokens_out: Some(100),
+                max_cost_usd: Some(10.0),
+                ..Default::default()
+            },
+            wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+            process_cleanup_proof: None,
+            daily_authority: None,
+        };
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine
+            .install_budget_authority(
+                budget_seed.detached("bootstrap-budget").unwrap(),
+                budget_seed.clone(),
+            )
+            .unwrap();
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-budget-restart";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "recover paid provider result".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+
+        let request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![user_message],
+            conversation_id: Some(engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        let checkpoint = engine
+            .commit_provider_recovery_checkpoint(
+                turn_id,
+                &request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let dispatch_id = checkpoint.dispatch_id.unwrap();
+        let request_digest = checkpoint.request_digest.unwrap();
+        let budget_authority = engine.budget_authority.as_ref().unwrap();
+        let budget_session_id = budget_authority.lock().budget_session_id().to_owned();
+        budget_authority
+            .lock()
+            .reserve_provider_dispatch(&dispatch_id, &budget_session_id, 6, 2, 0.01)
+            .unwrap()
+            .unwrap();
+
+        let attempt_id = "attempt-budget-restart";
+        let stream_id = format!("provider-stream:{attempt_id}");
+        let stream_events = vec![
+            crate::session_journal::ProviderStreamEvent::TextDelta {
+                text: "durable paid answer".into(),
+            },
+            crate::session_journal::ProviderStreamEvent::Done {
+                stop_reason: serde_json::json!("end_turn"),
+                finish_reason: serde_json::to_value(FinishReason::Stop).unwrap(),
+                usage: serde_json::to_value(TokenUsage::default()).unwrap(),
+            },
+        ];
+        let response_digest =
+            crate::provider_recovery::provider_response_digest(&stream_events).unwrap();
+        let journal = engine.session_journal.as_ref().unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPreparedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id: dispatch_id.clone(),
+                    turn_id: turn_id.into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "test".into(),
+                    model: "test-model".into(),
+                    request_digest,
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptStarted {
+                    attempt_id: attempt_id.into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamStarted {
+                stream_id: stream_id.clone(),
+                attempt_id: attempt_id.into(),
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamBatchCommitted {
+                stream_id: stream_id.clone(),
+                ordinal: 0,
+                events: stream_events,
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamFinished { stream_id })
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Succeeded,
+                    response_digest: Some(response_digest),
+                },
+            )
+            .unwrap();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14b0001").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed
+            .install_budget_authority(
+                budget_seed.detached("bootstrap-budget").unwrap(),
+                budget_seed.clone(),
+            )
+            .unwrap();
+        resumed.use_recovery_test_key(&recovery_key);
+        let cursor = resumed.recovery_plan().unwrap().cursor();
+        let authority = resumed.budget_authority.as_ref().unwrap();
+        assert_eq!(
+            authority
+                .lock()
+                .inspect(|tracker, _| tracker.reserved_totals(&budget_session_id))
+                .unwrap(),
+            (0, 0.0)
+        );
+        assert_eq!(
+            authority
+                .lock()
+                .inspect(|tracker, _| tracker.session_totals(&budget_session_id))
+                .unwrap(),
+            (8, 0.01)
+        );
+        assert_eq!(
+            authority
+                .lock()
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_in"),
+            "6"
+        );
+        assert_eq!(
+            authority
+                .lock()
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_out"),
+            "2"
+        );
+
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-budget-restart")
+            .await
+            .unwrap();
+        assert_eq!(recovered.text, "durable paid answer");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(resumed);
+
+        let reopened = manager.load_for_run("f14b0001").unwrap();
+        let mut second = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        second
+            .install_budget_authority(
+                budget_seed.detached("bootstrap-budget").unwrap(),
+                budget_seed,
+            )
+            .unwrap();
+        let authority = second.budget_authority.as_ref().unwrap().lock();
+        assert_eq!(
+            authority
+                .inspect(|tracker, _| tracker.reserved_totals(&budget_session_id))
+                .unwrap(),
+            (0, 0.0)
+        );
+        assert_eq!(
+            authority
+                .inspect(|tracker, _| tracker.session_totals(&budget_session_id))
+                .unwrap(),
+            (8, 0.01)
+        );
+        assert_eq!(
+            authority
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_in"),
+            "6"
+        );
+        assert_eq!(
+            authority
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_out"),
+            "2"
+        );
+        assert_eq!(
+            authority
+                .restored_reservation_reconciliation()
+                .reservations_settled,
+            0
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unpriced_provider_is_rejected_while_a_usd_cap_is_active() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn_with(
+            TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+        )]]));
+        let calls = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat {
+            provider_type: Some("custom-unpriced".into()),
+            ..Default::default()
+        };
+        engine.model = "opaque-model".into();
+        engine.config.budget.max_cost_usd = Some(1.0);
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(1_000_000)
+                    .per_session_usd(1.0)
+                    .build(),
+            ),
+        )));
+
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("governance rejection is a clean termination");
+
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unpriceable remote call must not start under a USD cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_provider_remains_usable_under_implicit_smart_cap() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn_with(
+            TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+        )]]));
+        let calls = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat {
+            provider_type: Some("custom-unpriced".into()),
+            ..Default::default()
+        };
+        engine.model = "opaque-model".into();
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(1_000_000)
+                    .per_session_usd(25.0)
+                    .build(),
+            ),
+        )));
+
+        engine
+            .run("task", "m-1")
+            .await
+            .expect("implicit Smart cap degrades to token-only governance");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "the budget cap must stop the loop after the FIRST turn, \
-             not run until max_turns"
+            "an implicit Smart cost cap must not disable an unpriced provider"
+        );
+    }
+
+    #[test]
+    fn continue_with_budget_reopens_only_the_current_smart_session() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(1.0)
+                .build(),
+        )));
+        engine.set_budget_tracker(tracker.clone());
+
+        assert!(
+            tracker.lock().reserve("session-unknown", 101, 0.0).is_err(),
+            "Continue is bound to a real budget-exceeded receipt"
+        );
+
+        engine
+            .continue_with_additional_budget("grant-001", 50, 0.50)
+            .expect("Smart session may add explicit headroom");
+        engine
+            .continue_with_additional_budget("grant-001", 50, 0.50)
+            .expect("an identical retry must not require another exhausted latch");
+
+        assert!(tracker.lock().reserve("session-unknown", 150, 1.50).is_ok());
+        assert!(tracker.lock().reserve("another-session", 101, 0.0).is_err());
+    }
+
+    #[test]
+    fn managed_session_cannot_interactively_widen_budget() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, ManagedDangerousPolicy,
+        };
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut engine = engine_with(provider);
+        engine.config.execution_policy =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Deny);
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(100)
+                    .build(),
+            ),
+        )));
+
+        assert_eq!(
+            engine.continue_with_additional_budget("grant-managed", 1, 0.0),
+            Err(wcore_protocol::events::BudgetGrantRefusalReason::ManagedPolicy)
         );
     }
 
@@ -16809,6 +24716,2945 @@ mod audit_2026_05_22_tests {
         assert_eq!(events[0]["usage"]["input_tokens"], 100);
     }
 
+    #[test]
+    fn resumed_engine_holds_journal_lease_until_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("test", "test-model", "/tmp", None).unwrap();
+        manager.persist_first_message(&session).unwrap();
+        let active = manager.load_for_run(&session.id).unwrap();
+
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let contested = manager.load_for_run(&session.id).unwrap_err();
+        assert!(
+            contested.to_string().contains("already held"),
+            "engine lifetime must retain the writer lease: {contested}"
+        );
+
+        drop(engine);
+        let reacquired = manager.load_for_run(&session.id).unwrap();
+        assert_eq!(reacquired.session.id, session.id);
+    }
+
+    #[tokio::test]
+    async fn live_session_switch_transfers_journal_authority_and_runtime_state() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+
+        let mut session_a = manager
+            .create("test", "test-model", "/tmp", Some("f14000a"))
+            .unwrap();
+        session_a.messages.push(wcore_types::message::Message::now(
+            wcore_types::message::Role::User,
+            vec![wcore_types::message::ContentBlock::Text {
+                text: "session A".into(),
+            }],
+        ));
+        session_a.total_usage = usage(900, 90);
+        manager.persist_first_message(&session_a).unwrap();
+
+        let mut session_b = manager
+            .create("test", "test-model", "/tmp", Some("f14000b"))
+            .unwrap();
+        session_b.messages.push(wcore_types::message::Message::now(
+            wcore_types::message::Role::User,
+            vec![wcore_types::message::ContentBlock::Text {
+                text: "session B".into(),
+            }],
+        ));
+        session_b.total_usage = usage(40, 4);
+        manager.persist_first_message(&session_b).unwrap();
+
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let active_b = manager.load_for_run(&session_b.id).unwrap();
+        let b_before = active_b.journal.state().unwrap().last_seq;
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued B".into()),
+                done_endturn_with(usage(5, 2)),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active_a,
+        );
+
+        engine.run_usage = usage(100, 10);
+        engine.current_msg_id = "session-a-message".into();
+        engine.current_agent_run_id = Some("session-a-run".into());
+        engine.compact_state.consecutive_failures = 2;
+        engine.plan_state.is_active = true;
+        engine
+            .per_turn_costs
+            .push(wcore_protocol::events::TurnCost {
+                turn: 1,
+                model: "session-a-model".into(),
+                provider: "test".into(),
+                cost_usd: 0.0,
+                priced: true,
+            });
+
+        engine.switch_active_session(active_b).unwrap();
+
+        assert_eq!(engine.current_session_id().as_deref(), Some("f14000b"));
+        assert_eq!(
+            serde_json::to_value(engine.conversation_messages()).unwrap(),
+            serde_json::to_value(&session_b.messages).unwrap()
+        );
+        let (total, delta) = engine.usage_snapshot();
+        assert_eq!(total.input_tokens, 40);
+        assert_eq!(total.output_tokens, 4);
+        assert_eq!(delta.input_tokens, 0);
+        assert_eq!(delta.output_tokens, 0);
+        assert!(engine.current_msg_id.is_empty());
+        assert!(engine.current_agent_run_id.is_none());
+        assert_eq!(engine.compact_state.consecutive_failures, 0);
+        assert!(!engine.plan_state.is_active);
+        assert!(engine.per_turn_costs.is_empty());
+
+        // Reacquiring A proves the engine released A's exclusive writer lease.
+        // Keeping that handle open while B runs lets us prove no later durable
+        // event is accidentally appended through the retired authority.
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let a_before = active_a.journal.state().unwrap().last_seq;
+        let contested_b = manager.load_for_run(&session_b.id).unwrap_err();
+        assert!(
+            contested_b.to_string().contains("already held"),
+            "the engine must own B's writer lease: {contested_b}"
+        );
+
+        let result = engine.run("continue B", "b-message").await.unwrap();
+        assert_eq!(result.text, "continued B");
+        assert_eq!(active_a.journal.state().unwrap().last_seq, a_before);
+        assert!(
+            engine
+                .session_journal
+                .as_ref()
+                .unwrap()
+                .state()
+                .unwrap()
+                .last_seq
+                > b_before,
+            "the next durable turn must advance B's journal"
+        );
+        let (total, _) = engine.usage_snapshot();
+        assert_eq!(total.input_tokens, 45);
+        assert_eq!(total.output_tokens, 6);
+    }
+
+    #[test]
+    fn invalid_live_session_switch_leaves_existing_authority_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session_a = manager
+            .create("test", "test-model", "/tmp", Some("f14001a"))
+            .unwrap();
+        let session_b = manager
+            .create("test", "test-model", "/tmp", Some("f14001b"))
+            .unwrap();
+        manager.persist_first_message(&session_a).unwrap();
+        manager.persist_first_message(&session_b).unwrap();
+
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let mut invalid_b = manager.load_for_run(&session_b.id).unwrap();
+        invalid_b.session.id = "f140bad".into();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active_a,
+        );
+
+        let error = engine.switch_active_session(invalid_b).unwrap_err();
+        assert!(error.to_string().contains("journal session mismatch"));
+        assert_eq!(engine.current_session_id().as_deref(), Some("f14001a"));
+        assert!(
+            manager.load_for_run(&session_a.id).is_err(),
+            "a rejected switch must retain A's writer lease"
+        );
+        assert!(
+            manager.load_for_run(&session_b.id).is_ok(),
+            "a rejected switch must release the unused B authority"
+        );
+    }
+
+    /// Journal writer #3 must honour the startup degrade.
+    ///
+    /// `Config::resolve` turns `session.enabled` off on a host with no usable
+    /// credential store. Writers #1 (`init_session`) and #2 (the resume
+    /// constructor) honour that; #3 did not, and would install a live journal
+    /// on an engine that must not hold one — re-arming the every-turn failure
+    /// the degrade exists to prevent.
+    ///
+    /// The PASS direction of this behaviour (switch succeeds when durable
+    /// sessions are on) is covered by
+    /// `live_session_switch_transfers_journal_authority_and_runtime_state`
+    /// above, so the guard is proven able to both fail and pass.
+    #[tokio::test]
+    async fn switch_is_refused_when_durable_sessions_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session_a = manager
+            .create("test", "test-model", "/tmp", Some("f14002a"))
+            .unwrap();
+        let session_b = manager
+            .create("test", "test-model", "/tmp", Some("f14002b"))
+            .unwrap();
+        manager.persist_first_message(&session_a).unwrap();
+        manager.persist_first_message(&session_b).unwrap();
+
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let active_b = manager.load_for_run(&session_b.id).unwrap();
+
+        // The degraded host: resolve has already forced this off.
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = false;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active_a,
+        );
+        assert!(
+            !engine.has_durable_journal(),
+            "writer #2's guard should already have dropped the inherited journal"
+        );
+
+        let error = engine.switch_active_session(active_b).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("durable session persistence is disabled"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !engine.has_durable_journal(),
+            "a refused switch must not install a journal on a degraded engine"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_blocks_bare_turn_started_before_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c001"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "continue exactly once".into(),
+            })
+            .unwrap();
+        let cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("continued".into()),
+            done_endturn(),
+        ]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let new_turn = engine.run("must not start", "new-message").await;
+        assert!(matches!(
+            new_turn,
+            Err(super::AgentError::SessionAuthority(_))
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let result = engine
+            .resume_interrupted_turn("turn-original", &cursor, "recovered-message")
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::AgentError::SessionAuthority(message))
+                if message.contains("not directly continuable")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        assert!(state.turns["turn-original"].completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c005"))
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "continue from checkpoint".into(),
+            }],
+        );
+        let orphaned_tool_use = Message::now(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "must-not-be-repaired".into(),
+                name: "fixture".into(),
+                input: serde_json::json!({}),
+                extra: None,
+            }],
+        );
+        active.session.messages.push(orphaned_tool_use.clone());
+        active.session.messages.push(user_message.clone());
+        manager
+            .persist_first_message(&active.session)
+            .expect("test session must be discoverable after restart");
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "continue from checkpoint".into(),
+            })
+            .unwrap();
+        let encoded_tool_use = serde_json::to_value(&orphaned_tool_use).unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ConversationMessageCommitted {
+                    turn_id: "turn-original".into(),
+                    message_index: 0,
+                    message: encoded_tool_use.clone(),
+                    message_digest: crate::session_journal::state_payload_digest(&encoded_tool_use)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let encoded_message = serde_json::to_value(&user_message).unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ConversationMessageCommitted {
+                    turn_id: "turn-original".into(),
+                    message_index: 1,
+                    message: encoded_message.clone(),
+                    message_digest: crate::session_journal::state_payload_digest(&encoded_message)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let checkpoint_provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut checkpoint_engine = super::AgentEngine::resume_active_with_provider(
+            checkpoint_provider,
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        let recovery_key = [0x5a; 32];
+        checkpoint_engine.use_recovery_test_key(&recovery_key);
+        let mut prepared_message = user_message.clone();
+        prepared_message.content.push(ContentBlock::Text {
+            text: "transient request-only tail".into(),
+        });
+        let prepared_request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![orphaned_tool_use, prepared_message],
+            conversation_id: Some(checkpoint_engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        checkpoint_engine
+            .commit_provider_recovery_checkpoint(
+                "turn-original",
+                &prepared_request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let cursor = checkpoint_engine.recovery_plan().unwrap().cursor();
+        drop(checkpoint_engine);
+
+        let reopened = manager.load_for_run("f14c005").unwrap();
+        let state_before_wrong_key = reopened.journal.state().unwrap();
+        let mut wrong_key_engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        wrong_key_engine.use_recovery_test_key(&[0x6b; 32]);
+        let rejected = wrong_key_engine
+            .resume_interrupted_turn("turn-original", &cursor, "wrong-key-message")
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(super::AgentError::SessionAuthority(ref message))
+                if message == "recovery confidential request is invalid"
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            wrong_key_engine
+                .session_journal
+                .as_ref()
+                .unwrap()
+                .state()
+                .unwrap(),
+            state_before_wrong_key,
+            "a wrong recovery key must not advance or mutate durable authority"
+        );
+        assert_eq!(
+            wrong_key_engine.recovery_plan().unwrap().cursor(),
+            cursor,
+            "a wrong recovery key must leave the committed cursor byte-identical"
+        );
+        drop(wrong_key_engine);
+
+        let reopened = manager.load_for_run("f14c005").unwrap();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+
+        let result = engine
+            .resume_interrupted_turn("turn-original", &cursor, "recovered-message")
+            .await
+            .unwrap();
+        assert_eq!(result.text, "continued");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        let prompts = state
+            .conversation
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter(|message| message.to_string().contains("continue from checkpoint"))
+            .count();
+        assert_eq!(
+            prompts, 1,
+            "checkpoint resume must not duplicate the prompt"
+        );
+        assert!(
+            state
+                .conversation
+                .iter()
+                .all(|message| !message.to_string().contains("backfilled before sending")),
+            "exact checkpoint replay must bypass orphan repair and other request preparation"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_provider_success_before_terminal_composite_never_redispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x3e; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c007"))
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "finish from durable provider output".into(),
+            }],
+        );
+        active.session.messages.push(user_message.clone());
+        manager.persist_first_message(&active.session).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-before-terminal-composite";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "finish from durable provider output".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+
+        let request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![user_message],
+            conversation_id: Some(engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        let checkpoint = engine
+            .commit_provider_recovery_checkpoint(
+                turn_id,
+                &request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let dispatch_id = checkpoint.dispatch_id.unwrap();
+        let request_digest = checkpoint.request_digest.unwrap();
+        let attempt_id = "attempt-before-terminal-composite";
+        let stream_id = format!("provider-stream:{attempt_id}");
+        let stream_events = vec![
+            crate::session_journal::ProviderStreamEvent::TextDelta {
+                text: "durable before composite".into(),
+            },
+            crate::session_journal::ProviderStreamEvent::Done {
+                stop_reason: serde_json::json!("end_turn"),
+                finish_reason: serde_json::to_value(FinishReason::Stop).unwrap(),
+                usage: serde_json::to_value(TokenUsage::default()).unwrap(),
+            },
+        ];
+        let response_digest =
+            crate::provider_recovery::provider_response_digest(&stream_events).unwrap();
+        let journal = engine.session_journal.as_ref().unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPreparedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id: dispatch_id.clone(),
+                    turn_id: turn_id.into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "test".into(),
+                    model: "test-model".into(),
+                    request_digest,
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptStarted {
+                    attempt_id: attempt_id.into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamStarted {
+                stream_id: stream_id.clone(),
+                attempt_id: attempt_id.into(),
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamBatchCommitted {
+                stream_id: stream_id.clone(),
+                ordinal: 0,
+                events: stream_events,
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamFinished { stream_id })
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Succeeded,
+                    response_digest: Some(response_digest),
+                },
+            )
+            .unwrap();
+        let cursor = engine.recovery_plan().unwrap().cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14c007").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.use_recovery_test_key(&recovery_key);
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-before-composite")
+            .await
+            .unwrap();
+        assert_eq!(recovered.text, "durable before composite");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let entries = resumed
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.event,
+                        crate::session_journal::SessionEvent::TurnCommitted { .. }
+                    )
+                })
+                .count(),
+            1,
+            "recovery must terminalize the durable answer exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_checkpoint_commits_after_restart_without_provider_redispatch() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x4f; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c006"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("durable terminal".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-terminal";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "finish once".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+
+        let result = engine
+            .run_inner(
+                super::UserTurnInput::new("finish once", None),
+                "terminal-message",
+                Some(turn_id),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.text, "durable terminal");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let entries = engine
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert!(matches!(
+            entries.last().map(|entry| &entry.event),
+            Some(
+                crate::session_journal::SessionEvent::ConversationRecoveryCheckpointCommittedV2 { .. }
+            )
+        ));
+        let plan = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            plan.disposition,
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                ref checkpoint,
+                ..
+            } if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::CommitTurn
+            )
+        ));
+        let cursor = plan.cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14c006").unwrap();
+        let recovered_output = Arc::new(RecoveryTextSink::default());
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            recovered_output.clone(),
+            reopened,
+        );
+        resumed.use_recovery_test_key(&recovery_key);
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-terminal")
+            .await
+            .unwrap();
+        assert_eq!(recovered.text, "durable terminal");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *recovered_output.deltas.lock().unwrap(),
+            vec![(
+                "durable terminal".to_string(),
+                "resume-terminal".to_string()
+            )],
+            "terminal recovery must replay the durable text exactly once"
+        );
+        let state = resumed.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state.turns[turn_id].completion,
+            Some(crate::session_journal::TurnCompletion::Committed { .. })
+        ));
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        let entries = resumed
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.event,
+                        crate::session_journal::SessionEvent::TurnCommitted { .. }
+                    )
+                })
+                .count(),
+            1,
+            "terminal checkpoint recovery must append exactly one turn commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_charge_budget_cap_recovers_terminal_without_running_tools() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x5a; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14b00d6e7001"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::ToolUse {
+                    id: "budget-blocked-tool".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage {
+                        input_tokens: 10_000,
+                        output_tokens: 10_000,
+                        ..Default::default()
+                    },
+                },
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let provider_calls = provider.call_counter();
+        let physical_tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["RestartProofOpaque".into()];
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_tool_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(12_000)
+                    .build(),
+            ),
+        )));
+        let turn_id = "turn-budget-tool";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "run only within budget".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+
+        let result = engine
+            .run_inner(
+                super::UserTurnInput::new("run only within budget", None),
+                "budget-message",
+                Some(turn_id),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            physical_tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the post-charge cap must suppress provider-requested tools"
+        );
+        let plan = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            plan.disposition,
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                ref checkpoint,
+                ..
+            } if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::CommitTurn
+            )
+        ));
+        let cursor = plan.cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14b00d6e7001").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_tool_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.use_recovery_test_key(&recovery_key);
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-budget-tool")
+            .await
+            .unwrap();
+        assert_eq!(recovered.stop_reason, StopReason::MaxTurns);
+        assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            physical_tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "restart must not turn a budget-suppressed tool into executable work"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_stale_cursor_before_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c002"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "do not duplicate".into(),
+            })
+            .unwrap();
+        let mut cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        cursor.journal_digest = "stale-digest".into();
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let result = engine
+            .resume_interrupted_turn("turn-original", &cursor, "recovered-message")
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::AgentError::SessionAuthority(message))
+                if message.contains("cursor no longer matches")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_cancel_is_cursor_bound_and_durably_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c003"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "cancel safely".into(),
+            })
+            .unwrap();
+        let effects = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("turn-original");
+        let approval_id = effects
+            .request_approval_with_id("approval-cancel", &serde_json::json!({"tool": "Write"}))
+            .unwrap()
+            .id()
+            .to_owned();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPrepared {
+                    attempt_id: "provider-cancel".into(),
+                    turn_id: "turn-original".into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    request_digest: "request-digest".into(),
+                },
+            )
+            .unwrap();
+        let tool_id = effects
+            .prepare_tool(
+                "provider-call-cancel",
+                0,
+                "Write",
+                serde_json::json!({"path": "a"}),
+                serde_json::json!({"path": "a"}),
+            )
+            .unwrap()
+            .id()
+            .to_owned();
+        let child_id = effects
+            .prepare_child("child-cancel", serde_json::json!({"task": "inspect"}))
+            .unwrap()
+            .id()
+            .to_owned();
+        let delivery_id = effects
+            .prepare_delivery("fixture", serde_json::json!({"message": "pending"}))
+            .unwrap()
+            .id()
+            .to_owned();
+        let budget_id = effects
+            .reserve_budget(
+                crate::session_journal::BudgetPurpose::Conversation,
+                crate::session_journal::BudgetAmount {
+                    value: 100,
+                    unit: crate::session_journal::BudgetUnit::Tokens,
+                },
+            )
+            .unwrap()
+            .id()
+            .to_owned();
+        let cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        engine
+            .cancel_interrupted_turn("turn-original", &cursor)
+            .await
+            .unwrap();
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state.turns["turn-original"].completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+        assert!(state.approvals[&approval_id].resolution.is_some());
+        assert!(matches!(
+            state.provider_attempts["provider-cancel"].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.tools[&tool_id].effect,
+            crate::session_journal::ToolEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.children[&child_id].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.deliveries[&delivery_id].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(state.budgets[&budget_id].released);
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+
+        let stale = engine
+            .cancel_interrupted_turn("turn-original", &cursor)
+            .await
+            .unwrap_err();
+        assert!(stale.to_string().contains("cursor no longer matches"));
+    }
+
+    #[tokio::test]
+    async fn recovery_cancel_preserves_correlated_provider_dispatch_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c003c0de1"))
+            .unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&[0x44; 32]);
+        let turn_id = "turn-correlated-provider-cancel";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "cancel before correlated provider dispatch".into(),
+            })
+            .await
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "cancel before correlated provider dispatch".into(),
+            }],
+        );
+        engine.messages.push(user_message.clone());
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+        let request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![user_message],
+            conversation_id: Some(engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        let checkpoint = engine
+            .commit_provider_recovery_checkpoint(
+                turn_id,
+                &request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let dispatch_id = checkpoint.dispatch_id.unwrap();
+        let attempt_id = "provider-correlated-cancel";
+        engine
+            .append_journal_event(
+                crate::session_journal::SessionEvent::ProviderAttemptPreparedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id: dispatch_id.clone(),
+                    turn_id: turn_id.into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    request_digest: checkpoint.request_digest.unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        let cursor = engine.recovery_plan().unwrap().cursor();
+
+        engine
+            .cancel_interrupted_turn(turn_id, &cursor)
+            .await
+            .unwrap();
+
+        let entries = engine
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert!(entries.iter().any(|entry| matches!(
+            &entry.event,
+            crate::session_journal::SessionEvent::ProviderAttemptNotStartedV2 {
+                attempt_id: event_attempt_id,
+                dispatch_id: event_dispatch_id,
+                ..
+            } if event_attempt_id == attempt_id && event_dispatch_id == &dispatch_id
+        )));
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state.provider_attempts[attempt_id].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.turns[turn_id].completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_cancel_refuses_unknown_provider_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c004"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "do not fabricate cancellation".into(),
+            })
+            .unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPrepared {
+                    attempt_id: "provider-unknown".into(),
+                    turn_id: "turn-original".into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    request_digest: "request-digest".into(),
+                },
+            )
+            .unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptStarted {
+                    attempt_id: "provider-unknown".into(),
+                },
+            )
+            .unwrap();
+        let cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        let before = active.journal.state().unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let error = engine
+            .cancel_interrupted_turn("turn-original", &cursor)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outcomes are reconciled"));
+        assert_eq!(
+            engine.session_journal.as_ref().unwrap().state().unwrap(),
+            before,
+            "refused cancellation must not append partial terminal state"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_resume_without_journal_authority_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("test", "test-model", "/tmp", None).unwrap();
+        manager.persist_first_message(&session).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            session,
+        );
+
+        let result = engine.run("must not start", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::SessionAuthority(_))),
+            "persisted execution without a lease must fail closed: {result:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "authority failure must happen before provider dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_run_journals_exact_conversation_and_one_terminal_transition() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("a11ce5acce55"))
+            .unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("durable answer".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let result = engine.run("durable prompt", "m-1").await.unwrap();
+        assert_eq!(result.text, "durable answer");
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            state.conversation,
+            serde_json::to_value(&engine.messages)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        assert_eq!(state.turns.len(), 1);
+        let turn = state.turns.values().next().unwrap();
+        assert!(matches!(
+            turn.completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Committed { assistant_message })
+                if assistant_message == "durable answer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn synthetic_result_is_durable_before_text_is_exposed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("d0ab1e0a7e57"))
+            .unwrap();
+        let journal = active.journal.clone();
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sink = Arc::new(JournalOrderSink {
+            journal,
+            observed: Arc::clone(&observed),
+        });
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            sink,
+            active,
+        );
+
+        let result = engine.run("/crucible off", "m-1").await.unwrap();
+        assert_eq!(result.text, "Crucible suggestions off for this session.");
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_persisted_run_records_cancelled_without_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("ca11ce1ca11c"))
+            .unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.session_runtime = None;
+        engine.cancel_token.cancel();
+
+        let result = engine.run("cancel me", "m-1").await;
+        assert!(matches!(result, Err(super::AgentError::UserAborted)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        assert!(matches!(
+            state.turns.values().next().unwrap().completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_persisted_approval_repairs_tool_pair_before_turn_cancelled() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("ca11ce1a9900"))
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::ToolUse {
+                    id: "approval-cancelled-tool".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage::default(),
+                },
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&[0x43; 32]);
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        let approval_seen = Arc::new(tokio::sync::Notify::new());
+        engine.set_protocol_writer(Arc::new(ApprovalRequestEmitter {
+            seen: Arc::clone(&approval_seen),
+        }));
+        let cancel = engine.cancel_token();
+
+        let run = tokio::spawn(async move {
+            let outcome = engine
+                .run("ask before the opaque tool", "approval-cancel")
+                .await;
+            (engine, outcome)
+        });
+        // These two are DEADLOCK guards, not latency assertions. Nothing in
+        // this test claims the approval becomes pending inside any particular
+        // wall-clock budget — `Notify` is the ordering signal and it stores a
+        // permit, so there is no lost-wakeup race to bound. The old 2s budget
+        // was therefore a pass condition the test never meant to state, and on
+        // a hosted `windows-latest` runner executing the whole 2253-case
+        // binary four-ways it went red (run 30727017681) purely on contention:
+        // the same case passes in 0.5-0.6s five times out of five in isolation
+        // there, and the full binary passes it on this tree. 30s still fails a
+        // genuine hang fast while no longer encoding runner throughput.
+        const DEADLOCK_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
+        tokio::time::timeout(DEADLOCK_GUARD, approval_seen.notified())
+            .await
+            .expect("the durable tool approval must become pending");
+        cancel.cancel();
+        let (engine, outcome) = tokio::time::timeout(DEADLOCK_GUARD, run)
+            .await
+            .expect("approval cancellation must stop the durable turn")
+            .expect("engine task must join");
+
+        assert!(matches!(outcome, Err(super::AgentError::UserAborted)));
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cancelling approval must not execute the tool"
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state
+                .approvals
+                .get("approval-cancelled-tool")
+                .and_then(|approval| approval.resolution.as_ref()),
+            Some(crate::session_journal::ApprovalResolution::Cancelled)
+        ));
+        assert!(
+            state.tools.is_empty(),
+            "cancellation before approval cannot prepare a tool execution"
+        );
+        assert!(matches!(
+            state.turns.values().next().unwrap().completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+        let conversation = state
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Message>, _>>()
+            .unwrap();
+        assert!(matches!(
+            conversation.as_slice(),
+            [
+                ..,
+                Message {
+                    role: Role::Assistant,
+                    content: assistant,
+                    ..
+                },
+                Message {
+                    role: Role::User,
+                    content: repair,
+                    ..
+                }
+            ] if matches!(
+                assistant.as_slice(),
+                [ContentBlock::ToolUse { id, .. }] if id == "approval-cancelled-tool"
+            ) && matches!(
+                repair.as_slice(),
+                [ContentBlock::ToolResult { tool_use_id, is_error: true, .. }]
+                    if tool_use_id == "approval-cancelled-tool"
+            )
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_run_is_failed_before_a_new_turn_starts() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("deadbeef1200"))
+            .unwrap();
+        let provider =
+            Arc::new(BlockingThenScriptedProvider::new().with_physical_url(server.uri()));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let mut first = Box::pin(engine.run("first", "m-1"));
+        tokio::select! {
+            _ = provider.entered.notified() => {}
+            result = &mut first => panic!("first run unexpectedly completed: {result:?}"),
+        }
+        drop(first);
+
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            recovery.disposition,
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint { .. }
+        ));
+        let second = engine.run("second", "m-2").await.unwrap_err();
+        assert!(matches!(second, super::AgentError::SessionAuthority(_)));
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a dropped run must not dispatch again without an explicit recovery action"
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        assert!(state.turns.values().all(|turn| turn.completion.is_none()));
+    }
+
+    #[tokio::test]
+    async fn startup_transitions_running_tool_to_unknown_and_blocks_before_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300001"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn");
+        let running = scope
+            .prepare_tool(
+                "provider-tool-call",
+                0,
+                "OpaqueRemote",
+                json!({"secret": "requested"}),
+                json!({"secret": "effective"}),
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+        let tool_execution_id = running.id().to_owned();
+        drop(running);
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } if turn_id == "interrupted-turn"
+                && tool_execution_ids == std::slice::from_ref(&tool_execution_id)
+        ));
+        let cursor = recovery.cursor();
+        let reconciliation = engine
+            .reconcile_interrupted_turn("interrupted-turn", &cursor)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reconciliation,
+            super::AgentError::SessionAuthority(_)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            engine.tool_effects_requiring_reconciliation().unwrap(),
+            vec![tool_execution_id.clone()]
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::Unknown {
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                evidence,
+            } if evidence["recovery"] == "engine_startup"
+        ));
+        assert!(state.turns["interrupted-turn"].completion.is_none());
+    }
+
+    struct RestartProofOpaqueTool {
+        physical_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct RecoveryPostureTool(&'static str);
+
+    #[async_trait]
+    impl Tool for RecoveryPostureTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "Recovery posture ordering fixture"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "additionalProperties": false})
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    #[async_trait]
+    impl Tool for RestartProofOpaqueTool {
+        fn name(&self) -> &str {
+            "RestartProofOpaque"
+        }
+
+        fn description(&self) -> &str {
+            "Opaque effect used to prove engine restart recovery"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "additionalProperties": false})
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            self.physical_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            wcore_types::tool::ToolResult {
+                content: "physical effect committed".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    fn restart_proof_registry(
+        physical_calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(RestartProofOpaqueTool {
+            physical_calls: Arc::clone(physical_calls),
+        }));
+        registry
+    }
+
+    #[test]
+    fn recovery_posture_digest_is_independent_of_tool_registration_order() {
+        let mut first_registry = ToolRegistry::new();
+        first_registry.register(Box::new(RecoveryPostureTool("Zulu")));
+        first_registry.register(Box::new(RecoveryPostureTool("Alpha")));
+        let mut second_registry = ToolRegistry::new();
+        second_registry.register(Box::new(RecoveryPostureTool("Alpha")));
+        second_registry.register(Box::new(RecoveryPostureTool("Zulu")));
+        let config = wcore_config::config::Config::default();
+        let first = super::AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config.clone(),
+            first_registry,
+            Arc::new(NullOutput),
+        );
+        let second = super::AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            second_registry,
+            Arc::new(NullOutput),
+        );
+
+        assert_eq!(
+            first.recovery_posture().unwrap().authority_digest,
+            second.recovery_posture().unwrap().authority_digest
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_multi_tool_round_replays_first_and_retries_second_once() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x41; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14a00170001"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued after recovered tool round".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["RestartProofOpaque".into()];
+        // This fixture seeds tool attempts directly through the journal scope;
+        // hook recovery is covered by the dedicated F14 durability tests.
+        config.tools.verify_edits = false;
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        engine.set_protocol_writer(Arc::new(NullEmitter));
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-multi-tool";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "run both tools".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "run both tools".into(),
+            }],
+        ));
+        engine.messages.push(Message::now(
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call-first".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call-second".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+            ],
+        ));
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(
+            engine.session_journal.as_ref().unwrap().clone(),
+        )
+        .for_turn(turn_id);
+        scope
+            .prepare_tool("call-first", 0, "RestartProofOpaque", json!({}), json!({}))
+            .unwrap()
+            .start()
+            .unwrap()
+            .succeed(json!({
+                "content": "first durable result",
+                "is_error": false,
+                "effect_receipt": null,
+            }))
+            .unwrap();
+        let second = scope
+            .prepare_tool("call-second", 1, "RestartProofOpaque", json!({}), json!({}))
+            .unwrap();
+        let second_execution_id = second.id().to_string();
+        second
+            .not_started(crate::session_journal::ToolNotStartedReason::Cancelled {
+                reason: "process stopped before durable tool execution began".into(),
+            })
+            .unwrap();
+        let cursor = engine.recovery_plan().unwrap().cursor();
+        drop(scope);
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14a00170001").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        resumed.set_protocol_writer(Arc::new(NullEmitter));
+        resumed.use_recovery_test_key(&recovery_key);
+        let result = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-multi-tool")
+            .await
+            .unwrap();
+        assert_eq!(result.text, "continued after recovered tool round");
+        let state = resumed.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the completed first call must replay and the second call must execute once; state={state:#?}"
+        );
+        assert!(matches!(
+            state.tools[&second_execution_id].effect,
+            crate::session_journal::ToolEffectState::NotStarted
+        ));
+        let retry = state
+            .tools
+            .values()
+            .find(|tool| tool.retry_of.as_deref() == Some(&second_execution_id))
+            .expect("the interrupted prepared attempt must have one linked retry");
+        assert_eq!(retry.ordinal, 1);
+        assert!(matches!(
+            retry.effect,
+            crate::session_journal::ToolEffectState::Succeeded
+        ));
+        assert_eq!(
+            state
+                .tools
+                .values()
+                .filter(|tool| tool.provider_call_id == "call-first")
+                .count(),
+            1,
+            "the completed first call must not be dispatched again"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_denial_terminalizes_without_provider_or_tool_replay() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x42; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14de111a100"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued after denial".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let provider_calls = provider.call_counter();
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        engine.set_protocol_writer(Arc::new(NullEmitter));
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-denial";
+        let completed_call_id = "call-completed";
+        let call_id = "call-denied";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "ask before running".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "ask before running".into(),
+            }],
+        ));
+        engine.messages.push(Message::now(
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse {
+                    id: completed_call_id.into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                ContentBlock::ToolUse {
+                    id: call_id.into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+            ],
+        ));
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let intent = json!({
+            "provider_call_id": call_id,
+            "tool": "RestartProofOpaque",
+            "category": wcore_protocol::events::ToolCategory::Info.to_string(),
+            "input": {},
+        });
+        engine
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .append(crate::session_journal::SessionEvent::ApprovalRequested {
+                approval_id: call_id.into(),
+                origin: crate::session_journal::ApprovalOrigin::Turn {
+                    turn_id: turn_id.into(),
+                },
+                intent_digest: crate::session_journal::state_payload_digest(&intent).unwrap(),
+            })
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(
+            engine.session_journal.as_ref().unwrap().clone(),
+        )
+        .for_turn(turn_id);
+        scope
+            .prepare_tool(
+                completed_call_id,
+                0,
+                "RestartProofOpaque",
+                json!({}),
+                json!({}),
+            )
+            .unwrap()
+            .start()
+            .unwrap()
+            .succeed(json!({
+                "content": "first durable result",
+                "is_error": false,
+                "effect_receipt": null,
+            }))
+            .unwrap();
+        let prepared = scope
+            .prepare_tool(call_id, 1, "RestartProofOpaque", json!({}), json!({}))
+            .unwrap();
+        let prepared_execution_id = prepared.id().to_string();
+        drop(prepared);
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::AwaitApproval { .. }
+        ));
+        drop(scope);
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14de111a100").unwrap();
+        reopened
+            .journal
+            .append(crate::session_journal::SessionEvent::ApprovalResolved {
+                approval_id: call_id.into(),
+                resolution: crate::session_journal::ApprovalResolution::Decided {
+                    decision: crate::session_journal::ApprovalDecision::Deny,
+                },
+            })
+            .unwrap();
+        let denial_cursor = crate::recovery::RecoveryPlan::from_journal(&reopened.journal)
+            .unwrap()
+            .cursor();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        resumed.set_protocol_writer(Arc::new(NullEmitter));
+        resumed.use_recovery_test_key(&recovery_key);
+        let result = resumed
+            .resume_interrupted_turn(turn_id, &denial_cursor, "resume-denial")
+            .await
+            .unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a recovered denial must terminalize without another provider request"
+        );
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a durable denial must never cross the physical execution boundary"
+        );
+        let entries = resumed
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        let intent_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::session_journal::SessionEvent::ToolIntentRecordedV2 {
+                        provider_call_id,
+                        ..
+                    } if provider_call_id == call_id
+                )
+            })
+            .expect("denial must persist a tool intent");
+        let no_start_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::session_journal::SessionEvent::ToolExecutionNotStarted {
+                        reason: crate::session_journal::ToolNotStartedReason::ApprovalDenied {
+                            approval_id,
+                        },
+                        ..
+                    } if approval_id == call_id
+                )
+            })
+            .expect("denial must persist a no-start receipt");
+        assert!(matches!(
+            resumed.session_journal.as_ref().unwrap().state().unwrap().tools
+                [&prepared_execution_id]
+                .not_started_reason,
+            Some(crate::session_journal::ToolNotStartedReason::ApprovalDenied {
+                ref approval_id,
+            }) if approval_id == call_id
+        ));
+        let terminal_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::session_journal::SessionEvent::TurnCancelled { turn_id: terminal_turn }
+                        if terminal_turn == turn_id
+                )
+            })
+            .expect("denied recovery must terminalize the original turn");
+        assert!(intent_index < no_start_index);
+        assert!(no_start_index < terminal_index);
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        assert!(matches!(
+            resumed.messages.last().map(|message| message.content.as_slice()),
+            Some([
+                ContentBlock::ToolResult {
+                    tool_use_id: first_id,
+                    content,
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: denied_id,
+                    is_error: true,
+                    ..
+                }
+            ]) if first_id == completed_call_id
+                && content == "first durable result"
+                && denied_id == call_id
+        ));
+        let next = resumed
+            .run("ordinary next turn", "after-denial")
+            .await
+            .unwrap();
+        assert_eq!(next.text, "continued after denial");
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the ordinary post-cancellation turn may dispatch the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_denial_resumes_after_partial_no_start_without_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14de111a101"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let provider_calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        let turn_id = "turn-partial-denial";
+        let call_id = "call-partial-denial";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "deny after partial closure".into(),
+            })
+            .await
+            .unwrap();
+        engine.messages = vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "deny after partial closure".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: call_id.into(),
+                    name: "Opaque".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+        ];
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let intent = json!({
+            "provider_call_id": call_id,
+            "tool": "Opaque",
+            "category": wcore_protocol::events::ToolCategory::Exec.to_string(),
+            "input": {},
+        });
+        let journal = engine.session_journal.as_ref().unwrap().clone();
+        journal
+            .append(crate::session_journal::SessionEvent::ApprovalRequested {
+                approval_id: call_id.into(),
+                origin: crate::session_journal::ApprovalOrigin::Turn {
+                    turn_id: turn_id.into(),
+                },
+                intent_digest: crate::session_journal::state_payload_digest(&intent).unwrap(),
+            })
+            .unwrap();
+        let prepared = crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+            .for_turn(turn_id)
+            .prepare_tool(call_id, 0, "Opaque", json!({}), json!({}))
+            .unwrap();
+        let execution_id = prepared.id().to_owned();
+        drop(prepared);
+        journal
+            .append(crate::session_journal::SessionEvent::ApprovalResolved {
+                approval_id: call_id.into(),
+                resolution: crate::session_journal::ApprovalResolution::Decided {
+                    decision: crate::session_journal::ApprovalDecision::Deny,
+                },
+            })
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ToolExecutionNotStarted {
+                    tool_execution_id: execution_id,
+                    reason: crate::session_journal::ToolNotStartedReason::ApprovalDenied {
+                        approval_id: call_id.into(),
+                    },
+                },
+            )
+            .unwrap();
+        let partial_cursor = engine.recovery_plan().unwrap().cursor();
+        drop(journal);
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14de111a101").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        let result = resumed
+            .resume_interrupted_turn(turn_id, &partial_cursor, "resume-partial-denial")
+            .await
+            .unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "partial descendant closure must not reopen provider authority"
+        );
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        assert!(matches!(
+            resumed.messages.last().map(|message| message.content.as_slice()),
+            Some([ContentBlock::ToolResult {
+                tool_use_id,
+                is_error: true,
+                ..
+            }]) if tool_use_id == call_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14ca11ce100"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let provider_calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        let turn_id = "turn-cancel-checkpoint";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "cancel durably".into(),
+            })
+            .await
+            .unwrap();
+        engine.messages = vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "cancel durably".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "cancelled-call".into(),
+                    name: "Opaque".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "cancelled-call".into(),
+                    content: "Tool denied during recovery".into(),
+                    is_error: true,
+                }],
+            ),
+        ];
+        let result = super::AgentResult {
+            text: String::new(),
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+            usage_delta: TokenUsage::default(),
+            turns: 1,
+            active_window_percent: None,
+            agent_run_id: None,
+        };
+        engine
+            .commit_terminal_recovery_checkpoint(
+                turn_id,
+                &result,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+                crate::recovery::RecoveryTerminalCompletion::Cancelled,
+            )
+            .await
+            .unwrap();
+        let checkpoint_cursor = engine.recovery_plan().unwrap().cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14ca11ce100").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &checkpoint_cursor, "finish-cancel")
+            .await
+            .unwrap();
+        assert!(recovered.text.is_empty());
+        assert_eq!(recovered.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a durable cancellation checkpoint must finish without provider dispatch"
+        );
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        assert!(matches!(
+            resumed
+                .session_journal
+                .as_ref()
+                .unwrap()
+                .state()
+                .unwrap()
+                .turns[turn_id]
+                .completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300006"))
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::ToolUse {
+                    id: "opaque-call".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage::default(),
+                },
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let provider_calls = provider.call_counter();
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["RestartProofOpaque".into()];
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let crashed = crate::orchestration::with_dispatcher_crash_after_physical_effect(
+            engine.run("perform opaque effect", "m-1"),
+        )
+        .await;
+        assert!(
+            crashed.is_err(),
+            "the graph must surface its crashed dispatch task as a failed run: {crashed:?}"
+        );
+        let provider_calls_before_restart =
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            provider_calls_before_restart > 0,
+            "the live run must reach the scripted provider"
+        );
+        let pre_restart = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the injected crash must happen after the physical effect; result={crashed:?}; state={pre_restart:?}"
+        );
+        assert!(matches!(
+            pre_restart
+                .tools
+                .values()
+                .next()
+                .expect("the dispatcher must durably start the effect")
+                .effect,
+            crate::session_journal::ToolEffectState::Running
+        ));
+
+        drop(engine);
+        let reopened = manager.load_for_run("f1300006").unwrap();
+        let mut restarted = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+
+        let recovery = restarted.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id: _,
+                tool_execution_ids,
+            } if tool_execution_ids.len() == 1
+        ));
+        let interrupted_turn_id = match &recovery.disposition {
+            crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. } => {
+                turn_id.clone()
+            }
+            _ => unreachable!("asserted reconciliation-required disposition"),
+        };
+        let reconciliation = restarted
+            .reconcile_interrupted_turn(&interrupted_turn_id, &recovery.cursor())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reconciliation,
+            super::AgentError::SessionAuthority(_)
+        ));
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            provider_calls_before_restart,
+            "startup recovery must block before a second provider call"
+        );
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "startup recovery must not repeat the opaque physical effect"
+        );
+        let state = restarted.session_journal.as_ref().unwrap().state().unwrap();
+        let tool = state
+            .tools
+            .values()
+            .next()
+            .expect("one durable tool effect");
+        assert!(matches!(
+            &tool.effect,
+            crate::session_journal::ToolEffectState::Unknown {
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                evidence,
+            } if evidence["recovery"] == "engine_startup"
+        ));
+    }
+
+    async fn assert_untrusted_filesystem_checkpoint_blocks_restart(corrupt: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("protected.txt");
+        std::fs::write(&target, b"original bytes").unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300005"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+
+        let input = json!({
+            "file_path": target,
+            "content": "replacement bytes",
+        });
+        let observed = RealFs.observe_file(&target).await.unwrap();
+        let preimage = FileContentIdentity::from_bytes(b"original bytes");
+        let receipt = wcore_tools::effects::FilesystemEffectReceiptV1 {
+            version: wcore_tools::effects::FILESYSTEM_EFFECT_RECEIPT_VERSION,
+            reconciler: wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into(),
+            path: target.clone(),
+            preparation_object: observed.object,
+            precondition: wcore_tools::effects::FilesystemEffectPrecondition::Present {
+                identity: preimage.into(),
+            },
+            checkpoint_identity: Some(preimage.into()),
+            intended: FileContentIdentity::from_bytes(b"replacement bytes").into(),
+        };
+        let checkpoint = receipt.checkpoint_identity().unwrap().clone();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn");
+        scope
+            .store_effect_checkpoint(&checkpoint.sha256, b"original bytes")
+            .unwrap();
+        let running = scope
+            .prepare_tool_with_effect_receipt(
+                "provider-tool-call",
+                0,
+                "Write",
+                input.clone(),
+                input,
+                wcore_types::tool::ToolEffectContract {
+                    kind: wcore_types::tool::ToolEffectKind::FilesystemTransactional,
+                    reconciler: Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into()),
+                },
+                serde_json::to_value(receipt).unwrap(),
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+        let tool_execution_id = running.id().to_owned();
+        drop(running);
+
+        let checkpoint_path = dir
+            .path()
+            .join(".f1300005.journal.effects")
+            .join(&checkpoint.sha256);
+        if corrupt {
+            std::fs::write(&checkpoint_path, b"corrupt checkpoint").unwrap();
+        } else {
+            std::fs::remove_file(&checkpoint_path).unwrap();
+        }
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } if turn_id == "interrupted-turn"
+                && tool_execution_ids == std::slice::from_ref(&tool_execution_id)
+        ));
+        let cursor = recovery.cursor();
+        let reconciliation = engine
+            .reconcile_interrupted_turn("interrupted-turn", &cursor)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reconciliation,
+            super::AgentError::SessionAuthority(_)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+        ));
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::Unknown {
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation() {
+        assert_untrusted_filesystem_checkpoint_blocks_restart(false).await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation() {
+        assert_untrusted_filesystem_checkpoint_blocks_restart(true).await;
+    }
+
+    #[tokio::test]
+    async fn existing_unknown_is_not_hidden_and_operator_resolution_unblocks_next_turn() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300002"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+        let unknown = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn")
+            .prepare_tool(
+                "provider-tool-call",
+                0,
+                "OpaqueRemote",
+                json!({}),
+                json!({}),
+            )
+            .unwrap()
+            .start()
+            .unwrap()
+            .unknown(
+                crate::session_journal::ToolUnknownReason::AmbiguousFailure {
+                    error: "remote outcome unavailable".into(),
+                },
+                json!({"adapter": "opaque"}),
+            )
+            .unwrap();
+        let tool_execution_id = unknown.id().to_owned();
+        drop(unknown);
+
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued after resolution".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } if turn_id == "interrupted-turn"
+                && tool_execution_ids == std::slice::from_ref(&tool_execution_id)
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        engine
+            .resolve_unknown_tool_effect(
+                tool_execution_id.clone(),
+                crate::session_journal::ToolResolution::Succeeded {
+                    result: json!({"receipt": "operator-confirmed"}),
+                },
+                crate::session_journal::ToolResolutionSource::Operator {
+                    operator_id: "operator-1".into(),
+                },
+                json!({"ticket": "INC-1"}),
+            )
+            .unwrap();
+        assert!(
+            engine
+                .tool_effects_requiring_reconciliation()
+                .unwrap()
+                .is_empty()
+        );
+
+        let cancellation = engine.recovery_plan().unwrap();
+        engine
+            .cancel_interrupted_turn("interrupted-turn", &cancellation.cursor())
+            .await
+            .unwrap();
+
+        let result = engine.run("continue", "m-2").await.unwrap();
+        assert_eq!(result.text, "continued after resolution");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::Succeeded
+        ));
+        assert!(matches!(
+            state.turns["interrupted-turn"].completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+    }
+
+    /// Build a journaled engine whose scripted provider calls `tool_name` once
+    /// and then, if it is asked again, produces a final text turn.
+    async fn journaled_engine_calling_tool(
+        session_id: &str,
+        tool_name: &str,
+        tool: Box<dyn wcore_tools::Tool>,
+        dir: &tempfile::TempDir,
+        server_uri: String,
+    ) -> (super::AgentEngine, Arc<std::sync::atomic::AtomicUsize>) {
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some(session_id))
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                vec![
+                    LlmEvent::ToolUse {
+                        id: "opaque-call".into(),
+                        name: tool_name.into(),
+                        input: json!({}),
+                        extra: None,
+                    },
+                    LlmEvent::Done {
+                        stop_reason: StopReason::ToolUse,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    },
+                ],
+                vec![
+                    LlmEvent::TextDelta("saw the tool error".into()),
+                    done_endturn(),
+                ],
+            ])
+            .with_physical_url(server_uri),
+        );
+        let calls = provider.call_counter();
+        let mut registry = ToolRegistry::new();
+        registry.register(tool);
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec![tool_name.to_string()];
+        let engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            registry,
+            Arc::new(NullOutput),
+            active,
+        );
+        (engine, calls)
+    }
+
+    /// D1, at the level a user experiences it. An opaque tool that runs and
+    /// reports an error used to take the whole session down —
+    /// `AgentError::SessionAuthority`, no second provider request, and a
+    /// journal the turn could never leave. The model must instead see the
+    /// error and get another round to react to it.
+    #[tokio::test]
+    async fn completed_opaque_tool_error_does_not_stop_the_live_turn() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, calls) = journaled_engine_calling_tool(
+            "f1300004",
+            "Flaky",
+            Box::new(AlwaysFailTool),
+            &dir,
+            server.uri(),
+        )
+        .await;
+
+        let result = engine
+            .run("run once", "m-1")
+            .await
+            .expect("a tool error must not be fatal to the session");
+        assert_eq!(result.text, "saw the tool error");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the model must get a round to react to the tool error"
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            state
+                .tools
+                .values()
+                .filter(|tool| tool.effect.requires_reconciliation())
+                .count(),
+            0,
+            "a dispatch this process watched finish must not need reconciliation"
+        );
+    }
+
+    /// The other half of the same rule, unchanged: an effect nothing observed
+    /// finishing — here a tool that panics mid-dispatch — is genuinely unknown.
+    /// It must still stop the turn before another provider request, because the
+    /// external effect may be in any state.
+    #[tokio::test]
+    async fn newly_unknown_tool_stops_the_live_turn_before_another_provider_call() {
+        struct PanickingTool;
+        #[async_trait]
+        impl wcore_tools::Tool for PanickingTool {
+            fn name(&self) -> &str {
+                "Panicky"
+            }
+            fn description(&self) -> &str {
+                "panics mid-dispatch, so nothing observes it finish"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                json!({"type": "object"})
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                false
+            }
+            async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+                panic!("injected opaque tool panic")
+            }
+            fn category(&self) -> wcore_protocol::events::ToolCategory {
+                wcore_protocol::events::ToolCategory::Info
+            }
+        }
+
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, calls) = journaled_engine_calling_tool(
+            "f1300004",
+            "Panicky",
+            Box::new(PanickingTool),
+            &dir,
+            server.uri(),
+        )
+        .await;
+
+        let run = engine.run("run once", "m-1").await;
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        let error = match run {
+            Err(error) => error,
+            Ok(result) => {
+                panic!("unknown effect did not stop the turn: result={result:?}; state={state:?}")
+            }
+        };
+        assert!(matches!(error, super::AgentError::SessionAuthority(_)));
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an ambiguous tool result must block the next provider request"
+        );
+        let unknowns = state
+            .tools
+            .values()
+            .filter(|tool| tool.effect.requires_reconciliation())
+            .count();
+        assert_eq!(unknowns, 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_tool_is_terminalized_not_started_before_recovered_turn_fails() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300003"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+        let prepared =
+            crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+                .for_turn("interrupted-turn")
+                .prepare_tool("provider-tool-call", 0, "Read", json!({}), json!({}))
+                .unwrap();
+        let tool_execution_id = prepared.id().to_owned();
+        drop(prepared);
+
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("safe continuation".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::Blocked {
+                turn_id,
+                reason: crate::recovery::RecoveryBlocker::ContextCheckpointMissing,
+            } if turn_id == "interrupted-turn"
+        ));
+        engine
+            .cancel_interrupted_turn("interrupted-turn", &recovery.cursor())
+            .await
+            .unwrap();
+
+        let result = engine.run("continue", "m-1").await.unwrap();
+        assert_eq!(result.text, "safe continuation");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.tools[&tool_execution_id]
+                .not_started_reason
+                .as_ref(),
+            Some(crate::session_journal::ToolNotStartedReason::Cancelled { reason })
+                if reason == "interrupted turn cancelled during recovery"
+        ));
+    }
+
     #[tokio::test]
     async fn resumed_session_carries_cumulative_usage_but_fresh_delta() {
         // CORE-2 (c) — an engine resumed from a persisted session inherits
@@ -17027,11 +27873,11 @@ mod audit_2026_05_22_tests {
         }
     }
 
-    // --- D6: orphaned tool_use repaired before save ----------------------
+    // --- D6: orphaned tool_use repaired before durable save --------------
 
     #[test]
-    fn save_session_repairs_orphaned_tool_use() {
-        // AUDIT D-6 — `save_session` must not persist a trailing
+    fn durable_conversation_repair_closes_orphaned_tool_use() {
+        // AUDIT D-6 — durable persistence must not retain a trailing
         // assistant message whose `tool_use` blocks have no following
         // `tool_result`. The repair appends a synthetic error-result
         // user message. Pre-fix: the orphaned shape was written verbatim.
@@ -17051,7 +27897,7 @@ mod audit_2026_05_22_tests {
                 }],
             ),
         ];
-        engine.save_session();
+        engine.repair_orphaned_tool_use();
         let last = engine.messages.last().expect("messages non-empty");
         assert_eq!(
             last.role,
@@ -17168,7 +28014,7 @@ mod audit_2026_05_22_tests {
     }
 
     #[test]
-    fn save_session_leaves_well_formed_history_untouched() {
+    fn durable_conversation_repair_leaves_well_formed_history_untouched() {
         // Control: a history that already ends with a tool-results
         // message must NOT gain a spurious repair message.
         use wcore_types::message::{ContentBlock, Message, Role};
@@ -17194,7 +28040,7 @@ mod audit_2026_05_22_tests {
             ),
         ];
         let before = engine.messages.len();
-        engine.save_session();
+        engine.repair_orphaned_tool_use();
         assert_eq!(
             engine.messages.len(),
             before,
@@ -18279,12 +29125,14 @@ mod retry_wedge_protection_tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use serde_json::json;
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_tools::registry::ToolRegistry;
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
 
     use crate::output::OutputSink;
+    use crate::test_utils::TestSink;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -18419,17 +29267,25 @@ mod retry_wedge_protection_tests {
     async fn ceiling_abort_does_not_persist_unrecoverable_session() {
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
-        let session = manager.create("test", "m", "/tmp", None).unwrap();
-        let sid = session.id.clone();
-
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("ce1111a60001"))
+            .unwrap();
         let provider = Arc::new(RecordingProvider::new(vec![]));
+        let requests = provider.recorded();
         let mut engine = wedge_engine(provider);
         engine.session_manager = Some(manager);
-        engine.current_session = Some(session);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
 
-        // Establish the last GOOD on-disk state via the engine's OWN save path
-        // (persist = true also runs update_index_for, so `load` can find it —
-        // a bare `SessionManager::save` does not index the session).
+        let baseline_turn = "baseline-turn";
+        engine.active_journal_turn_id = Some(baseline_turn.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: baseline_turn.into(),
+                user_message: "recoverable".into(),
+            })
+            .await
+            .unwrap();
         engine.messages = vec![Message::new(
             Role::User,
             vec![ContentBlock::Text {
@@ -18437,38 +29293,62 @@ mod retry_wedge_protection_tests {
             }],
         )];
         engine
-            .finish_run_terminated_inner("ok", 1, FinishReason::Length, true)
+            .sync_journal_conversation(baseline_turn)
             .await
             .unwrap();
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnCommitted {
+                turn_id: baseline_turn.into(),
+                assistant_message: String::new(),
+            })
+            .await
+            .unwrap();
+        engine.active_journal_turn_id = None;
+        engine.save_session_mirror();
 
-        // Now the in-memory history is UNRECOVERABLE; persist = false must leave
-        // the recoverable on-disk state untouched.
+        // This irreducible in-memory history fails context admission. The new
+        // TurnStarted retains the rejected prompt, while canonical conversation
+        // authority must remain at the last resumable baseline.
         engine.messages = vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "OVER-CEILING-must-not-persist".into(),
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "irreducible".into(),
+                name: "Read".into(),
+                input: json!({"blob": "x".repeat(1_000_000)}),
+                extra: None,
             }],
         )];
-        engine
-            .finish_run_terminated_inner("x", 2, FinishReason::Length, false)
+        let result = engine
+            .run("rejected over-ceiling prompt", "ceiling-message")
             .await
             .unwrap();
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "context admission must fail before provider dispatch"
+        );
+        drop(engine);
 
-        // The on-disk session is STILL the small recoverable state.
         let verify = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
-        let loaded = verify.load(&sid).unwrap();
+        let loaded = verify.load_for_run("ce1111a60001").unwrap();
         assert_eq!(
-            loaded.messages.len(),
+            loaded.session.messages.len(),
             1,
             "unrecoverable history must not overwrite the saved session"
         );
-        let ContentBlock::Text { text } = &loaded.messages[0].content[0] else {
+        let ContentBlock::Text { text } = &loaded.session.messages[0].content[0] else {
             panic!("expected text");
         };
         assert_eq!(
             text, "recoverable",
             "the last recoverable state must survive"
         );
+        let state = loaded.journal.state().unwrap();
+        let canonical: Message = serde_json::from_value(state.conversation[0].clone()).unwrap();
+        assert!(matches!(
+            canonical.content.as_slice(),
+            [ContentBlock::Text { text }] if text == "recoverable"
+        ));
     }
 
     /// The complement: a RESUMABLE terminal abort (`persist_session = true`)
@@ -18738,6 +29618,9 @@ mod retry_wedge_protection_tests {
         ]));
         let requests = provider.recorded();
         let mut engine = wedge_engine(provider);
+        let sink = Arc::new(TestSink::new());
+        let sink_handle = sink.handle();
+        engine.output = sink;
         engine.messages = failed_tool_round_history(&huge_error);
         let result = engine.run("try again", "m-stub-1").await;
 
@@ -18775,6 +29658,29 @@ mod retry_wedge_protection_tests {
             }
             other => panic!("expected the progress-gate ApiError, got {other:?}"),
         }
+        let events = sink_handle.snapshot();
+        assert!(
+            events.iter().any(|event| {
+                event["type"].as_str() == Some("mid_flight_monitor_decision")
+                    && event["directive"].as_str() == Some("stop")
+                    && event["reason"].as_str() == Some("output_stall")
+            }),
+            "the output-stall stop must have a typed host-visible reason: {events:?}"
+        );
+        let monitor_stages: Vec<_> = events
+            .into_iter()
+            .filter(|event| {
+                event["type"].as_str() == Some("capability_activation")
+                    && event["capability"].as_str() == Some("mid_flight_monitor")
+            })
+            .filter_map(|event| event["stage"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            monitor_stages,
+            ["reached", "outcome_changed", "observed"],
+            "the output-stall stop must carry complete runtime proof; the one-time \
+             construction chain is emitted by production bootstrap"
+        );
     }
 
     #[tokio::test]
@@ -18798,6 +29704,125 @@ mod retry_wedge_protection_tests {
             .expect("a single transient failure must still recover");
         assert_eq!(result.text, "recovered");
         assert_eq!(requests.lock().unwrap().len(), 2, "1 initial + 1 retry");
+    }
+
+    #[tokio::test]
+    async fn successful_turn_clears_stall_before_a_later_transient_failure() {
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // First outbound turn: one empty failure, then a successful tool
+            // request. The successful stream must clear the stall streak.
+            vec![LlmEvent::Error("first transient".into())],
+            vec![
+                LlmEvent::ToolUse {
+                    id: "missing-1".into(),
+                    name: "MissingTool".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                },
+                done(StopReason::ToolUse, FinishReason::Stop, 100),
+            ],
+            // The missing tool creates another failed tool round. A later
+            // transient provider failure is a fresh streak and may retry.
+            vec![LlmEvent::Error("second transient".into())],
+            vec![
+                LlmEvent::TextDelta("recovered twice".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 100),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.messages = failed_tool_round_history("prior tool failure");
+
+        let result = engine
+            .run("continue", "m-stall-reset")
+            .await
+            .expect("successful output between failures must reset the stall streak");
+
+        assert_eq!(result.text, "recovered twice");
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            4,
+            "both independent transient failures receive their bounded retry"
+        );
+    }
+
+    struct RepeatedFailTool;
+
+    #[async_trait]
+    impl wcore_tools::Tool for RepeatedFailTool {
+        fn name(&self) -> &str {
+            "RepeatedFail"
+        }
+
+        fn description(&self) -> &str {
+            "deterministic failure fixture"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: "same root failure".into(),
+                is_error: true,
+            }
+        }
+
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_failure_guard_prevents_false_monitor_outcome_proof() {
+        let tool_calls = (0..10)
+            .map(|index| LlmEvent::ToolUse {
+                id: format!("fail-{index}"),
+                name: "RepeatedFail".into(),
+                input: serde_json::json!({"attempt": index}),
+                extra: None,
+            })
+            .chain(std::iter::once(done(
+                StopReason::ToolUse,
+                FinishReason::Stop,
+                100,
+            )))
+            .collect();
+        let provider = Arc::new(RecordingProvider::new(vec![tool_calls]));
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(RepeatedFailTool));
+        let sink = Arc::new(TestSink::new());
+        let sink_handle = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            tools,
+            sink,
+        );
+
+        let result = engine
+            .run("keep retrying", "m-monitor-precedence")
+            .await
+            .expect("the existing failure guard terminates cleanly");
+        assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+
+        let monitor_stages = sink_handle
+            .snapshot()
+            .into_iter()
+            .filter(|event| {
+                event["type"].as_str() == Some("capability_activation")
+                    && event["capability"].as_str() == Some("mid_flight_monitor")
+            })
+            .count();
+        assert_eq!(
+            monitor_stages, 0,
+            "the monitor must not claim an outcome when FailureGuard owned termination"
+        );
     }
 
     #[test]

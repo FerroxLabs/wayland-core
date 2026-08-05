@@ -1,0 +1,22 @@
+EVIDENCE ID : F25-04-FAILCLOSED
+LEDGER ROW  : 29
+ARTIFACT    : `phases/25-remote-reach-nodes-plugin-lifecycle/25-04-SUMMARY.md` + `25-04-FAIL-CLOSED-EVIDENCE.md` — all five hostile compromise cases fail closed on **both** hosts, each compromise induced for real. **Success Criterion 4 NOT MET** — SSH and cloud cannot be enumerated on the proof hosts, so their orphan counts are `NOT MEASURED`. Three HIGH found, fixed and re-proved
+
+== PATH RESOLUTION ==
+[OK]   stat phases/25-remote-reach-nodes-plugin-lifecycle/25-04-SUMMARY.md
+       -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-04-SUMMARY.md  size=11984
+       head:
+---
+phase: 25-remote-reach-nodes-plugin-lifecycle
+plan: "04"
+subsystem: fail-closed-and-orphans
+tags: [f25-05, orphan-scanner, fail-closed, false-negative, containment]
+status: complete
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 25-04-FAIL-CLOSED-EVIDENCE.md -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-04-FAIL-CLOSED-EVIDENCE.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

@@ -1,0 +1,129 @@
+{
+ "authorised_cells": [],
+ "binary": {
+  "path": "C:\\f28\\candidate-wayland-core.exe",
+  "provenance": "CI run 30269095004 release artifact for candidate 32e2f57d",
+  "sha256": "baf9bd692833eb7b9d54f00053739115b6ad5257fbdb0b0e99a8694a2ee996a6",
+  "target": "x86_64-pc-windows-msvc"
+ },
+ "control_ref": "control:appc-observe@seandesktop:f28ctl-20260727222551",
+ "directional_controls": [
+  {
+   "actual": "activeness-absent",
+   "direction": "negative",
+   "evidence": "measured at run time in this environment; win-control.log line F28_DIRECTION=id=neg-activeness-detector-scheduled-task",
+   "expected": "activeness-absent",
+   "id": "neg-activeness-detector-scheduled-task",
+   "passed": true
+  },
+  {
+   "actual": "unobservable",
+   "direction": "negative",
+   "evidence": "measured at run time in this environment; win-control.log line F28_DIRECTION=id=neg-wedged-lease-scheduled-task",
+   "expected": "unobservable",
+   "id": "neg-wedged-lease-scheduled-task",
+   "passed": true
+  },
+  {
+   "actual": "observable",
+   "direction": "positive",
+   "evidence": "measured at run time in this environment; win-control.log line F28_DIRECTION=id=pos-clean-lease-scheduled-task",
+   "expected": "observable",
+   "id": "pos-clean-lease-scheduled-task",
+   "passed": true
+  },
+  {
+   "actual": "activeness-absent",
+   "direction": "negative",
+   "evidence": "measured at run time in this environment; win-control.log line F28_DIRECTION=id=neg-activeness-detector-ssh",
+   "expected": "activeness-absent",
+   "id": "neg-activeness-detector-ssh",
+   "passed": true
+  },
+  {
+   "actual": "unobservable",
+   "direction": "negative",
+   "evidence": "measured at run time in this environment; win-control.log line F28_DIRECTION=id=neg-wedged-lease-ssh",
+   "expected": "unobservable",
+   "id": "neg-wedged-lease-ssh",
+   "passed": true
+  },
+  {
+   "actual": "observable",
+   "direction": "positive",
+   "evidence": "measured at run time in this environment; win-control.log line F28_DIRECTION=id=pos-clean-lease-ssh",
+   "expected": "observable",
+   "id": "pos-clean-lease-ssh",
+   "passed": true
+  }
+ ],
+ "host": "seandesktop",
+ "observation_blocked_authorised": false,
+ "observations": [
+  {
+   "id": "obs-scheduled-task-as-found",
+   "lease_count": 0,
+   "lease_state": "as-found",
+   "probe_evidence": "the product's own availability path was driven by a real sandboxed spawn (on Windows is_available() IS a real spawn, not a capability query); 'sandbox disabled' present=False, lease-reconciliation refusal present=False, lease files present at the observation=0",
+   "probe_report": "available",
+   "product_behaviour": "executed-sandboxed",
+   "product_evidence": "worker executed=True (F28RAN present in the product's captured worker stdout); containment signature observed=True (0xC0000022 on \\BaseNamedObjects, which AppContainer confines by construction, and/or a System32 binary refused, with no S-1-16-12288 High integrity label); uncontained High-integrity label present=False",
+   "session_type": "scheduled-task"
+  },
+  {
+   "id": "obs-scheduled-task-cleared",
+   "lease_count": 0,
+   "lease_state": "cleared",
+   "probe_evidence": "the product's own availability path was driven by a real sandboxed spawn (on Windows is_available() IS a real spawn, not a capability query); 'sandbox disabled' present=False, lease-reconciliation refusal present=False, lease files present at the observation=0",
+   "probe_report": "available",
+   "product_behaviour": "refused-fail-closed",
+   "product_evidence": "worker executed=False (F28RAN present in the product's captured worker stdout); containment signature observed=False (0xC0000022 on \\BaseNamedObjects, which AppContainer confines by construction, and/or a System32 binary refused, with no S-1-16-12288 High integrity label); uncontained High-integrity label present=False",
+   "session_type": "scheduled-task"
+  },
+  {
+   "id": "obs-scheduled-task-wedged",
+   "lease_count": 1,
+   "lease_state": "wedged",
+   "probe_evidence": "the product's own availability path was driven by a real sandboxed spawn (on Windows is_available() IS a real spawn, not a capability query); 'sandbox disabled' present=True, lease-reconciliation refusal present=True, lease files present at the observation=1",
+   "probe_report": "unavailable",
+   "product_behaviour": "refused-fail-closed",
+   "product_evidence": "worker executed=False (F28RAN present in the product's captured worker stdout); containment signature observed=False (0xC0000022 on \\BaseNamedObjects, which AppContainer confines by construction, and/or a System32 binary refused, with no S-1-16-12288 High integrity label); uncontained High-integrity label present=False",
+   "session_type": "scheduled-task"
+  },
+  {
+   "id": "obs-ssh-as-found",
+   "lease_count": 0,
+   "lease_state": "as-found",
+   "probe_evidence": "the product's own availability path was driven by a real sandboxed spawn (on Windows is_available() IS a real spawn, not a capability query); 'sandbox disabled' present=False, lease-reconciliation refusal present=False, lease files present at the observation=0",
+   "probe_report": "available",
+   "product_behaviour": "executed-sandboxed",
+   "product_evidence": "worker executed=True (F28RAN present in the product's captured worker stdout); containment signature observed=True (0xC0000022 on \\BaseNamedObjects, which AppContainer confines by construction, and/or a System32 binary refused, with no S-1-16-12288 High integrity label); uncontained High-integrity label present=False",
+   "session_type": "ssh"
+  },
+  {
+   "id": "obs-ssh-cleared",
+   "lease_count": 0,
+   "lease_state": "cleared",
+   "probe_evidence": "the product's own availability path was driven by a real sandboxed spawn (on Windows is_available() IS a real spawn, not a capability query); 'sandbox disabled' present=False, lease-reconciliation refusal present=False, lease files present at the observation=0",
+   "probe_report": "available",
+   "product_behaviour": "executed-sandboxed",
+   "product_evidence": "worker executed=True (F28RAN present in the product's captured worker stdout); containment signature observed=True (0xC0000022 on \\BaseNamedObjects, which AppContainer confines by construction, and/or a System32 binary refused, with no S-1-16-12288 High integrity label); uncontained High-integrity label present=False",
+   "session_type": "ssh"
+  },
+  {
+   "id": "obs-ssh-wedged",
+   "lease_count": 1,
+   "lease_state": "wedged",
+   "probe_evidence": "the product's own availability path was driven by a real sandboxed spawn (on Windows is_available() IS a real spawn, not a capability query); 'sandbox disabled' present=True, lease-reconciliation refusal present=True, lease files present at the observation=1",
+   "probe_report": "unavailable",
+   "product_behaviour": "refused-fail-closed",
+   "product_evidence": "worker executed=False (F28RAN present in the product's captured worker stdout); containment signature observed=False (0xC0000022 on \\BaseNamedObjects, which AppContainer confines by construction, and/or a System32 binary refused, with no S-1-16-12288 High integrity label); uncontained High-integrity label present=False",
+   "session_type": "ssh"
+  }
+ ],
+ "quiet_run": true,
+ "recorded_at": 1000,
+ "run_id": "f28ctl-20260727222551",
+ "schema": "f28-controls/1",
+ "verdict": "wedge-clearable"
+}

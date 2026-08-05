@@ -1,0 +1,12 @@
+M2 applied
+ran: 
+=== M2 failures in migrate_quarantine ===
+grep: [0-9]+: No such file or directory
+grep: tests": No such file or directory
+    t23_an_imported_artifact_resolves_back_to_the_peer_it_came_from
+    t25_an_imported_peer_script_arrives_without_its_execute_bit
+    t2_skill_without_a_directive_is_data_and_needs_no_promotion
+    t2b_a_data_skill_that_cannot_be_written_is_not_counted_as_imported
+    t5_quarantined_content_is_absent_from_what_the_agent_would_load
+test result: FAILED. 29 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 47.83s
+restored dirty=0

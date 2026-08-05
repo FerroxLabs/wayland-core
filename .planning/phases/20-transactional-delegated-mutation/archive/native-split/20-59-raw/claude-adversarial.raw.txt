@@ -1,0 +1,66 @@
+Internal Claude non-author adversarial reviewer — leg 4 of the 20-59 four-way panel.
+Prompted to REFUTE the candidate (default-refuted-if-uncertain).
+
+Static verification performed against the sealed tree 8a1d2d84 (tree c1fe79fe), all git ops via /usr/bin/git:
+
+1. Tree bind: git rev-parse 8a1d2d84^{tree} == c1fe79fe4a6d68a536078be4887343a82b5fce38 (VERIFIED).
+2. Source delta (non-planning): git diff --name-only f0dd5b6d 8a1d2d84 | grep -v planning ==
+   exactly crates/wcore-sandbox/tests/hard_process_containment_windows.rs; direct-parent
+   c902b2e5..8a1d2d84 == same one file (+53/-10). NO Cargo.toml/Cargo.lock/workflow/command.rs/
+   worktree_manager.rs change.
+3. Rust-layer hardening CONFIRMED present: out.status.success() x3 (L128/186/243); panicking
+   parse unwrap_or_else(|err| panic!) x3 (L135/195/250); filter_map ABSENT; sole unwrap_or(0)
+   is L98 unique_tag nanos (benign). Preserved verbatim: if pids.is_empty(){return 0;} (L221),
+   peak>0 (L455), peak<=SANDBOX_ACTIVE_PROCESS_LIMIT (L459), peak<attempts (L464),
+   !captured_pids.is_empty() (L469), reap_stray_choice best-effort. Siblings present:
+   job_close_reaps_detached_descendant_with_no_residue (L339), breakaway_is_denied (L499),
+   qualified_hard_containment_backend_preflight (L551). command.rs / #A / #B untouched by absence.
+
+INITIAL read (Rust layer only): would PASS — mirrors the Gemini blind spot.
+
+ADVERSARIAL deeper prosecution (the panel mandate): read the actual PowerShell -Command scripts
+in all three observers. NONE sets -ErrorAction Stop, $ErrorActionPreference='Stop', or a trap
+(grep over the sealed file: NONE FOUND). All three use default error action (Continue).
+
+PowerShell semantics (documented, non-refutable):
+- Get-CimInstance failures are NON-terminating errors by default → the pipeline continues.
+- @(<failed pipeline>) yields an empty array → .Count == 0; the PID query yields no tokens.
+- powershell.exe -Command exits 0 on a non-terminating error (no terminating exception,
+  no explicit `exit N`; in WinPS 5.x @(...) resets $? to True).
+Therefore on a non-terminating CIM failure: out.status.success() == TRUE (exit 0), stdout == "0"
+(Count observers) or "" (PID observer), the panicking parse succeeds on "0"/empty, and
+wait_until(observer == 0, 30) is satisfied on the first poll — the reap property is reported
+PROVEN WITHOUT EVIDENCE. This is the EXACT 20-52 fail-open class, moved one layer down from Rust
+to PowerShell. The 20-57 doc comment ("a post-close query failure therefore cannot satisfy a reap
+wait_until(...==0) without evidence") OVERCLAIMS: it holds for a non-zero exit / unparseable
+stdout, but NOT for the exit-0-with-error-record mode.
+
+Refutation attempt: to refute I would need executable counter-evidence that the observers fail
+CLOSED on a non-terminating CIM error. I cannot run Windows here (#![cfg(windows)]; macOS/Linux
+only), and the documented semantics point to fail-open. So the finding is NOT refutable —
+default-refuted-if-uncertain resolves to CONCUR, not refute.
+
+Concrete trigger, not purely theoretical: the carried Kimi watch-item "tagged_cmd_count CIM
+visibility under NetworkService" flags that the CIM query's behavior under a restricted token is a
+live 20-53 question; access/provider errors under such a token are precisely the non-terminating
+class that leaves exit 0.
+
+Convergence: Codex 5.6 Sol (MEDIUM) and Kimi K3 (LOW) independently reached the same finding;
+Kimi named the same one-line fix (add -ErrorAction Stop so any CIM error becomes terminating =>
+exit 1 => caught by the new assert!(out.status.success())). Gemini 3.1 Pro missed it (Rust-layer
+PASS) — the same blind-spot dynamic the four-way panel exists to catch (cf. 20-52, where Gemini +
+Kimi missed the Rust-layer fail-open Codex + Claude caught; here Kimi CAUGHT the deeper one).
+
+VERDICT: BLOCK (concur, not refute). Real, non-deferred, statically-provable LOW/MEDIUM finding:
+PowerShell-layer fail-open persists. Does NOT admit 20-53.
+
+Codex LOW (evidence-integrity nit on the brief, not a candidate defect): git diff f0dd5b6d..8a1d2d84
+lists 16 paths (15 .planning artifacts + the test) because planning-doc commits interleave; the
+SOURCE delta restricted to non-planning is exactly one file (verified). The brief's "ONE file"
+phrasing was imprecise; the candidate's code repair IS a clean one-file delta (Codex + Kimi both
+concur the code delta is one file). Partially refuted: no candidate defect; a brief-phrasing
+clarification only. Does not affect disposition.
+
+Panel reachability: all three external CLIs reachable, exit 0, schema-valid JSON keyed to
+source_sha 8a1d2d84 — the fail-closed unreachable/partial-panel path was NOT triggered. This is a
+FINDING-BASED BLOCK, not an incomplete-panel BLOCK.

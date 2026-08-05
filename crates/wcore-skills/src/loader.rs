@@ -45,8 +45,24 @@ pub async fn load_all_skills(
     bare: bool,
     mcp_manager: Option<&McpManager>,
 ) -> Vec<SkillMetadata> {
+    let bundled_catalog = bundled::BundledSkillCatalog::embedded();
+    load_all_skills_with_bundled(cwd, add_dirs, bare, mcp_manager, &bundled_catalog).await
+}
+
+/// Load all skills with a caller-owned bundled/plugin catalog.
+///
+/// Bootstrap uses this entry point so plugin entries remain local to the
+/// session being constructed. Catalog insertion order is preserved before
+/// the existing MCP and filesystem precedence rules are applied.
+pub async fn load_all_skills_with_bundled(
+    cwd: &Path,
+    add_dirs: &[PathBuf],
+    bare: bool,
+    mcp_manager: Option<&McpManager>,
+    bundled_catalog: &bundled::BundledSkillCatalog,
+) -> Vec<SkillMetadata> {
     // Resolve bundled skills with file extraction (async context).
-    let bundled_loaded = prepare_bundled_loaded().await;
+    let bundled_loaded = prepare_bundled_loaded(bundled_catalog).await;
 
     let mut all: Vec<LoadedSkill> = Vec::new();
 
@@ -62,7 +78,9 @@ pub async fn load_all_skills(
         }
         // Bundled skills prepended so they win deduplication
         all.splice(0..0, bundled_loaded);
-        return deduplicate_by_name(deduplicate(all));
+        // Governance applies in bare mode too: an isolated environment is still one a
+        // revoked skill must not execute in.
+        return apply_governance(deduplicate_by_name(deduplicate(all))).await;
     }
 
     // 1. User-level skills (highest priority)
@@ -135,7 +153,127 @@ pub async fn load_all_skills(
 
     // Path-based dedup first (handles symlinked duplicates), then name-based
     // dedup to enforce MCP vs. filesystem priority.
-    deduplicate_by_name(deduplicate(all))
+    apply_governance(deduplicate_by_name(deduplicate(all))).await
+}
+
+// ---------------------------------------------------------------------------
+// 23A-C1: governance enforcement
+// ---------------------------------------------------------------------------
+
+/// Apply skill governance to a fully-resolved catalog.
+///
+/// Two effects, and the order between them is the resurrection fence:
+///
+/// 1. **A revoked skill is dropped from the catalog entirely.** Not quarantined —
+///    *removed*. Quarantine only hides a skill from the model; the skill is still
+///    loaded, still resolvable by name, and still executable through the user-invocable
+///    path. A revocation that left the skill executable would not be a revocation.
+/// 2. **A promoted skill has its generated-provenance quarantine lifted**, but only
+///    while the bytes on disk still hash to the digest the grant names.
+///
+/// Revocation is checked **first and unconditionally**, so a stale promotion grant can
+/// never re-expose a revoked artifact even if withdrawal did not complete.
+///
+/// This is the single choke point for both. It sits after dedup rather than inside
+/// `load_skill_file` for two reasons: the governance state is read **once** per catalog
+/// load instead of once per skill, and one placement is auditable where a dozen call
+/// sites are not.
+///
+/// **Cost when nothing is governed is one directory read.** With no revocations and no
+/// grants — the state of every install that has never used these commands — the function
+/// returns the catalog untouched without hashing anything.
+async fn apply_governance(skills: Vec<SkillMetadata>) -> Vec<SkillMetadata> {
+    let Ok(store) = crate::govern::GovernanceStore::open_default() else {
+        // No governance root resolvable on this platform. Governance is unavailable,
+        // not violated; the catalog is unchanged.
+        return skills;
+    };
+    let (Ok(revocations), Ok(grants)) = (store.live_revocations(), store.promotions()) else {
+        // A governance read failed. Returning the catalog unchanged is the same
+        // fail-open choice `is_revoked` documents, and for the same reason: failing
+        // closed here would empty a user's whole skill catalog on one bad file.
+        tracing::error!(
+            target: "wcore_skills::loader",
+            "could not read skill governance state; catalog left ungoverned"
+        );
+        return skills;
+    };
+    if revocations.is_empty() && grants.is_empty() {
+        return skills;
+    }
+
+    let mut out = Vec::with_capacity(skills.len());
+    for mut meta in skills {
+        let Some(root) = meta.skill_root.clone() else {
+            // Bundled and MCP skills have no directory. They are not drafted, cannot
+            // be revoked by this surface, and are passed through.
+            out.push(meta);
+            continue;
+        };
+        let dir = PathBuf::from(&root);
+        let dir_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let signature = crate::govern::read_signature(&dir);
+
+        // ---- 1. revocation, first and unconditional ----
+        let revoked = revocations.iter().any(|r| {
+            r.skill_name == dir_name
+                || match (r.signature.as_deref(), signature.as_deref()) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => false,
+                }
+        });
+        if revoked {
+            tracing::info!(
+                target: "wcore_skills::loader",
+                skill = %meta.name,
+                path = %dir.display(),
+                "skill is revoked; excluded from the catalog"
+            );
+            continue;
+        }
+
+        // ---- 2. promotion lifts quarantine, and only for generated drafts ----
+        //
+        // Gated on generated provenance so a promotion can never clear a
+        // `disable-model-invocation` the *author* set in frontmatter. Promotion's
+        // authority is over the quarantine this loader imposes, not over a user's
+        // explicit declaration about their own skill.
+        if meta.disable_model_invocation
+            && grants.iter().any(|g| g.skill_name == dir_name)
+            && is_generated_draft(&dir, &meta.name, &meta.content).await
+        {
+            let dir_for_check = dir.clone();
+            let store_for_check = store.clone();
+            let state = tokio::task::spawn_blocking(move || {
+                store_for_check.promotion_state(&dir_for_check)
+            })
+            .await;
+            match state {
+                Ok(Ok(s)) if s.lifts_quarantine() => {
+                    meta.disable_model_invocation = false;
+                }
+                Ok(Ok(crate::promote::PromotionState::DigestMismatch { promotion_id, .. })) => {
+                    // Explicitly logged: a promoted skill silently reverting to
+                    // quarantine after an edit is correct but surprising, and an
+                    // unexplained reversion reads as a bug.
+                    tracing::warn!(
+                        target: "wcore_skills::loader",
+                        skill = %meta.name,
+                        promotion_id = %promotion_id,
+                        "promotion grant does not match the bytes on disk; skill stays \
+                         quarantined. Re-promote it to cover the current content."
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        out.push(meta);
+    }
+    out
 }
 
 /// X1: load every skill's listing-only metadata without keeping bodies pinned.
@@ -156,7 +294,20 @@ pub async fn load_catalog(
     bare: bool,
     mcp_manager: Option<&McpManager>,
 ) -> Vec<crate::refs::SkillRef> {
-    let full = load_all_skills(cwd, add_dirs, bare, mcp_manager).await;
+    let bundled_catalog = bundled::BundledSkillCatalog::embedded();
+    load_catalog_with_bundled(cwd, add_dirs, bare, mcp_manager, &bundled_catalog).await
+}
+
+/// Load listing refs with a caller-owned bundled/plugin catalog.
+pub async fn load_catalog_with_bundled(
+    cwd: &Path,
+    add_dirs: &[PathBuf],
+    bare: bool,
+    mcp_manager: Option<&McpManager>,
+    bundled_catalog: &bundled::BundledSkillCatalog,
+) -> Vec<crate::refs::SkillRef> {
+    let full =
+        load_all_skills_with_bundled(cwd, add_dirs, bare, mcp_manager, bundled_catalog).await;
     full.into_iter().map(metadata_to_ref).collect()
 }
 
@@ -186,12 +337,15 @@ pub async fn load_plugin_skill_catalog(
         .collect()
 }
 
-/// Call `bundled::prepare_bundled_skills()` and wrap results as `LoadedSkill`.
+/// Prepare one caller-owned bundled catalog and wrap results as `LoadedSkill`.
 ///
 /// Each bundled skill is assigned a virtual path `<bundled:name>` for
 /// deduplication purposes (these paths can never match real filesystem paths).
-async fn prepare_bundled_loaded() -> Vec<LoadedSkill> {
-    bundled::prepare_bundled_skills()
+async fn prepare_bundled_loaded(
+    bundled_catalog: &bundled::BundledSkillCatalog,
+) -> Vec<LoadedSkill> {
+    bundled_catalog
+        .prepare_bundled_skills()
         .await
         .into_iter()
         .map(|meta| {
@@ -240,6 +394,31 @@ fn collect_skill_md<'a>(
 
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
+
+            // F23A-C1-H4: never discover a promotion/rollback staging tree.
+            //
+            // `promote::staging_root_for` aims to put staging beside the skills root, and for
+            // a flat `<root>/<name>` skill it does. For the layout the auto-drafter actually
+            // writes — `skills/auto/auto-<sig>/` — the skill's parent is `skills/auto`, so
+            // staging resolves to `skills/.promote-staging`, INSIDE this walk. A kill between
+            // the copy and the `rename(2)` then leaves a half-built tree holding a `SKILL.md`
+            // right where the loader will find it: the same "present, loadable, incomplete"
+            // state F23A-C1-H3 removed from the target directory, arriving via the staging
+            // directory instead.
+            //
+            // Fenced by name because the location cannot be guaranteed — `rename(2)` needs
+            // staging on the target's filesystem, and skills roots nest arbitrarily through
+            // `--add-dir`, `$WAYLAND_HOME` and project roots. Matched on this one directory
+            // name rather than by a blanket dotted-directory rule, which would change which
+            // skills load for users who never touched governance.
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n == crate::promote::STAGING)
+            {
+                continue;
+            }
+
             // Follow symlinks: entry.file_type() does NOT traverse symlinks,
             // so use tokio::fs::metadata() which resolves the target type.
             let is_dir = match tokio::fs::metadata(&path).await {
@@ -408,13 +587,11 @@ async fn load_skill_file(
         skill_root.as_deref(),
     );
 
-    // Auto-drafted skills carry a sibling `manifest.json` written by the
-    // SkillDrafter. Until a human reviews one (`needs_review: true`), it must
-    // NOT be advertised to the model: an unreviewed draft in the catalog makes
-    // models notice it and narrate skipping it into user-facing output (e.g. a
-    // skill drafted from trivial test turns). Keep it LOADED — so the user can
-    // still review or explicitly invoke it — but hide it from model invocation.
-    if draft_needs_review(skill_dir).await {
+    // F06: generated provenance remains quarantined until F23 supplies a
+    // governed promotion transaction. Review flags are not activation
+    // authority. Keep drafts loaded for operator inspection, but never expose
+    // them to model-facing catalog surfaces.
+    if is_generated_draft(skill_dir, &resolved_name, &parsed.content).await {
         metadata.disable_model_invocation = true;
     }
 
@@ -426,20 +603,21 @@ async fn load_skill_file(
     })
 }
 
-/// True when `skill_dir` holds an auto-drafted skill that has not been reviewed
-/// yet — a sibling `manifest.json` with `"needs_review": true` (written by the
-/// `SkillDrafter`). Best-effort: a missing, unreadable, or malformed manifest,
-/// or one without the flag, means "not a pending draft" (`false`), so
-/// hand-authored skills are completely unaffected.
-async fn draft_needs_review(skill_dir: &Path) -> bool {
+/// Generated provenance classifier for current and released drafts. A valid
+/// `auto_drafted=true` manifest is authoritative regardless of review status.
+/// Missing or damaged metadata falls back to the exact released body marker;
+/// an `auto-*` name by itself never quarantines user-authored content.
+pub(crate) async fn is_generated_draft(skill_dir: &Path, name: &str, content: &str) -> bool {
     let manifest = skill_dir.join("manifest.json");
-    let Ok(bytes) = tokio::fs::read(&manifest).await else {
-        return false;
-    };
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|v| v.get("needs_review").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
+    if let Ok(bytes) = tokio::fs::read(&manifest).await
+        && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("auto_drafted").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    crate::draft::is_released_generated_skill(name, content)
 }
 
 // ---------------------------------------------------------------------------

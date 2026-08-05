@@ -1,0 +1,9 @@
+tag: v0.12.25
+assets:
+  wayland-core-checksums.txt
+  wayland-core-v0.12.25-aarch64-apple-darwin.tar.gz
+  wayland-core-v0.12.25-aarch64-pc-windows-msvc.zip
+  wayland-core-v0.12.25-aarch64-unknown-linux-gnu.tar.gz
+  wayland-core-v0.12.25-x86_64-apple-darwin.tar.gz
+  wayland-core-v0.12.25-x86_64-pc-windows-msvc.zip
+  wayland-core-v0.12.25-x86_64-unknown-linux-gnu.tar.gz

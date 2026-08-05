@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use futures::stream::{FuturesUnordered, StreamExt};
 use wcore_config::config::Config;
 use wcore_types::message::TokenUsage;
+use wcore_types::spawner::ChildOrigin;
 
 use wcore_pricing::DEFAULT_CATALOG;
 
@@ -168,7 +169,7 @@ pub async fn run_council(
     task: &str,
     roster: &Roster,
     spawner: &AgentSpawner,
-    base: &Config,
+    _base: &Config,
 ) -> Result<CouncilOutcome, CouncilError> {
     let resolver = spawner
         .provider_resolver()
@@ -264,7 +265,11 @@ pub async fn run_council(
                     None => None,
                 };
                 let start = Instant::now();
-                let result = tokio::time::timeout(proposer_deadline, spawner.spawn_one(cfg)).await;
+                let result = tokio::time::timeout(
+                    proposer_deadline,
+                    spawner.spawn_one_with_origin(cfg, ChildOrigin::Council),
+                )
+                .await;
                 (i, provider, model, result, start.elapsed())
             }
         })
@@ -307,8 +312,10 @@ pub async fn run_council(
                         if proposal.is_usable() {
                             usable_count += 1;
                         }
-                        let charged_tokens =
-                            proposal.usage.input_tokens + proposal.usage.output_tokens;
+                        let charged_tokens = proposal
+                            .usage
+                            .total_input_tokens()
+                            .saturating_add(proposal.usage.output_tokens);
                         if charged_tokens > 0
                             && let (Some(tracker), Some((sess, user))) =
                                 (spawner.budget_tracker(), spawner.budget_identity())
@@ -376,11 +383,12 @@ pub async fn run_council(
         Some(spec) => match resolver.resolve_provider(spec) {
             Ok((provider, model)) => {
                 let agg_provider = spec.split(':').next().unwrap_or(spec).to_string();
-                aggregator_provenance = Some((agg_provider, model.clone()));
+                aggregator_provenance = Some((agg_provider.clone(), model.clone()));
+                let pinned_spawner =
+                    spawner.clone_for_resolved_provider(provider, agg_provider, model.clone());
                 let agg = LlmSynthesisAggregator::new(
-                    provider,
+                    pinned_spawner,
                     model,
-                    base.clone(),
                     roster.aggregator_temperature,
                 );
                 Some(agg.aggregate(task, &proposals).await)
@@ -404,7 +412,10 @@ pub async fn run_council(
         aggregator_provenance.as_ref(),
         aggregate.as_ref(),
     ) {
-        let total = agg.usage.input_tokens + agg.usage.output_tokens;
+        let total = agg
+            .usage
+            .total_input_tokens()
+            .saturating_add(agg.usage.output_tokens);
         if total > 0 {
             let usd =
                 CouncilSpend::usd_for_usage(prov, model.as_deref(), &agg.usage, roster.flux_markup);
@@ -447,6 +458,7 @@ mod tests {
     use super::*;
     use crate::orchestration::council::resolver::{ProviderResolver, ResolveError};
     use crate::orchestration::council::roster::ProposerSpec;
+    use crate::spawner::bind_test_durable_session;
 
     /// Resolver that returns a fixed verdict per spec — Keyless/Unknown for the
     /// pre-filter tests (no providers needed since nothing is spawned).
@@ -679,6 +691,7 @@ mod tests {
     // no more than 2 may stream at once even though all four are spawned together.
     #[tokio::test]
     async fn same_route_bounds_concurrent_spawns() {
+        let dir = tempfile::tempdir().unwrap();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counting = Arc::new(CountingProvider {
@@ -686,8 +699,21 @@ mod tests {
             max: max.clone(),
         });
         let resolver = Arc::new(SharedResolver(counting.clone()));
-        let spawner =
-            AgentSpawner::new(counting.clone(), Config::default()).with_provider_resolver(resolver);
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        // Council proposers are shared read-only children, so the spawner MUST
+        // carry the parent-workspace authority for them to resolve their
+        // workspace and reach the provider — this is the council leg of the
+        // workspace-authority propagation the CLI binds via
+        // `govern_standalone_spawner`.
+        let spawner = AgentSpawner::new(counting.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_provider_resolver(resolver);
+        bind_test_durable_session(&spawner, dir.path(), "f190023");
 
         let mut r = roster(&["flux:a", "flux:b", "flux:c", "flux:d"]);
         r.proposer_concurrency = 2;
@@ -710,6 +736,7 @@ mod tests {
     // the two members are NOT throttled against each other — they can overlap.
     #[tokio::test]
     async fn distinct_routes_have_independent_pools() {
+        let dir = tempfile::tempdir().unwrap();
         let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counting = Arc::new(CountingProvider {
@@ -717,8 +744,18 @@ mod tests {
             max: max.clone(),
         });
         let resolver = Arc::new(SharedResolver(counting.clone()));
-        let spawner =
-            AgentSpawner::new(counting.clone(), Config::default()).with_provider_resolver(resolver);
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        // See `same_route_bounds_concurrent_spawns`: the council spawner must be
+        // parent-workspace bound so shared read-only proposers resolve and run.
+        let spawner = AgentSpawner::new(counting.clone(), config)
+            .with_parent_workspace(dir.path())
+            .unwrap()
+            .with_provider_resolver(resolver);
+        bind_test_durable_session(&spawner, dir.path(), "f190024");
 
         let mut r = roster(&["openai:a", "anthropic:b"]);
         r.proposer_concurrency = 1;

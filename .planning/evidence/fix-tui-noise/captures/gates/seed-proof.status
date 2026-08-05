@@ -1,0 +1,9 @@
+BASELINE_GREEN_RC_FROM_GATES=0 (WLTHELP)
+SEEDED_LINES=1
+WLTHELP_SEEDED=101
+SEEDED_COUNTS=test result: FAILED. 3 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s|
+SEEDED_MSG=`--help` leaks 1 internal identifier(s) at users:
+REVERTED=CLEAN
+WLTHELP_REVERTED=0
+REVERTED_COUNTS=test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s|
+WLDONE

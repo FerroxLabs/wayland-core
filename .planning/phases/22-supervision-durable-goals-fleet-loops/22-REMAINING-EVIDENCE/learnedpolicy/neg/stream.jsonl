@@ -1,0 +1,48 @@
+{"type":"ready","version":"0.12.25","session_id":"23a804260697","capabilities":{"tool_approval":true,"thinking":false,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"force","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"name":"wayland-desktop-core","major":1,"minor":8,"generator":"wcore-desktop-contract-gen/11","fixture_digest":"sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8","schema_digest":"sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54","source_inputs_digest":"sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562","capabilities":{"anvil_receipts":"publication_bound","browser_events":"shape_only","contract_negotiation":"available","cua_events":"shape_only","durable_child_model_v1":"available","effective_execution_policy_revisions":"available","host_delegated_delivery":"available","operator_tool_effect_resolution_v1":"available","plugin_events":"shape_only","runtime_diagnostics_v1":"available","runtime_mcp_lifecycle_v1":"available","semantic_failover_receipts":"available","turn_recovery_v1":"available","workflow_lifecycle_v1":"available"}},"execution_policy":{"critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785332393558,"policy":{"posture":"smart","approvals":"bypass","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}}
+{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785332393558,"policy":{"posture":"smart","approvals":"bypass","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"bubblewrap","writable_roots":["/tmp/wl22p-neg/work","/tmp/wayland-scratch-u0/contained"],"readable_roots":["/tmp/wayland-scratch-u0/contained","/tmp/wl22p-neg/work"],"capabilities":[]}}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"declared"}
+{"type":"capability_activation","capability":"pricing_refresher","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"declared"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"configured"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"constructed"}
+{"type":"capability_activation","capability":"mid_flight_monitor","stage":"ready"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"declared"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"configured"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"constructed"}
+{"type":"capability_activation","capability":"cooldown_tracker","stage":"ready"}
+{"type":"capability_activation","capability":"learned_policy","stage":"declared"}
+{"type":"capability_activation","capability":"learned_policy","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"declared"}
+{"type":"capability_activation","capability":"smart_handoff","stage":"unavailable","reason":"disabled_by_config"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"declared"}
+{"type":"capability_activation","capability":"delegate_isolation","stage":"unavailable","reason":"isolation_not_enforced"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"procedure_skill_drafting","stage":"ready"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"declared"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"configured"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"constructed"}
+{"type":"capability_activation","capability":"legacy_auto_skill_drafting","stage":"ready"}
+{"type":"stream_start","msg_id":"wl22p-1"}
+{"type":"info","msg_id":"wl22p-1","message":"Pricing unavailable for openai/canned-model; the call remains bounded by the token envelope and cost is unpriced, not $0."}
+{"type":"provider_attempt"}
+{"type":"info","msg_id":"wl22p-1","message":"Tool call: Read"}
+{"type":"info","msg_id":"wl22p-1","message":"Provider completed without authoritative usage; the conservative reservation was charged."}
+{"type":"tool_running","msg_id":"wl22p-1","call_id":"call_parent_1","tool_name":"Read"}
+{"type":"tool_result","msg_id":"wl22p-1","call_id":"call_parent_1","tool_name":"Read","status":"success","output":"     1\tparent probe content","output_type":"text"}
+{"type":"info","msg_id":"wl22p-1","message":"[Read success]      1\tparent probe content"}
+{"type":"info","msg_id":"wl22p-1","message":"Pricing unavailable for openai/canned-model; the call remains bounded by the token envelope and cost is unpriced, not $0."}
+{"type":"provider_attempt"}
+{"type":"info","msg_id":"wl22p-1","message":"Tool call: Delegate"}
+{"type":"info","msg_id":"wl22p-1","message":"Provider completed without authoritative usage; the conservative reservation was charged."}
+{"type":"tool_running","msg_id":"wl22p-1","call_id":"call_parent_2","tool_name":"Delegate"}
+{"type":"tool_result","msg_id":"wl22p-1","call_id":"call_parent_2","tool_name":"Delegate","status":"success","output":"{\"results\":[{\"name\":\"delegate-WL22P-CHILD-MARKER\",\"status\":\"completed\",\"summary\":\"WL22P_CHILD_DONE\",\"task_index\":0,\"tokens\":{\"input\":0,\"output\":0},\"turns\":2}]}","output_type":"text"}
+{"type":"info","msg_id":"wl22p-1","message":"[Delegate success] {\"results\":[{\"name\":\"delegate-WL22P-CHILD-MARKER\",\"status\":\"completed\",\"summary\":\"WL22P_CHILD_DONE\",\"task_index\":0,\"tokens\":{\"input\":0,\"output\":0},\"turns\":2}]}"}
+{"type":"info","msg_id":"wl22p-1","message":"Pricing unavailable for openai/canned-model; the call remains bounded by the token envelope and cost is unpriced, not $0."}
+{"type":"provider_attempt"}
+{"type":"text_delta","text":"WL22P_PARENT_DONE","msg_id":"wl22p-1"}
+{"type":"info","msg_id":"wl22p-1","message":"Provider completed without authoritative usage; the conservative reservation was charged."}
+{"type":"session_cost","session_id":"23a804260697","total_cost_usd":0.0,"per_turn":[{"turn":0,"model":"canned-model","provider":"openai","cost_usd":0.0,"priced":true},{"turn":1,"model":"canned-model","provider":"openai","cost_usd":0.0,"priced":true},{"turn":2,"model":"canned-model","provider":"openai","cost_usd":0.0,"priced":true}]}
+{"type":"stream_end","msg_id":"wl22p-1","finish_reason":"stop","usage":{"input_tokens":0,"output_tokens":0,"active_window_percent":2},"usage_delta":{"input_tokens":0,"output_tokens":0},"agent_run_id":"agent-run-2dcc6a42-4e0d-464a-a65c-ac47631b3486"}

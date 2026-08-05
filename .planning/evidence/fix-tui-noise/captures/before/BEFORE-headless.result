@@ -1,0 +1,28 @@
+LABEL=BEFORE-headless
+BIN=/root/wayland-fix-tui-noise/target/release/wayland-core
+BIN_SHA256=f2078c290cffb053bfd27dbe6133e9e35a75eab157e7b669fa657cc7469a26e5
+BUILD_INFO=wayland-core 0.12.25 (source e7bc6d883027102ff1e5bbaa2dd19f9265268cab) 
+EXTRA=[--no-tui]
+RUST_LOG_SET=<unset>
+PROC_RC=0
+WALL_S=11.91
+STDOUT_BYTES=5
+STDERR_LINES=42
+ASSERT_RAN=OK
+ASSERT_TURN=OK
+INFO_LINES=20
+WARN_LINES=19
+ERROR_LINES=0
+DEBUG_LINES=0
+TRACE_LINES=0
+STDERR_NONBLANK=41
+CTRL_POS=1
+CTRL_NEG=0
+STDOUT_LAST_BYTE_HEX=31
+STDOUT_ENDS_NEWLINE=NO
+STDOUT_FIRST8_HEX= 2a 20 33 39 31
+STDOUT_STARTS_STAR_SPACE=YES
+ARM_LINES=2026-07-30T13:46:25.976850Z  INFO web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.|2026-07-30T13:46:25.976886Z  WARN transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden|2026-07-30T13:46:25.990694Z  INFO user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)|
+ANSWER_HAS_391=1
+WLRC=0
+WLDONE

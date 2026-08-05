@@ -1,0 +1,1 @@
+NO CAPTURE: [Errno 2] No such file or directory: '/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/f27-obs2/wire-pdf-mismatch.jsonl'

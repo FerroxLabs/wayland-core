@@ -1,0 +1,59 @@
+PANEL MEMBER: Gemini 3.1 Pro
+INVOCATION: gemini -p "<panel-question.txt>" -m gemini-3.1-pro-preview -o text --skip-trust
+CAPTURED: 2026-07-27, planning session for Phase 28.
+NOTE ON THIS TRANSCRIPT: `--skip-trust` was supplied; without it this member refuses and returns
+nothing, silently turning a four-way panel into a three-way. MCP tool-name truncation warnings
+and hook lines are omitted; the reviewer's answer is verbatim and complete.
+
+--- ANSWER ---
+
+To decide how Phase 28's acceptance gate must be implemented, we must reconcile the strict
+accounting demanded by a certification phase (RULE A) with the hard-won operational limits on
+what must actually be fixed (RULE B).
+
+Here is the evaluation of the crux and the specific constraints:
+
+**(e) The Crux: Is "resolved as dispositioned" honest reconciliation or disguised scope
+reduction?**
+In the context of certification and risk management, "resolved" does not exclusively mean
+"fixed code." A finding is resolved when the open loop is closed—meaning the risk has been
+formally mitigated, transferred, or accepted by a named owner with a documented rationale.
+Reading "resolved" as "dispositioned" is an intellectually honest reconciliation. It upholds
+the absolute strictness of RULE A (every single finding must be explicitly addressed and
+recorded) while honoring the operational boundary of RULE B (we do not force the agent to
+churn endlessly on unfixable sub-HIGH items). It is not scope reduction because the accounting
+burden remains absolute; nothing is dropped.
+
+**(a) What Criterion 4 is actually protecting:**
+F28-04 pairs "every finding... is resolved" with "No critical case is skipped." This reveals
+the criterion's true intent: **complete visibility and zero dropped context**. The danger it
+guards against is the "silent absence" measured in the program's history. It is an auditing
+and accounting requirement.
+
+**(b) The measured history of literal vs. amended rules:**
+The empirical data is unambiguous. Forcing the agent to fix LOW/MEDIUM findings (c4-literal)
+empirically breaks the program's throughput, resulting in a 74-plan, two-week loop. The
+amended rule restored execution to a 4-plan baseline. We cannot adopt `c4-literal` without
+willfully ignoring the most expensive lesson the program has learned.
+
+**(c) The demands of a Certification Phase:**
+Because Phase 28 produces a signed receipt that downstream phases rely upon, adopting
+`c4-standing` (which simply drops MEDIUM/LOW findings from the gate entirely) is unacceptable.
+A certification receipt that silently omits known defects is a fraudulent receipt. Downstream
+consumers of the release must know exactly what they are inheriting.
+
+**(d) Gaming vectors and mitigations:**
+The obvious attack on `c4-disposition` is severity laundering—an agent downgrading a difficult
+HIGH finding to a MEDIUM to exploit the deferral path. The option anticipates this by requiring
+a written rubric and an independent cross-audit for any downgrade from an initially assessed
+CRITICAL/HIGH. A secondary attack is rubber-stamping the deferrals; requiring a named
+rationale, owner, and BACKLOG id forces the agent to produce a verifiable paper trail.
+
+**Conclusion:**
+Option `c4-escalate` violates the standing order to decide well rather than block on human
+intervention. `c4-literal` repeats a proven catastrophic failure mode. `c4-standing` produces a
+dishonest certification receipt. `c4-disposition` is the only path that yields a mathematically
+complete ledger of findings (satisfying RULE A) without triggering the endless fix-loop
+(satisfying RULE B).
+
+PANEL_POSITION=c4-disposition

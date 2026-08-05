@@ -1,0 +1,34 @@
+=== crates/wcore-tools/src/edit.rs (825 lines) ===
+  pat fs::\w+:
+     fs::read_to_string           [256, 452, 474, 517, 569, 592, 655, 677]
+     fs::write                    [462, 482, 505, 549, 576, 601, 608, 631]
+  pat \batomic\w*:
+     atomic_write                 [277]
+  pat use crate::\w+:
+     use crate::Tool              [10]
+     use crate::context           [11]
+     use crate::file_cache        [12, 438]
+     use crate::fuzzy_match       [13]
+     use crate::path_validation   [14]
+=== crates/wcore-tools/src/write.rs (459 lines) ===
+  pat fs::\w+:
+     fs::create_dir_all           [101]
+     fs::read_to_string           [276, 302, 330, 353, 413]
+     fs::remove_file              [123]
+     fs::rename                   [121]
+     fs::write                    [114, 124]
+  pat \bwrite_\w+:
+     write_edit                   [390]
+     write_input                  [397, 401]
+     write_overwrite_updates_cache_mtime [419]
+     write_populates_cache        [363]
+     write_then_edit_succeeds     [388]
+     write_tool                   [393, 401]
+  pat \batomic\w*:
+     atomically                   [112]
+     atomicity                    [160]
+  pat use crate::\w+:
+     use crate::Tool              [10, 242]
+     use crate::context           [11]
+     use crate::file_cache        [12, 243]
+     use crate::path_validation   [13]

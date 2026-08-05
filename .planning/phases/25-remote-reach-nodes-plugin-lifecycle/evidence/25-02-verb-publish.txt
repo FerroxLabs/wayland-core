@@ -1,0 +1,40 @@
+signature     (unsigned)
+permissions:
+  - run hooks around the agent lifecycle
+error: quarantine: verification failed for lifecycle-demo: plugin lifecycle-demo: plugin_api_version `999.0-from-the-future` does not match engine `1.0`
+[exit=1]
+
+STATE: exit=1 (non-zero required — a gate that cannot fail is not a gate)
+### VERB 4/12 sign — mint a key
+$ /root/wayland-25/target/release/wayland-core plugin sign --new-key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+wrote signing key   /root/f25-02-lab/keys/author.key
+wrote verifying key /root/f25-02-lab/keys/author.pub
+install the verifying key as a trust anchor:
+  cp /root/f25-02-lab/keys/author.pub "${WAYLAND_TRUSTED_KEYS_DIR:-$HOME/.wayland/trusted-keys}/"
+[exit=0]
+
+### VERB 4/12 sign — sign the entry artifact
+$ /root/wayland-25/target/release/wayland-core plugin sign /root/f25-02-lab/src/lifecycle-demo --key /root/f25-02-lab/keys/author.key --install-root /root/f25-02-lab/home/plugins
+signed bin/run → /root/f25-02-lab/src/lifecycle-demo/bin/wayland-plugin.sig
+[exit=0]
+
+STATE: installed the verifying key as a trust anchor at /root/f25-02-lab/home/trusted-keys/author.pub -- the exact step that sign --new-key printed
+STATE: 64 bytes at bin/wayland-plugin.sig (beside the entry artifact, where the engine verifier reads it)
+### VERB 5/12 publish
+$ /root/wayland-25/target/release/wayland-core plugin publish /root/f25-02-lab/src/lifecycle-demo --to /root/f25-02-lab/market --install-root /root/f25-02-lab/home/plugins
+published lifecycle-demo 1.0.0
+  digest   4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac
+  signed   bin/run (wayland-plugin.sig)
+  target   /root/f25-02-lab/market/plugins/lifecycle-demo
+  install  wayland-core plugin marketplace add /root/f25-02-lab/market && wayland-core plugin install lifecycle-demo@market
+[exit=0]
+
+STATE: bundle at /root/f25-02-lab/market/plugins/lifecycle-demo:
+{
+  "name": "lifecycle-demo",
+  "version": "1.0.0",
+  "content_digest": "4fa0ee587fbf59e75577a98dec1ce646cccb46283f96442716f82816a3642bac",
+  "signed_artifact": "bin/run",
+  "signature_file": "wayland-plugin.sig",
+  "published_at": "2026-07-27T01:48:38.010661817Z"
+}

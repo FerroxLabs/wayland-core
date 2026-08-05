@@ -1,0 +1,9 @@
+# Unavailable capabilities
+The capabilities below are NOT available in this session because their backend is not configured. If the user asks for one, do NOT claim the ability does not exist or invent another reason — tell them exactly what to configure:
+- Image generation — unavailable: set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY
+- Image understanding (vision) — unavailable: set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY
+- Audio transcription — unavailable: set GROQ_API_KEY or OPENAI_API_KEY
+- Text-to-speech — unavailable: set OPENAI_API_KEY or ELEVENLABS_API_KEY
+- Video analysis — unavailable: set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY (and install ffmpeg)
+- Discord — unavailable: set DISCORD_BOT_TOKEN
+

@@ -1,0 +1,13 @@
+--- COLLAPSE-7: acceptance signed by a key the trust root binds to PACKAGING ---
+COLLAPSE-2 was refused by the distinct-key-per-state rule, which fires before
+the role check. This attempt uses a FRESH packaging-role key, so no key id
+repeats and the refusal must come from the ROLE binding itself.
+[COLLAPSE-7 add spare packaging key] rc=0
+    KEY ADDED key_id=spare-packaging-key role=packaging public_key_base64=Nu83NB2AuBC9IjbD+gaiWSwWr5rcjwoiFwG8bV9MBXc=
+    starting from run A's first three records
+[COLLAPSE-7 append] rc=0
+    STATE APPENDED state=release_acceptance body_sha256=ad4e27d315825d8fd38df754101129291f06347be7cd5f6b947c90e6638ca418
+[COLLAPSE-7 state-verify] rc=1
+    wayland-release: key spare-packaging-key is bound to role Packaging but role ReleaseAcceptance is required
+C7_RC=1
+

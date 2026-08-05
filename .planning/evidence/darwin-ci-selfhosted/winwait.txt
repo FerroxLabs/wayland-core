@@ -1,0 +1,8 @@
+self-hosted WINDOWS job records in last 40 ci.yml runs: 3
+ wait(min)  runner        state       job
+     182.6  SEANDESKTOP   null        CI (Array)
+      71.8  SEANDESKTOP   failure     CI (Array)
+      24.3  SEANDESKTOP   failure     CI (Array)
+
+n=3  median wait 71.8 min   max 182.6 min   min 24.3 min
+waits over 60 min: 2/3

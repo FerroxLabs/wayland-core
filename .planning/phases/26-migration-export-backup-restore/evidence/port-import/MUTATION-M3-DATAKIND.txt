@@ -1,0 +1,6 @@
+=== M3: classify_data_kind forced Executable (the ONLY predicate the persona path consults) ===
+  M3 applied
+  binary RAN 23 tests
+  passthru-direction FAILED count: 0
+  test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.55s
+  restored dirty=0

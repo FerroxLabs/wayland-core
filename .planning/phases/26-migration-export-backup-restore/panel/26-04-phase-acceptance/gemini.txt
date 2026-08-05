@@ -1,0 +1,13 @@
+PANEL-MEMBER: gemini
+PANEL-QUESTION-SHA256: daa6b1d1353c04b66b44e4b263e27dbf8f8be56bf30e9c3cd8d40cf0380b7db7
+---
+PANEL-VERDICT: accept-with-named-open
+PANEL-BASIS: The certification accurately closes 7 criteria with reproducible, re-executed evidence and honestly records 2 criteria as OPEN with their specific unmet clauses explicitly named, without dodging any HIGH findings or rounding up partial proofs.
+
+**Reasoning:**
+1. **No Rounding Up of CLOSED Claims:** Every criterion marked `CLOSED` is backed by concrete evidence that was replayed at the certified SHA. The certification demonstrates rigorous honesty, notably in SC2 where it deliberately restricted the platform claim to `linux` to avoid presenting an uninstrumented Windows corroboration as a load-bearing proof. 
+2. **Proper Handling of OPEN Items:** SC3 and F26-03 are appropriately marked `OPEN`. Rather than ignoring the untested migration interruption path or the unstarted F23 envelope consumption, the certification explicitly names these gaps. This follows the Phase 20A precedent, ensuring Phase 28 inherits precisely defined boundaries rather than hidden technical debt.
+3. **No Reclassification Dodges:** The findings reconciliation proves that no `CRITICAL` or `HIGH` finding was downgraded to avoid fixing it. The sole `HIGH` finding (F26-03-D) was fixed at the product level, and the fix was proven by the fixture.
+4. **Cap Held:** The four-plan limit was strictly respected, with unaddressed scope cleanly routed to the backlog. 
+
+The evidence fully supports the stated outcomes, making `accept-with-named-open` the factually correct verdict.

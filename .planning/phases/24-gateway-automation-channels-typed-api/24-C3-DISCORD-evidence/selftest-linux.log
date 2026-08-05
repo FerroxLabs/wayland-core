@@ -1,0 +1,25 @@
+ok   instrument A: known-POSITIVE — a clean reply carrying the token matches
+ok   instrument B: known-NEGATIVE — a reply carrying a DIFFERENT token does NOT match
+ok   instrument C: THE OLD MATCHER WOULD HAVE MISSED IT (the repair does something)
+ok   instrument D: normalization does not collapse distinct tokens into each other
+ok   mangled A: known-POSITIVE — genuinely escaped/wrapped replies ARE detected
+ok   mangled B: known-NEGATIVE — a healthy reply is NOT flagged
+ok   mangled C: THE OLD DETECTOR WOULD HAVE MISSED IT (flagged the healthy reply)
+ok   harness A: known-POSITIVE — an ordinary passing sync test is still reported ok
+FAIL harness B: (expected FAIL) a false sync assertion is counted
+     intentional
+
+1 !== 2
+
+ok   harness B-verify: known-NEGATIVE — the false sync test above was counted as FAIL
+FAIL harness C: (expected FAIL) an async test with a FALSE assertion
+     check() received an async/thenable function. Its assertions resolve AFTER check() returns, so a failure would be reported as a pass. Make the test synchronous, or await the work before calling check().
+ok   harness C-verify: THE OLD HARNESS WOULD HAVE MISSED IT
+ok   fixture A: HELLO -> IDENTIFY -> READY -> HEARTBEAT_ACK completes
+ok   fixture B: MESSAGE_CREATE is dispatched and carries the required fields
+ok   fixture C: a token the fixture did NOT mint is refused (no green by universal acceptance)
+ok   fixture D: wrong token yields op9 INVALID_SESSION and is COUNTED as auth failure
+ok   fixture E: concurrent-connection counter is the race instrument and it moved
+ok   fixture F: REST /users/@me accepts the minted token and rejects any other
+
+F24C3DISC SELFTEST passed=16 failed=0

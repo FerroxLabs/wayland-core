@@ -1,0 +1,31 @@
+=== --version ===
+wayland-core 0.12.25
+RC=0
+=== --help line count ===
+215
+=== -h line count ===
+142
+=== --config-path ===
+/root/.config/wayland-core/config.toml
+=== --doctor (first 20 lines) ===
+wayland-core doctor v0.12.25
+
+[PASS] binary version         v0.12.25 (matches expected)
+[FAIL] chromium browser       NOT FOUND
+       Install: apt install chromium-browser  (Debian/Ubuntu)
+       Install: pacman -S chromium             (Arch)
+       Install: nix-env -iA nixpkgs.chromium       (NixOS)
+[FAIL] wlrctl                 NOT FOUND
+       Install: apt install wlrctl              (Debian/Ubuntu — may need PPA)
+       Install: pacman -S wlrctl                (Arch)
+       Install: nix-env -iA nixpkgs.wlrctl      (NixOS)
+       Install: or build from source: https://git.sr.ht/~brocellous/wlrctl
+[FAIL] grim                   NOT FOUND
+       Install: apt install grim                (Debian/Ubuntu)
+       Install: pacman -S grim                  (Arch)
+       Install: nix-env -iA nixpkgs.grim        (NixOS)
+[WARN] WAYLAND_DISPLAY        not set — Wayland CUA backend unavailable
+       Hint: log in to a Wayland session (Sway, GNOME on Wayland, KDE on Wayland)
+[WARN] X DISPLAY              not set — X11 CUA backend unavailable
+       Hint: log in to an X11 session, or start Xwayland
+DOCTOR_RC=0

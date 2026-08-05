@@ -1,0 +1,32 @@
+# Live proof of the new `F23_CACHE=total` surface
+# Binary: wayland-core 0.12.25, debug, built on hetzner-dsm from this branch.
+
+## Independent meter (the loopback provider's own log, whole fresh run)
+12 BILLED round-trips   # 5 on-fresh + 5 off-fresh + 2 poison
+
+## PASS DIRECTION — the DEGRADED arm's five restart-fragments
+F23_CACHE=total sessions=5 incomplete_sessions=0 round_trips=5 input_tokens=100000 output_tokens=500 cost_usd=0.000000 uncached_equivalent_usd=0.000000 cost_truth=unpriced catalog_priced_round_trips=0 estimated_round_trips=0 unpriced_round_trips=5 dir=/root/effacc-fresh/home-off-fresh/cache-ledger
+F23_CACHE=total_cost_warning text=total_usd_is_a_floor_not_spend cost_truth=unpriced
+
+## CONTROL — the JOURNALLED arm, which spent the same. Byte-identical figures.
+F23_CACHE=total sessions=5 incomplete_sessions=0 round_trips=5 input_tokens=100000 output_tokens=500 cost_usd=0.000000 uncached_equivalent_usd=0.000000 cost_truth=unpriced catalog_priced_round_trips=0 estimated_round_trips=0 unpriced_round_trips=5 dir=/root/effacc-fresh/home-on-fresh/cache-ledger
+
+## FAIL DIRECTION — an EMPTY store must not read as a trustworthy zero
+F23_CACHE=list sessions=0 dir=/root/effacc-emptystore/cache-ledger
+F23_CACHE=total sessions=0 incomplete_sessions=0 round_trips=0 input_tokens=0 output_tokens=0 cost_usd=0.000000 uncached_equivalent_usd=0.000000 cost_truth=unpriced catalog_priced_round_trips=0 estimated_round_trips=0 unpriced_round_trips=0 dir=/root/effacc-emptystore/cache-ledger
+F23_CACHE=total_cost_warning text=total_usd_is_a_floor_not_spend cost_truth=unpriced
+
+## USD AXIS on a CATALOG-PRICED model (gpt-4o-mini, same loopback, cap max_tokens_in=25000)
+L1 rc=0 / L2 rc=0 / L3 rc=0        # three fresh sessions, ZERO refusals
+independent meter round-trips: 3
+F23_CACHE=list sessions=3 dir=/root/effacc-priced/home/cache-ledger
+F23_CACHE=total sessions=3 incomplete_sessions=0 round_trips=3 input_tokens=60000 output_tokens=300 cost_usd=0.009180 uncached_equivalent_usd=0.009180 cost_truth=priced catalog_priced_round_trips=3 estimated_round_trips=0 unpriced_round_trips=0 dir=/root/effacc-priced/home/cache-ledger
+
+# Arithmetic cross-check, independent of the product:
+#   60000 in  x $0.15/1M = $0.00900
+#     300 out x $0.60/1M = $0.00018
+#                          --------
+#                          $0.00918   == the printed cost_usd, exactly.
+#
+# 60000 input tokens billed across three fresh sessions under a 25000-token
+# ceiling, with zero refusals. That is the compounding shape, in dollars.

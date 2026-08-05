@@ -1,0 +1,321 @@
+[cs] tg fixture pid=3337941 at http://127.0.0.1:34537
+[cs] llm stub pid=3337948 at http://127.0.0.1:39393
+[cs] fixture health: {"ok":true,"pending":0,"polls":0}
+[cs] === LEG A: session first, service second — the service must take over ===
+[cs] session 'A' pid=3337956 log=session-A.log
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:38.104Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:39.254Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:40.402Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:41.552Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:42.702Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:43.852Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:45.002Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:46.157Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:47.314Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:48.464Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:49.618Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:50.767Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:51.918Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:53.082Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:54.233Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:55.382Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:56.532Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:57.681Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:58.832Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:55:59.981Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:01.130Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:02.279Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:03.431Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:04.580Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:05.730Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:06.880Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:08.030Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:09.181Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:10.330Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:11.478Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:12.630Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:13.777Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:14.925Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:16.074Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:17.223Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:18.372Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:19.522Z
+[cs] legA/session-owns: waiting, poll_total=0, 2026-07-28T20:56:20.673Z
+[cs] legA/session-owns: waiting, poll_total=1, 2026-07-28T20:56:21.822Z
+[cs] legA/session-owns: poll_total=2 (>= 2)
+[cs] legA/W1 session alone: window 1/8 at 2026-07-28T20:56:23.122Z
+[cs] legA/W1 session alone: window 4/8 at 2026-07-28T20:56:26.566Z
+[cs] legA/W1 session alone: window 7/8 at 2026-07-28T20:56:30.010Z
+[cs] legA/deliver-to-session: update 1 served 1x, deleted_by=12
+[cs] gateway 'A' pid=3350595 log=gateway-A.log
+[cs] legA/session-yields: waiting for 'F24_CHANNEL_LEASE=yielded', 2026-07-28T20:56:32.461Z
+[cs] legA/session-yields: saw 'F24_CHANNEL_LEASE=yielded' after 1298ms
+[cs] legA/gateway-acquires: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:56:33.766Z
+[cs] legA/gateway-acquires: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:56:34.916Z
+[cs] legA/gateway-acquires: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:56:36.064Z
+[cs] legA/gateway-acquires: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:56:37.213Z
+[cs] legA/gateway-acquires: saw 'F24_CHANNEL_LEASE=acquired' after 4755ms
+[cs] legA: settling 9000ms before the post-handover window
+[cs] legA/W2 gateway owns: window 1/8 at 2026-07-28T20:56:48.852Z
+[cs] legA/W2 gateway owns: window 4/8 at 2026-07-28T20:56:52.298Z
+[cs] legA/W2 gateway owns: window 7/8 at 2026-07-28T20:56:55.744Z
+[cs] legA/deliver-to-gateway: update 2 served 1x, deleted_by=34
+[cs] === LEG B: service first, session second — the service must keep polling ===
+[cs] gateway 'B' pid=3356349 log=gateway-B.log
+[cs] legB/gateway-owns: poll_total=34 (>= 2)
+[cs] legB/W1 gateway alone: window 1/8 at 2026-07-28T20:56:58.352Z
+[cs] legB/W1 gateway alone: window 4/8 at 2026-07-28T20:57:01.793Z
+[cs] legB/W1 gateway alone: window 7/8 at 2026-07-28T20:57:05.237Z
+[cs] session 'B' pid=3358778 log=session-B.log
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:07.538Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:08.689Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:09.837Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:10.986Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:12.134Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:13.290Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:14.437Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:15.585Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:16.735Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:17.884Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:19.032Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:20.181Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:21.329Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:22.478Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:23.630Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:24.778Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:25.928Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:27.076Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:28.224Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:29.372Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:30.521Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:31.671Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:32.819Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:33.969Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:35.118Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:36.266Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:37.416Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:38.563Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:39.712Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:40.861Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:42.008Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:43.157Z
+[cs] legB/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:57:44.304Z
+[cs] legB/session-observes: saw 'F24_CHANNEL_LEASE=observer' after 38063ms
+[cs] legB: settling 9000ms with both processes alive
+[cs] legB/W2 both alive: window 1/8 at 2026-07-28T20:57:55.938Z
+[cs] legB/W2 both alive: window 4/8 at 2026-07-28T20:57:59.383Z
+[cs] legB/W2 both alive: window 7/8 at 2026-07-28T20:58:02.828Z
+[cs] legB/deliver-to-gateway: update 3 served 1x, deleted_by=98
+[cs] === LEG D: kill the holder; a live observer must take over unaided ===
+[cs] gateway 'D' pid=3372003 log=gateway-D.log
+[cs] legD/gateway-owns: poll_total=98 (>= 2)
+[cs] session 'D' pid=3372116 log=session-D.log
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:05.433Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:06.581Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:07.728Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:08.880Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:10.028Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:11.177Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:12.325Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:13.472Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:14.621Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:15.768Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:16.916Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:18.065Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:19.216Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:20.365Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:21.512Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:22.662Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:23.813Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:24.961Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:26.109Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:27.258Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:28.406Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:29.554Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:30.702Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:31.851Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:33.000Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:34.147Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:35.294Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:36.443Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:37.591Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:38.740Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:39.889Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:41.038Z
+[cs] legD/session-observes: waiting for 'F24_CHANNEL_LEASE=observer', 2026-07-28T20:58:42.186Z
+[cs] legD/session-observes: saw 'F24_CHANNEL_LEASE=observer' after 38050ms
+[cs] legD: killing the holder pid=3372003 with SIGKILL — no operator action follows
+[cs] legD/session-takes-over: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:58:43.484Z
+[cs] legD/session-takes-over: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:58:44.633Z
+[cs] legD/session-takes-over: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:58:45.781Z
+[cs] legD/session-takes-over: waiting for 'F24_CHANNEL_LEASE=acquired', 2026-07-28T20:58:46.929Z
+[cs] legD/session-takes-over: saw 'F24_CHANNEL_LEASE=acquired' after 4740ms
+[cs] legD/W after takeover: window 1/8 at 2026-07-28T20:58:48.224Z
+[cs] legD/W after takeover: window 4/8 at 2026-07-28T20:58:51.667Z
+[cs] legD/W after takeover: window 7/8 at 2026-07-28T20:58:55.110Z
+[cs] legD/deliver-after-takeover: update 4 served 1x, deleted_by=144
+
+=== RESULT (4331 bytes at /root/f24cs-run-full/result.json) ===
+{
+  "run_id": "551b4439",
+  "started_at": "2026-07-28T20:55:37.831Z",
+  "legs": [
+    {
+      "leg": "A",
+      "verdict": "SERVICE WINS FROM BEHIND",
+      "session_pid": 3337956,
+      "gateway_pid": 3350595,
+      "session_owned_first": true,
+      "window_session_alone": {
+        "label": "legA/W1 session alone",
+        "start": "2026-07-28T20:56:22.973Z",
+        "end": "2026-07-28T20:56:32.158Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3337956
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3337956"
+        }
+      },
+      "window_gateway_owns": {
+        "label": "legA/W2 gateway owns",
+        "start": "2026-07-28T20:56:48.704Z",
+        "end": "2026-07-28T20:56:57.895Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3350595
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3350595"
+        }
+      },
+      "session_emitted_yield_token": true,
+      "gateway_emitted_acquire_token": true,
+      "delivered_while_session_owned": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 12
+      },
+      "delivered_after_handover": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 34
+      },
+      "session_still_alive_at_measurement": true,
+      "gateway_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legA session": 21424,
+        "legA gateway": 9697
+      }
+    },
+    {
+      "leg": "B",
+      "verdict": "SERVICE KEEPS IT",
+      "gateway_pid": 3356349,
+      "session_pid": 3358778,
+      "gateway_owned_first": true,
+      "window_gateway_alone": {
+        "label": "legB/W1 gateway alone",
+        "start": "2026-07-28T20:56:58.202Z",
+        "end": "2026-07-28T20:57:07.386Z",
+        "maxOpen": 1,
+        "polls": 7,
+        "pids": [
+          3356349
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3356349"
+        }
+      },
+      "window_both_alive": {
+        "label": "legB/W2 both alive",
+        "start": "2026-07-28T20:57:55.791Z",
+        "end": "2026-07-28T20:58:04.975Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3356349
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3356349"
+        }
+      },
+      "session_emitted_observer_token": true,
+      "gateway_yielded_wrongly": false,
+      "session_acquired_wrongly": false,
+      "delivered_to_gateway": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 98
+      },
+      "session_still_alive_at_measurement": true,
+      "gateway_still_alive_at_measurement": true,
+      "log_bytes": {
+        "legB gateway": 8425,
+        "legB session": 13959
+      }
+    },
+    {
+      "leg": "D",
+      "verdict": "LIVE OBSERVER TOOK OVER",
+      "gateway_pid": 3372003,
+      "session_pid": 3372116,
+      "gateway_owned_first": true,
+      "session_was_a_live_observer_before_the_kill": true,
+      "killed_at": "2026-07-28T20:58:43.336Z",
+      "session_emitted_acquire_token": true,
+      "session_alive_after_the_kill": true,
+      "nothing_was_started_after_the_kill": true,
+      "window_after_takeover": {
+        "label": "legD/W after takeover",
+        "start": "2026-07-28T20:58:48.076Z",
+        "end": "2026-07-28T20:58:57.260Z",
+        "maxOpen": 1,
+        "polls": 10,
+        "pids": [
+          3372116
+        ],
+        "grade": {
+          "grade": "OK",
+          "why": "exactly one poller, attributed to pid(s) 3372116"
+        }
+      },
+      "delivered_after_takeover": {
+        "delivered": true,
+        "serve_count": 1,
+        "deleted_by": 144
+      },
+      "log_bytes": {
+        "legD gateway": 5119,
+        "legD session": 14860
+      }
+    },
+    {
+      "leg": "C",
+      "verdict": "NOTHING LOST",
+      "submitted_total": 4,
+      "delivered_total": 4,
+      "never_delivered": [],
+      "served_more_than_once": [],
+      "still_pending_at_end": []
+    }
+  ],
+  "instrument": {
+    "fault": false,
+    "reasons": []
+  },
+  "llm_stub_hits": 3,
+  "poll_total": 144,
+  "conn_samples": 184,
+  "ss_available": true,
+  "finished_at": "2026-07-28T20:58:57.420Z"
+}
+DRIVERRC=0
+DRIVERDONE

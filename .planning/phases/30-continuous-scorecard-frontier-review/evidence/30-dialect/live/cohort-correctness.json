@@ -1,0 +1,17 @@
+{
+  "dimension": "correctness",
+  "vocabulary_version": "F30-DIALECT-VOCAB-V1",
+  "members": [
+    {
+      "tool_label": "wayland",
+      "corpus_sha256": "10c85fbd29ba89bdd08539c63d73744efb5616f584ed84c7f96e4c4a9e8f1323",
+      "declared_tools": 8,
+      "resolved_tool": "Write",
+      "refusal": null
+    }
+  ],
+  "eligible": false,
+  "refused_by": [
+    "COHORT_TOO_SMALL:1"
+  ]
+}

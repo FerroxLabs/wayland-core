@@ -1,0 +1,121 @@
+=== 29-04 re-measurement of open HIGH F29-02-H1 (the audit.toml 'sole path') ===
+commit: 882191d4737c7552bef33214f4aadc31dbf828a3
+captured: 2026-07-28T04:07:25Z
+
+### 1. What .cargo/audit.toml says today
+# cargo-audit configuration.
+#
+# Posture (verified 2026-06-02): `cargo audit` reports 0 vulnerabilities and
+# 5 warning-class advisories (4 "unmaintained", 1 "unsound"). CI runs plain
+# `cargo audit`, which does NOT fail on warning-class advisories — so the gate
+# is green WITHOUT ignoring anything. (A 6th, the lru "unsound" advisory, was
+# eliminated at source by the ratatui 0.29 -> 0.30 upgrade.)
+#
+# The ignore list is intentionally EMPTY. The 6 remaining advisories are left
+# VISIBLE as warnings (not silenced) and are dispositioned — publicly, dated,
+# with parent traces — in `.github/osv-scanner.toml`, which is the gating
+# scanner. Duplicating those mutes here would only hide warnings we want to
+# keep seeing on every run.
+#
+# History: a prior 18-entry wasmtime / wasmtime-wasi ignore block lived here
+# while the runtime was pinned at 30.x (it masked CVSS 9.2 / 9.0 advisories).
+# Those are now FIXED at the source — wasmtime + wasmtime-wasi were upgraded
+# 30 -> 36.0.10 (the bindgen async-syntax migration that had blocked the bump
+# is done) — so every entry in that block is satisfied and has been removed.
+# Confirmed: `cargo audit` with this file's ignore list bypassed reports the
+# same 6 warnings and zero wasmtime advisories.
+#
+# Rotation policy: on every dependency bump, re-run `cargo audit`. If a real
+# vulnerability ever needs a temporary documented exception, add it to
+# `ignore` below WITH a parent trace, a threat-model note, and a tracking
+# item — never as a bare id.
+#
+# Format reference: https://docs.rs/cargo-audit/latest/cargo_audit/
+
+[advisories]
+# (prior state) RUSTSEC-2023-0071 (rsa Marvin Attack) was ELIMINATED AT THE
+# SOURCE, not ignored: jsonwebtoken migrated `rust_crypto` -> `aws_lc_rs` in
+# wcore-channel-msteams + wcore-providers, dropping the pure-Rust `rsa` crate
+# from the tree (`cargo tree -i rsa` -> not found). aws-lc-rs was already
+# present via rustls, so this added no build surface.
+#
+# ── quick-xml 0.39.4 DoS pair (RUSTSEC-2026-0194 / RUSTSEC-2026-0195) ──────
+# Published 2026-06-29; started failing plain `cargo audit` on every PR from
+# 2026-07-02 (ambient advisory-DB event, not a code change). Both fixed only
+# in quick-xml >= 0.41.0.
+# Parent trace (sole path): quick-xml 0.39.4 <- plist 1.9.0 <- syntect 5.3.0
+#   <- wcore-cli (`cargo tree -i quick-xml`).
+# Threat model — UNREACHABLE: syntect is used only by the TUI diff widget
+# (crates/wcore-cli/src/tui/widgets/diff.rs:332-333) via
+# SyntaxSet::load_defaults_newlines() + ThemeSet::load_defaults(), which read
+# syntect's EMBEDDED binary dumps. No from_folder(), no user-supplied
+# .tmTheme/plist XML parsing anywhere in the workspace — the vulnerable
+# NsReader/attribute-check code paths never receive input of any provenance.
+# No fix to take at source: plist's latest release (1.9.0) still requires
+# quick-xml ^0.39.2; nothing patched exists on the 0.39 line.
+# Tracking: FerroxLabs/wayland-core#142 — lift when plist releases with
+# quick-xml >= 0.41 (`cargo update -p plist`, remove both entries here and in
+# .github/osv-scanner.toml).
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+
+### 2. How many crates declare a quick-xml dependency in Cargo.lock (the real consumer set)?
+quick-xml versions in the lockfile: ['0.31.0', '0.39.4']
+direct consumers of quick-xml: 3
+    calamine 0.26.1
+    plist 1.9.0
+    wcore-tools 0.12.25
+
+### 3. Does wcore-tools read user-supplied office documents (the reachable path)?
+crates/wcore-tools/Cargo.toml:108:calamine  = { workspace = true, optional = true }
+crates/wcore-tools/Cargo.toml:145:# Default-on; `--no-default-features` drops calamine/quick-xml/csv and
+crates/wcore-tools/Cargo.toml:147:doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
+crates/wcore-tools/src/doc_tool.rs:11://! - `xlsx` → [`calamine`], read via its STREAMING cell reader (never the dense
+crates/wcore-tools/src/doc_tool.rs:37://!   entities (they surface as ignored `GeneralRef`/`DocType` events); calamine
+crates/wcore-tools/src/doc_tool.rs:415:            // Reuse the SAME handle (no reopen): stream cells from calamine.
+crates/wcore-tools/src/doc_tool.rs:505:/// xlsx → markdown tables, read via calamine's STREAMING cell reader so a
+crates/wcore-tools/src/doc_tool.rs:513:    use calamine::{Reader, Xlsx};
+
+### 4. Does anything disable calamine's attribute checks (with_checks(false))?
+ZERO MATCHES across crates/: nothing calls with_checks anywhere, so the 0194 attribute path is not disarmed.
+
+### 5. WHICH quick-xml version does each consumer resolve to? (this is the decisive fact)
+    calamine 0.26.1 -> ['quick-xml 0.31.0']
+    plist 1.9.0 -> ['quick-xml 0.39.4']
+    wcore-tools 0.12.25 -> ['quick-xml 0.39.4']
+
+### 6. What does wcore-tools use its DIRECT quick-xml dependency for?
+
+# #650 doc_extract — office-doc text extraction (pure-Rust, no native libs).
+# calamine: xlsx/xls/ods; quick-xml: docx/pptx OOXML part parsing (0.39 already
+# in the tree); csv: robust quoted-CSV parsing.
+calamine = "0.26"
+quick-xml = "0.39"
+csv = "1.3"
+147:doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
+135:default = ["pdf", "image-inspect", "doc-extract"]
+
+=== DISPOSITION AT THIS COMMIT ===
+F29-02-H1 is SUSTAINED as HIGH, with one of its two legs CORRECTED.
+
+SUSTAINED: .cargo/audit.toml states the parent trace as a 'sole path'
+  (quick-xml 0.39.4 <- plist 1.9.0 <- syntect 5.3.0 <- wcore-cli) and grades the
+  threat UNREACHABLE. The lockfile at this commit shows a SECOND path onto the
+  SAME affected version: wcore-tools 0.12.25 depends on quick-xml 0.39.4
+  DIRECTLY, behind the DEFAULT-ON doc-extract feature, and uses it to parse
+  docx/pptx OOXML parts from USER-SUPPLIED files. That input is attacker-
+  controlled, nothing calls with_checks(false) anywhere in crates/, and both
+  RUSTSEC-2026-0194 and -0195 are denial-of-service advisories against exactly
+  that parser. The suppression's stated premise is therefore FALSE.
+
+CORRECTED: the earlier framing attributed reachability to calamine's 25
+  .attributes() call sites. calamine 0.26.1 resolves to quick-xml 0.31.0, which
+  the advisories do not name. That leg does NOT land on the affected version and
+  is withdrawn. The finding does not depend on it.
+
+NOT PROVABLE HERE: no proof-of-concept .docx/.pptx was constructed. This is a
+  static reachability argument on the dependency graph and the parser's input
+  provenance, not an executed exploit. Substitution point: a crafted OOXML part
+  driven through wcore-tools' doc_tool against quick-xml 0.39.4.
+
+OWNER: .cargo/audit.toml was fenced out of 29-02 and is fenced out of 29-04
+  (this plan modifies no production source at all). ESCALATED, not repaired.

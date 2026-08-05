@@ -1,0 +1,58 @@
+===== live =====
+  [live frame 1: ready] TS2353: Object literal may only specify known properties, and '"user_model_backend"' does not exist in type 'WCoreCapabilities'.
+  [live frame 2: execution_policy] TS2322: Type '"execution_policy"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_reque
+  [live frame 3: workspace_policy] TS2322: Type '"workspace_policy"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_reque
+  [live frame 4: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 5: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 6: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 7: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 8: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 9: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 10: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 11: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 12: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 13: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 14: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 15: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 16: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 17: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 18: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 19: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 20: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 21: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 22: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 23: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 24: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 25: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 26: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 27: capability_activation] TS2322: Type '"capability_activation"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_
+  [live frame 32: config_changed] TS2353: Object literal may only specify known properties, and '"user_model_backend"' does not exist in type 'WCoreCapabilities'.
+  [live frame 33: error] TS2322: Type '{ type: "error"; error: { code: string; message: string; retryable: false; }; }' is not assignable to type 'WCoreEvent'.
+  [live frame 37: budget_grant_result] TS2322: Type '"budget_grant_result"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_re
+
+===== corpus =====
+  [corpus anvil_receipt.json] TS2322: Type '"anvil_receipt"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_request"
+  [corpus anvil_receipt_invalidated.json] TS2322: Type '"anvil_receipt_invalidated"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "t
+  [corpus budget_grant_result.json] TS2322: Type '"budget_grant_result"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_re
+  [corpus config_changed.json] TS2353: Object literal may only specify known properties, and '"memory_enabled"' does not exist in type 'WCoreCapabilities'.
+  [corpus execution_policy.json] TS2322: Type '"execution_policy"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_reque
+  [corpus goal_control_refused.json] TS2322: Type '"goal_control_refused"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_r
+  [corpus goal_snapshot.json] TS2322: Type '"goal_snapshot"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_request"
+  [corpus goal_transition.json] TS2322: Type '"goal_transition"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_reques
+  [corpus mcp_removal_result.json] TS2322: Type '"mcp_removal_result"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_req
+  [corpus provider_failover_receipt.json] TS2322: Type '"provider_failover_receipt"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "t
+  [corpus ready.json] TS2353: Object literal may only specify known properties, and '"memory_enabled"' does not exist in type 'WCoreCapabilities'.
+  [corpus runtime_diagnostics_snapshot.json] TS2322: Type '"runtime_diagnostics_snapshot"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" |
+  [corpus runtime_diagnostics_unavailable.json] TS2322: Type '"runtime_diagnostics_unavailable"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking
+  [corpus session_cost.json] TS2353: Object literal may only specify known properties, and '"priced"' does not exist in type 'TurnCost'.
+  [corpus session_recovery_replay.json] TS2322: Type '"session_recovery_replay"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "too
+  [corpus session_recovery_snapshot.json] TS2322: Type '"session_recovery_snapshot"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "t
+  [corpus session_recovery_unavailable.json] TS2322: Type '"session_recovery_unavailable"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" |
+  [corpus stream_end.json] TS2353: Object literal may only specify known properties, and '"active_window_percent"' does not exist in type 'TokenUsage'.
+  [corpus sub_agent_event.json] TS2353: Object literal may only specify known properties, and '"child_run_id"' does not exist in type '{ type: "sub_agent_event"; parent_call_id: string; agen
+  [corpus turn_recovery_lifecycle.json] TS2322: Type '"turn_recovery_lifecycle"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "too
+  [corpus unknown_tool_effect_resolved.json] TS2322: Type '"unknown_tool_effect_resolved"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" |
+  [corpus workflow_finished.json] TS2322: Type '"workflow_finished"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_requ
+  [corpus workflow_node_event.json] TS2322: Type '"workflow_node_event"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_re
+  [corpus workflow_started.json] TS2322: Type '"workflow_started"' is not assignable to type '"error" | "suspend" | "ready" | "info" | "stream_start" | "text_delta" | "thinking" | "tool_reque
+

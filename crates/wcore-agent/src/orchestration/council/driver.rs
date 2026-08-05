@@ -6,6 +6,7 @@ use wcore_config::config::Config;
 use wcore_config::crucible::CrucibleConfig;
 use wcore_pricing::DEFAULT_CATALOG;
 use wcore_types::crucible::{CrucibleDecision, CruciblePlan, MICROCENTS_PER_USD};
+use wcore_types::spawner::ChildOrigin;
 
 use crate::spawner::{AgentSpawner, SubAgentConfig};
 
@@ -222,17 +223,20 @@ async fn execute_assembled(
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("assembler produced no model to answer with"))?;
         let result = spawner
-            .spawn_one(SubAgentConfig {
-                name: spec.clone(),
-                prompt: task.to_string(),
-                max_turns: cfg.proposer_max_turns,
-                max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
-                provider: Some(spec.clone()),
-                model: spec.split_once(':').map(|(_, m)| m.to_string()),
-                // Crucible #3: the Direct path is a single proposer-tier call.
-                temperature: Some(clamp_temperature(cfg.proposer_temperature)),
-            })
+            .spawn_one_with_origin(
+                SubAgentConfig {
+                    name: spec.clone(),
+                    prompt: task.to_string(),
+                    max_turns: cfg.proposer_max_turns,
+                    max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
+                    system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
+                    provider: Some(spec.clone()),
+                    model: spec.split_once(':').map(|(_, m)| m.to_string()),
+                    // Crucible #3: the Direct path is a single proposer-tier call.
+                    temperature: Some(clamp_temperature(cfg.proposer_temperature)),
+                },
+                ChildOrigin::Council,
+            )
             .await;
         if result.is_error {
             anyhow::bail!("direct call failed: {}", result.text);

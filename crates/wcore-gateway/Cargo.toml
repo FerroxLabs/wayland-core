@@ -1,0 +1,64 @@
+[package]
+name = "wcore-gateway"
+description = "Persistent Wayland-Core gateway runtime: lifecycle, pid lock, drain, and the exactly-once delivery ledger (F24-01)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Phase 24 plan 24-01. Mid-layer crate: it may depend on wcore-types,
+# wcore-config, wcore-protocol, wcore-cron and wcore-channels, and it must NOT
+# depend on the top-layer wcore-agent crate — that would invert the dependency
+# graph described in AGENTS.md. The operator-facing verb surface lives in
+# crates/wcore-cli/src/gateway.rs and drives this crate.
+
+[dependencies]
+# Phase 24 plan 24-02: the automation plane acquires the scheduling lease and
+# wraps the scheduler's dispatcher so every delivery-bearing fire goes through
+# THIS crate's exactly-once ledger. The edge runs wcore-gateway → wcore-cron
+# (never the reverse), which is the direction this crate's header already
+# declares as permitted, and it introduces no cycle: wcore-cron depends on no
+# workspace crate at all.
+async-trait = { workspace = true }
+wcore-cron = { workspace = true }
+
+# `service.rs` needs the OS-NATIVE config root (systemd's user-unit directory),
+# which the workspace exposes from exactly one place —
+# `wcore_config::config::os_native_config_root()` — so the hermeticity audit
+# (F-010/#270) keeps its single raw call site inside `wcore-config/src/config.rs`.
+# The edge runs wcore-gateway -> wcore-config, which this crate's header already
+# declares as permitted; wcore-config depends only on
+# wcore-types/wcore-compact/wcore-budget, so there is no cycle.
+wcore-config = { workspace = true }
+# `wcore_types::process_liveness` — the single zombie-aware liveness probe
+# behind `pidlock::process_is_alive`. wcore-types is the bottom layer with
+# zero internal deps, so no cycle is possible. See .planning/ZOMBIE-PROBE.md.
+wcore-types = { workspace = true }
+
+chrono = { workspace = true }
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# The single-instance lock is taken with `flock`/`LockFileEx` rather than
+# `fcntl`: fcntl record locks are owned by the PROCESS, so a second launch
+# inside one process would be silently admitted and the exclusion test
+# could never go red. See crates/wcore-gateway/src/pidlock.rs.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The automation suites drive the async dispatcher path directly.
+tokio = { workspace = true }

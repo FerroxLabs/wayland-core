@@ -295,6 +295,10 @@ impl Tool for GitTool {
         ToolCategory::Exec
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
     fn describe(&self, input: &Value) -> String {
         let op = input
             .get("op")

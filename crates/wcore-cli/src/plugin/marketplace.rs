@@ -230,16 +230,25 @@ pub struct PlannedInstall {
     pub marketplace: String,
 }
 
-/// Resolve `plugin@market` to an [`InstallPlan`]. Writes NOTHING to the plugin
-/// store and spawns no plugin process — it only acquires the source into the
-/// quarantine and lowers it. The returned plan is what a user approves before
-/// `commit_install` mutates disk.
-pub fn resolve_and_plan(
+/// A marketplace entry acquired onto disk, before anything has looked at what
+/// FORMAT it is. Extracted from `resolve_and_plan` (F25-04) so the native
+/// install path can share the identical catalog lookup, traversal check and
+/// quarantine clone instead of carrying a second copy of them.
+pub struct ResolvedSource {
+    pub entry: SourceEntry,
+    pub fetched_root: PathBuf,
+    pub resolved_sha: Option<String>,
+    pub mref: known::MarketplaceRef,
+}
+
+/// Acquire `plugin@market` into the quarantine. Writes nothing to the plugin
+/// store and spawns no plugin process.
+pub fn resolve_source(
     plugins_root: &Path,
     quarantine_root: &Path,
     market: &str,
     plugin: &str,
-) -> Result<PlannedInstall> {
+) -> Result<ResolvedSource> {
     let mref = known::get_marketplace(plugins_root, market)?
         .ok_or_else(|| PluginCliError::MarketplaceNotFound(market.to_string()))?;
 
@@ -268,6 +277,32 @@ pub fn resolve_and_plan(
             (cloned.path, Some(cloned.resolved_sha))
         }
     };
+
+    Ok(ResolvedSource {
+        entry,
+        fetched_root,
+        resolved_sha,
+        mref,
+    })
+}
+
+/// Resolve `plugin@market` to an [`InstallPlan`]. Writes NOTHING to the plugin
+/// store and spawns no plugin process — it only acquires the source into the
+/// quarantine and lowers it. The returned plan is what a user approves before
+/// `commit_install` mutates disk.
+pub fn resolve_and_plan(
+    plugins_root: &Path,
+    quarantine_root: &Path,
+    market: &str,
+    plugin: &str,
+) -> Result<PlannedInstall> {
+    let resolved = resolve_source(plugins_root, quarantine_root, market, plugin)?;
+    let ResolvedSource {
+        entry,
+        fetched_root,
+        resolved_sha,
+        mref,
+    } = resolved;
 
     let format = detect_format(&fetched_root).ok_or_else(|| {
         PluginCliError::Quarantine(format!(

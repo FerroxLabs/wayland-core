@@ -1,0 +1,115 @@
+INTERNAL ADVERSARIAL PASS — executor, panel member four
+=======================================================
+
+The three external members split three ways: codex real-time-full, kimi
+accelerated-except-absolute-deadline, gemini escalate. There is no consensus to
+argue against, so this pass argues against the BEST-REASONED of the three
+(kimi's), then against gemini's, then steelmans the objection to the option I
+end up naming — because a pass that only attacks the options it rejects is a
+vote wearing a rebuttal's clothes.
+
+-------------------------------------------------------------------------------
+1. THE CASE AGAINST kimi's accelerated-except-absolute-deadline
+-------------------------------------------------------------------------------
+
+Kimi's argument is the strongest on the table and it turns on one sentence it
+did not check:
+
+  "for active-runtime legs you don't need to fake anything; downtime isn't
+   charged, so a compressed journey is honest by construction."
+
+That is true about budget arithmetic and false about Success Criterion 5. The
+criterion does not say "the active-runtime budget arithmetic is correct across a
+restart". It says a multi-day wait, resume and complete journey preserves
+cumulative authority, resource, evidence, memory and delivery state with exactly
+one loop owner at every resume point. What real days buy is almost entirely
+OUTSIDE the budget model, and kimi's licence to compress discards all of it:
+
+  (a) THE WAIT CONDITION BECOMES UNFALSIFIABLE. The journey's wait is satisfied
+      by real elapsed time. Compress the span and the wait completes on the
+      first resume — which is the exact failure the plan names: "a wait that was
+      pending on day one is still pending on day two and completes on the day
+      its condition is met, not on the first resume after it." Under a
+      compressed span there is no observation that could distinguish a wait that
+      correctly stayed pending from one that never could have.
+
+  (b) THE ENVIRONMENT HAS NO CLOCK SEAM EITHER, AND IT IS HALF THE CLAIM. A
+      compressed journey never exercises systemd-tmpfiles or tmpreaper reaping
+      the state directory, log rotation moving the run log, filesystem cache
+      eviction, a real OS reboot, or — the sharpest one — a stale writer-lease
+      file whose recorded PID has since been REUSED by an unrelated process.
+      PID reuse is a genuine single-loop-owner hazard that only becomes probable
+      over days and that nothing in the budget model measures. The probe's
+      45-second gap cannot produce any of these, and kimi treats a 45-second
+      real gap as having already bought what three days buy.
+
+  (c) OPTION 3'S OWN TEXT IS SELF-DEFEATING GIVEN THE MEASUREMENT KIMI CITES.
+      Option 3 reserves real elapsed time for "the absolute-deadline leg, which
+      always runs against real elapsed time on every platform". The same probe
+      run kimi quotes also emitted
+      F23_04_ABSDEADLINE_PRODUCT_CONSTRUCTION_SITES=0 and
+      F23_04_ABSDEADLINE_PRODUCT_REACHABLE=false. There is no product-reachable
+      absolute-deadline leg to run. Option 3 therefore reduces to "accelerate
+      everything, hold nothing in real time" — real-time-full's opposite wearing
+      its clothes — and every platform's span assertion becomes trivially
+      satisfiable with no compensating real-time leg anywhere in the journey.
+      Kimi engaged with the CHARGING line and never with the REACHABILITY line.
+
+-------------------------------------------------------------------------------
+2. THE CASE AGAINST gemini's escalate
+-------------------------------------------------------------------------------
+
+Gemini reasons: no seam exists, so acceleration is impossible; real-time-full
+needs three platforms; macOS cannot run; therefore nothing is executable;
+therefore escalate. The first three steps are correct and the conclusion does
+not follow.
+
+It conflates two different questions. The POLICY question is "which legs must
+use real time". The REACHABILITY question is "which legs can run at all". A
+blocked macOS leg answers the second and says nothing about the first. The plan
+supplies the mechanism for exactly this: termination state 2, complete with
+named open requirements — the shape Phase 20A closed in, on three met criteria
+with four requirements honestly open.
+
+Escalating here would also cost more evidence than it saves: it leaves the two
+REACHABLE platforms unexercised as well, at a calendar saving of zero, on a
+criterion the plan itself calls the one most likely to reveal a cross-restart
+defect. And the plan defines deadlock narrowly — no option drawing three of four
+positions AND no minority carrying demonstrably stronger evidence. The second
+conjunct fails: the seam measurement is decisive minority evidence. This is a
+split, not a deadlock, and escalate is not available for a split.
+
+-------------------------------------------------------------------------------
+3. THE STEELMAN AGAINST MY OWN POSITION
+-------------------------------------------------------------------------------
+
+real-time-full's literal text says "on all three platforms". macOS cannot run:
+the phase's controlling instruction forbids Cargo on the Mac, and
+scripts/f23-macos-binary.sh was never landed by 23B-01 or 23B-02, both of which
+recorded that conflict and escalated it rather than resolving it. So
+real-time-full is not literally executable either, and I must not paper over
+that by pretending it is.
+
+The honest reading, and the one I commit to: real-time-full is a rule about HOW
+a leg must run — no leg may be accelerated, every span claim must be a real
+span. It is not a prediction that every leg WILL run. A platform whose binary is
+unobtainable records OPEN for a reachability blocker, with the blocker named,
+under termination state 2. That is materially different from recording it green
+on a simulated span, which is what both accelerated options would license.
+
+-------------------------------------------------------------------------------
+4. POSITION
+-------------------------------------------------------------------------------
+
+The measurement removes two of the four options outright rather than making them
+expensive. Thirteen candidate environment seams were attempted and every one was
+inert; the shipped binary's --help exposes zero clock, deadline or now flags;
+unix_millis() is SystemTime::now() with no override, trait seam or test hook.
+F23_04_CLOCK_INJECTION_SEAM=none is not a preference, it is the absence of a
+mechanism. Both accelerated options are arguments about a thing that does not
+exist. escalate requires a deadlock and this is a split. One option remains, and
+it is also the one the criterion's own wording demands.
+
+PANEL_NONCE=05028d2c95e3a675
+PANEL_POSITION=real-time-full
+PANEL_RATIONALE=Thirteen candidate seams were inert and the binary exposes no clock flag, so both accelerated options rest on a mechanism the product does not have; escalate needs a deadlock and this is a split, leaving real-time-full as the only option backed by the measurement.

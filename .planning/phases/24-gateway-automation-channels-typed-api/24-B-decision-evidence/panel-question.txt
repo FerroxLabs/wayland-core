@@ -1,0 +1,131 @@
+You are one of four independent reviewers on a Rust codebase decision. Answer on the
+evidence given. End your response with EXACTLY ONE line of the form:
+PANEL_POSITION=<option-id>
+where <option-id> is one of: full-nine-verbs, journey-minimal, separate-binary, do-not-create
+
+## CONTEXT
+
+Repository: wayland-core, a multi-provider AI agent CLI in Rust. Cargo workspace under
+crates/. Layering rule from AGENTS.md: dependencies flow downward; wcore-cli is the TOP
+layer (the binary), wcore-gateway is a MID layer crate.
+
+Phase 24 built a new crate `wcore-gateway` (plan 24-01) containing:
+  - lifecycle.rs  : an 8-state machine (Uninstalled/Installed/Stopped/Starting/Running/
+                    Draining/Drained/Failed) + a StatusProjection struct
+                    {state,pid,uptime_secs,profile,turns_in_flight,deliveries_pending,
+                     binary_path,binary_version}
+  - pidlock.rs    : single-instance flock/LockFileEx lock on a 1-byte sentinel, plus a
+                    readable gateway.pid record; path normalisation at the comparison
+                    boundary
+  - ledger.rs     : an exactly-once delivery ledger, 4 persisted states
+                    (Accepted/Attempted/Settled/Abandoned), atomic-replace journal
+  - drain.rs      : DrainController — close admission, publish falling in-flight counts,
+                    bounded wait, flush, clean-or-forced outcome
+  - service.rs    : one ServiceManager impl per OS family behind one trait, single
+                    platform selection point. macOS = per-user launchd agent,
+                    Linux = per-user systemd user unit, Windows = logon-triggered
+                    scheduled task (authorized by an earlier 4-way panel on measured
+                    evidence).
+  - automation.rs : (plan 24-02) AutomationPlane — a lease-owning scheduler runner with
+                    a 7-type trigger vocabulary, bounded retry and history, delivery
+                    routed through the ledger.
+
+53 + 134 tests green on Linux; 42 green on real Windows including hostile pidlock cases.
+
+## THE HOLE
+
+`crates/wcore-cli/src/gateway.rs` DOES NOT EXIST. No plan in phase 24 claims it. Plan
+24-01 declined it as a fenced file; plan 24-02 declined it as out of scope. As a result
+there is no `wayland-core gateway ...` subcommand at all. The gateway crate is driven
+only by unit tests.
+
+## MEASURED EVIDENCE, taken from the tree
+
+EVIDENCE 1 — the crate's own module doc names the file:
+  crates/wcore-gateway/src/lib.rs line 10-11:
+    "The operator verb surface lives in `crates/wcore-cli/src/gateway.rs` and drives
+     this crate."
+  crates/wcore-gateway/src/lifecycle.rs line 6:
+    "Every operator verb in `crates/wcore-cli/src/gateway.rs` drives exactly one
+     transition here and reads back exactly this projection."
+
+EVIDENCE 2 — the wiring cost is already paid. `crates/wcore-cli/Cargo.toml` line 115
+already carries `wcore-gateway = { path = "../wcore-gateway" }`. Adding the module
+therefore requires NO manifest edit and NO Cargo.lock edit. Registering the subcommand
+requires exactly two additive lines in crates/wcore-cli/src/lib.rs and two additive
+blocks in crates/wcore-cli/src/main.rs (an enum variant and a match arm), following the
+identical shape used by 20+ existing subcommands (`Backend(wcore_cli::backend::BackendArgs)`
+=> `wcore_cli::backend::run(args).await`).
+
+EVIDENCE 3 — THE DEFECT. Every service unit the crate generates hardcodes a verb that
+does not exist. Verbatim from crates/wcore-gateway/src/service.rs:
+  launchd  ProgramArguments: ["{binary}", "gateway", "run"]
+  systemd  ExecStart={binary} gateway run
+  schtasks /tr "\"{binary}\" gateway run"
+`wayland-core gateway run` is not a subcommand. So an operator who runs the install path
+today registers a launch agent / systemd unit / scheduled task whose ExecStart fails
+immediately with a clap "unrecognized subcommand" error. The registration succeeds and
+the service never runs.
+
+EVIDENCE 4 — what the phase's terminal plan (24-04) requires. Its journey is one ordered
+step list run live on macOS, Linux and Windows:
+  clean state -> setup profile+channel -> install gateway as user service -> start ->
+  status reports running with a live pid -> add automation of >=2 trigger types ->
+  submit N deliveries -> confirm arrival at an INDEPENDENT sink -> HARD KILL with no
+  drain -> confirm the PLATFORM'S OWN service mechanism brings it back -> confirm every
+  accepted delivery arrived exactly once -> produce a support bundle -> drain cleanly ->
+  uninstall -> confirm the machine is left as found.
+The verbs this needs: install, start, status, drain, stop, uninstall, and a long-lived
+`run` the platform can relaunch. It does NOT need `doctor` or `logs`.
+
+EVIDENCE 5 — the earlier contract document named nine verbs:
+  gateway install|start|stop|restart|status|doctor|logs|drain|uninstall
+
+EVIDENCE 6 — constraint. The executing lane may make only ADDITIVE, minimal edits to
+crates/wcore-cli/src/lib.rs and main.rs (other lanes edit those files concurrently), and
+must not touch Cargo.toml or Cargo.lock. It has a Linux build host and can live-test
+there. It CANNOT build on macOS (forbidden) and Windows access is uncertain.
+The lane's budget is finite and it also owes plans 24-03 and 24-04.
+
+## THE QUESTION
+
+What should be built for `crates/wcore-cli/src/gateway.rs`?
+
+OPTION full-nine-verbs
+  Build all nine verbs from the contract (install, start, stop, restart, status, doctor,
+  logs, drain, uninstall) plus the hidden `run` daemon entry point.
+  PRO: matches the recorded contract exactly; nothing left for a later plan.
+  CON: doctor and logs are not needed by any Criterion-1 or 24-04 journey step; the
+  budget spent on them is budget not spent proving install/start/kill/recover live.
+
+OPTION journey-minimal
+  Build `run` (the actual long-lived supervised runtime: acquires the pidlock, opens the
+  ledger, starts the AutomationPlane, serves until signalled) plus install, start, stop,
+  restart, status, drain, uninstall. Defer `doctor` and `logs` with a named, recorded
+  gap, on the grounds that both are diagnostics rather than lifecycle and neither appears
+  in any journey step or Success Criterion clause.
+  PRO: every verb built is a verb the live journey exercises, so all of it gets proved
+  rather than asserted; closes EVIDENCE 3's defect.
+  CON: the phase's own contract document listed nine; shipping seven means the contract
+  and the code disagree unless the gap is recorded.
+
+OPTION separate-binary
+  Do not put the surface in wcore-cli. Ship a separate `wayland-gateway` binary (its own
+  [[bin]] or its own crate) so the shared fenced files are never touched.
+  PRO: zero contention on the two shared files.
+  CON: contradicts the crate's own documented placement; the service units invoke
+  `<wayland-core> gateway run`, so this ALSO requires changing service.rs on all three
+  families; the operator now has two binaries; and a [[bin]] in wcore-gateway would need
+  clap added to that crate, which IS a manifest+lockfile edit the lane is forbidden.
+
+OPTION do-not-create
+  The surface belongs elsewhere or is already served; do not create the file.
+  If you pick this you must name what then satisfies "native service lifecycle, drain,
+  restart, upgrade and rollback work without lost or duplicate delivery" (Criterion 1).
+
+Weigh especially: (a) does EVIDENCE 3 make this a defect fix rather than a feature?
+(b) is deferring `doctor` and `logs` honest or is it scope-shaving? (c) given a finite
+budget, is it better to build seven verbs and LIVE-PROVE them, or nine verbs and prove
+fewer?
+
+Remember: end with exactly one line PANEL_POSITION=<option-id>

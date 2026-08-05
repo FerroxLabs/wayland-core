@@ -1,0 +1,5 @@
+Rule deleted
+Rule deleted (v6)
+REMAINING_8788_RULES=0  (expect 0)
+CTRL_known_positive_16666=2  (expect 2)
+GATEWAYS_STILL_RUNNING=3  (expect 0)

@@ -1,0 +1,27 @@
+F27 REOPEN-BY-NAME OBSERVATION
+HOST: Ubuntu-2404-noble-amd64-base
+SHA: 2ecdfdf54ff7fda920eec7d068337006e5da4ee4
+BIN: /root/wayland-p27/target/release/wayland-core
+
+=== REOPEN pdf-path (mode=pdf entry=valid-doc.pdf) ===
+RC: 0
+NAME-RESOLUTIONS-OF-CORPUS-ENTRY: 8
+    1494655 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=592, ...}) = 0
+    1494655 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=592, ...}) = 0
+    1494655 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf", AT_STATX_SYNC_AS_STAT, STATX_ALL,  <unfinished ...>
+    1494655 openat(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf", O_RDONLY|O_CLOEXEC <unfinished ...>
+    1494655 <... openat resumed>)           = 35</root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf>
+    1494655 statx(35</root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL,  <unfinished ...>
+    1494655 statx(35</root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=592, ...}) = 0
+    1495158 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-doc.pdf", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=592, ...}) = 0
+
+=== REOPEN composer-path (mode=composer entry=valid-image.png) ===
+RC: 0
+NAME-RESOLUTIONS-OF-CORPUS-ENTRY: 5
+    1495188 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW, STATX_ALL,  <unfinished ...>
+    1495188 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png", AT_STATX_SYNC_AS_STAT, STATX_ALL,  <unfinished ...>
+    1495188 <... openat resumed>)           = 34</root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png>
+    1495188 statx(34</root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png>, "", AT_STATX_SYNC_AS_STAT|AT_EMPTY_PATH, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=74, ...}) = 0
+    1495310 statx(AT_FDCWD</root/wayland-p27>, "/root/wayland-p27/crates/wcore-fixture-harness/fixtures/f27/intake/valid-image.png", AT_STATX_SYNC_AS_STAT|AT_SYMLINK_NOFOLLOW, STATX_ALL, {stx_mask=STATX_ALL|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFREG|0644, stx_size=74, ...}) = 0
+
+DONE

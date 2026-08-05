@@ -7,13 +7,10 @@
 //! aggregator sub-agent itself errors, it falls back to the first usable
 //! proposal so a transient aggregator failure never sinks the whole council.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 
-use wcore_config::config::Config;
-use wcore_providers::LlmProvider;
 use wcore_types::message::TokenUsage;
+use wcore_types::spawner::ChildOrigin;
 
 use super::proposal::{AggregateResult, Proposal, build_synthesis_prompt};
 use crate::spawner::{AgentSpawner, SubAgentConfig};
@@ -37,28 +34,20 @@ pub const AGGREGATOR_MAX_TOKENS: u32 = 4096;
 
 /// An aggregator that asks a pinned LLM to synthesize the proposals.
 pub struct LlmSynthesisAggregator {
-    /// The provider the synthesis runs on (already keyed/resolved).
-    provider: Arc<dyn LlmProvider>,
+    /// Clone of the parent spawner, preserving its session authority.
+    spawner: AgentSpawner,
     /// Optional model override for the synthesis.
     model: Option<String>,
-    /// Base config the synthesis sub-agent inherits (policy surface, etc.).
-    base: Config,
     /// Crucible #3: sampling temperature for the synthesis sub-agent
     /// (convergence — runs cooler than the proposers).
     temperature: f32,
 }
 
 impl LlmSynthesisAggregator {
-    pub fn new(
-        provider: Arc<dyn LlmProvider>,
-        model: Option<String>,
-        base: Config,
-        temperature: f32,
-    ) -> Self {
+    pub fn new(spawner: AgentSpawner, model: Option<String>, temperature: f32) -> Self {
         Self {
-            provider,
+            spawner,
             model,
-            base,
             temperature,
         }
     }
@@ -98,19 +87,25 @@ impl Aggregator for LlmSynthesisAggregator {
         // tool registry, so even a successful injection in a proposal cannot
         // reach a side-effecting tool. The provider is the (already-resolved)
         // aggregator provider; `model` is applied via child_config (T2).
-        let spawner = AgentSpawner::new(self.provider.clone(), self.base.clone());
-        let result = spawner
-            .spawn_one(SubAgentConfig {
-                name: "__council_aggregator__".to_string(),
-                prompt,
-                max_turns: AGGREGATOR_MAX_TURNS,
-                max_tokens: AGGREGATOR_MAX_TOKENS,
-                system_prompt: Some(super::run::COUNCIL_AGGREGATOR_SYSTEM_PROMPT.to_string()),
-                provider: None,
-                model: self.model.clone(),
-                // Crucible #3: aggregator runs cooler for a stable synthesis.
-                temperature: Some(self.temperature),
-            })
+        let result = self
+            .spawner
+            .spawn_one_with_origin(
+                SubAgentConfig {
+                    name: "__council_aggregator__".to_string(),
+                    prompt,
+                    max_turns: AGGREGATOR_MAX_TURNS,
+                    max_tokens: AGGREGATOR_MAX_TOKENS,
+                    system_prompt: Some(super::run::COUNCIL_AGGREGATOR_SYSTEM_PROMPT.to_string()),
+                    // `spawner` is already pinned to the provider resolved by
+                    // the council admission path. Leaving this unpinned avoids
+                    // a second, potentially divergent provider resolution.
+                    provider: None,
+                    model: self.model.clone(),
+                    // Crucible #3: aggregator runs cooler for a stable synthesis.
+                    temperature: Some(self.temperature),
+                },
+                ChildOrigin::Council,
+            )
             .await;
 
         // The aggregator's synthesis sub-agent burned tokens whether it
@@ -147,7 +142,10 @@ mod tests {
     // `tests/crucible_council.rs`, where the proven `common::test_config()` and
     // a capturing provider are available. These inline tests cover the logic
     // that does NOT spawn the engine.
+    use std::sync::Arc;
     use tokio::sync::mpsc;
+    use wcore_config::config::Config;
+    use wcore_providers::LlmProvider;
     use wcore_providers::ProviderError;
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::TokenUsage;
@@ -180,8 +178,8 @@ mod tests {
     async fn empty_usable_set_returns_empty_without_spawning() {
         // All errored → nothing usable → early return BEFORE any spawn, so the
         // (never-streaming) provider is never invoked.
-        let agg =
-            LlmSynthesisAggregator::new(Arc::new(NeverProvider), None, Config::default(), 0.4);
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), Config::default());
+        let agg = LlmSynthesisAggregator::new(spawner, None, 0.4);
         let res = agg.aggregate("task", &[prop("openai", "x", true)]).await;
         assert!(res.final_text.is_empty());
         assert!(res.chosen_from.is_empty());

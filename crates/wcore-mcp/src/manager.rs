@@ -14,13 +14,18 @@ use super::protocol::{
 };
 use super::transport::sse::SseTransport;
 use super::transport::stdio::StdioTransport;
+use super::transport::stdio_readiness::{
+    McpStdioExecutableReadiness, McpStdioExecutableReadinessStatus,
+    inspect_mcp_stdio_executable_in_context,
+};
 use super::transport::streamable_http::StreamableHttpTransport;
 use super::transport::{McpError, McpTransport};
+use wcore_config::shell::{LaunchValueSource, McpStdioLaunchContext};
 
 /// Per-server connect budget (audit C2).
 ///
 /// `connect_server` runs the full MCP handshake: spawn transport →
-/// `initialize` → `notifications/initialized` → `tools/list`. Each request
+/// `initialize` → `notifications/initialized` → capability discovery. Each request
 /// over a stdio transport is itself bounded (audit C1), but the boot path
 /// must not wait the full per-request budget on a server that is wedged
 /// before it ever speaks MCP. 30s covers a legitimately slow server (npm
@@ -53,7 +58,13 @@ pub enum McpServerHealth {
     /// Connect attempt returned a clean error (transport/init/handshake).
     Failed { reason: String },
     /// Connect attempt exceeded the per-server budget before erroring.
-    TimedOut { after: Duration },
+    TimedOut {
+        after: Duration,
+        /// Present when the connect budget elapsed but the spawned transport
+        /// could not be proven closed and reaped. Consumers must surface this
+        /// rather than reducing the outcome to an ordinary timeout.
+        cleanup_error: Option<String>,
+    },
     /// Registration was skipped by a gate BEFORE any connect was attempted
     /// (e.g. an unreachable transport command). No manager populates this —
     /// it exists so a boot snapshot can carry skipped servers uniformly.
@@ -64,9 +75,19 @@ pub enum McpServerHealth {
 /// connect loop record `TimedOut` vs `Failed` distinctly (the boundary between
 /// them is lost once flattened to a single `McpError`).
 enum ConnectOutcome {
-    Ok(Box<McpServer>),
-    Failed(String),
-    TimedOut(Duration),
+    Ok {
+        server: Box<McpServer>,
+        executable_readiness: Option<McpStdioExecutableReadiness>,
+    },
+    Failed {
+        reason: String,
+        executable_readiness: Option<McpStdioExecutableReadiness>,
+    },
+    TimedOut {
+        after: Duration,
+        cleanup_error: Option<String>,
+        executable_readiness: Option<McpStdioExecutableReadiness>,
+    },
 }
 
 /// Outcome of a transport-successful MCP tool call ([`McpManager::call_tool`]).
@@ -83,13 +104,48 @@ pub struct McpCallOutcome {
     pub is_error: bool,
 }
 
+/// Optional versioned durable identity forwarded with an MCP `tools/call`.
+///
+/// This metadata gives a server the stable key needed to implement its own
+/// idempotency protocol. It does not make an otherwise opaque MCP tool
+/// repeat-safe or reconcilable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolEffectIdentity {
+    pub version: u32,
+    pub tool_execution_id: String,
+    pub idempotency_key: String,
+}
+
+impl McpToolEffectIdentity {
+    pub fn v1(tool_execution_id: impl Into<String>, idempotency_key: impl Into<String>) -> Self {
+        Self {
+            version: 1,
+            tool_execution_id: tool_execution_id.into(),
+            idempotency_key: idempotency_key.into(),
+        }
+    }
+
+    fn as_meta(&self) -> serde_json::Value {
+        json!({
+            "version": self.version,
+            "toolExecutionId": self.tool_execution_id,
+            "idempotencyKey": self.idempotency_key,
+        })
+    }
+}
+
 /// Manages connections to multiple MCP servers
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
     /// Per-server connect outcome (every attempted server, including failures).
     health: HashMap<String, McpServerHealth>,
+    /// Redacted readiness captured from the same immutable stdio context used
+    /// by the actual child process. Non-stdio servers have no entry.
+    executable_readiness: HashMap<String, McpStdioExecutableReadiness>,
     /// Monotonically increasing request ID counter for all JSON-RPC calls
     next_id: AtomicU64,
+    /// Immutable authority used by every HTTP transport added to this manager.
+    egress_policy: wcore_egress::SharedPolicy,
 }
 
 impl McpManager {
@@ -102,7 +158,15 @@ impl McpManager {
     /// other servers" guarantee. Running concurrently means a single slow
     /// server delays only itself, not the whole boot.
     pub async fn connect_all(configs: &HashMap<String, McpServerConfig>) -> Result<Self, McpError> {
-        Self::connect_all_with_connect_timeout(configs, CONNECT_TIMEOUT).await
+        Self::connect_all_with_policy(configs, wcore_egress::default_policy()).await
+    }
+
+    /// Connect all servers with an explicit session egress policy.
+    pub async fn connect_all_with_policy(
+        configs: &HashMap<String, McpServerConfig>,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<Self, McpError> {
+        Self::connect_all_with_policy_and_timeout(configs, CONNECT_TIMEOUT, egress_policy).await
     }
 
     /// [`connect_all`](Self::connect_all) with an explicit per-server
@@ -113,18 +177,43 @@ impl McpManager {
         configs: &HashMap<String, McpServerConfig>,
         connect_timeout: Duration,
     ) -> Result<Self, McpError> {
-        let connect_futures = configs.iter().map(|(name, config)| async move {
-            let outcome = Self::connect_server_outcome(name, config, connect_timeout).await;
-            (name.clone(), outcome)
+        Self::connect_all_with_policy_and_timeout(
+            configs,
+            connect_timeout,
+            wcore_egress::default_policy(),
+        )
+        .await
+    }
+
+    /// Explicit-policy variant used by hosted sessions and concurrency tests.
+    pub async fn connect_all_with_policy_and_timeout(
+        configs: &HashMap<String, McpServerConfig>,
+        connect_timeout: Duration,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<Self, McpError> {
+        let connect_futures = configs.iter().map(|(name, config)| {
+            let policy = egress_policy.clone();
+            async move {
+                let outcome =
+                    Self::connect_server_outcome(name, config, connect_timeout, policy).await;
+                (name.clone(), outcome)
+            }
         });
 
         let results = futures::future::join_all(connect_futures).await;
 
         let mut servers = HashMap::new();
         let mut health = HashMap::new();
+        let mut executable_readiness = HashMap::new();
         for (name, outcome) in results {
             match outcome {
-                ConnectOutcome::Ok(server) => {
+                ConnectOutcome::Ok {
+                    server,
+                    executable_readiness: readiness,
+                } => {
+                    if let Some(readiness) = readiness {
+                        executable_readiness.insert(name.clone(), readiness);
+                    }
                     eprintln!(
                         "[mcp] Connected to '{}': {} tools, resources={}",
                         name,
@@ -139,15 +228,34 @@ impl McpManager {
                     );
                     servers.insert(name, *server);
                 }
-                ConnectOutcome::Failed(reason) => {
+                ConnectOutcome::Failed {
+                    reason,
+                    executable_readiness: readiness,
+                } => {
+                    if let Some(readiness) = readiness {
+                        executable_readiness.insert(name.clone(), readiness);
+                    }
                     // Non-fatal: continue with other servers, but keep the
                     // cause so `/doctor` can surface it (was: log-and-forget).
                     tracing::warn!(target: "mcp.manager", server = %name, error = %reason, "failed to connect MCP server");
                     health.insert(name, McpServerHealth::Failed { reason });
                 }
-                ConnectOutcome::TimedOut(after) => {
+                ConnectOutcome::TimedOut {
+                    after,
+                    cleanup_error,
+                    executable_readiness: readiness,
+                } => {
+                    if let Some(readiness) = readiness {
+                        executable_readiness.insert(name.clone(), readiness);
+                    }
                     tracing::warn!(target: "mcp.manager", server = %name, ?after, "MCP server connect timed out");
-                    health.insert(name, McpServerHealth::TimedOut { after });
+                    health.insert(
+                        name,
+                        McpServerHealth::TimedOut {
+                            after,
+                            cleanup_error,
+                        },
+                    );
                 }
             }
         }
@@ -155,7 +263,9 @@ impl McpManager {
         Ok(Self {
             servers,
             health,
+            executable_readiness,
             next_id: AtomicU64::new(10),
+            egress_policy,
         })
     }
 
@@ -167,14 +277,74 @@ impl McpManager {
         name: &str,
         config: &McpServerConfig,
         connect_timeout: Duration,
+        egress_policy: wcore_egress::SharedPolicy,
     ) -> ConnectOutcome {
-        match timeout(connect_timeout, Self::connect_server(name, config)).await {
-            Ok(Ok(server)) => ConnectOutcome::Ok(Box::new(server)),
-            Ok(Err(e)) => ConnectOutcome::Failed(e.to_string()),
-            Err(_) => {
+        let (stdio_context, executable_readiness) = if config.transport == TransportType::Stdio {
+            let Some(command) = config.command.as_deref() else {
+                return ConnectOutcome::Failed {
+                    reason: "stdio transport requires 'command'".to_string(),
+                    executable_readiness: Some(McpStdioExecutableReadiness {
+                        status: McpStdioExecutableReadinessStatus::InvalidExecutable,
+                        path_source: LaunchValueSource::Unavailable,
+                        pathext_source: LaunchValueSource::Unavailable,
+                    }),
+                };
+            };
+            let empty_environment = HashMap::new();
+            let environment = config.env.as_ref().unwrap_or(&empty_environment);
+            let context = match McpStdioLaunchContext::capture(environment) {
+                Ok(context) => context,
+                Err(error) => {
+                    return ConnectOutcome::Failed {
+                        reason: format!("cannot construct sanitized stdio launch context: {error}"),
+                        executable_readiness: Some(McpStdioExecutableReadiness {
+                            status: McpStdioExecutableReadinessStatus::InvalidEffectiveEnvironment,
+                            path_source: LaunchValueSource::Unavailable,
+                            pathext_source: LaunchValueSource::Unavailable,
+                        }),
+                    };
+                }
+            };
+            let readiness = inspect_mcp_stdio_executable_in_context(command, &context).await;
+            (Some(context), Some(readiness))
+        } else {
+            (None, None)
+        };
+        let result = if config.transport == TransportType::Stdio {
+            Self::connect_server(name, config, egress_policy, stdio_context, connect_timeout)
+                .await
+                .map(Some)
+        } else {
+            timeout(
+                connect_timeout,
+                Self::connect_server(name, config, egress_policy, stdio_context, connect_timeout),
+            )
+            .await
+            .map_err(|_| McpError::ConnectTimedOut {
+                after: connect_timeout,
+                cleanup: String::new(),
+            })
+            .and_then(|result| result)
+            .map(Some)
+        };
+        match result {
+            Ok(Some(server)) => ConnectOutcome::Ok {
+                server: Box::new(server),
+                executable_readiness,
+            },
+            Ok(None) => unreachable!("successful connect always returns a server"),
+            Err(McpError::ConnectTimedOut { cleanup, .. }) => {
                 warn!(server = %name, "[mcp] connect timed out — skipping server");
-                ConnectOutcome::TimedOut(connect_timeout)
+                ConnectOutcome::TimedOut {
+                    after: connect_timeout,
+                    cleanup_error: (!cleanup.is_empty()).then_some(cleanup),
+                    executable_readiness,
+                }
             }
+            Err(e) => ConnectOutcome::Failed {
+                reason: e.to_string(),
+                executable_readiness,
+            },
         }
     }
 
@@ -189,8 +359,29 @@ impl McpManager {
         name: String,
         config: &McpServerConfig,
     ) -> Result<Vec<String>, McpError> {
-        match Self::connect_server_outcome(&name, config, CONNECT_TIMEOUT).await {
-            ConnectOutcome::Ok(server) => {
+        if let Some(server) = self
+            .servers
+            .get(&name)
+            .filter(|server| server.transport.is_alive())
+        {
+            return Ok(server.tools.iter().map(|tool| tool.name.clone()).collect());
+        }
+
+        match Self::connect_server_outcome(
+            &name,
+            config,
+            CONNECT_TIMEOUT,
+            self.egress_policy.clone(),
+        )
+        .await
+        {
+            ConnectOutcome::Ok {
+                server,
+                executable_readiness,
+            } => {
+                if let Some(readiness) = executable_readiness {
+                    self.executable_readiness.insert(name.clone(), readiness);
+                }
                 let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
                 eprintln!(
                     "[mcp] Connected to '{}': {} tools, resources={}",
@@ -207,7 +398,13 @@ impl McpManager {
                 self.servers.insert(name, *server);
                 Ok(tool_names)
             }
-            ConnectOutcome::Failed(reason) => {
+            ConnectOutcome::Failed {
+                reason,
+                executable_readiness,
+            } => {
+                if let Some(readiness) = executable_readiness {
+                    self.executable_readiness.insert(name.clone(), readiness);
+                }
                 self.health.insert(
                     name,
                     McpServerHealth::Failed {
@@ -216,18 +413,42 @@ impl McpManager {
                 );
                 Err(McpError::Transport(reason))
             }
-            ConnectOutcome::TimedOut(after) => {
-                self.health
-                    .insert(name.clone(), McpServerHealth::TimedOut { after });
-                Err(McpError::Transport(format!(
-                    "connect to '{name}' timed out after {after:?}"
-                )))
+            ConnectOutcome::TimedOut {
+                after,
+                cleanup_error,
+                executable_readiness,
+            } => {
+                if let Some(readiness) = executable_readiness {
+                    self.executable_readiness.insert(name.clone(), readiness);
+                }
+                self.health.insert(
+                    name.clone(),
+                    McpServerHealth::TimedOut {
+                        after,
+                        cleanup_error: cleanup_error.clone(),
+                    },
+                );
+                if let Some(cleanup_error) = cleanup_error {
+                    Err(McpError::Transport(format!(
+                        "connect to '{name}' timed out after {after:?}; cleanup unverified: {cleanup_error}"
+                    )))
+                } else {
+                    Err(McpError::Transport(format!(
+                        "connect to '{name}' timed out after {after:?}"
+                    )))
+                }
             }
         }
     }
 
     /// Connect to a single MCP server: create transport, initialize, discover tools
-    async fn connect_server(name: &str, config: &McpServerConfig) -> Result<McpServer, McpError> {
+    async fn connect_server(
+        name: &str,
+        config: &McpServerConfig,
+        egress_policy: wcore_egress::SharedPolicy,
+        stdio_context: Option<McpStdioLaunchContext>,
+        connect_timeout: Duration,
+    ) -> Result<McpServer, McpError> {
         let empty_map = HashMap::new();
 
         // 1. Create transport
@@ -237,8 +458,10 @@ impl McpManager {
                     McpError::InitFailed("stdio transport requires 'command'".into())
                 })?;
                 let args = config.args.as_deref().unwrap_or(&[]);
-                let env = config.env.as_ref().unwrap_or(&empty_map);
-                Box::new(StdioTransport::spawn(command, args, env).await?)
+                let context = stdio_context.ok_or_else(|| {
+                    McpError::InitFailed("stdio launch context was not prepared".into())
+                })?;
+                Box::new(StdioTransport::spawn_with_context(command, args, context).await?)
             }
             TransportType::Sse => {
                 let url = config
@@ -246,73 +469,128 @@ impl McpManager {
                     .as_deref()
                     .ok_or_else(|| McpError::InitFailed("SSE transport requires 'url'".into()))?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(SseTransport::connect(url, headers, config.allow_local).await?)
+                Box::new(
+                    SseTransport::connect_with_policy(
+                        url,
+                        headers,
+                        config.allow_local,
+                        egress_policy,
+                    )
+                    .await?,
+                )
             }
             TransportType::StreamableHttp => {
                 let url = config.url.as_deref().ok_or_else(|| {
                     McpError::InitFailed("streamable-http transport requires 'url'".into())
                 })?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(StreamableHttpTransport::connect(url, headers, config.allow_local).await?)
+                Box::new(
+                    StreamableHttpTransport::connect_with_policy(
+                        url,
+                        headers,
+                        config.allow_local,
+                        egress_policy,
+                    )
+                    .await?,
+                )
             }
         };
 
-        // 2. Initialize handshake
-        let init_params = InitializeParams {
-            protocol_version: "2025-03-26".to_string(),
-            capabilities: ClientCapabilities {
-                tools: Some(json!({})),
-            },
-            client_info: ClientInfo {
-                name: "wayland-core".to_string(),
-                version: "0.3.0".to_string(),
-            },
+        let handshake = async {
+            // 2. Initialize handshake
+            let init_params = InitializeParams {
+                protocol_version: "2025-03-26".to_string(),
+                capabilities: ClientCapabilities {
+                    tools: Some(json!({})),
+                },
+                client_info: ClientInfo {
+                    name: "wayland-core".to_string(),
+                    version: "0.3.0".to_string(),
+                },
+            };
+
+            let init_req = JsonRpcRequest::new(
+                1,
+                "initialize",
+                Some(serde_json::to_value(&init_params).map_err(|e| {
+                    McpError::InitFailed(format!("Failed to serialize init params: {}", e))
+                })?),
+            );
+
+            let init_response = transport.request(&init_req).await?;
+            let init_result: InitializeResult =
+                serde_json::from_value(init_response.result.ok_or_else(|| {
+                    McpError::InitFailed("No result in initialize response".into())
+                })?)
+                .map_err(|e| McpError::InitFailed(format!("Failed to parse init result: {}", e)))?;
+
+            // Check whether server declared resources capability
+            let supports_resources = init_result
+                .capabilities
+                .get("resources")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+            let supports_tools = init_result
+                .capabilities
+                .get("tools")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
+            // 3. Send initialized notification
+            let initialized_notification =
+                JsonRpcRequest::notification("notifications/initialized", None);
+            transport.notify(&initialized_notification).await?;
+
+            // 4. Discover tools only when the server advertises that capability.
+            // Resource-only MCP servers are valid and may reject `tools/list`.
+            let tools = if supports_tools {
+                let list_req = JsonRpcRequest::new(2, "tools/list", None);
+                let list_response = transport.request(&list_req).await?;
+                let tools_result: ToolsListResult =
+                    serde_json::from_value(list_response.result.ok_or_else(|| {
+                        McpError::InitFailed("No result in tools/list response".into())
+                    })?)
+                    .map_err(|e| {
+                        McpError::InitFailed(format!("Failed to parse tools list: {}", e))
+                    })?;
+                tools_result.tools
+            } else {
+                Vec::new()
+            };
+
+            Ok::<_, McpError>((tools, supports_resources))
         };
 
-        let init_req = JsonRpcRequest::new(
-            1,
-            "initialize",
-            Some(serde_json::to_value(&init_params).map_err(|e| {
-                McpError::InitFailed(format!("Failed to serialize init params: {}", e))
-            })?),
-        );
-
-        let init_response = transport.request(&init_req).await?;
-        let init_result: InitializeResult = serde_json::from_value(
-            init_response
-                .result
-                .ok_or_else(|| McpError::InitFailed("No result in initialize response".into()))?,
-        )
-        .map_err(|e| McpError::InitFailed(format!("Failed to parse init result: {}", e)))?;
-
-        // Check whether server declared resources capability
-        let supports_resources = init_result
-            .capabilities
-            .get("resources")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-
-        // 3. Send initialized notification
-        let initialized_notification =
-            JsonRpcRequest::notification("notifications/initialized", None);
-        transport.notify(&initialized_notification).await?;
-
-        // 4. List tools
-        let list_req = JsonRpcRequest::new(2, "tools/list", None);
-        let list_response = transport.request(&list_req).await?;
-        let tools_result: ToolsListResult = serde_json::from_value(
-            list_response
-                .result
-                .ok_or_else(|| McpError::InitFailed("No result in tools/list response".into()))?,
-        )
-        .map_err(|e| McpError::InitFailed(format!("Failed to parse tools list: {}", e)))?;
-
-        Ok(McpServer {
-            name: name.to_string(),
-            transport,
-            tools: tools_result.tools,
-            supports_resources,
-        })
+        match timeout(connect_timeout, handshake).await {
+            Ok(Ok((tools, supports_resources))) => Ok(McpServer {
+                name: name.to_string(),
+                transport,
+                tools,
+                supports_resources,
+            }),
+            Ok(Err(error)) => {
+                let cleanup = transport.close().await.err();
+                if let Some(cleanup) = cleanup {
+                    Err(McpError::InitFailed(format!(
+                        "{error}; transport cleanup failed: {cleanup}"
+                    )))
+                } else {
+                    Err(error)
+                }
+            }
+            Err(_) => {
+                let cleanup = transport
+                    .close()
+                    .await
+                    .err()
+                    .map(|error| format!("; cleanup failed: {error}"))
+                    .unwrap_or_default();
+                Err(McpError::ConnectTimedOut {
+                    after: connect_timeout,
+                    cleanup,
+                })
+            }
+        }
     }
 
     /// Get all discovered tools with their server names.
@@ -375,6 +653,20 @@ impl McpManager {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpCallOutcome, McpError> {
+        self.call_tool_with_effect_identity(server_name, tool_name, arguments, None)
+            .await
+    }
+
+    /// Execute an MCP tool while forwarding an optional durable identity in
+    /// the protocol-defined `_meta` extension point. Tool arguments remain
+    /// byte-for-byte structurally separate from host metadata.
+    pub async fn call_tool_with_effect_identity(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        effect: Option<&McpToolEffectIdentity>,
+    ) -> Result<McpCallOutcome, McpError> {
         let server = self
             .servers
             .get(server_name)
@@ -389,13 +681,20 @@ impl McpManager {
             )));
         }
 
+        let mut params = serde_json::Map::new();
+        params.insert("name".into(), json!(tool_name));
+        params.insert("arguments".into(), arguments);
+        if let Some(effect) = effect {
+            params.insert(
+                "_meta".into(),
+                json!({ "wayland/durable-effect": effect.as_meta() }),
+            );
+        }
+
         let request = JsonRpcRequest::new(
             self.next_id.fetch_add(1, Ordering::Relaxed),
             "tools/call",
-            Some(json!({
-                "name": tool_name,
-                "arguments": arguments
-            })),
+            Some(serde_json::Value::Object(params)),
         );
 
         let response = server.transport.request(&request).await?;
@@ -437,6 +736,12 @@ impl McpManager {
     /// source of truth for the `/doctor` MCP section — keyed by server name.
     pub fn health(&self) -> &HashMap<String, McpServerHealth> {
         &self.health
+    }
+
+    /// Secret-free executable readiness captured from the same stdio launch
+    /// context used by each attempted child.
+    pub fn executable_readiness(&self) -> &HashMap<String, McpStdioExecutableReadiness> {
+        &self.executable_readiness
     }
 
     /// Whether this manager hosts a connected server named `name`. No
@@ -516,12 +821,12 @@ impl McpManager {
     /// id correlation, pre-C3) could desync the next call. After this the
     /// server reports `is_alive() == false`, so `all_tools()` stops
     /// advertising it and `call_tool` fast-fails.
-    pub async fn close_server(&self, server_name: &str) {
-        if let Some(server) = self.servers.get(server_name)
-            && let Err(e) = server.transport.close().await
-        {
-            warn!(server = %server_name, error = %e, "[mcp] close_server failed");
-        }
+    pub async fn close_server(&self, server_name: &str) -> Result<bool, McpError> {
+        let Some(server) = self.servers.get(server_name) else {
+            return Ok(false);
+        };
+        server.transport.close().await?;
+        Ok(true)
     }
 
     /// Test-only constructor: build a manager with an explicit health map
@@ -536,7 +841,9 @@ impl McpManager {
                 .into_iter()
                 .map(|(name, h)| (name.to_string(), h))
                 .collect(),
+            executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
+            egress_policy: wcore_egress::default_policy(),
         }
     }
 
@@ -562,7 +869,9 @@ impl McpManager {
         Self {
             servers,
             health,
+            executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
+            egress_policy: wcore_egress::default_policy(),
         }
     }
 
@@ -593,7 +902,9 @@ impl McpManager {
         Self {
             servers,
             health,
+            executable_readiness: HashMap::new(),
             next_id: AtomicU64::new(10),
+            egress_policy: wcore_egress::default_policy(),
         }
     }
 }
@@ -618,7 +929,7 @@ mod tests {
     use crate::protocol::JsonRpcResponse;
     use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     // -----------------------------------------------------------------------
     // MockTransport: returns pre-configured JSON-RPC responses
@@ -680,12 +991,140 @@ mod tests {
         }
     }
 
+    struct CloseErrorTransport;
+
+    #[async_trait]
+    impl McpTransport for CloseErrorTransport {
+        async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            Err(McpError::Transport("unused request".into()))
+        }
+
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Err(McpError::Transport("injected cleanup failure".into()))
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers: build McpManager with pre-configured servers
     // -----------------------------------------------------------------------
 
     fn make_manager_with_servers(entries: Vec<(&str, bool, Box<dyn McpTransport>)>) -> McpManager {
         McpManager::new_for_test(entries)
+    }
+
+    #[tokio::test]
+    async fn close_server_preserves_cleanup_failure() {
+        let manager =
+            make_manager_with_servers(vec![("fails-close", false, Box::new(CloseErrorTransport))]);
+
+        let error = manager
+            .close_server("fails-close")
+            .await
+            .expect_err("close failure must not be reported as success");
+        assert!(error.to_string().contains("injected cleanup failure"));
+        assert!(
+            manager.hosts_server("fails-close"),
+            "failed cleanup must retain manager ownership for a retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_deferred_managers_retain_distinct_session_policies() {
+        let first: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let second: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let empty = HashMap::new();
+
+        let (first_manager, second_manager) = tokio::join!(
+            McpManager::connect_all_with_policy(&empty, first.clone()),
+            McpManager::connect_all_with_policy(&empty, second.clone()),
+        );
+        let first_manager = first_manager.expect("first manager");
+        let second_manager = second_manager.expect("second manager");
+
+        assert!(Arc::ptr_eq(&first_manager.egress_policy, &first));
+        assert!(Arc::ptr_eq(&second_manager.egress_policy, &second));
+        assert!(!Arc::ptr_eq(
+            &first_manager.egress_policy,
+            &second_manager.egress_policy
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_managers_enforce_opposite_session_policies() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[derive(Debug)]
+        struct DenyAll;
+
+        #[async_trait]
+        impl wcore_egress::EgressPolicy for DenyAll {
+            async fn check(
+                &self,
+                _request: &wcore_egress::reqwest::Request,
+            ) -> wcore_egress::EgressDecision {
+                wcore_egress::EgressDecision::Deny {
+                    reason: "session denied".to_string(),
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"initialize\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": "2025-03-26", "capabilities": {}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                "\"method\":\"notifications/initialized\"",
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        let config = McpServerConfig {
+            transport: TransportType::StreamableHttp,
+            command: None,
+            args: None,
+            env: None,
+            url: Some(server.uri()),
+            headers: None,
+            deferred: Some(true),
+            allow_local: true,
+            only_for_assistant: None,
+        };
+        let configs = HashMap::from([("deferred".to_string(), config)]);
+        let allow: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let deny: wcore_egress::SharedPolicy = Arc::new(DenyAll);
+
+        let (allowed, denied) = tokio::join!(
+            McpManager::connect_all_with_policy(&configs, allow),
+            McpManager::connect_all_with_policy(&configs, deny),
+        );
+        let allowed = allowed.expect("allowed manager");
+        let denied = denied.expect("denied manager");
+
+        assert!(matches!(
+            allowed.health().get("deferred"),
+            Some(McpServerHealth::Ready { tool_count: 0 })
+        ));
+        assert!(matches!(
+            denied.health().get("deferred"),
+            Some(McpServerHealth::Failed { reason }) if reason.contains("session denied")
+        ));
+        assert_eq!(
+            server.received_requests().await.expect("request log").len(),
+            2,
+            "the denied session must not emit any network request"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -997,12 +1436,11 @@ mod tests {
             allow_local: false,
             only_for_assistant: None,
         };
-        // A real MCP handshake fixture: answer initialize + tools/list.
+        // A real MCP handshake fixture with no listable capabilities.
         let healthy_script = r#"
             while IFS= read -r line; do
               case "$line" in
                 *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}\n' ;;
-                *tools/list*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n' ;;
               esac
             done
         "#;
@@ -1036,6 +1474,111 @@ mod tests {
     // `health()` entry, with the failure cause preserved (was log-and-forget).
     // -----------------------------------------------------------------------
 
+    /// Third of the four hand-rolled zombie checks. It guessed `true`
+    /// ("gone") on an unreadable `/proc/<pid>/stat` while the copy in
+    /// `transport/stdio.rs` guessed `false` ("alive") on the identical input —
+    /// two files in one crate disagreeing about the same syscall. The
+    /// centralised probe answers `Indeterminate` there instead of guessing.
+    /// See `.planning/ZOMBIE-PROBE.md`.
+    #[cfg(unix)]
+    fn process_gone_or_zombie(pid: i32) -> bool {
+        !wcore_types::process_liveness::process_is_alive(pid as u32)
+    }
+
+    #[cfg(unix)]
+    async fn assert_recorded_processes_reaped(pid_file: &std::path::Path) {
+        let contents = std::fs::read_to_string(pid_file).expect("fixture must record process ids");
+        let pids: Vec<i32> = contents
+            .split_whitespace()
+            .map(|pid| pid.parse().expect("fixture pid"))
+            .collect();
+        assert_eq!(
+            pids.len(),
+            2,
+            "fixture must record direct and grandchild pids"
+        );
+        for pid in pids {
+            let mut reaped = false;
+            for _ in 0..100 {
+                if process_gone_or_zombie(pid) {
+                    reaped = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(reaped, "fixture process {pid} survived manager return");
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_tree_fixture(pid_file: &std::path::Path, response: &str) -> McpServerConfig {
+        use wcore_config::config::TransportType;
+
+        let script = format!(
+            "sleep 300 & grandchild=$!; echo \"$$ $grandchild\" > '{}'; read line; {response}",
+            pid_file.display()
+        );
+        McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("sh".into()),
+            args: Some(vec!["-c".into(), script]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+            allow_local: false,
+            only_for_assistant: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_timeout_reaps_direct_and_grandchild_processes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("timeout.pids");
+        let mut configs = HashMap::new();
+        configs.insert(
+            "hung".to_string(),
+            process_tree_fixture(&pid_file, "sleep 300"),
+        );
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_millis(400))
+                .await
+                .expect("bounded connect returns manager");
+        assert!(matches!(
+            manager.health().get("hung"),
+            Some(McpServerHealth::TimedOut {
+                cleanup_error: None,
+                ..
+            })
+        ));
+        assert_recorded_processes_reaped(&pid_file).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn malformed_handshake_reaps_direct_and_grandchild_processes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("malformed.pids");
+        let malformed = r#"printf '{"jsonrpc":"2.0","id":1,"result":[]}\n'; sleep 300"#;
+        let mut configs = HashMap::new();
+        configs.insert(
+            "malformed".to_string(),
+            process_tree_fixture(&pid_file, malformed),
+        );
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_secs(2))
+                .await
+                .expect("malformed connect returns manager");
+        assert!(matches!(
+            manager.health().get("malformed"),
+            Some(McpServerHealth::Failed { .. })
+        ));
+        assert_recorded_processes_reaped(&pid_file).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn health_records_timeout_for_a_hung_server() {
@@ -1063,11 +1606,23 @@ mod tests {
         // No live server, but the timeout is recorded with its cause.
         assert!(manager.server_names().is_empty());
         match manager.health().get("hung") {
-            Some(McpServerHealth::TimedOut { after }) => {
+            Some(McpServerHealth::TimedOut {
+                after,
+                cleanup_error,
+            }) => {
                 assert_eq!(*after, Duration::from_millis(300));
+                assert!(cleanup_error.is_none());
             }
             other => panic!("expected TimedOut, got {other:?}"),
         }
+        assert_eq!(
+            manager
+                .executable_readiness()
+                .get("hung")
+                .map(|readiness| readiness.status),
+            Some(McpStdioExecutableReadinessStatus::Resolved),
+            "timeout evidence must come from the launch context used by the child"
+        );
     }
 
     #[cfg(unix)]
@@ -1102,6 +1657,14 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+        assert_eq!(
+            manager
+                .executable_readiness()
+                .get("broken")
+                .map(|readiness| readiness.status),
+            Some(McpStdioExecutableReadinessStatus::NotFound),
+            "spawn failure must retain readiness from the same launch context"
+        );
     }
 
     #[cfg(unix)]
@@ -1113,7 +1676,7 @@ mod tests {
         let healthy_script = r#"
             while IFS= read -r line; do
               case "$line" in
-                *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}\n' ;;
+                *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}\n' ;;
                 *tools/list*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"e","inputSchema":{"type":"object"}}]}}\n' ;;
               esac
             done
@@ -1155,6 +1718,14 @@ mod tests {
             Some(McpServerHealth::Ready { tool_count }) => assert_eq!(*tool_count, 1),
             other => panic!("expected Ready{{1}}, got {other:?}"),
         }
+        assert_eq!(
+            manager
+                .executable_readiness()
+                .get("healthy")
+                .map(|readiness| readiness.status),
+            Some(McpStdioExecutableReadinessStatus::Resolved),
+            "successful child must retain resolved readiness from its launch context"
+        );
         assert!(
             matches!(
                 manager.health().get("hung"),

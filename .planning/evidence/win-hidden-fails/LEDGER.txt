@@ -1,0 +1,121 @@
+THE SIX "FLAKY" TESTS, RE-MEASURED WITH RETRIES DISABLED
+========================================================
+
+Every number below is 10 repetitions per test per condition, `--retries 0`,
+`--no-fail-fast`, `--profile ci`. 30 measured runs per test per platform. A run
+that executed zero tests is graded NOTRUN and a run that took the
+delegated-backend skip is graded SKIPPED; neither can be counted as a pass.
+
+Conditions
+  isolated  one `cargo nextest run` per test, nothing else running
+  batch     all present targets in ONE invocation
+  loaded    same as batch, with num-cpus busy-spinners alongside
+
+Hosts
+  LINUX  hetzner-dsm, Ubuntu 24.04, 96 cores      (control)
+  WINH   GitHub-hosted windows-latest, Windows 2025 Server, 4 cores,
+         ~30.7 GB free disk, run 30727452188 job "hosted server SKU"
+  WINS   self-hosted SEANDESKTOP (the box that produced the original FLAKY
+         reports) -- STILL QUEUED, see "NOT MEASURED" below
+
+WINH's harness graded every repetition ERROR because nextest coloured its
+output and the summary regex did not strip ANSI. The captured per-run logs are
+intact and the table below is those logs re-graded offline; both the raw output
+and the re-grade are committed side by side so the correction is checkable.
+The parser is fixed (`--color never` plus an ANSI strip), proven against the
+same captured bytes:
+    parse_summary(raw)                -> None
+    parse_summary(ANSI stripped)      -> (1 run, 1 passed, 0 failed)
+    parse_summary(ANSI stripped, red) -> (1 run, 0 passed, 1 failed)
+
+
+| test                                             | host | runs | pass | fail | verdict |
+|--------------------------------------------------|------|-----:|-----:|-----:|---------|
+| packaged_core_recovers_after_two_503_responses    | LINUX|   30 |   30 |    0 | GREEN |
+| packaged_core_recovers_after_two_503_responses    | WINH |   30 |   30 |    0 | GREEN |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | LINUX | 30 | 0 | 0 | NOTRUN (Windows-only target) |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | WINH | 30 | 30 | 0 | GREEN |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | LINUX | 30 | 30 | 0 | GREEN |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | WINH  | 30 | 21 | 9 | FLAKY -- genuinely nondeterministic |
+|   ... isolated 7/10, batch 9/10, loaded 5/10 -- fails MORE under load       |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | LINUX | 30 | 30 | 0 | GREEN |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | WINH  | 30 | 28 | 2 | FLAKY -- same race as the row above |
+| dispatches_4_noop_workers_in_parallel             | LINUX|   30 |   30 |    0 | GREEN |
+| dispatches_4_noop_workers_in_parallel             | WINH |   30 |    0 |   30 | CONSISTENTLY FAILING (disk admission) |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | LINUX | 30 | 30 | 0 | GREEN |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | WINH  | 30 |  0 | 30 | CONSISTENTLY FAILING (disk admission) |
+
+
+WHAT ACTUALLY FAILS -- three distinct causes, all previously invisible
+---------------------------------------------------------------------
+
+(1) DISK ADMISSION -- 30/30 and 30/30, deterministic, not flaky at all
+
+    dispatch floods: DispatchAdmission("dispatch requires 43486543872 bytes
+    for 5 active workers, 0 bytes already reserved, and its safety margin,
+    but only 30762147840 bytes are available")
+
+    called `Result::unwrap()` on an `Err` value: DispatchAdmission("dispatch
+    requires 34896609280 bytes for 4 active workers, 0 bytes already reserved,
+    and its safety margin, but only 30762373120 bytes are available")
+
+    The arithmetic, from crates/wcore-swarm/src/worktree.rs:125-127 and
+    worktree_manager.rs:368-390:
+        per transaction = min(MAX_TRANSACTION_WORKSPACE_BYTES = 8 GiB,
+                              MAX_AGGREGATE_WORKSPACE_BYTES = 64 GiB / N)
+        required        = per_transaction * N + existing + 512 MiB margin
+    So 4 workers -> 32 GiB + 512 MiB = 34896609280 bytes exactly.
+       5 workers -> 40 GiB + 512 MiB = 43486543872 bytes exactly.
+
+    This is a FLAT 8 GiB-of-free-disk reservation per worker, taken up front,
+    independent of what the worker will use. A 4-worker swarm refuses on any
+    machine with under ~32.5 GiB free; a full 8-worker swarm needs ~64.5 GiB.
+    It is fail-closed and the message is honest, but it makes `swarm dispatch`
+    unreachable on an ordinary developer laptop and on every hosted CI runner.
+    That is a product sizing decision that has never been stated anywhere a
+    user would see it.
+
+    NOTE ON SCOPE: this arm is conditional on free space, and it is why these
+    two rows are 0/30 on WINH. It does NOT establish what happens on
+    SEANDESKTOP, which has more disk. See "NOT MEASURED".
+
+(2) WINDOWS SHARE VIOLATION DURING WORKSPACE ACCOUNTING -- nondeterministic
+
+    worker process: sandbox child execution failed: workspace accounting:
+    dispatch admission refused: workspace accounting refused ".git": io: The
+    process cannot access the file because it is being used by another
+    process. (os error 32)
+
+    A transient ERROR_SHARING_VIOLATION on one file inside the workspace turns
+    into a refusal of the whole dispatch. On Windows that is an everyday event
+    (git's own handles, the indexer, AV). An accounting walk that cannot open
+    one entry has not proven the workspace is oversized; it has proven it could
+    not look.
+
+(3) DESCENDANT STILL HOLDS THE RETAINED CHECKOUT DESCRIPTOR -- nondeterministic
+
+    worker descendant still holds the retained checkout descriptor;
+    transaction quarantined and its reservation held for retry
+
+    Hit by BOTH `malformed_heartbeat_*` and `public_dispatch_owns_git_authority_*`.
+    The loan check (`checkout_loan_outstanding`, dispatch.rs) runs before the
+    Windows kernel has finished closing the reaped job's inherited handles, so
+    the loan counter is still non-zero. Each occurrence quarantines the
+    transaction AND HOLDS ITS RESERVATION -- against the 8 GiB-per-worker
+    budget in (1), a machine that hits this repeatedly loses dispatch capacity
+    until something reclaims it.
+
+
+NOT MEASURED -- stated plainly rather than papered over
+-------------------------------------------------------
+The self-hosted SEANDESKTOP leg of run 30727452188 was still `queued` after
+~50 minutes and never started. Both Windows runners were `busy=true` the whole
+time and the account had 25-37 runs queued. Direct ssh to the same box was
+attempted four times (120s, 300s, 900s, 600s) and returned rc=124 every time:
+the session authenticates, the exec request is accepted, and no output ever
+comes back.
+
+So: the six tests have been re-measured on Linux and on a hosted Windows server
+SKU. They have NOT been re-measured on the exact box that produced the original
+FLAKY reports. `windows-flake-ledger.yml` is on the branch and its self-hosted
+job will publish `windows-flake-ledger-<run_id>` whenever the runner frees up.

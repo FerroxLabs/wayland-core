@@ -1,0 +1,20 @@
+EVIDENCE ID : F03-RECEIPT@1c644ccd
+LEDGER ROW  : 1
+ARTIFACT    : `docs/design/2026-07-13-wayland-core-f03-evidence-receipt.md`; implementation source `1c644ccdee8180bd2eded312d391f486be99902d` on `frontier/m0`
+
+== PATH RESOLUTION ==
+[OK]   stat docs/design/2026-07-13-wayland-core-f03-evidence-receipt.md
+       -> docs/design/2026-07-13-wayland-core-f03-evidence-receipt.md  size=4883
+       head:
+# Wayland Core F03 Evidence Receipt
+
+**Status:** versioned evidence and report contract implemented and verified
+
+**Implementation source:** `1c644ccdee8180bd2eded312d391f486be99902d` on `frontier/m0`
+
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t 1c644ccdee8180bd2eded312d391f486be99902d -> commit
+       git log -1 1c644ccdee8180bd2eded312d391f486be99902d -> 1c644ccdee8180bd2eded312d391f486be99902d 2026-07-14 fix(eval): satisfy report writer lint
+
+== VERDICT == CONFIRMED

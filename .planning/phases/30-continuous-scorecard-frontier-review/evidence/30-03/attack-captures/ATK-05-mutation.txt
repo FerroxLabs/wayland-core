@@ -1,0 +1,10 @@
+case: ATK-05
+what: a comparison is built on a leg carrying a recorded instrument defect
+half: MUTATION
+class: comparative
+scope: SCRIPTED_HARNESS
+text: wayland-core's cost is practically indistinguishable from both peers.
+outcome: REFUSED
+rule: confounded_leg_supports_no_comparison
+refusal: claim `P` compares (declared comparative) on `LEG-04`, whose measurement 30-02 recorded as confounded by an instrument defect: The canonical script emits a `write_file` tool call, a name only Hermes exposes; OpenClaw also scored 0/30 on the identical script.
+missing: an unconfounded measurement (`LEG-04` carries a recorded instrument defect)

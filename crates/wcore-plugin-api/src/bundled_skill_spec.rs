@@ -1,8 +1,6 @@
-//! Mirror of `wcore-skills::BundledSkillDefinition` (verified at
-//! `crates/wcore-skills/src/bundled/mod.rs:16`). The host adapter translates
-//! by leaking owned `String`s to satisfy the `&'static str` shape of the
-//! underlying registry — plugin lifetime == process lifetime, so the leak is
-//! acceptable per the bundled-skill registry's own static design.
+//! Owned plugin wire mirror of the host's bundled skill fields. The host moves
+//! these strings into its session-local catalog without depending on this crate
+//! from `wcore-skills`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

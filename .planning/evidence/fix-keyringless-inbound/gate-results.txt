@@ -1,0 +1,80 @@
+GATE RESULTS — lane fix-keyringless-inbound
+Final commit under test: 7c69fef43564cb5957d64fc1d47f2f30adf714dd
+Host: hetzner-dsm, worktree /root/wl-fkri, SHA asserted programmatically before every run.
+All counts read from files with the Read tool, never through the rtk-proxied
+shell (rtk strips "ignored" and "filtered out" — the two fields the anti-vacuity
+rule depends on).
+
+=== FINAL RUN (7c69fef4) ===
+WLRC=0   cargo fmt --all -- --check                       (0 diff lines, run on the Mac)
+WLRC=0   cargo metadata --locked --format-version 1
+WLRC=0   cargo check --workspace --all-targets
+WLRC=0   cargo clippy -p wcore-cli --all-targets -- -D warnings
+             error count 0; control (Checking/Compiling/Finished lines) 2 -> log is real
+WLRC=0   cargo test -p wcore-cli --lib doctor
+             test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 1895 filtered out
+WLRC=0   cargo test -p wcore-agent --lib switch_is_refused_when_durable_sessions_are_disabled
+             test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2255 filtered out
+             (1 executed, NOT a filter that matched nothing — flavour (c) checked)
+WLRC=0   cargo test -p wcore-agent --test headless_durable_session_test
+             test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+The 4 new doctor tests all present and executed:
+  enabled_sessions_report_on ......................................... ok
+  host_forced_degrade_is_not_reported_as_an_operator_choice .......... ok
+  host_forced_wins_even_if_the_config_still_says_enabled ............. ok
+  operator_disabled_sessions_are_not_reported_as_a_host_fault ........ ok
+
+=== ONE RED, PROVEN PRE-EXISTING ===
+WLRC=101  cargo clippy -p wcore-agent --all-targets -- -D warnings
+
+  NOT caused by this lane, established two independent ways:
+  1. The 4 errors are all "the borrowed expression implements the required
+     traits" in test `user_model_identity_wire`. `engine.rs` is mentioned
+     0 times in the whole log.
+  2. The SAME command at an UNTOUCHED base (`/root/wl-fkri-pre`, b8311575)
+     also exits 101.
+  `git diff --name-only <merge-base> HEAD` shows this lane touched
+  user_model_identity_wire 0 times (control: engine.rs 1).
+
+  This is the third independent confirmation of the standing clippy red the
+  fix-headless-keyring lane reported. Not silenced, not mine.
+
+=== A RED I DID CAUSE, AND FIXED ===
+My first attempt added the durable-sessions report as a doctor `CheckResult`
+row. That broke `doctor_shows_yellow_when_key_unset` in
+`crates/wcore-cli/src/tui/surfaces/diagnostics.rs` — a FENCED file.
+
+  at e7bc6d88 (my row absent): test result: ok. 1 passed; 0 failed; 1917 filtered
+  with my row:                 FAILED — "provider `Gemini` missing from /doctor output"
+
+Mechanism, measured not assumed: the TUI converts every `CheckResult` into a
+row and renders into `TestBackend::new(80, 24)`, a fixed 24-line viewport, so
+one extra system row pushes the PROVIDERS section off screen.
+
+Resolution: the report was moved to a printed section in `run()`, following the
+precedent of `print_mcp_section`, whose own doc comment says it is deliberately
+kept out of `collect`/`CheckResult` for exactly this reason. No fenced file was
+edited and no test was weakened. After the move the doctor suite is 27/0.
+
+=== A SECOND SELF-INFLICTED RED, AND ITS FIX ===
+The rework left a duplicated `#[test]` attribute (doctor/mod.rs:697), which
+`-D warnings` rejects as `duplicate-macro-attributes` (clippy-cli 101). Removed.
+
+Worth recording because of what the test count showed: the duplicate had
+registered `host_forced_degrade_is_not_reported_as_an_operator_choice` TWICE
+(it appears on two lines of the pre-fix log), so the suite went 28 -> 27 after
+the repair. A dropping test count is normally alarming; here it is the duplicate
+disappearing, verified by diffing the test-name lists, not by assuming.
+
+=== UNRUN CELLS, COUNTED AND NAMED (5) ===
+1. Real OS keyring arm — structurally unreachable under an isolated profile:
+   `credentials.rs:1362` makes WAYLAND_HOME prefer the in-home vault over the
+   OS keyring. Was UNRUN before this lane; still UNRUN. Not claimed.
+2. macOS — nothing run at this SHA. Changes are platform-neutral.
+3. Windows — nothing run at this SHA.
+4. Discord / Slack / Matrix live inbound — impossible with the available
+   credentials (bot-author drop / xoxb / single personal account), not merely
+   skipped.
+5. `--json-stream` degrade event — decided against, not built, so nothing to
+   test. Seam request recorded instead.

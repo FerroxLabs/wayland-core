@@ -19,6 +19,14 @@
 - **Activation**: `wayland-core --json-stream [other flags]`
 - **Lifecycle**: One process per conversation; process stays alive for multi-turn
 
+> **Normative source.** This document is prose guidance. The machine-readable,
+> digest-pinned producer contract in `crates/wcore-protocol/contracts/desktop/v1/`
+> (JSON Schemas, canonical fixtures, adversarial vectors, `manifest.json`) is the
+> normative wire definition and is byte-checked in CI by `wcore-contract check`.
+> It currently covers 18 commands and 49 events; this document does not yet
+> narrate every one of them. Where the two differ, the corpus wins — and the
+> difference is a documentation bug worth reporting.
+
 ## 1. Agent → Client Events (stdout)
 
 Every line is a JSON object with a `type` field.
@@ -30,24 +38,109 @@ Emitted once after initialization completes. Client MUST wait for this before se
 ```json
 {
   "type": "ready",
-  "version": "0.2.0",
+  "version": "0.12.25",
   "session_id": "a1b2c3",
+  "session_persistence": "durable",
   "capabilities": {
     "tool_approval": true,
     "thinking": true,
     "effort": false,
     "effort_levels": [],
-    "modes": ["default", "auto_edit", "yolo"],
+    "modes": ["default", "auto_edit", "force"],
     "current_mode": "default",
     "mcp": true
+  },
+  "contract": {
+    "name": "wayland-desktop-core",
+    "major": 1,
+    "minor": 11,
+    "generator": "wcore-desktop-contract-gen/12",
+    "fixture_digest": "sha256:0704...",
+    "schema_digest": "sha256:e5d1...",
+    "source_inputs_digest": "sha256:9d59...",
+    "capabilities": { "contract_negotiation": "available" }
+  },
+  "execution_policy": {
+    "critical": true,
+    "contract_version": "1.0",
+    "revision": 0,
+    "reason": "launch",
+    "effective_at_unix_ms": 1721000000000,
+    "policy": {
+      "posture": "smart",
+      "approvals": "prompt",
+      "sandbox": "required",
+      "source": "desktop_local_launch",
+      "managed_floor_active": false
+    }
   }
 }
 ```
 
+`contract` and `execution_policy` are **required**. The reference host observer
+(`wcore_protocol::contract::HostContractObserver`) fails closed before
+negotiation when either is absent or malformed, and `ready` must be the first
+line on the stream. See the pinned corpus at
+`crates/wcore-protocol/contracts/desktop/v1/` for the byte-exact shape.
+
+`session_id` is **required and nullable**, never omitted. It is this event's
+correlation key, and a host keys its own session tracking on it — so a producer
+that drops the key hands the host `undefined` with no accompanying signal, and
+the host cannot tell a degraded Core from a malformed frame from a Core too old
+to know. `session_persistence` states which cause produced the value it holds:
+
+| Value | `session_id` | Meaning |
+|-------|--------------|---------|
+| `durable` | string | A journaled session with crash replay. It survives a restart, can be resumed, and a turn interrupted mid-dispatch resumes itself from the sealed provider request |
+| `journaled_without_replay` | string | A journaled session **without** crash replay. History, provider attempts, tool calls, approvals and deliveries are all recorded and survive a restart; what is missing is the sealed copy of the exact provider request, because this host has no usable OS keyring and no unlocked credentials vault |
+| `disabled_by_operator` | `null` | `[session] enabled = false`. Nothing is journaled, by request |
+| `disabled_by_host` | `null` | **Decode-only, from a producer older than contract minor 12.** Such a Core answered a missing key by turning durable sessions off. A current Core journals instead and never sends this |
+
+### What a host should do with `journaled_without_replay`
+
+Treat the session as durable for history and audit: list it, offer resume, keep
+it. Do **not** show auto-recovery affordances or wait on one.
+
+- A turn interrupted mid-dispatch does not resume itself. The next message on
+  that session is refused with a reconciliation error naming the interrupted
+  turn — surface a resume / reconcile / cancel choice, not a retry spinner.
+- Every turn on such a session also carries a per-turn `info` frame saying
+  replay is off, correlated to that turn's `msg_id`.
+- A `--resume` of a session whose sealed state cannot be opened is refused
+  **by name**, as a single non-retryable `error` frame with **no preceding
+  `ready`**. That session is LOCKED pending a key, not corrupt: leave its
+  journal alone, because restoring `WAYLAND_VAULT_PASSPHRASE_FD` and resuming
+  again recovers it. Only that session is refused — a launch that does not name
+  it starts and journals normally.
+
+To refuse to run this way at all, set `[session] require_durability = true`;
+Core then declines to start rather than accepting turns it could not recover.
+
+Feature-detect via two capabilities on `ready.contract.capabilities`, and they
+are **additive rather than successive**:
+
+- `session_persistence_v1` — the frame SHAPE: `session_id` is always on the
+  wire and `session_persistence` always states the cause. A current Core still
+  declares it, because it still keeps that promise. A Core that declares
+  neither may omit `session_id` entirely, and its absence means nothing in
+  particular.
+- `session_persistence_v2` — the wider VOCABULARY: `session_persistence` may be
+  `journaled_without_replay`. A host that feature-detected on v1 alone minted
+  its switch when the enum had three values; since the enum is closed, such a
+  host must detect v2 before it can accept the fourth.
+
+The keyring-less frame is pinned byte-exact at
+`crates/wcore-protocol/contracts/desktop/v1/compat/events/ready.journaled-without-replay.json`,
+and the legacy value the schema must still accept at
+`.../compat/events/ready.disabled-by-host.legacy.json`.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | string | Protocol version (semver) |
-| `session_id` | string? | Session ID (omitted when sessions are disabled in config) |
+| `session_id` | string \| null | Session ID. **Always present**, `null` when this run has no durable session. Never omitted — see below. `null` means, and now only means, that the operator set `[session] enabled = false`: since 2026-08-02 a host that cannot protect a durable session journals anyway, without the sealed replay copy of the provider request, so it has a real session and names it |
+| `session_persistence` | string | Why `session_id` holds what it holds: `durable`, `journaled_without_replay`, `disabled_by_operator`, or (decode-only, from an older producer) `disabled_by_host`. Required. See §1.1b |
+| `contract` | object | Pinned producer-contract descriptor. Required. Host compares `name`, `major`, `minor`, `generator` and all three digests against its own pin and fails closed on any mismatch |
+| `execution_policy` | object | Launch policy snapshot at `revision` 0 with `reason` `launch` or `resume`. Required. Same envelope as the `execution_policy` event (§1.1a) |
 | `capabilities.tool_approval` | bool | Whether agent supports pause-and-wait tool approval |
 | `capabilities.thinking` | bool | Whether current provider supports extended thinking |
 | `capabilities.effort` | bool | Whether current provider supports reasoning_effort |
@@ -55,6 +148,9 @@ Emitted once after initialization completes. Client MUST wait for this before se
 | `capabilities.modes` | string[] | Available approval modes for `set_mode` command |
 | `capabilities.current_mode` | string | Currently active approval mode |
 | `capabilities.mcp` | bool | Whether MCP tools are available |
+| `capabilities.memory_enabled` | bool (W0) | Long-term cross-session memory is active |
+| `capabilities.online_evolution` | bool (W0) | Online GEPA evolution is active |
+| `capabilities.user_model_backend` | string (W0) | Backend serving the user-selected model (e.g. `local`) |
 | `capabilities.streaming_tools` | bool (W0) | Engine will emit `tool_chunk` events for streaming tool results (W7) |
 | `capabilities.sub_agent_traces` | bool (W0) | Engine will emit `sub_agent_event` with `parent_call_id` (W7) |
 | `capabilities.cost_attribution` | bool (W0) | Engine will emit per-turn/session `cost` events (W6) |
@@ -75,6 +171,144 @@ W6/W7/W8 stay disabled by `wcore-config` until an explicit release flips them on
 Default-off W0 flags are **omitted** from the serialized `capabilities` object
 (`#[serde(skip_serializing_if = "is_false")]`), so v0.1.21 hosts see the original
 seven-field shape unchanged.
+
+### 1.1a `execution_policy`
+
+Emitted immediately after `ready`. It reports the immutable launch authority
+that Core actually enforced; it is not a command and cannot be sent back to
+mint authority.
+
+```json
+{
+  "type": "execution_policy",
+  "critical": true,
+  "contract_version": "1.0",
+  "revision": 1,
+  "reason": "mode_change",
+  "effective_at_unix_ms": 1721000000100,
+  "policy": {
+    "posture": "smart",
+    "approvals": "auto_edit",
+    "sandbox": "required",
+    "source": "protocol",
+    "managed_floor_active": false
+  }
+}
+```
+
+All six top-level fields are **required**. `critical` is always `true`: this is
+an authority-critical sub-contract, so a contract-aware host that does not
+understand the event or its `contract_version` major must fail closed rather
+than drop it. `contract_version` is the execution-policy sub-contract version
+(currently `1.0`; only major `1` is accepted).
+
+`revision` is session-monotonic. It starts at `0` in the `ready` snapshot
+(`reason` `launch` or `resume`) and advances by exactly one for every accepted
+policy change whose serialized `policy` bytes actually changed — an accepted
+no-op `set_mode` therefore does **not** consume a revision. `reason` is
+`launch`, `mode_change`, `resume`, or `expiry`. `effective_at_unix_ms` is
+audit/display evidence only; monotonic runtime deadlines remain the authority
+for dangerous-session expiry.
+
+Reducer rules (`wcore_protocol::execution_policy::ExecutionPolicySequence`):
+a byte-identical repeat of the current revision is an idempotent `Duplicate`; a
+same-revision snapshot with different bytes, a gapped or stale revision, an
+unsupported `contract_version` major, and `critical: false` all fail closed.
+
+`posture` is `smart`, `managed`, or `dangerous`. `approvals` is `prompt`,
+`auto_edit`, or `bypass`; `sandbox` is `required` or `bypass`. Dangerous
+snapshots also carry `dangerous_activation_id` and
+`dangerous_expires_at_unix_ms`; non-dangerous snapshots must omit both.
+
+### 1.1b `workspace_policy`
+
+Emitted after `execution_policy` and again when a local host-approved developer
+capability changes the effective read roots. It is an output-only receipt of
+what Core enforces; echoing any field back cannot mint trust or authority.
+
+```json
+{
+  "type": "workspace_policy",
+  "policy": {
+    "trust": {
+      "level": "trusted",
+      "source": "user",
+      "fingerprint": "d14a...",
+      "explanation": "fingerprint-bound local trust decision is current"
+    },
+    "profile": "trusted_local_smart",
+    "backend": "sandbox-exec",
+    "writable_roots": ["/workspace", "/private/tmp"],
+    "readable_roots": ["/opt/homebrew", "/workspace"],
+    "capabilities": []
+  }
+}
+```
+
+The default for a repository without a current external fingerprint decision is
+`strict`. Managed, remote, and child constraints remain strict regardless of a
+stored local decision. Hosts must display the receipt as effective state, not
+as a selectable trust claim.
+
+### 1.1c Durable turn recovery events (contract v1.1)
+
+Recovery v1 is a fail-closed, content-free view of the durable session
+journal. It lets Desktop reconnect without treating transcript text, provider
+payloads, tool arguments, tool output, paths, or approval secrets as recovery
+authority. Every recovery frame carries `recovery_version: 1` and opaque
+correlation IDs. A recovery cursor binds a journal sequence to a lowercase,
+raw 64-hex SHA-256 content digest; neither component is authoritative on its
+own. Recovery cursor and state digests deliberately omit the `sha256:` prefix
+used by evidence, artifact, and contract digests.
+
+`session_recovery_snapshot` reports one sanitized committed state:
+
+```json
+{
+  "type": "session_recovery_snapshot",
+  "recovery_version": 1,
+  "request_id": "recovery-request-001",
+  "session_id": "session-desktop-001",
+  "cursor": {
+    "journal_sequence": 40,
+    "journal_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "lifecycle": "reconciliation_required",
+  "pending_turn": {
+    "turn_id": "turn-002",
+    "msg_id": "msg-002",
+    "lifecycle": "reconciliation_required",
+    "pending_call_id": "call-tool-002",
+    "reconcile_reason": "tool_outcome_unknown"
+  },
+  "budget": {
+    "tokens_used": 12000,
+    "token_limit": 20000,
+    "cost_used_usd": 1.25,
+    "cost_limit_usd": 5.0
+  }
+}
+```
+
+`session_recovery_replay` contains ordered, content-free milestones after the
+requested cursor. `from` must exactly match the host's accepted cursor, item
+sequences must be contiguous, and `through` must equal the final item cursor.
+An identical sequence with a different digest is a conflict, not a duplicate.
+Transitions without a more specific public milestone use `state_advanced` so
+the cursor sequence remains contiguous without exposing private payloads.
+
+`session_recovery_unavailable` refuses recovery with one typed reason:
+`session_not_found`, `unsupported_version`, `cursor_invalid`, `cursor_ahead`,
+`cursor_digest_mismatch`, `history_gap`, `journal_corrupt`,
+`snapshot_unavailable`, or `unknown_critical_state`. Hosts must not silently
+restart a turn after this event.
+
+`turn_recovery_lifecycle` reports a durable transition for one turn. Lifecycle
+values are `ready`, `streaming`, `awaiting_approval`, `tool_in_flight`,
+`reconciliation_required`, `suspended`, `completed`, `cancelled`, and
+`failed`. A reconciliation reason is required whenever Core cannot prove that
+direct continuation is safe.
 
 ### 1.2 `stream_start`
 
@@ -242,7 +476,12 @@ Current response turn finished.
 |-------|------|-------------|
 | `msg_id` | string | Message ID this turn belongs to |
 | `finish_reason` | `"stop" \| "length" \| "error" \| "max_turns"` | Why the turn ended. `stop`: model finished normally. `length`: hit max_tokens. `error`: provider/runtime error. `max_turns`: the engine hit the per-turn `max_turns` cap (the model did **not** fail) — offer a "Continue" affordance to resume the run rather than a model-error message. Hosts should treat `finish_reason` as an open string and tolerate future values. |
-| `usage` | object? | Token counts (optional; omitted when provider does not report usage) |
+| `usage` | object? | Token counts (optional; omitted when provider does not report usage). In protocol v0.2.0 the three input categories are disjoint: `input_tokens` is uncached input, `cache_read_tokens` is cached input read, and `cache_write_tokens` is input written to cache. Total input processed is their saturating sum. Billing consumers MUST price each category once at its applicable rate; they must not add cache counters to `input_tokens` and then price the cache counters again. |
+
+This v0.2.0 accounting semantic corrects the ambiguous v0.1.21 description
+without changing the JSON field names. A host that previously interpreted
+`input_tokens` as already including the cache counters must update before using
+these values for total-input telemetry, quota enforcement, or billing.
 
 ### 1.10 `error`
 
@@ -506,6 +745,165 @@ All fields are optional. Only provided fields are updated.
 
 > **Validation**: The agent validates `thinking` and `effort` values against the current provider's capabilities. If the provider does not support a feature, the change is rejected with a descriptive message in the `info` event. After processing, a `config_changed` event is always emitted with the updated capabilities.
 
+### 2.7a `grant_workspace_capability`
+
+Ask Core to add the minimum runtime roots derived from a local executable as
+read-only mounts for the rest of this process:
+
+```json
+{
+  "type": "grant_workspace_capability",
+  "executable": "/opt/acme-sdk/bin/acme"
+}
+```
+
+Core accepts this command only when all of these are true:
+
+1. The process was launched locally with `--json-stream` and
+   `--allow-host-workspace-grants`.
+2. The current repository fingerprint is trusted and no managed, remote, or
+   child constraint has selected the strict profile.
+3. The canonical target is an executable regular file outside known credential
+   stores.
+
+Success emits an updated `workspace_policy` receipt followed by an `info`
+event. Refusal emits an `info` event explaining the failed condition. The
+command never adds writable roots, changes approval posture, or disables the OS
+sandbox. Hosts should expose it only behind an explicit local approval UI.
+
+### 2.7b `continue_with_budget`
+
+Add explicit operator-authorized headroom to the active session after a
+provider budget stop:
+
+```json
+{
+  "type": "continue_with_budget",
+  "request_id": "budget-001",
+  "additional_tokens": 250000,
+  "additional_cost_usd": 2.50
+}
+```
+
+`request_id` is required and must match
+`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`: 1–128 ASCII bytes, beginning with an
+alphanumeric byte. Whitespace, Unicode, shell/path punctuation, and longer
+identifiers fail closed in both the JSON Schema and Core decoder. Both grant
+fields are optional individually, but at least one must be positive. Token
+headroom is an unsigned 64-bit integer; negative, fractional, wrong-type, and
+values above `18446744073709551615` fail closed.
+
+The grant applies only to the current session; it does not widen another
+session or a per-user daily limit. Managed sessions reject interactive
+increases so a host cannot override an organization-controlled ceiling.
+
+Core returns a typed `budget_grant_result` correlated by `request_id`:
+
+```json
+{
+  "type": "budget_grant_result",
+  "request_id": "budget-001",
+  "additional_tokens": 250000,
+  "additional_cost_usd": 2.5,
+  "outcome": "granted"
+}
+```
+
+A `granted` result must omit `refusal_reason`. A `refused` result must include
+exactly one reason from the closed refusal vocabulary. Contradictory result
+shapes fail schema validation and typed deserialization.
+
+During an active turn, Core returns terminal `refused` with
+`turn_in_progress`; the host may retry after the terminal turn event with a
+fresh request ID. Replaying the refused request ID returns the exact cached
+terminal refusal; Core never converts it into a later grant. Core never
+acknowledges a grant for later application unless that pending state is durable.
+Identical replay returns the exact cached result without applying the grant
+twice. Reusing a request ID with different grant content is refused with
+`request_id_conflict`. Applied request bindings are
+committed in the same durable budget-authority transaction as the extension,
+so a crash after mutation but before response emission cannot apply the retry
+twice. The durable and response ledgers are finite, fail closed with
+`ledger_capacity_exceeded`, and never evict authoritative prior receipts. A
+host should expose this only as an explicit local action after showing the
+exhausted limit and requested headroom.
+
+### 2.7c `session_resync`
+
+Request a versioned recovery snapshot. Omitting `after` requests the current
+committed snapshot. Supplying `after` also requests sanitized replay strictly
+after that cursor.
+
+```json
+{
+  "type": "session_resync",
+  "recovery_version": 1,
+  "request_id": "recovery-request-001",
+  "session_id": "session-desktop-001",
+  "after": {
+    "journal_sequence": 40,
+    "journal_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+  }
+}
+```
+
+`request_id` makes retries idempotently correlatable. A genesis request omits
+`after`; the genesis cursor returned by Core omits `journal_sequence` but still
+carries its digest. Core responds with a recovery snapshot, optional replay,
+or a typed unavailable event. Unsupported recovery versions fail closed.
+
+### 2.7d `resume_turn`
+
+Apply an explicit action to the interrupted turn state the operator inspected:
+
+```json
+{
+  "type": "resume_turn",
+  "recovery_version": 1,
+  "request_id": "recovery-request-002",
+  "session_id": "session-desktop-001",
+  "turn_id": "turn-002",
+  "cursor": {
+    "journal_sequence": 42,
+    "journal_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "action": "reconcile"
+}
+```
+
+`action` is `continue`, `reconcile`, or `cancel`. The cursor is mandatory and
+must still identify the current committed state. `reconcile` invokes only
+Core-registered authoritative reconcilers; the command cannot carry a
+free-form claim that an external effect succeeded or failed.
+
+### 2.7e `resolve_interrupted_approval`
+
+Resolve the exact approval gate restored for an interrupted durable turn:
+
+```json
+{
+  "type": "resolve_interrupted_approval",
+  "recovery_version": 1,
+  "request_id": "recovery-request-003",
+  "session_id": "session-desktop-001",
+  "turn_id": "turn-002",
+  "cursor": {
+    "journal_sequence": 42,
+    "journal_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "approval_id": "approval-002",
+  "decision": "approve",
+  "answer": "Proceed"
+}
+```
+
+`decision` is `approve` or `deny`; `answer` is optional. Core binds the
+decision to the request, inspected cursor, interrupted turn, and exact durable
+approval ID. A stale cursor or approval ID fails closed. The
+`session_resync`, `resume_turn`, and `resolve_interrupted_approval` command
+objects are closed: unknown top-level fields are rejected instead of silently
+ignored.
+
 ### 2.8 `add_mcp_server`
 
 Dynamically inject an MCP server before the conversation starts. This command is only accepted during the **pre-message phase** — after the `ready` event and before the first `message` command. Any `add_mcp_server` sent after the first `message` is rejected with an error.
@@ -585,7 +983,7 @@ with the original operation or fails it with a deny reason.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `resume_token` | string | yes | Echoed verbatim from the `approval_required` event. Routes the decision to the right pending bridge. |
+| `resume_token` | string | yes | Echoed verbatim from the `approval_required` event. Routes the decision to the right pending bridge. Only ever valid for a NON-EMPTY token: an ordinary tool gate carries `""` and is answered with `tool_approve` / `tool_deny` instead (§1.N+4). |
 | `approved` | bool | yes | `true` to approve and proceed, `false` to deny. |
 | `modifications` | object \| null | no | Reserved for forward-compat: host-side edits to the pending operation (e.g. an edited tool input). Engine currently ignores; future waves may wire this through. |
 
@@ -758,7 +1156,8 @@ wayland-core --json-stream \
   --max-turns <N> \
   --base-url <URL> \
   --system-prompt <TEXT> \
-  --auto-approve          # Start in yolo mode
+  --auto-approve          # Approvals bypassed; the OS sandbox stays on
+  --allow-host-workspace-grants # Optional local read-only runtime approvals
   --workspace <PATH>      # Working directory for file operations
 ```
 
@@ -804,24 +1203,31 @@ decoder MUST honour this contract:
    type-specific interpretation. Do not derive directly into a closed
    enum.
 
-2. **Distinguish three outcomes per line:**
+2. **Negotiate before interpreting contract-aware events.** A current Core
+   `ready` includes a `contract` descriptor with the supported major/minor,
+   generator, fixture/schema/source digests, and capability statuses. A host
+   pinned to this contract fails closed on an unsupported major or a pinned
+   schema/fixture digest mismatch. The reference observer is
+   `wcore_protocol::contract::HostContractObserver`.
+
+3. **Distinguish three outcomes per line:**
    - **Known event type**: the `type` string is in the host's known set;
      render normally.
    - **Unknown event type**: the `type` string is NOT in the host's known
-     set. **Drop silently** — no error log, no exception, no surfaced
-     warning. This is the forward-compatibility path; new wcore versions
-     emit variants the host hasn't learned about.
+     set. Drop it only when the event explicitly carries `"critical": false`.
+     Reject `"critical": true`, a missing classification, or a non-boolean
+     classification. Unknown criticality is critical; hosts must not guess.
    - **Malformed**: input wasn't decodable JSON, OR had no `type` field,
      OR the `type` value wasn't a string. **Log or count with rate
      limiting** — this indicates protocol corruption (framing bugs,
      truncation, injection) and is observable evidence of a problem,
      distinct from normal version skew.
 
-3. **Tolerate unknown fields on known variants.** Read only the fields
+4. **Tolerate unknown fields on known variants.** Read only the fields
    the host expects. Unknown fields on a known event must be ignored;
    they appear when wcore adds new optional fields in future versions.
 
-4. **Use `capabilities` advisory, not permissive.** The `Ready` event's
+5. **Use `capabilities` advisory, not permissive.** The `Ready` event's
    `capabilities` block advertises which event families this wcore
    session will emit. The host CAN read the flags to decide whether to
    add relevant `type` strings to its known set. The host MUST NOT
@@ -830,11 +1236,11 @@ decoder MUST honour this contract:
 
 ### Authoritative test
 
-The behaviour above is enforced in
-`crates/wcore-protocol/tests/host_decoder_contract.rs`. That file
-contains a reference `host_decode` implementation that satisfies this
-contract; use it as the spec when porting the Electron host's decoder
-to match. The production host code lives at
+Legacy additive decoding is characterized in
+`crates/wcore-protocol/tests/host_decoder_contract.rs`. Negotiated,
+fail-closed behavior is enforced by `HostContractObserver` and serialized
+corpus replay in `desktop_contract_adversarial.rs`; use that observer as the
+current reference when porting the Electron host's decoder. The production host code lives at
 `app/src/process/agent/wcore/index.ts` — conformance there is a
 follow-up audit owned by the Wayland Desktop side, not by W0.
 
@@ -862,9 +1268,9 @@ strings. A host that wants to render any of these adds the listed
 
 Some event variants ship without a dedicated `Capabilities.*` flag.
 They are always-emitted; hosts that do not know about them silently
-drop the line per the W0 host decoder contract. As of W8c.3:
-`budget_exceeded` is the only host-tolerated variant on this list
-(plus the long-standing `provider_circuit_event`, see §1.N+5).
+drop the line per the W0 host decoder contract. This includes
+`budget_exceeded`, `provider_circuit_event`, provider evidence events,
+`capability_activation`, and `mid_flight_monitor_decision`.
 Rationale: `BudgetExceeded` is a singular event per session (fires
 once when the first budget cap trips); the flag-per-variant overhead
 exceeds the wire-surface savings.
@@ -916,12 +1322,13 @@ Ready event for the session.
     "turn": 0,
     "model": "claude-3-5-haiku",
     "provider": "anthropic-family",
-    "input_tokens": 1000,
+    "input_tokens": 200,
     "output_tokens": 50,
     "cache_read": 800,
     "cache_write": 0,
     "cache_hit_rate": 0.8,
     "cost_usd": 0.0,
+    "cost_priced": false,
     "tool_calls": [
       {
         "call_id": "tu_01",
@@ -946,12 +1353,13 @@ Ready event for the session.
 | `trace.turn` | u64 | Zero-indexed turn within the session. |
 | `trace.model` | string | Model identifier passed to the provider. |
 | `trace.provider` | string | **Schema-versioned.** W1 emitted coarse provider family (`"anthropic-family"` / `"openai-family"`). W6 upgraded this to the structured per-provider identity sourced from `ProviderCompat.provider_type`: one of `"anthropic"`, `"bedrock"`, `"vertex"`, `"openai"`, `"ollama"`, or `"unknown"`. Hosts MUST tolerate both shapes during the migration window. |
-| `trace.input_tokens` | u64 | Prompt tokens reported by the provider. |
+| `trace.input_tokens` | u64 | Uncached prompt tokens reported by the provider. Protocol v0.2.0 treats this as disjoint from `cache_read` and `cache_write`. |
 | `trace.output_tokens` | u64 | Completion tokens reported by the provider. |
 | `trace.cache_read` | u64 | Provider-reported cache read tokens. |
 | `trace.cache_write` | u64 | Provider-reported cache creation tokens. |
-| `trace.cache_hit_rate` | f64 | `cache_read / input_tokens`. 0.0 when input_tokens is 0. |
-| `trace.cost_usd` | f64 | USD cost for the turn. W6 populates this from the per-provider list-price rows on `ProviderCompat` (per-model pricing is W6.1). Stays `0.0` when no cost row is set (e.g. local providers like Ollama). |
+| `trace.cache_hit_rate` | f64 | `cache_read / (input_tokens + cache_read + cache_write)`, using a saturating denominator. `0.0` when total input is zero. |
+| `trace.cost_usd` | f64 | USD cost for the turn when `cost_priced` is true. A zero with `cost_priced: false` is not a free call. |
+| `trace.cost_priced` | bool | True for metered prices and known-free local inference; false when the active router/model has no authoritative price. Missing on legacy traces defaults to false. |
 | `trace.tool_calls` | array | One `ToolCallTrace` per tool call executed in this turn. |
 | `trace.hook_actions` | array | Hook action records. Empty until W2 wires the hook engine. |
 | `trace.source_product` | string | Always `"wayland-core"` (S5 attribution). |
@@ -978,8 +1386,8 @@ to subscribe.
   "session_id": "sess-001",
   "total_cost_usd": 0.123456,
   "per_turn": [
-    { "turn": 0, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.05 },
-    { "turn": 1, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.073456 }
+    { "turn": 0, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.05, "priced": true },
+    { "turn": 1, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.073456, "priced": true }
   ]
 }
 ```
@@ -987,8 +1395,8 @@ to subscribe.
 | Field | Type | Description |
 |---|---|---|
 | `session_id` | string | The session id that just terminated. |
-| `total_cost_usd` | f64 | Sum of `per_turn[].cost_usd`. Floating-point arithmetic — hosts that need exact accounting should sum `per_turn` themselves. |
-| `per_turn` | array | Per-turn cost rows. Each is `{ turn, model, provider, cost_usd }`. `provider` matches the structured per-provider identity used in `trace_event.trace.provider`. |
+| `total_cost_usd` | f64 | Sum of `per_turn[].cost_usd`. This is only a complete session price when every row has `priced: true`. |
+| `per_turn` | array | Per-turn cost rows. Each is `{ turn, model, provider, cost_usd, priced }`. `priced: false` means unpriced, never free; missing on legacy rows defaults to false. `provider` matches the structured per-provider identity used in `trace_event.trace.provider`. |
 
 #### Host conformance
 
@@ -996,7 +1404,8 @@ to subscribe.
 flag. Hosts that did NOT see `cost_attribution: true` on the Ready event
 MUST drop the variant silently per the Host Decoder Contract. Hosts that
 opt in surface it via their cost UI (totals, per-session breakdown,
-billing-export, etc.). Per-turn cost remains available inline on
+billing-export, etc.). Hosts MUST render a row with `priced: false` as
+"unpriced", not `$0`. Per-turn cost remains available inline on
 `trace_event.trace.cost_usd` when `structured_traces` is also enabled.
 
 ### 1.N+2 sub_agent_event (W7)
@@ -1104,9 +1513,27 @@ All three are gated by the W0-reserved `capabilities.hitl_suspend` flag.
 | Field | Type | Description |
 |---|---|---|
 | `call_id` | string | The pending tool/operation `call_id` awaiting approval. |
-| `resume_token` | string | Opaque server-generated token. Host MUST echo this back verbatim in the corresponding `approval_resume` command — it routes the decision to the right pending `ApprovalBridge`. |
+| `resume_token` | string | Bridge secret, present ONLY for bridge-backed approvals. **EMPTY for an ordinary tool gate** — see "Which command answers this" below. Never echo an empty token. |
+| `correlation_id` | string | Opaque public handle for UI matching. Always equals `call_id`. Omitted from the JSON when empty. |
 | `reason` | string | Short machine-readable reason category (e.g. `"Edit outside workspace root"`, `"Exec — destructive command"`). |
 | `context` | string | Human-readable detail — the host displays this in the approval modal. |
+| `plan` | object | Crucible council proposal card. Present only for a council approval; absent otherwise. |
+
+**Which command answers this.** There are two kinds of `approval_required`
+and they are answered by DIFFERENT commands. A host that always replies with
+`approval_resume` hangs on every ordinary tool gate, because that gate's
+`resume_token` is the empty string and the engine has no bridge entry to
+route it to.
+
+| Kind | How to recognise it | Answer with |
+|---|---|---|
+| Ordinary tool gate (Write outside the workspace, a destructive Bash, …) | `resume_token` is `""` | [`tool_approve`](#23-tool_approve) / [`tool_deny`](#24-tool_deny), keyed by `call_id` |
+| Bridge-backed gate (Crucible council, egress consent) | `resume_token` is a non-empty opaque secret | [`approval_resume`](#210-approval_resume-w7), keyed by `resume_token` |
+
+The bridge secret is deliberately NOT the `call_id`: the model can see the
+`call_id`, so routing approvals on it would let a tool approve itself
+(GHSA-8r7g). `ProtocolSink` additionally strips in-flight secrets from
+streaming tool output.
 
 **`suspend`** — session-level state transition emitted alongside
 `approval_required`. Hosts that render a state pill (Idle / Streaming /
@@ -1205,6 +1632,84 @@ Per the W0 Host Decoder Contract, hosts that haven't learned the
 baseline as any other unknown event. Hosts that render it typically
 surface a banner ("anthropic down, fallback active") and a transient
 indicator on recovery.
+
+### 1.N+5a provider_attempt / provider_retry / provider_failure (F04)
+
+Core emits provider evidence events for every physical request and retry
+decision. These events are always enabled so evaluators and diagnostics can
+distinguish real engine recovery from fixture-side request counts. They are
+additive diagnostics: hosts that do not recognize them MUST drop them silently
+under the Host Decoder Contract.
+
+```json
+{ "type": "provider_attempt", "failure": "http_503" }
+{ "type": "provider_retry", "failure": "http_503" }
+{ "type": "provider_attempt" }
+{ "type": "provider_failure", "failure": "stream_truncated" }
+```
+
+| Event | Field | Type | Description |
+|---|---|---|---|
+| `provider_attempt` | `failure` | string? | One physical provider request. Omitted when that request reached a usable response. |
+| `provider_retry` | `failure` | string? | Core scheduled another request after the typed failure. This is not an additional physical-attempt count. |
+| `provider_failure` | `failure` | string | A failure discovered after the physical request completed, such as a truncated SSE body. It does not by itself imply a retry. |
+
+`failure` is a stable machine-readable class such as `http_429`, `http_503`,
+`timeout`, `connection`, `stream_truncated`, `context_overflow`, or
+`egress_denied`. Hosts MUST treat the value as an open string and MUST NOT parse
+human-readable provider error messages to infer it.
+
+### 1.N+5b capability_activation (F05)
+
+Immediately after `ready`, Core emits typed activation facts for each audited
+capability. This is runtime truth, not a feature advertisement: a capability
+ends startup either at `ready` or at `unavailable` with a stable reason. A
+capability that later performs a real side effect emits a repeatable
+`reached` → `outcome_changed` → `observed` cycle only after that side effect
+succeeds.
+
+```json
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "declared" }
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "configured" }
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "constructed" }
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "ready" }
+{ "type": "capability_activation", "capability": "delegate_isolation", "stage": "unavailable", "reason": "isolation_not_enforced" }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `capability` | string | Stable identity: `pricing_refresher`, `mid_flight_monitor`, `cooldown_tracker`, `learned_policy`, `smart_handoff`, `delegate_isolation`, `procedure_skill_drafting`, or `legacy_auto_skill_drafting`. |
+| `stage` | string | `declared`, `configured`, `constructed`, `ready`, `reached`, `outcome_changed`, `observed`, or terminal `unavailable`. |
+| `reason` | string? | Required only for `unavailable`: `disabled_by_config`, `dependency_unavailable`, `no_production_constructor`, `runtime_path_unwired`, or `isolation_not_enforced`. |
+
+These events are always-on additive diagnostics and have no `Ready.capabilities`
+flag. Hosts SHOULD retain only the latest fact per capability for status UI,
+while evaluators SHOULD validate the complete ordered chain. Unknown capability,
+stage, and reason strings must be handled as forward-compatible values rather
+than granting authority or implying availability.
+
+### 1.N+5c mid_flight_monitor_decision (F10)
+
+Core emits this event when the production mid-flight monitor changes control
+flow. It is always-on and additive: hosts that do not recognize the event MUST
+drop it silently under the Host Decoder Contract.
+
+```json
+{ "type": "mid_flight_monitor_decision", "directive": "replan", "reason": "repeated_tool_route" }
+{ "type": "mid_flight_monitor_decision", "directive": "stop", "reason": "output_stall" }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `directive` | `"replan" \| "stop"` | `replan` means changed-strategy guidance was committed to the next provider request. `stop` means Core bounded the current run. |
+| `reason` | string | Stable class: `output_stall`, `repeated_error`, `repeated_tool_route`, or `budget_exceeded`. Treat future values as open strings. |
+
+For `repeated_tool_route`, the first detected normalized cycle emits `replan`.
+If the same route repeats without material deviation, Core emits `stop` and
+finishes with `max_turns` so the host can offer Continue. `output_stall` covers
+repeated completed provider attempts that return no output after a failed tool
+round; absolute request/stream hang timeouts are an F15 provider-governance
+responsibility, not an implied guarantee of this event.
 
 ### 1.N+6 browser_event (W8c.1)
 
@@ -1366,9 +1871,14 @@ would drop it silently per W0).
 > `Once` — every send gets its own confirmation card.
 >
 > The approval gate IS the delegation contract: a host that spawns the
-> engine with `--auto-approve` / `--force` (or grants wire-force via
-> `WAYLAND_ALLOW_WIRE_FORCE=1`) is opting out of that gate and MUST
-> supply its own confirmation UX before fulfilling these requests.
+> engine with `--auto-approve` or tier 1
+> (`--dangerously-skip-permissions`, aliases `--force` / `--yolo`), or grants
+> wire-force via `WAYLAND_ALLOW_WIRE_FORCE=1`, is opting out of that gate and
+> MUST supply its own confirmation UX before fulfilling these requests. These
+> approval controls do not disable the OS sandbox. The tier-2 Dangerous posture
+> (`--dangerously-skip-permissions-and-sandbox`, deprecated alias
+> `--dangerous`) can only be selected at a local process launch and cannot be
+> requested over the JSON stream.
 
 ```json
 {

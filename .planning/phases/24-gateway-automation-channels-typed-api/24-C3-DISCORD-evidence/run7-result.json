@@ -1,0 +1,130 @@
+{
+  "schema": "wayland.discord.inbound/1",
+  "verdict": "PASS",
+  "instrument_fault": false,
+  "instrument_faults": [],
+  "legs": [
+    {
+      "leg": "admit",
+      "ok": true,
+      "detail": "replies=1 (want exactly 1), dispatched_to_sockets=1"
+    },
+    {
+      "leg": "dedupe",
+      "ok": true,
+      "detail": "first=1 after_replay=1 (want unchanged), positive_control=1 (want 1)"
+    },
+    {
+      "leg": "access",
+      "ok": true,
+      "detail": "stranger_replies=0 (want 0), allowed_control=1 (want 1)"
+    },
+    {
+      "leg": "bind",
+      "ok": true,
+      "detail": "A->900000001 (want 900000001), B->900000002 (want 900000002)"
+    },
+    {
+      "leg": "route",
+      "ok": true,
+      "detail": "A_reply_carries_A=true, A_reply_leaks_B=false"
+    },
+    {
+      "leg": "steady",
+      "ok": true,
+      "detail": "submitted=12 answered=12 lost=0 duplicated=0"
+    }
+  ],
+  "legs_passed": 6,
+  "legs_total": 6,
+  "max_concurrent_gateway_connections": 1,
+  "total_gateway_connections": 1,
+  "identify_count": 1,
+  "resume_count": 0,
+  "heartbeats": 14,
+  "dispatched_total": 20,
+  "dispatch_socket_deliveries": 20,
+  "arrivals_total": 18,
+  "llm_turns": 18,
+  "steady_per_token": [
+    {
+      "token": "f24c3-disc-steady0-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady1-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady2-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady3-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady4-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady5-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady6-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady7-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady8-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady9-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady10-b96acb",
+      "replies": 1
+    },
+    {
+      "token": "f24c3-disc-steady11-b96acb",
+      "replies": 1
+    }
+  ],
+  "steady_lost": [],
+  "steady_duplicated": [],
+  "fixture_coverage": {
+    "implemented": [
+      "op10_hello",
+      "op2_identify",
+      "op0_ready",
+      "op1_heartbeat/op11_ack",
+      "op6_resume_with_replay",
+      "op0_message_create_dispatch",
+      "rest_users_me",
+      "rest_create_message",
+      "rest_typing",
+      "rest_reactions"
+    ],
+    "not_implemented": [
+      "zlib/etf_compression",
+      "shard_negotiation",
+      "rate_limit_buckets",
+      "guild_or_permission_state",
+      "voice",
+      "op9_invalid_session_negotiation"
+    ]
+  },
+  "fixture_notes": [],
+  "notes": [
+    "discord fixture on http://127.0.0.1:46187 (gateway ws://127.0.0.1:46187)",
+    "llm fixture http://127.0.0.1:36353",
+    "gateway IDENTIFYed after ~5750ms (tcp=25 upgrades=1 live=1)",
+    "settling 30000ms before the steady-state leg"
+  ]
+}

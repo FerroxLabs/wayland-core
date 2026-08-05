@@ -8,12 +8,16 @@
 //! failure dump.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::task::JoinHandle;
 
+use crate::redaction::SecretRedactor;
+
 const RING_CAPACITY: usize = 50;
+const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 
 /// Handle to a background drain task. Drop = task is cancelled
 /// (the underlying `child.stderr` is also closed when the child exits,
@@ -21,6 +25,7 @@ const RING_CAPACITY: usize = 50;
 /// tests).
 pub struct StderrCapture {
     buf: Arc<Mutex<VecDeque<String>>>,
+    secret_detected: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -33,37 +38,48 @@ impl StderrCapture {
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
+        Self::spawn_redacted(stderr, SecretRedactor::default())
+    }
+
+    pub(crate) fn spawn_redacted<R>(stderr: R, redactor: SecretRedactor) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
         let buf = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
         let buf_for_task = Arc::clone(&buf);
+        let secret_detected = Arc::new(AtomicBool::new(false));
+        let detected_for_task = Arc::clone(&secret_detected);
 
         let handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut line = Vec::new();
+            let mut reader = stderr;
+            let mut chunk = [0_u8; 8192];
+            let mut line = VecDeque::new();
             loop {
-                line.clear();
-                // read_until handles partial UTF-8 cleanly — we lossy-
-                // convert below.
-                match reader.read_until(b'\n', &mut line).await {
+                match reader.read(&mut chunk).await {
                     Ok(0) => break, // EOF
-                    Ok(_) => {
-                        // Trim the trailing newline if present so the
-                        // ring buffer stores clean lines.
-                        let s = String::from_utf8_lossy(&line);
-                        let s = s.trim_end_matches('\n').trim_end_matches('\r').to_string();
-                        if let Ok(mut q) = buf_for_task.lock() {
-                            if q.len() == RING_CAPACITY {
-                                q.pop_front();
+                    Ok(count) => {
+                        for byte in &chunk[..count] {
+                            if *byte == b'\n' {
+                                push_line(&buf_for_task, &mut line, &redactor, &detected_for_task);
+                            } else {
+                                if line.len() == MAX_CAPTURE_BYTES {
+                                    line.pop_front();
+                                }
+                                line.push_back(*byte);
                             }
-                            q.push_back(s);
                         }
                     }
                     Err(_) => break,
                 }
             }
+            if !line.is_empty() {
+                push_line(&buf_for_task, &mut line, &redactor, &detected_for_task);
+            }
         });
 
         Self {
             buf,
+            secret_detected,
             handle: Mutex::new(Some(handle)),
         }
     }
@@ -76,7 +92,18 @@ impl StderrCapture {
             Err(p) => p.into_inner(),
         };
         let lines: Vec<&str> = q.iter().map(String::as_str).collect();
-        lines.join("\n")
+        bounded_tail(lines.join("\n"))
+    }
+
+    pub(crate) fn secret_detected(&self) -> bool {
+        self.secret_detected.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn finish(&self) {
+        let handle = self.handle.lock().ok().and_then(|mut handle| handle.take());
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
     }
 
     /// Best-effort cancel of the drain task. Used by tests so the
@@ -89,6 +116,54 @@ impl StderrCapture {
             h.abort();
         }
     }
+}
+
+fn push_line(
+    buf: &Arc<Mutex<VecDeque<String>>>,
+    line: &mut VecDeque<u8>,
+    redactor: &SecretRedactor,
+    secret_detected: &AtomicBool,
+) {
+    if line.back() == Some(&b'\r') {
+        line.pop_back();
+    }
+    let bytes = line.make_contiguous();
+    let value = bounded_tail(String::from_utf8_lossy(bytes).into_owned());
+    let (value, detected) = redactor.text(value);
+    if detected {
+        secret_detected.store(true, Ordering::Release);
+    }
+    line.clear();
+    if let Ok(mut queue) = buf.lock() {
+        if queue.len() == RING_CAPACITY {
+            queue.pop_front();
+        }
+        queue.push_back(value);
+        while joined_len(&queue) > MAX_CAPTURE_BYTES {
+            if queue.len() == 1 {
+                if let Some(value) = queue.front_mut() {
+                    *value = bounded_tail(std::mem::take(value));
+                }
+                break;
+            }
+            queue.pop_front();
+        }
+    }
+}
+
+fn joined_len(queue: &VecDeque<String>) -> usize {
+    queue.iter().map(String::len).sum::<usize>() + queue.len().saturating_sub(1)
+}
+
+fn bounded_tail(value: String) -> String {
+    if value.len() <= MAX_CAPTURE_BYTES {
+        return value;
+    }
+    let mut start = value.len() - MAX_CAPTURE_BYTES;
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value[start..].to_string()
 }
 
 impl Drop for StderrCapture {
@@ -116,9 +191,8 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &mut tokio::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            use std::io::Read;
             let mut tmp = vec![0u8; buf.remaining()];
-            let n = self.0.read(&mut tmp)?;
+            let n = std::io::Read::read(&mut self.0, &mut tmp)?;
             buf.put_slice(&tmp[..n]);
             std::task::Poll::Ready(Ok(()))
         }
@@ -155,5 +229,42 @@ mod tests {
         // The TAIL should be present; the head should be gone.
         assert!(snap.contains("line-119"), "missing last line: {snap:?}");
         assert!(!snap.contains("line-5\n"), "head should be evicted");
+    }
+
+    #[tokio::test]
+    async fn newline_free_payload_is_byte_bounded() {
+        const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+        const TAIL: &[u8] = b"stderr-tail-sentinel";
+
+        let mut bytes = vec![b'x'; 256 * 1024];
+        bytes.extend_from_slice(TAIL);
+        let cap = StderrCapture::spawn(CursorAdapter(Cursor::new(bytes)));
+        sleep(Duration::from_millis(50)).await;
+
+        let snap = cap.snapshot();
+        assert!(
+            snap.ends_with(std::str::from_utf8(TAIL).unwrap()),
+            "bounded capture must retain the newest stderr bytes"
+        );
+        assert!(
+            snap.len() <= MAX_CAPTURE_BYTES,
+            "newline-free stderr exceeded {MAX_CAPTURE_BYTES} bytes: captured {}",
+            snap.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn redacts_and_flags_secret_before_retention() {
+        const SECRET: &str = "secret-canary-123";
+        let cap = StderrCapture::spawn_redacted(
+            CursorAdapter(Cursor::new(format!("before {SECRET} after\n").into_bytes())),
+            SecretRedactor::from_secret(Some(SECRET.to_string())),
+        );
+        cap.finish().await;
+
+        let retained = cap.snapshot();
+        assert!(!retained.contains(SECRET));
+        assert!(retained.contains("[REDACTED]"));
+        assert!(cap.secret_detected());
     }
 }

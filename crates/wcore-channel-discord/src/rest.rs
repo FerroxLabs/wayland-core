@@ -50,11 +50,20 @@ pub struct CreateMessageBody<'a> {
     pub nonce: Option<&'a str>,
 }
 
-/// Generate a process-unique nonce for Discord's optimistic-send dedup.
-/// The global monotonic counter guarantees uniqueness within a process;
-/// the wall-clock millis prefix keeps it distinct across restarts. The
-/// `-` separator makes the `{ms}-{n}` concatenation unambiguous, and the
-/// whole string stays well under Discord's 25-char cap.
+/// Discord's `nonce` is capped at 25 characters.
+const MAX_NONCE_LEN: usize = 25;
+
+/// Generate a process-unique nonce for a send with no delivery key.
+///
+/// The global monotonic counter guarantees uniqueness within a process and the
+/// wall-clock millis prefix keeps it distinct across restarts. **That
+/// distinctness is correct HERE and wrong for a keyed send** — an unkeyed
+/// message has no logical identity to collapse against, so presenting a stable
+/// nonce would let Discord suppress a genuinely new message. A keyed send uses
+/// [`nonce_for_key`] instead.
+///
+/// The `-` separator makes the `{ms}-{n}` concatenation unambiguous, and the
+/// whole string stays well under the cap.
 pub(crate) fn next_nonce() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,6 +74,32 @@ pub(crate) fn next_nonce() -> String {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     format!("{ms:x}-{n:x}")
+}
+
+/// Derive a nonce from the gateway's outbound delivery key.
+///
+/// The nonce field exists so Discord can collapse a re-sent create-message
+/// request. Until this existed the adapter only ever produced [`next_nonce`],
+/// whose documented property was that it is *"distinct across restarts"* — so
+/// the token deliberately differed on exactly the replay it was there to
+/// suppress, and the field bought nothing beyond a single process's retry loop.
+///
+/// The delivery key is hashed rather than truncated: Discord caps the nonce at
+/// 25 characters, and a delivery key is `cron:{job_id}:{epoch_millis}` whose
+/// DISTINGUISHING tail (the timestamp) is what truncation would cut off — two
+/// occurrences of one job would collapse into a single nonce and the second
+/// would be suppressed as a duplicate. That is a message loss, so truncation is
+/// not an option here.
+pub(crate) fn nonce_for_key(key: &str) -> String {
+    // FNV-1a, 64-bit. Collision avoidance, not a security boundary.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let n = format!("wl{h:016x}");
+    debug_assert!(n.len() <= MAX_NONCE_LEN);
+    n
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,6 +330,86 @@ pub(crate) async fn add_reaction(
     status_to_result(resp.status(), "reaction")
 }
 
+/// Body of `PATCH /channels/{c}/messages/{m}` — the edit.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct EditMessageBody<'a> {
+    pub content: &'a str,
+}
+
+/// Edit an already-sent message via
+/// `PATCH /channels/{channel_id}/messages/{message_id}` (`200` with the
+/// updated message object).
+///
+/// Single attempt. `send_message` retries because a lost send is a lost
+/// message; an edit that fails is visible to its caller and re-issuable by
+/// them, and Discord's edit endpoint has no idempotency slot, so a blind retry
+/// buys nothing and can only re-apply an edit the caller may have superseded.
+pub(crate) async fn edit_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    channel_id: &str,
+    message_id: &str,
+    content: &str,
+) -> Result<Message, DiscordError> {
+    let url = format!("{api_base}/api/v10/channels/{channel_id}/messages/{message_id}");
+    let auth = format!("Bot {bot_token}");
+    let resp = http
+        .patch(&url)
+        .header(reqwest::header::AUTHORIZATION, &auth)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&EditMessageBody { content })
+        .send()
+        .await
+        .map_err(|e| DiscordError::Http(format!("network: {e}")))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let bytes = resp.bytes().await.unwrap_or_default();
+        let err: ErrorResponse = serde_json::from_slice(&bytes).unwrap_or_default();
+        let desc = err.message.unwrap_or_else(|| format!("status {status}"));
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(DiscordError::Auth(desc));
+        }
+        return Err(DiscordError::Rejected {
+            code: status.as_u16(),
+            description: desc,
+        });
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| DiscordError::Http(format!("body read: {e}")))?;
+    serde_json::from_slice(&bytes).map_err(|e| DiscordError::Decode(e.to_string()))
+}
+
+/// Delete an already-sent message via
+/// `DELETE /channels/{channel_id}/messages/{message_id}` (`204 No Content`).
+///
+/// Discord answers `404 Unknown Message` for an id that is not there. That is
+/// surfaced as [`DiscordError::Rejected`] rather than swallowed as success:
+/// "already gone" and "we deleted it" are the same end state but not the same
+/// fact, and an operator chasing a message that was never sent needs to know
+/// which one happened.
+pub(crate) async fn delete_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), DiscordError> {
+    let url = format!("{api_base}/api/v10/channels/{channel_id}/messages/{message_id}");
+    let auth = format!("Bot {bot_token}");
+    let resp = http
+        .delete(&url)
+        .header(reqwest::header::AUTHORIZATION, &auth)
+        .send()
+        .await
+        .map_err(|e| DiscordError::Http(format!("network: {e}")))?;
+    status_to_result(resp.status(), "delete")
+}
+
 /// Discord media CDN hosts. Inbound `attachment.url` values are attacker-
 /// controlled (they arrive verbatim in gateway JSON), so media fetches are
 /// confined to these hosts — fail-closed against SSRF to internal/metadata
@@ -332,8 +447,13 @@ pub(crate) async fn download_bytes(
     // Stream the body with a hard cap so a CDN response that omits/lies about
     // Content-Length can't buffer unbounded into an OOM (defense-in-depth on
     // top of the CDN host allowlist above).
-    const MAX_MEDIA_BYTES: usize = 100 * 1024 * 1024;
-    let bytes = wcore_egress::read_body_capped(resp, MAX_MEDIA_BYTES)
+    //
+    // The cap is the adapter's DECLARED bound, not a second hardcoded number.
+    // It used to be a private `const MAX_MEDIA_BYTES = 100 MiB` while
+    // `media_bounds()` advertised 25 MiB to anyone who asked — an advertised
+    // limit no code path read.
+    let max_bytes = usize::try_from(crate::MEDIA_BOUNDS.max_bytes).unwrap_or(usize::MAX);
+    let bytes = wcore_egress::read_body_capped(resp, max_bytes)
         .await
         .map_err(|e| DiscordError::Http(format!("media body read: {e}")))?;
     Ok(bytes)
@@ -502,6 +622,37 @@ mod reaction_tests {
     /// the nonce is `[0-9a-f-]`). Kept tiny and local.
     fn regex_escape(s: &str) -> String {
         s.replace('-', r"\-")
+    }
+
+    /// The property that makes the nonce worth anything: the SAME logical
+    /// delivery produces the SAME nonce from a DIFFERENT process.
+    ///
+    /// `next_nonce` cannot do this — its documented behaviour is to be
+    /// "distinct across restarts", which defeats the only replay Discord's
+    /// nonce field could suppress. This asserts the opposite property for the
+    /// keyed derivation, and asserts that `next_nonce` still does NOT have it,
+    /// because an unkeyed send must not present a collapsible token.
+    #[test]
+    fn the_keyed_nonce_is_stable_across_processes_and_the_unkeyed_one_is_not() {
+        let a = nonce_for_key("cron:job-a:1785121776528");
+        let again = nonce_for_key("cron:job-a:1785121776528");
+        assert_eq!(a, again, "the same delivery must map to the same nonce");
+
+        // A different occurrence of the SAME job must NOT collapse. Truncating
+        // the key instead of hashing it would break exactly this, because the
+        // distinguishing timestamp is the TAIL.
+        assert_ne!(a, nonce_for_key("cron:job-a:1785121776529"));
+        assert_ne!(a, nonce_for_key("cron:job-b:1785121776528"));
+
+        assert!(
+            a.len() <= MAX_NONCE_LEN,
+            "nonce must fit Discord's {MAX_NONCE_LEN}-char cap, got {} for {a}",
+            a.len()
+        );
+
+        // And the unkeyed generator keeps its distinctness, which is correct
+        // for a send with no logical identity.
+        assert_ne!(next_nonce(), next_nonce());
     }
 
     #[tokio::test]

@@ -1,0 +1,43 @@
+file=crates/wcore-tools/src/kubectl_tool.rs lines=610
+=== env::set_var at line 531 ===
+  518|         let direct = KubectlTool::new().execute(input).await;
+  519|         assert!(direct.is_error);
+  520|         assert!(direct.content.contains("sandbox UNAVAILABLE"));
+  521|     }
+  522| 
+  523|     #[tokio::test]
+  524|     #[serial_test::serial]
+  525|     async fn parallel_session_runtimes_do_not_share_env_passthrough() {
+  526|         const ALPHA: &str = "WCORE_F09_SESSION_ALPHA";
+  527|         const BETA: &str = "WCORE_F09_SESSION_BETA";
+  528| 
+  529|         // SAFETY: serial_test excludes other environment-mutating tests.
+  530|         unsafe {
+  531|             std::env::set_var(ALPHA, "alpha-value");
+  532|             std::env::set_var(BETA, "beta-value");
+  533|         }
+  534| 
+  535|         let alpha_capture = Arc::new(Mutex::new(Vec::new()));
+  536|         let beta_capture = Arc::new(Mutex::new(Vec::new()));
+  537|         let alpha_runtime = Arc::new(
+=== env::set_var at line 532 ===
+  519|         assert!(direct.is_error);
+  520|         assert!(direct.content.contains("sandbox UNAVAILABLE"));
+  521|     }
+  522| 
+  523|     #[tokio::test]
+  524|     #[serial_test::serial]
+  525|     async fn parallel_session_runtimes_do_not_share_env_passthrough() {
+  526|         const ALPHA: &str = "WCORE_F09_SESSION_ALPHA";
+  527|         const BETA: &str = "WCORE_F09_SESSION_BETA";
+  528| 
+  529|         // SAFETY: serial_test excludes other environment-mutating tests.
+  530|         unsafe {
+  531|             std::env::set_var(ALPHA, "alpha-value");
+  532|             std::env::set_var(BETA, "beta-value");
+  533|         }
+  534| 
+  535|         let alpha_capture = Arc::new(Mutex::new(Vec::new()));
+  536|         let beta_capture = Arc::new(Mutex::new(Vec::new()));
+  537|         let alpha_runtime = Arc::new(
+  538|             SandboxRegistry::new(Arc::new(EnvCaptureBackend {

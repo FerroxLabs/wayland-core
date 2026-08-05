@@ -1,0 +1,17 @@
+=== cargo run -p wcore-agent --features voice --example f27_voice_capture
+=== host: seandesktop, native Windows x86_64, over ssh (SESSIONNAME empty, non-interactive)
++ & cargo run -p wcore-agent --features voice --example f27_voice_captu ...
+     Running `target\debug\examples\f27_voice_capture.exe`
+F27_VOICE=BACKEND_BOUND cpal bound a default input device
+F27_VOICE=RECORDING started, capturing for 3s
+F27_VOICE=RMS_DURING 5
+F27_VOICE=WAV_PATH C:\Users\seand\AppData\Local\Temp\wayland-voice-1785259888748656500.wav
+F27_VOICE=WAV_BYTES 96044
+F27_VOICE=CANCELLED cleanly, recorder idle
+F27_VOICE=CANCEL_IDEMPOTENT second cancel on an idle recorder is a no-op
+F27_VOICE_RC=0
+
+=== status file, read back by a SEPARATE ssh call (exit status is not trusted across this transport) ===
+WT_HEAD=a5cedb3
+WLRC=0
+WLDONE

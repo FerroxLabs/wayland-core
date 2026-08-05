@@ -62,12 +62,15 @@ use wcore_types::message::ContentBlock;
 
 use crate::confirm::ToolConfirmer;
 use crate::hooks::HookEngine;
+use crate::journal_effects::TurnEffectScope;
 use crate::orchestration::graph::NodeExecutor;
 use crate::orchestration::{
-    ExecutionControl, StreamingContext, ToolCallOutcome, execute_tool_calls_with_approval,
-    execute_tool_calls_with_budget, execute_tool_calls_with_policy_gate,
+    ExecutionControl, StreamingContext, ToolCallOutcome,
+    execute_tool_calls_with_approval_budget_and_effects,
+    execute_tool_calls_with_budget_and_effects, filter_tool_calls_by_policy, merge_policy_outcome,
 };
 use crate::policy_gate::PolicyGate;
+use crate::tool_budget::ToolBudgetTracker;
 
 /// Per-turn shared state moved into the adapter for the duration of a
 /// graph walk. The engine `take()`s from these cells before invoking
@@ -102,6 +105,8 @@ pub struct AgentExecutorConfig {
     pub compaction_level: wcore_compact::CompactionLevel,
     pub toon_enabled: bool,
     pub streaming: Option<StreamingContext>,
+    /// Shared run-scoped tool accounting backed by the execution envelope.
+    pub tool_budget: Option<ToolBudgetTracker>,
     /// When `Some`, dispatch goes through the JSON-protocol approval
     /// flow (`execute_tool_calls_with_approval`); otherwise it uses the
     /// budget-aware terminal-confirmation path
@@ -117,13 +122,15 @@ pub struct AgentExecutorConfig {
     /// unchanged. `SubAgent { id, .. }` activates the learned-policy
     /// pre-filter below (see `dispatch_once`).
     pub actor: CallActor,
-    /// v0.8.0 Task I (1.D.3): opt-in learned-policy pre-filter for
-    /// sub-agent callers. When `Some` AND `actor.is_sub_agent()`, each
-    /// tool call's `(name, argv)` is run through the policy BEFORE the
-    /// approval path. A deny short-circuits with an error
-    /// `ToolResult`; an allow or `Ask` falls through to the normal
-    /// dispatch path. `None` (the default) preserves byte-identical
-    /// pre-task-I behaviour even when `actor` is set.
+    /// v0.8.0 Task I (1.D.3), re-wired in Phase 22: opt-in learned-policy
+    /// pre-filter for sub-agent callers. When `Some` AND
+    /// `actor.is_sub_agent()`, each tool call's `(name, argv)` is run through
+    /// the policy AFTER `policy_gate` and BEFORE the approval path. A deny
+    /// short-circuits with an error `ToolResult`; an allow or `Ask` falls
+    /// through to the normal dispatch path, so this filter can only narrow —
+    /// it can neither resurrect a gate-denied call nor skip approval. `None`
+    /// (the default) preserves byte-identical pre-task-I behaviour even when
+    /// `actor` is set.
     pub learned_policy: Option<Arc<LearnedPolicy>>,
     /// AUDIT B-1 / A2 — session-root cancellation token threaded into
     /// every tool dispatch. `engine::run` passes a child of the
@@ -136,6 +143,10 @@ pub struct AgentExecutorConfig {
     /// preventing the agent's own writes from being treated as user edits.
     pub file_write_notifier:
         Option<std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>>,
+    /// Unit-test-only crash cut captured before the graph walker moves tool
+    /// dispatch into its spawned node task.
+    #[cfg(test)]
+    pub(crate) dispatcher_crash_cut: Option<super::DispatcherCrashCut>,
 }
 
 /// Approval-flow plumbing for JSON-protocol hosts (e.g. Wayland Desktop).
@@ -144,7 +155,6 @@ pub struct ApprovalChannel {
     pub manager: Arc<ToolApprovalManager>,
     pub writer: Arc<dyn ProtocolEmitter>,
     pub msg_id: String,
-    pub auto_approve: bool,
 }
 
 /// Production `NodeExecutor` adapter — wraps `execute_tool_calls_*`.
@@ -156,6 +166,9 @@ pub struct ApprovalChannel {
 /// shared `turn_cell.outcome` slot.
 pub struct AgentNodeExecutor {
     cfg: AgentExecutorConfig,
+    /// F13 durable authority is adapter-private so the public
+    /// `AgentExecutorConfig` struct remains source-compatible.
+    effect_scope: Option<TurnEffectScope>,
     /// Per-turn shared state (tool calls in, outcome + hooks out).
     /// `Arc<TokioMutex<...>>` because the executor is held behind an
     /// `Arc<dyn NodeExecutor>` and the graph may invoke `run_agent`
@@ -181,9 +194,15 @@ impl AgentNodeExecutor {
     pub fn new(cfg: AgentExecutorConfig, turn_cell: Arc<TokioMutex<TurnCell>>) -> Self {
         Self {
             cfg,
+            effect_scope: None,
             turn_cell,
             dispatched: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn with_effect_scope(mut self, effect_scope: Option<TurnEffectScope>) -> Self {
+        self.effect_scope = effect_scope;
+        self
     }
 }
 
@@ -257,7 +276,19 @@ impl NodeExecutor for AgentNodeExecutor {
         drop(cell);
 
         // (f) Dispatch with no lock held.
-        let (outcome, hooks_back) = dispatch_once(&self.cfg, &tool_calls, hooks_owned).await;
+        let dispatch = dispatch_once(
+            &self.cfg,
+            &tool_calls,
+            hooks_owned,
+            self.effect_scope.as_ref(),
+        );
+        #[cfg(test)]
+        let (outcome, hooks_back) = match self.cfg.dispatcher_crash_cut {
+            Some(cut) => super::scope_dispatcher_crash_cut(cut, dispatch).await,
+            None => dispatch.await,
+        };
+        #[cfg(not(test))]
+        let (outcome, hooks_back) = dispatch.await;
 
         let carrier = match &outcome {
             Ok(_) => Value::Object(serde_json::Map::new()),
@@ -279,78 +310,100 @@ async fn dispatch_once(
     cfg: &AgentExecutorConfig,
     tool_calls: &[ContentBlock],
     mut hooks: Option<HookEngine>,
+    effect_scope: Option<&TurnEffectScope>,
 ) -> (
     Result<ToolCallOutcome, ExecutionControl>,
     Option<HookEngine>,
 ) {
-    // v0.8.1 U11 — sub-agent ACL pre-filter scope-down. The 1.D.3
-    // pre-filter shipped in v0.8.0 I never fires in production
-    // (CallActor::SubAgent is never constructed; LearnedPolicy::new is
-    // never wired into AgentExecutorConfig). Removed pending a real
-    // sub-agent spawn path that sets the actor + a procedural-memory
-    // policy source. CallActor type is retained on AgentExecutorConfig
-    // because it defaults to Root (zero overhead) and is ready to
-    // activate when needed.
-    let outcome = if let Some(gate) = cfg.policy_gate.as_ref() {
-        execute_tool_calls_with_policy_gate(
+    // Phase 22 (22-02 Task 3) — the v0.8.0 1.D.3 sub-agent ACL pre-filter is
+    // WIRED again, and this time it has a production caller: `AgentSpawner`
+    // stamps every child engine with `CallActor::SubAgent` and hands it the
+    // parent's `LearnedPolicy`. Before this, `AgentExecutorConfig` carried a
+    // `pub learned_policy` field with ZERO readers anywhere in the workspace
+    // while its own doc comment claimed the field was consulted here — a knob
+    // that did nothing, which is the advertised-but-dead class.
+    //
+    // The policy gate is an unconditional floor, not an alternative approval
+    // rail, and the learned policy is strictly downstream of it: see
+    // `filter_tool_calls_by_policy`, which consults the gate first and only
+    // offers the survivors to the learned policy, so the pre-filter can
+    // subtract but never add. Filter first, then send every allowed call
+    // through the host or terminal approval path selected for this session.
+    let learned = cfg
+        .actor
+        .is_sub_agent()
+        .then_some(cfg.learned_policy.as_deref())
+        .flatten();
+    let mut filtered = (cfg.policy_gate.is_some() || learned.is_some())
+        .then(|| filter_tool_calls_by_policy(tool_calls, cfg.policy_gate.as_ref(), learned));
+    if let Some(filtered) = filtered.as_mut() {
+        filtered.journal_denials(&cfg.tools, effect_scope, tool_calls);
+    }
+    let allowed_calls = filtered.as_ref().map(|calls| calls.allowed_calls());
+    let dispatch_calls = allowed_calls.as_deref().unwrap_or(tool_calls);
+    let effect_ordinals = filtered.as_ref().map(|calls| {
+        calls
+            .allowed
+            .iter()
+            .map(|(original_ordinal, _)| *original_ordinal as u64)
+            .collect::<Vec<_>>()
+    });
+
+    let outcome = if let Some(approval) = cfg.approval.as_ref() {
+        execute_tool_calls_with_approval_budget_and_effects(
             &cfg.tools,
-            tool_calls,
-            &cfg.confirmer,
-            hooks.as_mut(),
-            cfg.compaction_level,
-            cfg.toon_enabled,
-            cfg.streaming.clone(),
-            None,
-            Some(gate),
-            &cfg.cancel,
-            cfg.file_write_notifier.as_ref(),
-        )
-        .await
-    } else if let Some(approval) = cfg.approval.as_ref() {
-        execute_tool_calls_with_approval(
-            &cfg.tools,
-            tool_calls,
+            dispatch_calls,
             &approval.manager,
             &approval.writer,
             &approval.msg_id,
-            approval.auto_approve,
             &cfg.allow_list,
             hooks.as_mut(),
             cfg.compaction_level,
             cfg.toon_enabled,
+            cfg.tool_budget.as_ref(),
             &cfg.cancel,
             cfg.file_write_notifier.as_ref(),
+            effect_scope,
+            effect_ordinals.as_deref(),
         )
         .await
     } else {
-        execute_tool_calls_with_budget(
+        execute_tool_calls_with_budget_and_effects(
             &cfg.tools,
-            tool_calls,
+            dispatch_calls,
             &cfg.confirmer,
             hooks.as_mut(),
             cfg.compaction_level,
             cfg.toon_enabled,
             cfg.streaming.clone(),
-            None,
+            cfg.tool_budget.as_ref(),
             &cfg.cancel,
             cfg.file_write_notifier.as_ref(),
+            effect_scope,
+            effect_ordinals.as_deref(),
         )
         .await
+    };
+
+    let outcome = match (filtered, outcome) {
+        (Some(filtered), Ok(outcome)) => Ok(merge_policy_outcome(filtered, outcome)),
+        (_, outcome) => outcome,
     };
 
     (outcome, hooks)
 }
 
-// v0.8.1 U11 — `sub_agent_prefilter` and `merge_prefilter_denies` removed
-// alongside the pre-filter call site above. The `LearnedPolicy` /
-// `DeniedPartition` plumbing was orphaned: every production caller
-// constructs `AgentExecutorConfig` with `actor: CallActor::Root` and
-// `learned_policy: None`, so the helpers were unreachable. They lived
-// here as a working spec; when a future wave wires a real sub-agent
-// spawn path that constructs `CallActor::SubAgent` and threads a
-// procedural-memory `LearnedPolicy` into the config, restore from git
-// history at `52b1ae2~..HEAD` and re-enable the `#[ignore]`'d
-// integration tests in `actor_acl_test.rs`.
+// Phase 22 (22-02 Task 3) — the standalone `sub_agent_prefilter` /
+// `merge_prefilter_denies` helpers the v0.8.1 U11 note pointed at are NOT
+// restored, deliberately. Their original source is not recoverable (this
+// repository's history begins at a squashed root, `da5a18b5`, so the
+// `52b1ae2~..HEAD` range the note names does not exist), and reintroducing a
+// second partition/merge pair would have given the dispatch path two orderings
+// to reason about. Instead the narrowing pass was folded into the existing
+// `filter_tool_calls_by_policy` / `merge_policy_outcome` pair, which already
+// owns "deny before dispatch, then restore the model's call order" and now
+// enforces gate-before-learned-policy structurally. The five `actor_acl_test`
+// cases the note asked to re-enable are re-enabled.
 
 #[cfg(test)]
 mod tests {
@@ -368,6 +421,7 @@ mod tests {
             compaction_level: wcore_compact::CompactionLevel::Off,
             toon_enabled: false,
             streaming: None,
+            tool_budget: None,
             approval: None,
             allow_list: vec![],
             policy_gate: None,
@@ -375,6 +429,7 @@ mod tests {
             learned_policy: None,
             cancel: CancellationToken::new(),
             file_write_notifier: None,
+            dispatcher_crash_cut: None,
         }
     }
 
@@ -446,7 +501,6 @@ mod tests {
             manager,
             writer,
             msg_id: "test_msg".into(),
-            auto_approve: true,
         });
         let cell = Arc::new(TokioMutex::new(TurnCell::new(vec![], None)));
         let exec: Arc<dyn NodeExecutor> = Arc::new(AgentNodeExecutor::new(cfg, cell.clone()));

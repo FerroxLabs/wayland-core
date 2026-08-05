@@ -1,0 +1,24 @@
+SHA_ASSERT=b2ddf113681647221dc9e5bbfc7de79b1da90b54
+test channel_lease::tests::dropping_the_owner_lets_the_next_process_poll ... FAILED
+test engine::audit_2026_05_22_tests::invalid_live_session_switch_leaves_existing_authority_untouched ... FAILED
+test engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch ... FAILED
+test engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call ... FAILED
+test engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay ... FAILED
+test engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch ... FAILED
+test engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state ... FAILED
+test engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once ... FAILED
+test engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches ... FAILED
+test goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition ... FAILED
+test session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority ... FAILED
+test orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects ... FAILED
+test session::tests::active_session_holds_exclusive_lease_until_drop ... FAILED
+test engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch ... FAILED
+test session::tests::test_f034_empty_session_gc ... FAILED
+test session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror ... FAILED
+test session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal ... FAILED
+test session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral ... FAILED
+test session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable ... FAILED
+test engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools ... FAILED
+test engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch ... FAILED
+test engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session ... FAILED
+test result: FAILED. 2212 passed; 22 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.48s

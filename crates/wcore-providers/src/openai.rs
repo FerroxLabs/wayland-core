@@ -61,9 +61,19 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    fn build_client(compat: &ProviderCompat) -> wcore_egress::EgressClient {
+        compat
+            .read_timeout_ms
+            .map_or_else(crate::http_client::build, |milliseconds| {
+                crate::http_client::build_with_read_timeout(std::time::Duration::from_millis(
+                    milliseconds.get(),
+                ))
+            })
+    }
+
     pub fn new(api_key: &str, base_url: &str, compat: ProviderCompat, debug: DebugConfig) -> Self {
         Self {
-            client: crate::http_client::build(),
+            client: Self::build_client(&compat),
             keys: Arc::new(Mutex::new(KeyPool::new(split_keys(api_key)))),
             bearer: None,
             base_url: base_url.to_string(),
@@ -85,7 +95,7 @@ impl OpenAIProvider {
         debug: DebugConfig,
     ) -> Self {
         Self {
-            client: crate::http_client::build(),
+            client: Self::build_client(&compat),
             keys: Arc::new(Mutex::new(KeyPool::new(Vec::new()))),
             bearer: Some(bearer),
             base_url: base_url.to_string(),
@@ -1276,11 +1286,15 @@ struct ToolCallAccumulator {
 
 struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
+    /// Per-response namespace for tool calls whose upstream stream omits the
+    /// required id. The synthesized id is persisted with the assistant/tool
+    /// pair, so the next request can replay the result instead of stripping it
+    /// as an invalid empty-id exchange.
+    synthetic_tool_call_namespace: String,
     input_tokens: u64,
     output_tokens: u64,
     /// Cache-read (prompt cache hit) tokens reported by the chat path's usage
-    /// chunk. Informational only — `input_tokens` already includes these on the
-    /// OpenAI chat surface, so this is not added to/subtracted from input.
+    /// chunk. Disjoint from `input_tokens`, which contains cache misses only.
     cache_read_tokens: u64,
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
@@ -1301,6 +1315,7 @@ impl StreamState {
     fn new() -> Self {
         Self {
             tool_calls: Vec::new(),
+            synthetic_tool_call_namespace: uuid::Uuid::new_v4().simple().to_string(),
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
@@ -1440,11 +1455,17 @@ impl LlmProvider for OpenAIProvider {
             // tools`. The request is otherwise valid, so rebuild the body
             // without the `tools` array and retry once on the same host so the
             // turn completes instead of surfacing a raw provider 400. Only fires
-            // when tools were actually attached.
+            // when tools were actually attached and the caller has not disabled
+            // provider-local retries (the engine does so for per-send budget
+            // admission).
             Err(ProviderError::Api {
                 status,
                 ref message,
-            }) if body_has_tools && is_tools_unsupported_error(status, message) => {
+            }) if body_has_tools
+                && !crate::retry::retries_disabled()
+                && is_tools_unsupported_error(status, message) =>
+            {
+                crate::retry::mark_last_attempt_retrying();
                 tracing::warn!(
                     model = %request.model,
                     "model does not support tools; retrying request without tools (#389)"
@@ -1475,15 +1496,18 @@ impl LlmProvider for OpenAIProvider {
             // may belong to the provider's alternate platform (e.g. Moonshot's
             // `api.moonshot.cn` vs `.ai`). When a fallback host is configured
             // and we haven't already pinned it, retry the SAME key there; pin it
-            // for the session on success. See `compat.auth_fallback_base_url`.
+            // for the session on success. Suppressed when the caller governs
+            // retry admission. See `compat.auth_fallback_base_url`.
             Err(ProviderError::Api { status, .. })
                 if matches!(status, 401 | 403)
+                    && !crate::retry::retries_disabled()
                     && self
                         .compat
                         .auth_fallback_base_url
                         .as_deref()
                         .is_some_and(|fb| fb != primary) =>
             {
+                crate::retry::mark_last_attempt_retrying();
                 let fallback = self
                     .compat
                     .auth_fallback_base_url
@@ -1508,15 +1532,22 @@ impl LlmProvider for OpenAIProvider {
         // these headers, so the parse yields `None` and nothing is emitted —
         // the SSE body path is entirely unchanged.
         let provider_meta = parse_flux_response_meta(response.headers());
+        let attempt_observer = crate::retry::current_attempt_observer();
 
         tokio::spawn(async move {
-            if let Some(meta) = provider_meta {
-                let _ = tx.send(meta).await;
-            }
-            let result = if use_responses {
-                process_responses_sse_stream(response, &tx, &debug).await
-            } else {
-                process_sse_stream(response, &tx, &debug).await
+            let process = async {
+                if let Some(meta) = provider_meta {
+                    let _ = tx.send(meta).await;
+                }
+                if use_responses {
+                    process_responses_sse_stream(response, &tx, &debug).await
+                } else {
+                    process_sse_stream(response, &tx, &debug).await
+                }
+            };
+            let result = match attempt_observer {
+                Some(observer) => crate::retry::scope_attempt_observer(observer, process).await,
+                None => process.await,
             };
             if let Err(e) = result {
                 let _ = tx.send(LlmEvent::Error(e.to_string())).await;
@@ -1631,8 +1662,6 @@ pub(crate) async fn process_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = StreamState::new();
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
@@ -1644,7 +1673,12 @@ pub(crate) async fn process_sse_stream(
     // not a clean empty success — surface it as an error.
     let mut terminal_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);
@@ -1690,6 +1724,7 @@ pub(crate) async fn process_sse_stream(
                     // D4: `[DONE]` arrived but no `finish_reason` chunk was
                     // ever seen — the stream was cut before the model
                     // finished. Treat as a truncation, not a clean turn.
+                    crate::retry::record_provider_failure("stream_truncated");
                     return Err(ProviderError::Parse(
                         "OpenAI SSE stream sent [DONE] with no finish_reason — \
                          response truncated before completion"
@@ -1719,6 +1754,7 @@ pub(crate) async fn process_sse_stream(
     // spawn forward an `LlmEvent::Error` instead of just closing the
     // channel (which the engine would mis-read as a clean empty turn).
     if !terminal_seen {
+        crate::retry::record_provider_failure("stream_truncated");
         return Err(ProviderError::Connection(
             "OpenAI SSE stream closed before any terminal event ([DONE] / \
              finish_reason / error) — response truncated"
@@ -1743,15 +1779,18 @@ pub(crate) async fn process_responses_sse_stream(
     tx: &mpsc::Sender<LlmEvent>,
     debug: &DebugConfig,
 ) -> Result<(), ProviderError> {
-    use futures::StreamExt;
-
     let mut state = openai_responses::ResponsesStreamState::new();
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
     let mut utf8 = wcore_types::utf8_stream::Utf8StreamDecoder::new();
     let mut terminal_seen = false;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = match crate::http_client::next_or_consumer_closed(&mut stream, tx).await {
+            crate::http_client::StreamPoll::Item(chunk) => chunk,
+            crate::http_client::StreamPoll::End => break,
+            crate::http_client::StreamPoll::ConsumerClosed => return Ok(()),
+        };
         let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
         let text = utf8.push(&chunk);
         buffer.push_str(&text);
@@ -1806,6 +1845,7 @@ pub(crate) async fn process_responses_sse_stream(
     }
 
     if !terminal_seen {
+        crate::retry::record_provider_failure("stream_truncated");
         return Err(ProviderError::Connection(
             "OpenAI Responses SSE stream closed before any terminal event \
              (response.completed / response.failed / error) — response truncated"
@@ -1865,33 +1905,32 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
 
     // Extract usage if present
     if let Some(usage) = json.get("usage") {
-        let base_prompt = usage["prompt_tokens"]
-            .as_u64()
-            .unwrap_or(state.input_tokens);
-
-        // DeepSeek-style: prompt_cache_hit_tokens is reported separately and
-        // prompt_tokens only contains the cache-miss portion.
-        // Add it to get the true total prompt size.
-        let cache_hit = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
-
-        state.input_tokens = base_prompt + cache_hit;
         state.output_tokens = usage["completion_tokens"]
             .as_u64()
             .unwrap_or(state.output_tokens);
 
-        // Cache-read accounting. DeepSeek reports the hit count in the separate
-        // `prompt_cache_hit_tokens` field (cache-miss-only prompt_tokens); the
-        // OpenAI-standard surface reports it under
-        // `prompt_tokens_details.cached_tokens` (prompt_tokens already total).
-        // Either way the cache-read count is informational and must be surfaced
-        // so chat-path sessions show cache savings, matching the Responses path.
+        // Normalize provider-specific usage into TokenUsage's disjoint input
+        // categories. Both DeepSeek and OpenAI report total input in
+        // `prompt_tokens`. DeepSeek additionally reports explicit hit/miss
+        // counters; OpenAI reports cached input as a subset under details.
+        let deepseek_cache_hit = usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64);
+        let deepseek_cache_miss = usage
+            .get("prompt_cache_miss_tokens")
+            .and_then(Value::as_u64);
         let cached_details = usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if cache_hit > 0 || cached_details > 0 {
-            state.cache_read_tokens = cache_hit.max(cached_details);
+        if let Some(prompt_tokens) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+            if let Some(cache_hit) = deepseek_cache_hit {
+                state.input_tokens =
+                    deepseek_cache_miss.unwrap_or_else(|| prompt_tokens.saturating_sub(cache_hit));
+                state.cache_read_tokens = cache_hit;
+            } else {
+                state.input_tokens = prompt_tokens.saturating_sub(cached_details);
+                state.cache_read_tokens = cached_details;
+            }
         }
     }
 
@@ -2018,7 +2057,17 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
         let stop_reason = match (finish_reason_raw, state.tool_calls.is_empty()) {
             // tool_calls / stop with pending calls → flush them as ToolUse
             ("tool_calls" | "stop", false) => {
-                for tc in state.tool_calls.drain(..) {
+                let synthetic_namespace = state.synthetic_tool_call_namespace.clone();
+                for (index, mut tc) in state.tool_calls.drain(..).enumerate() {
+                    if tc.id.trim().is_empty() {
+                        tc.id = format!("call_wcore_{synthetic_namespace}_{index}");
+                        tracing::warn!(
+                            target: "wcore_providers::openai",
+                            tool_call_index = index,
+                            synthetic_id = %tc.id,
+                            "OpenAI-compatible stream omitted a tool-call id; synthesized a unique internal id"
+                        );
+                    }
                     // Fail closed: non-empty argument JSON that does not parse
                     // must not run the tool with empty input — emit an error and
                     // skip the call. Empty arguments remain a valid empty object.
@@ -2409,6 +2458,111 @@ mod tests {
         assert_eq!(state.tool_calls.len(), 4, "indices 0..=3 create 4 slots");
         assert_eq!(state.tool_calls[3].name, "lookup");
         assert_eq!(state.tool_calls[3].id, "call_a");
+    }
+
+    #[test]
+    fn missing_tool_call_id_is_synthesized_and_round_trips() {
+        // #862: Flux occasionally streamed a valid tool name/arguments without
+        // the required call id. The engine executed it, but the next request's
+        // empty-id guard stripped both the assistant call and its result. The
+        // fork then repeated the same blind turn until its 11-turn cap.
+        let mut state = StreamState::new();
+        let data = r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+
+        let events = parse_sse_chunk(data, &mut state);
+        let (id, name, input) = events
+            .into_iter()
+            .find_map(|event| match event {
+                LlmEvent::ToolUse {
+                    id, name, input, ..
+                } => Some((id, name, input)),
+                _ => None,
+            })
+            .expect("the completed stream emits its tool call");
+
+        assert!(
+            id.starts_with("call_wcore_") && !id.trim().is_empty(),
+            "a missing upstream id must become a non-empty internal id: {id:?}"
+        );
+
+        let history = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: id.clone(),
+                    name,
+                    input,
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: "/workspace".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+        let replay = OpenAIProvider::build_messages(&history, "", &openai_compat());
+        let call_id = replay
+            .iter()
+            .find_map(|message| message["tool_calls"].as_array())
+            .and_then(|calls| calls.first())
+            .and_then(|call| call["id"].as_str());
+        let result_id = replay
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .and_then(|message| message["tool_call_id"].as_str());
+
+        assert_eq!(call_id, Some(id.as_str()));
+        assert_eq!(result_id, Some(id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stream_worker_exits_when_event_consumer_is_dropped() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .expect("write response headers");
+            socket.flush().await.expect("flush response headers");
+            std::future::pending::<()>().await;
+        });
+
+        let response = crate::http_client::build()
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("receive streaming response headers");
+        let (tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(async move {
+            process_sse_stream(response, &tx, &DebugConfig::default()).await
+        });
+
+        tokio::task::yield_now().await;
+        drop(rx);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(250), worker)
+            .await
+            .expect("the stream worker must not wait for the read timeout")
+            .expect("the stream worker must not panic");
+        assert!(
+            result.is_ok(),
+            "consumer cancellation is a clean exit: {result:?}"
+        );
+
+        server.abort();
     }
 
     // --- is_tools_unsupported_error (#389) --------------------------------
@@ -5038,30 +5192,31 @@ mod tests {
     }
 
     #[test]
-    fn usage_includes_prompt_cache_hit_tokens() {
-        // DeepSeek reports prompt_cache_hit_tokens separately;
-        // input_tokens should be the sum of prompt_tokens + prompt_cache_hit_tokens
+    fn usage_keeps_deepseek_cache_categories_disjoint() {
+        // DeepSeek defines prompt_tokens as hit + miss. Canonical input keeps
+        // the explicit miss count disjoint from cache reads.
         let mut state = StreamState::new();
 
-        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":500,"completion_tokens":100,"prompt_cache_hit_tokens":999500}}"#;
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":100,"prompt_cache_hit_tokens":999500,"prompt_cache_miss_tokens":500}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        assert_eq!(state.input_tokens, 1_000_000);
+        assert_eq!(state.input_tokens, 500);
         assert_eq!(state.output_tokens, 100);
+        assert_eq!(state.cache_read_tokens, 999_500);
     }
 
     #[test]
     fn usage_with_prompt_tokens_details_cached() {
-        // OpenAI standard: prompt_tokens already includes cached_tokens (it's the total)
-        // prompt_tokens_details.cached_tokens is informational only
+        // OpenAI standard: prompt_tokens includes cached_tokens, so normalize
+        // input_tokens to the uncached portion.
         let mut state = StreamState::new();
 
         let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":999000}}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        // prompt_tokens is already the full total for OpenAI
-        assert_eq!(state.input_tokens, 1_000_000);
+        assert_eq!(state.input_tokens, 1_000);
         assert_eq!(state.output_tokens, 100);
+        assert_eq!(state.cache_read_tokens, 999_000);
     }
 
     #[test]
@@ -5069,20 +5224,23 @@ mod tests {
         // Rank 39: the chat path must surface cache-read tokens in the Done
         // event (like the Responses path), not hardcode 0. OpenAI-standard
         // reports the hit count under prompt_tokens_details.cached_tokens while
-        // prompt_tokens stays the full total — so input_tokens is unchanged.
+        // prompt_tokens is the full total.
         let mut state = StreamState::new();
 
         let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":800}}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        assert_eq!(state.input_tokens, 1000, "prompt_tokens stays the total");
+        assert_eq!(
+            state.input_tokens, 200,
+            "input_tokens contains cache misses"
+        );
         assert_eq!(state.cache_read_tokens, 800);
 
         let done = state.flush_done().expect("pending_done should be Some");
         match done {
             LlmEvent::Done { usage, .. } => {
                 assert_eq!(usage.cache_read_tokens, 800);
-                assert_eq!(usage.input_tokens, 1000);
+                assert_eq!(usage.input_tokens, 200);
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -5090,14 +5248,17 @@ mod tests {
 
     #[test]
     fn chat_path_cache_read_from_deepseek_hit_field() {
-        // DeepSeek reports the hit count separately and prompt_tokens carries
-        // only the cache-miss portion; cache_read_tokens must reflect the hit.
+        // Some OpenAI-compatible DeepSeek surfaces omit the explicit miss field.
+        // Derive misses from DeepSeek's documented prompt total minus cache hits.
         let mut state = StreamState::new();
 
-        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":10,"prompt_cache_hit_tokens":800}}"#;
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_hit_tokens":800}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        assert_eq!(state.input_tokens, 1000, "miss + hit = total prompt");
+        assert_eq!(
+            state.input_tokens, 200,
+            "input_tokens contains cache misses"
+        );
         assert_eq!(state.cache_read_tokens, 800);
     }
 

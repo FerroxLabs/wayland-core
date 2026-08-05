@@ -1,0 +1,18 @@
+# Per-target binary manifest for the resolved candidate.
+# Every one of the six CI release targets appears. A target may be UNBINDABLE but it may
+# never be absent: an omission would let an OS family look certified on evidence that
+# never existed.
+# Consumed by: f28-resolve-candidate.py --resolve --target-manifest <this file>
+# Columns: target	status	digest	provenance	reason
+#
+# MEASURED, not assumed: `gh run view 30269095004 --repo FerroxLabs/wayland-core` reports
+# status=queued at 2026-07-27, so the release-binary matrix has not yet produced any
+# artifact for this commit. That is why all six are unbindable. It is NOT a claim that any
+# target is unobtainable in principle — CI has uploaded all six, including
+# aarch64-apple-darwin, since d9c7683b.
+x86_64-unknown-linux-gnu	unbindable			CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.
+aarch64-unknown-linux-gnu	unbindable			CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.
+x86_64-apple-darwin	unbindable			CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.
+aarch64-apple-darwin	unbindable			CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. This target is obtainable from CI since d9c7683b and must be bound before the macOS leg is certified.
+x86_64-pc-windows-msvc	unbindable			CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.
+aarch64-pc-windows-msvc	unbindable			CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.

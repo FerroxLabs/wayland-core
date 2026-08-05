@@ -1,0 +1,37 @@
+=== anyOf[76] full body ===
+{
+  "additionalProperties": true,
+  "properties": {
+    "type": {
+      "enum": [
+        "grant_workspace_capability",
+        "workspace_policy",
+        "capability_activation",
+        "provider_attempt",
+        "provider_retry",
+        "provider_failure",
+        "mid_flight_monitor_decision",
+        "compact_offload"
+      ]
+    }
+  },
+  "required": [
+    "type"
+  ],
+  "title": "Non-Desktop producer inventory discriminator",
+  "type": "object"
+}
+
+=== emission sites for the 7 non-Desktop variants ===
+  WorkspacePolicy: total=       6 non-test=6
+  CapabilityActivation: total=       9 non-test=9
+  ProviderAttempt: total=       5 non-test=3
+  ProviderRetry: total=       4 non-test=3
+  ProviderFailure: total=       4 non-test=3
+  MidFlightMonitorDecision: total=       8 non-test=8
+  CompactOffload: total=       3 non-test=3
+
+=== CONTROL known-positive: ProtocolEvent::Ready ===
+      17
+=== CONTROL known-negative: ProtocolEvent::NoSuchVariantXyz ===
+       0

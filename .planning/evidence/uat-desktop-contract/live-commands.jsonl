@@ -1,0 +1,21 @@
+{"type":"ping"}
+{"type":"get_runtime_diagnostics"}
+{"type":"session_resync"}
+{"type":"goal_resync"}
+{"type":"set_mode","mode":"force"}
+{"type":"set_mode","mode":"yolo"}
+{"type":"set_config","model":"test-model"}
+{"type":"add_mcp_server","name":"uat-bogus","transport":"stdio","command":"/nonexistent/uat/binary"}
+{"type":"remove_mcp_server","name":"uat-bogus"}
+{"type":"remove_mcp_server","name":"never-existed"}
+{"type":"tool_approve","call_id":"no-such-call","scope":"once"}
+{"type":"approval_resume","resume_token":"no-such-token","approved":true}
+{"type":"host_send_message_result","call_id":"no-such-call","ok":true}
+{"type":"continue_with_budget","request_id":"uat-req-1","additional_cost_usd":0.5,"additional_tokens":1000}
+{"type":"zzz_unknown_command_type"}
+{"type":"tool_approve"}
+not json at all
+[1,2,3]
+{"no_type_field":true}
+{"type":"ping"}
+{"type":"stop"}

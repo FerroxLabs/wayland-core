@@ -1,0 +1,52 @@
+﻿MUTDIAG m2 2026-07-29T00:31:56.4470670+07:00
+TARGET_SHA256=8a72b30e7153275a7a0c5377146e254e97b56815057692166f53a0ca43669619
+##### backends::appcontainer::appcontainer_acl_lease::tests::live_owner_unreconcilable_lease_is_honoured_not_reclaimed
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
+At C:\f28h2\mutdiag.ps1:16 char:9
++   $o = (& cargo test -p wcore-sandbox --lib -- --exact $n --test-thre ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.23s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running unittests src\lib.rs (C:\f28h2-target\debug\deps\wcore_sandbox-d9612696e1348a08.exe)
+
+running 1 test
+test backends::appcontainer::appcontainer_acl_lease::tests::live_owner_unreconcilable_lease_is_honoured_not_reclaimed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.02s
+
+
+##### backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_become_a_second_wedge
+cargo.exe :     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+At C:\f28h2\mutdiag.ps1:16 char:9
++   $o = (& cargo test -p wcore-sandbox --lib -- --exact $n --test-thre ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 0.20s:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+     Running unittests src\lib.rs (C:\f28h2-target\debug\deps\wcore_sandbox-d9612696e1348a08.exe)
+
+running 1 test
+
+thread 'backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_becom
+e_a_second_wedge' (31764) panicked at 
+crates\wcore-sandbox\src\backends\appcontainer\acl_lease\tests.rs:351:10:
+a lease directory that CONTAINS a quarantine directory must still recover: ExecFailed("unknown 
+entry in AppContainer ACL lease directory: \\\\?\\C:\\Users\\seand\\AppData\\Local\\Temp\\wcore-le
+ase-test-00004ea0\\Wayland\\Core\\AppContainerLeases\\v1\\quarantine")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_become_a_second_wedge ... FAILED
+
+failures:
+
+failures:
+    backends::appcontainer::appcontainer_acl_lease::tests::quarantine_directory_does_not_become_a_second_wedge
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 155 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p wcore-sandbox --lib`
+
+RESTORED_SHA256=bc6bdac1ff3f59459f05aaa81883f53b68480bacb73bae7696af6e493dc50de9
+MUTDIAGDONE

@@ -1,0 +1,18 @@
+• This is a panel question — answer from the evidence only. Analyze.
+
+  CredentialRef has exactly two String fields (name, source_file), no value field, no accessor accepting a value. `CredentialRef::new` takes only name and source_file. The conversion `to_portability` builds CredentialRef from `p.credential_env_var` (name) and `p.credential_file` — no value path. DiscoveredItem.credential is Option<CredentialRef>, serde derives on all types.
+
+  Can a value travel? Potential paths:
+  1. `details: BTreeMap<String, String>` — this is the real hole. `details` carries provider, model, base_url, mcp_refs, command, url. If any mapping inserted a credential value into details (e.g., an MCP server env var containing a token, or a base_url with embedded credentials, or url containing a token), it would serialize straight through. The probe uses canaries so it would catch it for the corpus, but the type doesn't prevent it. However the question is about the credential representation specifically. The `details` map is a String->String map that CAN hold a secret value — it's representable. Does the probe cover it? The probe asserts canaries absent from the whole JSON including details, and the corpus has 36 canary tokens, 0 appear. So empirically the mapper doesn't put secrets in details. But structurally, `details` is a channel through which a value could travel — e.g., MCP server `url` with embedded auth token, or `command` strings. That's a legitimate finding: the type-level guarantee covers `credential` only; `details` is a stringly-typed channel.
+
+  2. Error paths outside the plan: MigrationPlan holds api_key; if an error message included MigrationPlan Debug it could leak — but the emitted artifact is PortabilityPlan, probe covers anyhow error containing the plan.
+
+  3. `source_home` is absolute-ish path ("crates/wcore-cli/tests/fixtures/portability/hermes") — wait, the doc says relative, but the emitted doc shows source_home as a path on the discovering machine. Not a credential though.
+
+  Verdict: contract-holds for the credential representation — the type is genuinely valueless; Debug/Display/serde derive from a struct with two location fields. The probe is not merely cosmetic-checking: because the type has no value-carrying field, the multi-emitter probe plus positive half confirms non-vacuity. The deciding element: `CredentialRef` struct definition — two fields, no `value` variant, `new()` has no value parameter.
+
+  Finding: `details: BTreeMap<String,String>` in DiscoveredItem is an untyped string channel through which a value COULD travel (e.g., MCP `url`/`command` with embedded token); the probe covers it only empirically via canaries, not structurally. Also `CredentialRef.name` could in theory carry a value if a caller passed the value as name — but type can't prevent misuse; the probe's canary check covers that empirically.
+
+  Answer concisely with verdict lines.
+
+To resume this session: kimi -r session_a74dc9ff-d99c-4a08-ac1f-da7a99922e45

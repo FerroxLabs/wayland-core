@@ -23,10 +23,15 @@ pub mod detect;
 pub mod engine;
 /// The real forge wiring: sandbox gate + spawn builder + `drive_climb_full` + receipt.
 pub mod forge;
+/// Anvil gate → 06C parent-owned gate authorization translation (20-08 piece 2C).
+pub mod gate_authorization;
 /// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
 pub mod gates;
 /// Append-only climb journal for crash recovery + idempotent resume.
 pub mod journal;
+/// The production landing orchestrator: compose the selected winner's terminal
+/// delegated-mutation chain (winner → open → accept → land) fail-closed.
+pub mod landing;
 /// Per-workspace climb lease preventing interleaved climbs / user edits.
 pub mod lease;
 /// Per-task cost ledger with atomic reservation-before-dispatch.

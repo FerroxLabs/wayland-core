@@ -1,0 +1,96 @@
+You are auditing a concrete design decision in a Rust AI-agent CLI (wayland-core). Answer as a
+security/systems reviewer. Be adversarial. Do not be agreeable.
+
+## Measured facts (all verified in the source at HEAD; treat as given)
+
+1. Durable sessions write a per-session append-only journal at
+   `$WAYLAND_HOME/sessions/<id>.journal`. The FILE is created mode 0600 inside a 0700 directory,
+   and the reader REFUSES to open it if `mode & 0o077 != 0` or the owner uid differs. So the
+   journal at rest is already an owner-only file, enforced.
+
+2. The journal body is NOT encrypted. It is JSONL metadata: event types, cursors, digests,
+   checkpoint records. Prompt/response CONTENT is deliberately excluded — a test asserts the
+   prompt bytes do not appear in the journal.
+
+3. Exactly ONE field needs a secret key: `sealed_prepared_request`, the exact prepared provider
+   request (which does contain the full conversation), sealed with XChaCha20-Poly1305 under a
+   32-byte key. That key is stored in the "confidential credentials store".
+
+4. The confidential store has exactly two candidate backends: the OS keyring, or an
+   Argon2id-encrypted vault file. The vault is considered AVAILABLE only if the operator supplied
+   a passphrase out-of-band (`WAYLAND_VAULT_PASSPHRASE` or `..._FD`). There is no third candidate.
+
+5. Consequence, and the thing under review: on a headless Linux server with no OS keyring and no
+   passphrase (the normal state), neither candidate is available, so a fix that shipped today
+   turns durable sessions OFF ENTIRELY for the whole process. No journal, no session directory,
+   nothing on disk. The turn runs. A one-time notice is printed to stderr at startup.
+
+6. Before that fix, the product REFUSED: it returned a non-retryable `engine_error`, never called
+   the provider, and never started a turn — but it DID still write the journal file recording the
+   refusal.
+
+7. A `ProviderDispatch` recovery checkpoint currently REQUIRES `sealed_prepared_request` to be
+   present; a checkpoint without it is rejected as an invalid transition.
+
+8. Measured just now: in the degraded (no-journal) mode, the `ready` frame emitted to a
+   `--json-stream` host contains NO `session_id` field at all. The host is told nothing else. A
+   daemon that started three weeks ago has told nobody anything since.
+
+## The argument that motivates changing this
+
+The retry after a crash does not come from the engine. It comes from the messaging platform
+redelivering an inbound, or an operator retrying, or a human resending because they got no reply.
+With NO record on disk, nobody can determine whether the prior effect (the provider call, a tool
+execution, an outbound send) already happened. The absence of a journal does not remove the
+ambiguity; it exports the ambiguity to the user. So "no secure store therefore no journal" looks
+like a false dichotomy: the right move may be to degrade the ENCRYPTION, not the JOURNALING.
+
+## The four options. Pick one (or argue a fifth).
+
+**A. Auto-provision a machine-local key.** When there is no keyring and no passphrase, generate a
+random 32-byte key and store it in a 0600 file in the SAME 0700 profile directory as the journal.
+Journaling continues unchanged. No operator action, no config.
+
+**B. A, but policy-gated.** Same mechanism, but only when the operator opts in
+(`[session] degraded_durability = "machine_local_key"`). Default is fail-closed: refuse to start
+a turn, as in fact 6.
+
+**C. Status quo.** Keep the amnesia degrade.
+
+**D. Journal without the seal.** In degraded mode, write the journal but OMIT the sealed prepared
+request. Introduce an explicitly unrecoverable dispatch record: "a provider call with request
+digest X was dispatched at T; outcome unknown; this turn CANNOT be replayed." No new key at rest
+exists at all. Recovery downgrades from "resume the turn" to "tell the operator, truthfully, that
+the effect is unknowable and require a decision." Costs a journal schema change (fact 7).
+
+## Questions I want answered, in order
+
+Q1. Under the threat model implied by facts 1-3, does a 0600 key file sitting in the same 0700
+directory as the 0600 journal it protects provide ANY real security property? Name the specific
+attacker it stops, or say plainly that it is theatre. Note the honest candidate: it stops
+exfiltration of the journal ALONE (a backup, a `tar` of the sessions dir, a disk image) when the
+key file is not copied with it. Is that worth the complexity, or is it a fiction because any
+realistic backup takes the whole profile directory?
+
+Q2. Which of A / B / C / D is right? If B, is fail-closed-by-default correct given fact 5 is a
+release blocker (every keyring-less Linux server) — or does defaulting to refuse just recreate
+the blocker?
+
+Q3. Consider a "downgrade abuse" attack: an attacker who can make the keyring unavailable
+(kill the D-Bus session, unset an env var) converts "the product refuses and records" into "the
+product runs with no audit trail." Does option A enable that? Does D? Which option best denies
+an attacker the ability to obtain UNRECORDED execution?
+
+Q4. Separately from the degrade choice: if a journal ALREADY EXISTS on disk from a prior run but
+its key is now unavailable, must the product refuse to start? Argue both sides. Consider that
+refusing here bricks a server whose keyring merely disappeared, while running forks the engine
+from unknowable prior state.
+
+Q5. Is D's "explicitly unrecoverable dispatch record" actually better than A's real seal, or is
+it worse in a way I have missed? Specifically: is a record that proves an effect HAPPENED but
+cannot say WHAT it was, sufficient to resolve the platform-redelivery ambiguity that motivates
+this whole change?
+
+Answer each question by number. Be concrete. If you think the framing is wrong, say so first.
+End your reply with a single line of exactly this form and nothing else on that line:
+PANEL_CHOICE=<A|B|C|D|OTHER>

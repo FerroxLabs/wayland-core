@@ -16,11 +16,14 @@
 //! references; the dispatcher returns a static singleton so callers
 //! never own one.
 //!
-//! Each per-tool file documents its expected payload shape — those
-//! shapes are read from the actual `*ToolDef` outputs in W1, and the
-//! formatters degrade gracefully (missing fields collapse to `?` or are
-//! omitted) so a payload-schema drift in a future wcore version cannot
-//! crash the TUI.
+//! Each per-tool file documents the payload shape its tool ACTUALLY emits,
+//! cited to the producing source file. That wording is deliberate: the shapes
+//! were previously documented from intent rather than measurement, and 11 of
+//! the 12 formatters were reading keys no tool has ever produced (UAT-T3).
+//!
+//! A formatter degrades by OMITTING what it could not read — never by
+//! substituting a placeholder that reads like a fact. `?` is not a command
+//! and `0` is not an exit code.
 
 use std::time::Duration;
 
@@ -41,6 +44,10 @@ pub mod tts;
 pub mod vision;
 pub mod web;
 pub mod web_fetch;
+
+// UAT-T3: the regression suite that drives the REAL tools instead of
+// hand-built payloads lives in `tests/tool_formatter_real_payloads.rs`, not
+// here — see that file's docs for why it needs its own process.
 
 /// Render one tool's JSON result payload into UI lines.
 ///
@@ -146,23 +153,121 @@ pub(crate) fn fmt_duration(d: Duration) -> String {
     format!("{:.1}s", d.as_secs_f64())
 }
 
-/// Read `payload[key]` as a string, returning `default` if absent or
-/// not a string. Used everywhere — kept as a small helper so the
-/// per-tool files stay readable.
-pub(crate) fn str_or<'a>(payload: &'a Value, key: &str, default: &'a str) -> &'a str {
-    payload.get(key).and_then(Value::as_str).unwrap_or(default)
+// ── UAT-T3: making "unknown" expressible ───────────────────────────────────
+//
+// There used to be three readers here — `str_or`, `u64_or`, `i64_or` — each
+// taking a `default`, and every caller passed a *plausible looking* one:
+// `"?"` for a command, `0` for an exit code, `0` for a byte count. When the
+// payload did not carry the key (which, measured across all 12 formatters,
+// was the normal case and not the exception) the card rendered those defaults
+// as though they were facts. A shell command that failed with exit 1 was
+// reported as `exit 0`.
+//
+// They are DELETED rather than left unused, which is the point: a default is
+// only safe when it is *true* for a missing field, `0` is not a true exit
+// code, and `"?"` is not a true command. With no defaulting reader in scope a
+// future formatter cannot reintroduce the defect by reaching for the
+// convenient helper. The `opt_*` readers return `None` instead, so a
+// formatter has to decide what to do about not knowing — and `join_facts`
+// makes omission the easy path.
+//
+// Rule for every formatter in this module: **never render a value you did not
+// read.** If the field is absent, leave it out.
+
+/// Read `payload[key]` as a string, or `None` when absent / not a string.
+pub(crate) fn opt_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
 }
 
-/// Read `payload[key]` as a u64, returning `default` if absent or not
-/// numeric.
-pub(crate) fn u64_or(payload: &Value, key: &str, default: u64) -> u64 {
-    payload.get(key).and_then(Value::as_u64).unwrap_or(default)
+/// Read `payload[key]` as a u64, or `None` when absent / not numeric.
+pub(crate) fn opt_u64(payload: &Value, key: &str) -> Option<u64> {
+    payload.get(key).and_then(Value::as_u64)
 }
 
-/// Read `payload[key]` as an i64, returning `default` if absent or not
-/// numeric.
-pub(crate) fn i64_or(payload: &Value, key: &str, default: i64) -> i64 {
-    payload.get(key).and_then(Value::as_i64).unwrap_or(default)
+/// The payload's raw text, when the tool did not emit JSON at all.
+///
+/// `parse_payload` (widget) / `parse_card_payload` (inline transcript) fall
+/// back to `Value::String(raw)` when `serde_json::from_str` fails. Several
+/// tools — `Bash`, `Read`, `Write`, `Edit` — return plain prose, so that
+/// fallback is their normal path, not an error path. Formatters read the text
+/// through here instead of calling `.get(…)` and silently getting `None` for
+/// everything.
+/// Returns the text **verbatim**, not trimmed.
+///
+/// It did trim, briefly, and that was a real bug caught by the real-payload
+/// suite: `BashTool`'s result ends with the `\nSTDERR:\n` marker, so trimming
+/// the trailing newline destroyed the marker, the stdout/stderr split failed,
+/// and the byte count came back as 23 instead of 15. The emptiness check
+/// still uses `trim`, because a whitespace-only payload carries no
+/// information — but what is handed to the caller is exactly what the tool
+/// produced.
+pub(crate) fn raw_text(payload: &Value) -> Option<&str> {
+    payload.as_str().filter(|s| !s.trim().is_empty())
+}
+
+/// Join the facts a formatter actually established into one summary line.
+///
+/// Empty entries are dropped, so a formatter can push `None`-derived pieces
+/// without special-casing each one, and an absent field costs a missing
+/// clause rather than a fabricated value. Returns an empty string when
+/// nothing at all is known — callers surface that as "no summary", and the
+/// inline renderer's `is_filler` check already drops an empty body line.
+pub(crate) fn join_facts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// A one-line, width-clamped preview of arbitrary text.
+///
+/// Used when a tool's payload is prose the formatter cannot decompose: show
+/// the tool's *real* first line rather than inventing structured fields. The
+/// clamp is by `char`, not by byte, so multi-byte output cannot be split
+/// mid-codepoint.
+pub(crate) fn first_line_preview(text: &str, max: usize) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = line.trim();
+    let count = trimmed.chars().count();
+    if count <= max {
+        trimmed.to_string()
+    } else {
+        let head: String = trimmed.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+/// A one-line, width-clamped preview that elides the MIDDLE rather than the
+/// tail.
+///
+/// [`first_line_preview`] keeps the head, which is wrong for any status line
+/// whose identifying detail sits at the end — `WriteTool` emits
+/// `"Created <path> (<n> lines)"`, so head-truncation drops the filename AND
+/// the line count and leaves only a directory prefix. Keeping both ends
+/// preserves the verb and the filename+count for any path length; only the
+/// interior directory run is sacrificed. The clamp is by `char`, so multi-byte
+/// output cannot be split mid-codepoint, and the result is never longer than
+/// `max` chars.
+pub(crate) fn elided_line_preview(text: &str, max: usize) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let trimmed = line.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= max {
+        return trimmed.to_string();
+    }
+    // One char of the budget pays for the ellipsis; split the rest so the tail
+    // (filename + counts) is never the side that loses a char.
+    let budget = max.saturating_sub(1);
+    let head_len = budget / 2;
+    let tail_len = budget - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 #[cfg(test)]
@@ -195,16 +300,21 @@ mod tests {
         // confirm the summary diverges from the generic fallback on a
         // payload designed to trip the per-tool format string.
         let f = formatter_for("web");
+        // Two rows, so the assertion below is not coupled to whether the
+        // summary pluralises. (It now does: a one-row payload reads
+        // "Found 1 result", which broke this case when it asserted the
+        // literal substring "results".)
         let payload = json!({
             "results": [
-                { "title": "A", "url": "https://example.com", "domain": "example.com", "snippet": "s" }
+                { "title": "A", "url": "https://example.com", "domain": "example.com", "snippet": "s" },
+                { "title": "B", "url": "https://example.org", "domain": "example.org", "snippet": "t" }
             ]
         });
         let summary = f.summary_line(&payload, Duration::from_secs_f64(2.3));
         // Web formatter's idiom: "Found N results in X.Xs". Generic
         // would say nothing of the sort.
         assert!(summary.contains("Found"), "web summary was: {summary}");
-        assert!(summary.contains("results"), "web summary was: {summary}");
+        assert!(summary.contains("2 results"), "web summary was: {summary}");
     }
 
     /// v0.9.1.1 B3: regression — every actual backend tool name the
@@ -295,5 +405,34 @@ mod tests {
         let c = formatter_for("web_fetch").summary_line(&p, Duration::ZERO);
         assert_eq!(a, b);
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn elided_line_preview_keeps_both_ends_and_respects_the_budget() {
+        // Under budget: byte-identical to the input line, no ellipsis.
+        assert_eq!(
+            elided_line_preview("Created /a/b.txt (2 lines)", 60),
+            "Created /a/b.txt (2 lines)"
+        );
+
+        // Over budget: the verb AND the trailing filename+count survive —
+        // this is the whole point, and what head-truncation could not do.
+        let long = "Created /home/ci/work/wayland-core/crates/wcore-agent/src/orchestration/workflow/runner.rs (2 lines)";
+        let out = elided_line_preview(long, 60);
+        assert!(out.starts_with("Created "), "lost the verb: {out}");
+        assert!(out.ends_with("runner.rs (2 lines)"), "lost the tail: {out}");
+        assert!(out.contains('…'), "no elision marker: {out}");
+        assert_eq!(out.chars().count(), 60, "budget not honoured: {out}");
+        assert_ne!(
+            out,
+            first_line_preview(long, 60),
+            "head truncation and middle elision must differ here"
+        );
+
+        // Multi-byte input must not be split mid-codepoint on either side.
+        let wide = "★".repeat(200);
+        let out = elided_line_preview(&wide, 21);
+        assert_eq!(out.chars().count(), 21);
+        assert_eq!(out.chars().filter(|c| *c == '★').count(), 20);
     }
 }

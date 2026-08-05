@@ -1,0 +1,75 @@
+[2m2026-07-29T05:51:37.346126Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T05:51:37.563681Z[0m [32m INFO[0m migrated existing plaintext credentials into the encrypted vault [3mcount[0m[2m=[0m1
+[2m2026-07-29T05:51:37.563983Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24rcdisc [3mplatform[0m[2m=[0mdiscord
+[gateway] channels registered=1
+[2m2026-07-29T05:51:37.564179Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T05:51:37.564215Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:44653/v1/audio/transcriptions (active OpenAI-wire provider)
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-29T05:51:37.565190Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m3281482 [3mdir[0m[2m=[0m/root/f24rc-run2/home/channels
+[2m2026-07-29T05:51:37.673488Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[2m2026-07-29T05:51:37.674907Z[0m [34mDEBUG[0m sent IDENTIFY
+[2m2026-07-29T05:51:37.675921Z[0m [34mDEBUG[0m READY received; session captured for resume
+[gateway] started pid=3281482 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-29T05:51:37.924494Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-29T05:51:37.925644Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-29T05:51:37.925678Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-29T05:51:37.925774Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-29T05:51:37.925922Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-29T05:51:37.925936Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-29T05:51:37.925939Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-29T05:51:37.925941Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-29T05:51:37.925944Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-29T05:51:37.925946Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-29T05:51:37.925948Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-29T05:51:37.925957Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-29T05:51:37.925982Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:44653 (active OpenAI-wire provider)
+[2m2026-07-29T05:51:37.926001Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-29T05:51:37.926055Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-29T05:51:37.926071Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:44653/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T05:51:37.926111Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:44653 (active OpenAI-wire provider)
+[2m2026-07-29T05:51:37.926326Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-29T05:51:37.926334Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-29T05:51:37.926664Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-29T05:51:37.939652Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-29T05:51:37.939787Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-29T05:51:37.939792Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-29T05:51:37.941934Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-29T05:51:37.942640Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-29T05:51:37.981618Z[0m [32m INFO[0m transcription: using whisper-1 at http://127.0.0.1:44653/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-29T05:51:37.981998Z[0m [32m INFO[0m another process owns the schedule; this session observes and will not fire [3mdir[0m[2m=[0m/root/f24rc-run2/home/cron
+[2m2026-07-29T05:51:38.038830Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-29T05:51:38.468609Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.468625Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.468628Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.473633Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.474351Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.506659Z[0m [32m INFO[0m external edits detected (transcript-suppressed): User edited 952 files while I was thinking (`/root/wayland-24-reconnect/docs`, `/root/wayland-24-reconnect/docs/design`, `/root/wayland-24-reconnect/docs/design/flux-282-reference`, `/root/wayland-24-reconnect/docs/decisions`, `/root/waylan…[truncated]
+[2m2026-07-29T05:51:38.520231Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T05:51:38.545683Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.545709Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.545717Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.550841Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.551526Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:38.565913Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T05:51:38.885285Z[0m [33m WARN[0m gateway session ended; backing off before reconnect [3merror[0m[2m=[0mws read: WebSocket protocol error: Connection reset without closing handshake [3mbackoff_ms[0m[2m=[0m1000 [3mresumable[0m[2m=[0mtrue
+[2m2026-07-29T05:51:39.887858Z[0m [34mDEBUG[0m sent RESUME [3msession_id[0m[2m=[0mf24c3-sess-1-9dd5d583 [3mseq[0m[2m=[0m3
+[2m2026-07-29T05:51:39.889667Z[0m [34mDEBUG[0m RESUMED received; replayed events will flow as dispatches
+[2m2026-07-29T05:51:39.923939Z[0m [32m INFO[0m inbound denied [3mchannel[0m[2m=[0mf24rcdisc [3mreason[0m[2m=[0msender not in dm allowlist
+[2m2026-07-29T05:51:39.937408Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.937432Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.937439Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.944953Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.945907Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.960004Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T05:51:39.989276Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.989305Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.989313Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.996933Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:39.997929Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:40.009985Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-29T05:51:40.684785Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:40.684800Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:40.684803Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:40.691605Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:40.692501Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"openai" [3mmodel[0m[2m=[0m"f24rc-fixture"
+[2m2026-07-29T05:51:40.704308Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0

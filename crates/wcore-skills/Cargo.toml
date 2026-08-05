@@ -32,19 +32,26 @@ tracing.workspace      = true
 unicode-width.workspace = true
 lru.workspace          = true
 chrono.workspace       = true
-parking_lot.workspace  = true
+sha2.workspace         = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# Audit W-3 fix: restrict bundled-skill dir/file permissions on Windows.
-# windows-sys is already a workspace dep (see wcore-sandbox/Cargo.toml).
-# We need Win32_Security for SetSecurityInfo + related types.
+# Audit W-3 fix: capability-relative bundled-skill extraction on Windows.
 [target.'cfg(windows)'.dependencies]
+cap-fs-ext = "=3.4.5"
+cap-std = "=3.4.5"
 windows-sys = { version = "0.59", features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  # Exports ACCESS_ALLOWED_ACE_TYPE, which windows-sys 0.59 moved out of
+  # Win32_Security. Needed by the DACL assertions in bundled_tests.rs.
+  "Win32_System_SystemServices",
   "Win32_System_Threading",
 ] }
 

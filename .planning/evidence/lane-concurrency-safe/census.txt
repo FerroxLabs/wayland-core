@@ -1,0 +1,63 @@
+ROOT=/Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-concurrency-safe
+TOTAL_DECLARATIONS=120
+BUCKET BODILESS|nontest = 1
+BUCKET OTHER|nontest = 14
+BUCKET UNCOND_FALSE|nontest = 33
+BUCKET UNCOND_FALSE|test = 9
+BUCKET UNCOND_TRUE|nontest = 52
+BUCKET UNCOND_TRUE|test = 11
+PRODUCTION_SRC_UNCOND_TRUE=34
+  PROD_TRUE crates/wcore-agent/src/plan/tools.rs:53
+  PROD_TRUE crates/wcore-agent/src/plan/tools.rs:133
+  PROD_TRUE crates/wcore-tools/src/ask_user_question.rs:92
+  PROD_TRUE crates/wcore-tools/src/aws_cli_tool.rs:355
+  PROD_TRUE crates/wcore-tools/src/clarify.rs:87
+  PROD_TRUE crates/wcore-tools/src/doc_tool.rs:215
+  PROD_TRUE crates/wcore-tools/src/email_parse_tool.rs:261
+  PROD_TRUE crates/wcore-tools/src/gcloud_tool.rs:309
+  PROD_TRUE crates/wcore-tools/src/glob.rs:48
+  PROD_TRUE crates/wcore-tools/src/google_meet_tool.rs:733
+  PROD_TRUE crates/wcore-tools/src/google_meet_tool.rs:829
+  PROD_TRUE crates/wcore-tools/src/grep.rs:56
+  PROD_TRUE crates/wcore-tools/src/image_generation_tool.rs:463
+  PROD_TRUE crates/wcore-tools/src/image_inspect_tool.rs:250
+  PROD_TRUE crates/wcore-tools/src/jsonl_tool.rs:143
+  PROD_TRUE crates/wcore-tools/src/kubectl_tool.rs:296
+  PROD_TRUE crates/wcore-tools/src/linear_tool.rs:427
+  PROD_TRUE crates/wcore-tools/src/markdown_tool.rs:371
+  PROD_TRUE crates/wcore-tools/src/osv_check.rs:442
+  PROD_TRUE crates/wcore-tools/src/pdf_tool.rs:194
+  PROD_TRUE crates/wcore-tools/src/postgres_schema_tool.rs:366
+  PROD_TRUE crates/wcore-tools/src/read.rs:155
+  PROD_TRUE crates/wcore-tools/src/repomap.rs:72
+  PROD_TRUE crates/wcore-tools/src/session_search.rs:96
+  PROD_TRUE crates/wcore-tools/src/spotify_tool.rs:988
+  PROD_TRUE crates/wcore-tools/src/spotify_tool.rs:1267
+  PROD_TRUE crates/wcore-tools/src/sql_query_tool.rs:297
+  PROD_TRUE crates/wcore-tools/src/tool_search.rs:53
+  PROD_TRUE crates/wcore-tools/src/transcription_tools.rs:457
+  PROD_TRUE crates/wcore-tools/src/video_analyze_tool.rs:339
+  PROD_TRUE crates/wcore-tools/src/vision_tools.rs:473
+  PROD_TRUE crates/wcore-tools/src/wayland_introspection.rs:373
+  PROD_TRUE crates/wcore-tools/src/wayland_introspection.rs:435
+  PROD_TRUE crates/wcore-tools/src/web_tools.rs:753
+NONSRC_UNCOND_TRUE=18
+  NONSRC_TRUE crates/wcore-agent/tests/acceptance/plan_mode_test.rs:55
+  NONSRC_TRUE crates/wcore-agent/tests/e2e/compaction.rs:100
+  NONSRC_TRUE crates/wcore-agent/tests/orchestration_test.rs:476
+  NONSRC_TRUE crates/wcore-agent/tests/plan_e2e_test.rs:40
+  NONSRC_TRUE crates/wcore-agent/tests/plan_engine_test.rs:38
+  NONSRC_TRUE crates/wcore-agent/tests/policy_gate_wired_test.rs:94
+  NONSRC_TRUE crates/wcore-agent/tests/runaway_loop_test.rs:161
+  NONSRC_TRUE crates/wcore-agent/tests/runaway_loop_test.rs:199
+  NONSRC_TRUE crates/wcore-agent/tests/runaway_loop_test.rs:232
+  NONSRC_TRUE crates/wcore-agent/tests/runaway_loop_test.rs:875
+  NONSRC_TRUE crates/wcore-agent/tests/runaway_loop_test.rs:909
+  NONSRC_TRUE crates/wcore-agent/tests/workspace_bash_deny.rs:38
+  NONSRC_TRUE crates/wcore-cli/tests/mcp_serve_smoke.rs:51
+  NONSRC_TRUE crates/wcore-tools/benches/registry_dispatch_bench.rs:31
+  NONSRC_TRUE crates/wcore-tools/tests/script_dsl.rs:109
+  NONSRC_TRUE crates/wcore-tools/tests/script_dsl.rs:237
+  NONSRC_TRUE crates/wcore-tools/tests/tool_circuit_breaker_test.rs:37
+  NONSRC_TRUE crates/wcore-tools/tests/tool_circuit_breaker_test.rs:65
+census_rc=0

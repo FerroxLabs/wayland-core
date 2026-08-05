@@ -1,0 +1,47 @@
+=== KNOWN-POSITIVE control: secret_deny_paths_dynamic() call sites ===
+crates/wcore-tools/src/bash.rs:133:        manifest.fs_read_deny = p.secret_deny_paths_dynamic();
+crates/wcore-tools/src/workspace_policy/tests.rs:116:    let dynamic = policy.secret_deny_paths_dynamic();
+crates/wcore-tools/src/workspace_policy/tests.rs:516:/// construction via `secret_deny_paths_dynamic()`, while the frozen
+crates/wcore-tools/src/workspace_policy/tests.rs:537:    let dynamic = p.secret_deny_paths_dynamic();
+crates/wcore-tools/src/workspace_policy/tests.rs:561:        p.secret_deny_paths_dynamic().contains(&pem),
+crates/wcore-tools/src/workspace_policy/tests.rs:576:        p.secret_deny_paths_dynamic(),
+crates/wcore-tools/src/workspace_policy/tests.rs:582:        !p.secret_deny_paths_dynamic().contains(&env),
+crates/wcore-tools/src/workspace_policy/tests.rs:597:        p.secret_deny_paths_dynamic().contains(&pem),
+crates/wcore-tools/src/workspace_policy/tests.rs:599:        p.secret_deny_paths_dynamic()
+crates/wcore-tools/src/workspace_policy/tests.rs:625:    let dynamic = p.secret_deny_paths_dynamic();
+crates/wcore-tools/src/workspace_policy/tests.rs:658:        p.secret_deny_paths_dynamic().contains(&secret),
+crates/wcore-tools/src/workspace_policy/tests.rs:660:        p.secret_deny_paths_dynamic()
+crates/wcore-tools/src/workspace_policy/tests.rs:676:        remote.secret_deny_paths_dynamic().contains(&objects),
+crates/wcore-tools/src/workspace_policy/tests.rs:678:        remote.secret_deny_paths_dynamic()
+crates/wcore-tools/src/workspace_policy/tests.rs:683:        !local.secret_deny_paths_dynamic().contains(&objects),
+=== TARGET: secret_deny_paths() call sites (excluding _dynamic and the definition) ===
+crates/wcore-agent/tests/workspace_bash_deny.rs:10://!    `secret_deny_paths()` is non-empty and includes the `.env` path.
+crates/wcore-agent/tests/workspace_bash_deny.rs:98://    secret_deny_paths() non-empty and contains .env.
+crates/wcore-agent/tests/workspace_bash_deny.rs:111:    let deny_paths = policy.secret_deny_paths();
+crates/wcore-agent/tests/workspace_bash_deny.rs:115:        "Contained workspace with .env must have non-empty secret_deny_paths()"
+crates/wcore-agent/tests/workspace_bash_deny.rs:121:        ".env must appear in secret_deny_paths(); paths: {deny_paths:?}",
+crates/wcore-tools/src/workspace_policy.rs:111:    /// `secret_deny_paths()` / `compute_secret_deny()`.
+crates/wcore-tools/src/workspace_policy.rs:456:    /// denial (`secret_deny_paths()`) that `Contained` applies, so a
+crates/wcore-tools/src/workspace_policy/tests.rs:112:            .secret_deny_paths()
+crates/wcore-tools/src/workspace_policy/tests.rs:284:    let deny = p.secret_deny_paths();
+crates/wcore-tools/src/workspace_policy/tests.rs:308:    let deny = p.secret_deny_paths();
+crates/wcore-tools/src/workspace_policy/tests.rs:342:    let deny = p.secret_deny_paths();
+crates/wcore-tools/src/workspace_policy/tests.rs:361:    for path in p.secret_deny_paths() {
+crates/wcore-tools/src/workspace_policy/tests.rs:380:    let deny = p.secret_deny_paths();
+crates/wcore-tools/src/workspace_policy/tests.rs:393:/// `secret_deny_paths()` (which `bash.rs` feeds to the OS sandbox's
+crates/wcore-tools/src/workspace_policy/tests.rs:407:        !local.secret_deny_paths().contains(&env_canon),
+crates/wcore-tools/src/workspace_policy/tests.rs:413:        remote.secret_deny_paths().contains(&env_canon),
+crates/wcore-tools/src/workspace_policy/tests.rs:415:        remote.secret_deny_paths()
+crates/wcore-tools/src/workspace_policy/tests.rs:478:        .secret_deny_paths()
+crates/wcore-tools/src/workspace_policy/tests.rs:483:        .secret_deny_paths()
+crates/wcore-tools/src/workspace_policy/tests.rs:517:/// `secret_deny_paths()` (what `bash.rs` used before) MISSES it — proving the
+crates/wcore-tools/src/workspace_policy/tests.rs:534:        !p.secret_deny_paths().contains(&pem) && !p.secret_deny_paths().contains(&tf),
+crates/wcore-tools/src/workspace_policy/tests.rs:577:        p.secret_deny_paths().to_vec(),
+crates/wcore-tools/src/workspace_policy/tests.rs:653:        p.secret_deny_paths().contains(&secret),
+crates/wcore-tools/src/workspace_policy/tests.rs:655:        p.secret_deny_paths()
+crates/wcore-tools/src/bash/tests.rs:673:    // Create a .env file so secret_deny_paths() will include it.
+=== self.secret_deny field reads ===
+crates/wcore-tools/src/workspace_policy.rs:417:        &self.secret_deny
+crates/wcore-tools/src/workspace_policy.rs:465:        self.secret_deny
+crates/wcore-tools/src/workspace_policy.rs:467:        self.secret_deny.sort();
+crates/wcore-tools/src/workspace_policy.rs:468:        self.secret_deny.dedup();

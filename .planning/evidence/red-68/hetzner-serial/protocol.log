@@ -1,0 +1,133 @@
+warning: in config file .config/nextest.toml, ignoring unknown configuration key: profile.default.no-tests
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling libc v0.2.186
+   Compiling version_check v0.9.5
+   Compiling memchr v2.8.1
+   Compiling cfg-if v1.0.4
+   Compiling serde_core v1.0.228
+   Compiling typenum v1.20.1
+   Compiling autocfg v1.5.1
+   Compiling serde v1.0.228
+   Compiling pin-project-lite v0.2.17
+   Compiling zmij v1.0.21
+   Compiling parking_lot_core v0.9.12
+   Compiling hashbrown v0.17.1
+   Compiling smallvec v1.15.1
+   Compiling thiserror v2.0.18
+   Compiling equivalent v1.0.2
+   Compiling winnow v1.0.3
+   Compiling generic-array v0.14.7
+   Compiling semver v1.0.28
+   Compiling num-traits v0.2.19
+   Compiling scopeguard v1.2.0
+   Compiling serde_json v1.0.150
+   Compiling lock_api v0.4.14
+   Compiling rustc_version v0.4.1
+   Compiling aho-corasick v1.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling indexmap v2.14.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling iana-time-zone v0.1.65
+   Compiling itoa v1.0.18
+   Compiling cpufeatures v0.2.17
+   Compiling syn v2.0.117
+   Compiling once_cell v1.21.4
+   Compiling rstest_macros v0.26.1
+   Compiling bytes v1.11.1
+   Compiling tracing-core v0.1.36
+   Compiling slab v0.4.12
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling errno v0.3.14
+   Compiling digest v0.10.7
+   Compiling socket2 v0.6.4
+   Compiling mio v1.2.1
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling sha2 v0.10.9
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling futures-core v0.3.32
+   Compiling relative-path v1.9.3
+   Compiling workspace-hack v0.1.0 (/root/wayland-red68/workspace-hack)
+   Compiling toml_edit v0.25.12+spec-1.1.0
+   Compiling futures-task v0.3.32
+   Compiling glob v0.3.3
+   Compiling futures-timer v3.0.4
+   Compiling regex-automata v0.4.14
+   Compiling proc-macro-crate v3.5.0
+   Compiling regex v1.12.3
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+   Compiling futures-macro v0.3.32
+   Compiling tokio v1.52.3
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling rstest v0.26.1
+   Compiling chrono v0.4.44
+   Compiling wcore-types v0.12.25 (/root/wayland-red68/crates/wcore-types)
+   Compiling wcore-protocol v0.12.25 (/root/wayland-red68/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.20s
+────────────
+ Nextest run ID a17bab49-591e-4416-8d3c-1fe5fcc09099 with nextest profile: default
+    Starting 15 tests across 1 binary
+        PASS [   0.005s] ( 1/15) wcore-protocol::desktop_contract_corpus authority_fixtures_pin_correlated_current_shapes
+        PASS [   0.116s] ( 2/15) wcore-protocol::desktop_contract_corpus budget_grant_adversarial_fixtures_fail_closed
+  TRY 1 FAIL [   0.119s] (─────) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  stdout ───
+
+    running 1 test
+    test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+
+    failures:
+
+    failures:
+        checked_corpus_matches_real_serializers_byte_for_byte
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'checked_corpus_matches_real_serializers_byte_for_byte' (1428539) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+    checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\"]; run `wcore-contract generate`" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  TRY 2 FAIL [   0.119s] ( 3/15) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  stdout ───
+
+    running 1 test
+    test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+
+    failures:
+
+    failures:
+        checked_corpus_matches_real_serializers_byte_for_byte
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'checked_corpus_matches_real_serializers_byte_for_byte' (1428542) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+    checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\"]; run `wcore-contract generate`" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.006s] ( 4/15) wcore-protocol::desktop_contract_corpus contradictory_budget_grant_results_cannot_cross_the_wire
+        PASS [   0.331s] ( 5/15) wcore-protocol::desktop_contract_corpus durable_child_type_fixtures_round_trip_without_a_parallel_model
+        PASS [   0.008s] ( 6/15) wcore-protocol::desktop_contract_corpus event_schema_distinguishes_correlated_and_legacy_child_shapes
+        PASS [   0.006s] ( 7/15) wcore-protocol::desktop_contract_corpus every_command_fixture_deserializes_through_protocol_command
+        PASS [   0.128s] ( 8/15) wcore-protocol::desktop_contract_corpus every_json_artifact_is_canonical_and_lf_terminated
+        PASS [   1.506s] ( 9/15) wcore-protocol::desktop_contract_corpus generated_schemas_reject_malformed_authority_types_and_enums
+        PASS [   0.006s] (10/15) wcore-protocol::desktop_contract_corpus inventory_is_exactly_eighteen_commands_and_forty_nine_events
+        PASS [   0.222s] (11/15) wcore-protocol::desktop_contract_corpus malformed_durable_child_fixtures_are_rejected
+        PASS [   0.006s] (12/15) wcore-protocol::desktop_contract_corpus manifest_criticality_uses_only_the_normative_typed_vocabulary
+        PASS [   0.006s] (13/15) wcore-protocol::desktop_contract_corpus manifest_pins_generator_and_all_three_digests
+        PASS [   0.432s] (14/15) wcore-protocol::desktop_contract_corpus manifest_ready_and_schema_titles_share_one_contract_identity
+        PASS [   0.333s] (15/15) wcore-protocol::desktop_contract_corpus producer_complete_schema_keeps_current_and_non_desktop_variants_visible
+────────────
+     Summary [   3.352s] 15 tests run: 14 passed, 1 failed, 0 skipped
+  TRY 2 FAIL [   0.119s] ( 3/15) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+error: test run failed

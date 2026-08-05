@@ -1,0 +1,25 @@
+A security lane must prove an egress-denial control on Windows. The Linux proof used a VALID cloud API token against a nonexistent app, and the positive-control arm showed the product reporting `machine listing returned HTTP 404: {"error":"app not found"}` from api.machines.dev (Fly.io). On Windows no valid token exists and none may be moved there, so the lane used a deliberately invalid placeholder token; the code only rejects an EMPTY token, so the HTTP request is still made and the product reported `machine listing returned HTTP 401: {"error":"Authenticate: token validation error"}`. The deny arm, differing only by one config key (egress_allow), reported `egress denied ... blocked by the security policy`. A third leg with the PRE-FIX binary and the SAME deny config still got the 401, proving the gate can fail. Question: is the 401-from-invalid-token positive control evidentially EQUIVALENT to the 404-from-valid-token one for the specific claim "the request physically left the machine and a remote server answered", or is it materially weaker? Answer with a one-line verdict of EQUIVALENT or WEAKER, then at most 5 lines of reasoning naming any way a 401 could be produced WITHOUT the packet leaving the host.
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-29T16:43:58.518740Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-29T16:43:59.020581Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+warning: Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+WEAKER
+A 401 only proves the product received an HTTP-shaped rejection, not that Fly.io produced it.
+It could come from a localhost proxy, endpoint-security/TLS interceptor, hosts/DNS redirection, or an injected/mock HTTP transport without leaving the host.
+The valid-token 404 is stronger because successful credential validation binds the response to a service possessing the verification authority.
+The pre-fix 401 leg proves gate sensitivity, but packet capture or remote-side logs are needed for equivalent physical-egress proof.
+hook: Stop
+hook: Stop Completed
+tokens used
+31,134
+WEAKER
+A 401 only proves the product received an HTTP-shaped rejection, not that Fly.io produced it.
+It could come from a localhost proxy, endpoint-security/TLS interceptor, hosts/DNS redirection, or an injected/mock HTTP transport without leaving the host.
+The valid-token 404 is stronger because successful credential validation binds the response to a service possessing the verification authority.
+The pre-fix 401 leg proves gate sensitivity, but packet capture or remote-side logs are needed for equivalent physical-egress proof.

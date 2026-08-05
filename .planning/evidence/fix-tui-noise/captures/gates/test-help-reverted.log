@@ -1,0 +1,15 @@
+   Compiling wcore-cli v0.12.25 (/root/wayland-fix-tui-noise/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.59s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/help_no_internal_ids.rs (target/debug/deps/help_no_internal_ids-bb2893bfebad10b6)
+
+running 5 tests
+test matcher_accepts_ordinary_help_prose ... ok
+test matcher_rejects_seeded_internal_ids ... ok
+test long_help_has_no_internal_identifiers ... ok
+test short_help_has_no_internal_identifiers ... ok
+test help_output_is_greppable_at_all ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

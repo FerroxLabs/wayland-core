@@ -1,0 +1,378 @@
+crates/wcore-agent/src/budget_authority.rs         | 119 ++++++++++++
+ crates/wcore-cli/tests/child_attribution_corpus.rs | 208 +++++++++++++++++----
+ .../tests/child_attribution_corpus/cases.rs        |   5 +-
+ 3 files changed, 298 insertions(+), 34 deletions(-)
+
+--- Changes ---
+
+crates/wcore-agent/src/budget_authority.rs
+  @@ -1213,6 +1213,125 @@ mod tests {
+  +    /// Restart reconciliation must decide each SIBLING's reservation on that
+  +    /// sibling's own evidence, and must post the consequence to that sibling's
+  +    /// books only.
+  +    ///
+  +    /// Two siblings hold in-flight reservations across the same crash and are
+  +    /// owed opposite outcomes: sibling A's physical send is journalled, so its
+  +    /// admitted maximum must be charged; sibling B's never started, so its
+  +    /// reservation must be refunded outright. The failure this pins is the one
+  +    /// a single-session restart test cannot see — a restart that charges the
+  +    /// wrong sibling, refunds the wrong sibling, or applies one sibling's
+  +    /// disposition to both. It also pins the durability claim itself: the
+  +    /// reservations are read back out of the journal FILE, after the crash and
+  +    /// before any rebind, so "the reservations were not persisted" and "the
+  +    /// reservations were persisted and then deliberately reconciled" cannot be
+  +    /// confused for one another.
+  +    #[test]
+  +    fn restart_reconciliation_posts_each_siblings_outcome_to_that_sibling_alone() {
+  +        const SIBLING_A: &str = "parent/child-alpha";
+  +        const SIBLING_B: &str = "parent/child-beta";
+  +
+  +        let dir = tempfile::tempdir().unwrap();
+  +        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+  +        baseline(&journal);
+  +        let mut first =
+  +            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100)).unwrap();
+  +        start_turn(&journal, &mut first);
+  +
+  +        // Sibling A: the send reached the provider, so the crash must not give
+  +        // its money back.
+  +        first
+  +            .reserve_provider_dispatch("dispatch-alpha", SIBLING_A, 60, 20, 1.0)
+  +            .unwrap()
+  +            .unwrap();
+  +        append_successful_dispatch(&journal, "dispatch-alpha", "attempt-alpha");
+  +        // Sibling B: no attempt is ever journalled, so the crash owes it a
+  +        // refund. The amounts differ from A's on every axis, so a disposition
+  +        // applied to the wrong sibling produces different numbers than a
+  +        // correct one rather than the same ones.
+  +        first
+  +            .reserve_provider_dispatch("dispatch-beta", SIBLING_B, 30, 10, 0.5)
+  +            .unwrap()
+  +            .unwrap();
+  +
+  +        assert_eq!(
+  +            first
+  +                .inspect(|tracker, _| (
+  +                    tracker.reserved_totals(SIBLING_A),
+  +                    tracker.reserved_totals(SIBLING_B)
+  +                ))
+  +                .unwrap(),
+  +            ((80, 1.0), (40, 0.5))
+  +        );
+  +        drop(first);
+  +
+  +        // The crash has happened. Before anything rebinds, reload the durable
+  +        // authority straight out of the journal: both reservations are still
+  +        // there, on their own siblings, at their own amounts.
+  +        let durable = journal
+  +            .state()
+  +            .unwrap()
+  +            .budget_authority
+  +            .expect("the crashed process committed a durable budget authority");
+  +        assert_eq!(
+  +            durable
+  +                .provider_reservations
+  +                .keys()
+  +                .map(String::as_str)
+  +                .collect::<Vec<_>>(),
+  +            vec!["dispatch-alpha", "dispatch-beta"]
+  +        );
+  +        let persisted = BudgetTracker::from_snapshot_with_current_caps(
+  +            durable.provider_tracker.clone(),
+  +            BudgetCap::builder()
+  +                .per_session_tokens(100)
+  +                .per_session_usd(10.0)
+  +                .build(),
+  +        )
+  +        .unwrap();
+  +        assert_eq!(persisted.reserved_totals(SIBLING_A), (80, 1.0));
+  +        assert_eq!(persisted.reserved_totals(SIBLING_B), (40, 0.5));
+  +
+  +        let restored = BudgetAuthorityCoordinator::bind(config(Some(journal), 100)).unwrap();
+  +
+  +        // Sibling A is charged its admitted maximum, and sibling B's refund
+  +        // does not reduce it.
+  +        assert_eq!(
+  +            restored
+  +                .inspect(|tracker, _| tracker.session_totals(SIBLING_A))
+  +                .unwrap(),
+  +            (80, 1.0)
+  +        );
+  +        // Sibling B is refunded: nothing reserved and, critically, nothing
+  +        // charged. Sibling A's settlement did not land here.
+  +        assert_eq!(
+  +            restored
+  +                .inspect(|tracker, _| tracker.session_totals(SIBLING_B))
+  +                .unwrap(),
+  +            (0, 0.0)
+  +        );
+  +        assert_eq!(
+  ... (19 lines truncated)
+  +119 -0
+
+crates/wcore-cli/tests/child_attribution_corpus.rs
+  @@ -135,6 +135,12 @@ fn usd_eq(left: f64, right: f64) -> bool {
+  +/// Compare one actor's `(tokens, usd)` books against an expectation without
+  +/// making a rounding artefact look like a misattribution.
+  +fn totals_eq(left: (u64, f64), right: (u64, f64)) -> bool {
+  +    left.0 == right.0 && usd_eq(left.1, right.1)
+  +}
+  +
+   /// Seed a journal's canonical imported session baseline.
+   ///
+   /// The reducer requires the import to be the journal's first event and to carry
+  @@ -209,6 +215,44 @@ fn probe_reservation() -> (Attribution, String) {
+  +///
+  +/// ## What the first version of this probe got wrong
+  +///
+  +/// It carried the pre-crash `BudgetReservation` handles across the restart and
+  +/// asked the rebound tracker to `release` one of them, then read
+  +/// `reserved_totals`. Both reads came back empty and it recorded
+  +/// NOT-OBSERVABLE, escalated as F21-04-02 — a suspected durability defect.
+  +///
+  +/// It was the wrong meter, not a missing reservation. A restart does not carry
+  +/// in-flight reservations forward as refundable handles, and deliberately so:
+  +/// an unbound reservation recovered from a dead process has no evidence either
+  +/// way about whether the provider was actually paid, so
+  +/// `BudgetAuthorityCoordinator::bind` reconciles it CONSERVATIVELY — every
+  +/// restored reservation is settled at its admitted maximum
+  +/// (`budget_authority.rs` `restore` → `BudgetTracker::
+  +/// reconcile_restored_reservations_conservatively`). `reserved_totals` reading
+  +/// zero afterwards is that settlement completing, and `release` returning false
+  +/// is the handle having been consumed by it. The money is not returned on a
+  +/// crash; it is charged. Reading only the reserved meter saw the reservation
+  +/// leave and concluded it had never arrived.
+  +///
+  +/// ## What this probe measures now
+  +///
+  +/// Three legs, all on the attribution question and none on a mechanism:
+  +///
+  +/// 1. **The reservations are still on the siblings that made them after the
+  +///    crash.** The durable authority is reloaded out of the journal FILE,
+  +///    before anything rebinds, and each sibling's reserved books are read off
+  +///    it. This is the leg that distinguishes "not persisted" from "persisted,
+  +///    then reconciled".
+  +/// 2. **The restart posts each sibling's own reservation to its own charged
+  +///    books.** A restart that credited one sibling with the other's admitted
+  +///    maximum is exactly the misattribution this case exists to catch, and it
+  +///    is now visible because the charged meter is read as well as the reserved
+  +///    one.
+  +/// 3. **A refund on the crash-survivor authority still lands on one sibling
+  +///    only.** A reserves again on the rebound coordinator and is refunded; B is
+  +///    not touched, on either meter.
+   fn probe_refund_across_restart() -> (Attribution, String) {
+       // Bound to `_temp` rather than `_`: the directory must outlive both
+       // coordinator bindings, and `_` would drop it immediately.
+  @@ -231,7 +275,7 @@ fn probe_refund_across_restart() -> (Attribution, String) {
+  -    let reservations = {
+  +    {
+           let journal = match SessionJournal::open(&path, session) {
+               Ok(journal) => journal,
+               Err(error) => {
+  @@ -264,13 +308,13 @@ fn probe_refund_across_restart() -> (Attribution, String) {
+  -            let a = tracker.reserve(SIBLING_A, 100, 0.10).ok();
+  -            let b = tracker.reserve(SIBLING_B, 250, 0.25).ok();
+  -            (a, b)
+  +            let a = tracker.reserve(SIBLING_A, 100, 0.10).is_ok();
+  +            let b = tracker.reserve(SIBLING_B, 250, 0.25).is_ok();
+  +            a && b
+           });
+           match outcome {
+  -            Ok((Some(a), Some(b))) => (a, b),
+  -            Ok(_) => {
+  +            Ok(true) => {}
+  +            Ok(false) => {
+                   return (
+                       Attribution::NotObservable,
+                       "one of the two siblings could not reserve, so the two-sibling topology never \
+  @@ -286,9 +330,36 @@ fn probe_refund_across_restart() -> (Attribution, String) {
+  +    }
+  +
+  +    // LEG 1. The crash has happened and nothing has rebound yet. Read the
+  +    // durable authority straight out of the journal file and rebuild a tracker
+  +    // from it: both reservations are still there, on the siblings that made
+  +    // them, at the amounts they made them for.
+  +    let persisted = match durable_reserved_totals(&path, session, &seed.provider_caps) {
+  +        Ok(totals) => totals,
+  +        Err(reason) => return (Attribution::NotObservable, reason),
+       };
+  +    if !totals_eq(persisted.0, (100, 0.10)) || !totals_eq(persisted.1, (250, 0.25)) {
+  +        // Not a misattribution: if the reservations are not in the journal
+  +        // there is no refund for the restart to attribute to anyone. Recorded
+  +        // as the durability fact it would be.
+  +        return (
+  +            Attribution::NotObservable,
+  +            format!(
+  +                "the journal survived the crash carrying sibling A's reserved books as {:?} and \
+  +                 sibling B's as {:?}, against the 100 tokens / $0.1000 and 250 tokens / $0.2500 \
+  +                 they respectively reserved, so there was no surviving reservation to attribute a \
+  +                 refund to",
+  +                persisted.0, persisted.1
+  +            ),
+  +        );
+  +    }
+   
+  -    // The restart: a second authority bound over the same journal file.
+  +    // The restart: a second authority bound over the same journal file. Binding
+  +    // is itself the restart reconciliation — every reservation recovered from
+  +    // the dead process is settled at its admitted maximum, against the sibling
+  +    // that owns it.
+       let rebound_journal = match SessionJournal::open(&path, session) {
+           Ok(journal) => journal,
+           Err(error) => {
+  @@ -309,17 +380,35 @@ fn probe_refund_across_restart() -> (Attribution, String) {
+  +    // LEGS 2 and 3, in one transaction on the crash-survivor authority: read
+  +    // where the restart posted each sibling's reservation, then refund a fresh
+  +    // reservation belonging to sibling A alone.
+       let observed = rebound.transaction(|mutation| {
+           let tracker = mutation.provider_tracker();
+  -        let before_a = tracker.reserved_totals(SIBLING_A);
+  -        let before_b = tracker.reserved_totals(SIBLING_B);
+  -        // Refund exactly ONE sibling.
+  -        let released = tracker.release(reservations.0);
+  -        let after_a = tracker.reserved_totals(SIBLING_A);
+  -        let after_b = tracker.reserved_totals(SIBLING_B);
+  -        (released, before_a, before_b, after_a, after_b)
+  +        let settled_a = tracker.session_totals(SIBLING_A);
+  +        let settled_b = tracker.session_totals(SIBLING_B);
+  +        let carried_a = tracker.reserved_totals(SIBLING_A);
+  +        let carried_b = tracker.reserved_totals(SIBLING_B);
+  +        let refunded = match tracker.reserve(SIBLING_A, 40, 0.04) {
+  +            Ok(reservation) => {
+  +                let held_a = tracker.reserved_totals(SIBLING_A);
+  +                let held_b = tracker.reserved_totals(SIBLING_B);
+  +                let released = tracker.release(reservation);
+  +                Some((
+  +                    released,
+  +                    held_a,
+  +                    held_b,
+  +                    tracker.reserved_totals(SIBLING_A),
+  +                    tracker.reserved_totals(SIBLING_B),
+  +                    tracker.session_totals(SIBLING_A),
+  +                    tracker.session_totals(SIBLING_B),
+  +                ))
+  +            }
+  +            Err(_) => None,
+  +        };
+  +        (settled_a, settled_b, carried_a, carried_b, refunded)
+       });
+  -    let (released, before_a, before_b, after_a, after_b) = match observed {
+  +    let (settled_a, settled_b, carried_a, carried_b, refunded) = match observed {
+           Ok(values) => values,
+           Err(error) => {
+               return (
+  @@ -328,34 +417,89 @@ fn probe_refund_across_restart() -> (Attribution, String) {
+  -
+  -    let detail = format!(
+  -        "across the restart, sibling A's books read {before_a:?} before the refund and \
+  -         {after_a:?} after; sibling B's read {before_b:?} before and {after_b:?} after; the \
+  -         release reported {released}"
+  -    );
+  -    if !released {
+  -        // The reservation handle did not survive the restart. That is a fact
+  -        // about durability, not a misattribution, and it is recorded as what it
+  -        // is rather than reported as a red it is not.
+  +    let Some((released, held_a, held_b, after_a, after_b, charged_a, charged_b)) = refunded else {
+           return (
+               Attribution::NotObservable,
+  -            format!(
+  -                "{detail} — the reservation handle did not resolve after the rebind, so no refund \
+  -                 occurred and there was no attribution to observe"
+  -            ),
+  +            "the crash-survivor authority refused sibling A a fresh reservation, so there was no \
+  +             refund to attribute"
+  +                .to_owned(),
+           );
+  -    }
+  -    if after_b == before_b && after_a.0 < before_a.0 {
+  +    };
+  +
+  +    let detail = format!(
+  +        "the crash left sibling A's reserved books at {:?} and sibling B's at {:?} in the journal; \
+  +         the restart posted {settled_a:?} to sibling A's charged books and {settled_b:?} to \
+  +         sibling B's, carrying {carried_a:?} and {carried_b:?} forward as still-reserved; sibling \
+  +         A then reserved again ({held_a:?} against sibling B's {held_b:?}) and the refund \
+  +         reported {released}, leaving reserved {after_a:?} / {after_b:?} and charged \
+  +         {charged_a:?} / {charged_b:?}",
+  +        persisted.0, persisted.1
+  +    );
+  +
+  +    // The restart must charge each sibling ITS OWN admitted maximum and carry
+  +    // nothing forward as reserved.
+  +    let restart_posted_per_sibling = totals_eq(settled_a, (100, 0.10))
+  +        && totals_eq(settled_b, (250, 0.25))
+  +        && totals_eq(carried_a, (0, 0.0))
+  +        && totals_eq(carried_b, (0, 0.0));
+  +    // The refund must reduce only the sibling that made the reservation, and
+  +    // must not disturb either sibling's charged books.
+  +    let refund_landed_on_one_sibling = released
+  +        && totals_eq(held_a, (40, 0.04))
+  +        && totals_eq(held_b, (0, 0.0))
+  +        && totals_eq(after_a, (0, 0.0))
+  +        && totals_eq(after_b, (0, 0.0))
+  +        && totals_eq(charged_a, (100, 0.10))
+  +        && totals_eq(charged_b, (250, 0.25));
+  +
+  +    if restart_posted_per_sibling && refund_landed_on_one_sibling {
+           (
+               Attribution::Correct,
+  -            format!("{detail} — the refund reduced only the sibling whose reservation it released"),
+  +            format!(
+  +                "{detail} — the reservations survived the crash on the siblings that made them, \
+  +                 the restart charged each sibling only its own, and the refund reduced only the \
+  +                 sibling whose reservation it released"
+  +            ),
+           )
+       } else {
+           (Attribution::Misattributed, detail)
+       }
+   }
+   
+  +/// Reload the durable budget authority from a journal FILE and report each
+  +/// sibling's still-reserved books.
+  +///
+  +/// Deliberately reads the file rather than a live coordinator: a coordinator
+  +/// reconciles restored reservations as it binds, so only the file can answer
+  +/// whether the reservations were persisted at all.
+  +fn durable_reserved_totals(
+  +    path: &std::path::Path,
+  +    session: &str,
+  +    caps: &BudgetCap,
+  +) -> Result<((u64, f64), (u64, f64)), String> {
+  +    let journal = SessionJournal::open(path, session).map_err(|error| {
+  +        format!("the session journal could not be reopened after the crash: {error}")
+  +    })?;
+  +    let authority = journal
+  +        .state()
+  +        .map_err(|error| format!("the crashed session's journal did not reduce: {error}"))?
+  +        .budget_authority
+  +        .ok_or_else(|| {
+  +            "the crashed process committed no durable budget authority, so there was nothing for \
+  +             the restart to attribute"
+  +                .to_owned()
+  +        })?;
+  +    let tracker = BudgetTracker::from_snapshot_with_current_caps(
+  +        authority.provider_tracker.clone(),
+  +        caps.clone(),
+  +    )
+  +    .map_err(|error| format!("the durable provider authority did not reload: {error}"))?;
+  +    Ok((
+  +        tracker.reserved_totals(SIBLING_A),
+  +        tracker.reserved_totals(SIBLING_B),
+  +    ))
+  +}
+  +
+  +176 -32
+
+crates/wcore-cli/tests/child_attribution_corpus/cases.rs
+  @@ -180,8 +180,9 @@ pub const CORPUS: &[AttributionCase] = &[
+  -        in_process_seam: "BudgetAuthorityCoordinator::bind over a SessionJournal, dropped and \
+  -                          rebound, then BudgetTracker::release",
+  +        in_process_seam: "BudgetAuthorityCoordinator::bind over a SessionJournal, dropped, the \
+  +                          durable authority reloaded from the journal file, rebound, then \
+  +                          BudgetTracker::session_totals + reserved_totals + release",
+           human_visible_surface: HumanVisibleSurface::Wire,
+           live_observable: "a per-sibling refund observation on the host-protocol wire, keyed to \
+                             the sibling whose reservation was released",
+  +3 -2
+[full diff: rtk git diff --no-compact]

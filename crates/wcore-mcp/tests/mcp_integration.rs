@@ -371,6 +371,36 @@ async fn concurrent_calls_to_different_servers_return_correct_results() {
     assert_eq!(r2.unwrap().unwrap().text, "slow-result");
 }
 
+#[tokio::test]
+async fn parallel_managers_do_not_share_same_named_server_state() {
+    let first = McpManager::new_for_test_with_tools(vec![(
+        "shared-name",
+        false,
+        Box::new(DelayedTransport::new(
+            Duration::from_millis(25),
+            "first-session",
+        )),
+        vec![make_tool_def("t", "T")],
+    )]);
+    let second = McpManager::new_for_test_with_tools(vec![(
+        "shared-name",
+        false,
+        Box::new(DelayedTransport::new(
+            Duration::from_millis(25),
+            "second-session",
+        )),
+        vec![make_tool_def("t", "T")],
+    )]);
+
+    let (first_result, second_result) = tokio::join!(
+        first.call_tool("shared-name", "t", json!({})),
+        second.call_tool("shared-name", "t", json!({})),
+    );
+
+    assert_eq!(first_result.unwrap().text, "first-session");
+    assert_eq!(second_result.unwrap().text, "second-session");
+}
+
 // ---------------------------------------------------------------------------
 // 5. Server disconnect mid-stream
 // ---------------------------------------------------------------------------

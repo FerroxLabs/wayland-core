@@ -76,13 +76,14 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, info, warn};
+use wcore_config::shell::McpStdioLaunchContext;
 use wcore_mcp::protocol::{
     ClientCapabilities, ClientInfo, InitializeParams, JsonRpcRequest, JsonRpcResponse, McpToolDef,
     ToolsListResult,
 };
 use wcore_plugin_api::access_gate::PluginAccessGate;
 use wcore_plugin_api::manifest::PluginManifest;
-use wcore_plugin_api::tool::{PluginTool, PluginToolInvocation};
+use wcore_plugin_api::tool::{PluginTool, PluginToolEffectIdentity, PluginToolInvocation};
 use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::ToolResult;
 
@@ -106,55 +107,6 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 /// MCP protocol version we advertise during `initialize`. Matches what
 /// `wcore-mcp`'s in-engine `McpManager` already sends to upstream servers.
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
-
-/// Minimal env vars forwarded to MCP-bridge child processes after
-/// [`std::process::Command::env_clear`]. Everything else — including
-/// `OPENAI_API_KEY`, `WAYLAND_VAULT_*`, `ANTHROPIC_*`, etc. — is withheld
-/// (`WAYLAND_HOME` is an intentional exception below, forwarded so the child
-/// resolves the same isolated profile — C3; the vault secret stays withheld).
-/// Kept minimal: just enough for CLI tools to locate executables and
-/// behave correctly under different locales on every supported OS.
-///
-/// Windows entries are mandatory — without `SYSTEMROOT`/`WINDIR`/etc. the
-/// spawned child cannot initialise (CreateProcess returns
-/// `ERROR_ENVVAR_NOT_FOUND` / 0xcb, observed v0.8.6 round 17). Mirrors
-/// the same list in `wcore_mcp::transport::stdio::FORWARDED_ENV_VARS` and
-/// `wcore_plugin_subprocess::runner::FORWARDED_ENV_VARS` — keep all three
-/// in sync when adding vars.
-const FORWARDED_ENV_VARS: &[&str] = &[
-    // Unix essentials
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "TZ",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "LC_MONETARY",
-    "LC_NUMERIC",
-    "LC_TIME",
-    "TMPDIR",
-    // C3: the isolated-profile home. Engine-controlled children must resolve the
-    // SAME profile as the parent — without this they fall back to the default
-    // ~/.wayland (cross-profile leak). Non-secret path; the vault passphrase
-    // (WAYLAND_VAULT_*) is never forwarded.
-    "WAYLAND_HOME",
-    // Windows essentials
-    "SYSTEMROOT",
-    "WINDIR",
-    "COMSPEC",
-    "PATHEXT",
-    "PROCESSOR_ARCHITECTURE",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "PROGRAMFILES",
-    "PROGRAMFILES(X86)",
-    "PSMODULEPATH",
-    "TEMP",
-    "TMP",
-];
 
 /// Result of [`McpBridgePluginRunner::load`] — the runner plus the
 /// synthesized [`PluginTool`] list the host's apply pipeline registers.
@@ -266,23 +218,24 @@ impl McpBridgePluginRunner {
             .map(|s| s.args.clone())
             .unwrap_or_default();
 
+        let launch_context = McpStdioLaunchContext::capture(&HashMap::new()).map_err(|error| {
+            SubprocessPluginError::RpcParse(format!(
+                "plugin {}: invalid MCP bridge launch context: {error}",
+                manifest.plugin.name
+            ))
+        })?;
+
         let mut cmd = Command::new(&binary);
         cmd.args(&args)
-            .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
-        for var in FORWARDED_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
-        }
+        launch_context.apply_to(&mut cmd);
         info!(
             plugin = %manifest.plugin.name,
             binary = %binary.display(),
-            forwarded_env = ?FORWARDED_ENV_VARS,
-            "mcp-bridge subprocess spawning with cleared env"
+            "mcp-bridge subprocess spawning with canonical sanitized context"
         );
         let mut child = cmd.spawn().map_err(SubprocessPluginError::SpawnFailed)?;
 
@@ -550,10 +503,17 @@ impl McpBridgePluginRunner {
     /// Invoke an MCP tool by name through the bridge. Synthesized
     /// `PluginTool::execute` closures dispatch through here.
     pub async fn call_mcp_tool(&self, name: &str, input: Value) -> Result<ToolOutput> {
-        let params = json!({
-            "name": name,
-            "arguments": input,
-        });
+        self.call_mcp_tool_with_effect_identity(name, input, None)
+            .await
+    }
+
+    pub async fn call_mcp_tool_with_effect_identity(
+        &self,
+        name: &str,
+        input: Value,
+        effect: Option<&PluginToolEffectIdentity>,
+    ) -> Result<ToolOutput> {
+        let params = mcp_call_params(name, input, effect);
         let resp = self.send_request("tools/call", Some(params)).await?;
         let result_value = resp
             .result
@@ -639,6 +599,23 @@ impl McpBridgePluginRunner {
     }
 }
 
+fn mcp_call_params(name: &str, input: Value, effect: Option<&PluginToolEffectIdentity>) -> Value {
+    let mut params = json!({
+        "name": name,
+        "arguments": input,
+    });
+    if let Some(effect) = effect {
+        params["_meta"] = json!({
+            "wayland/durable-effect": {
+                "version": effect.version,
+                "toolExecutionId": effect.tool_execution_id,
+                "idempotencyKey": effect.idempotency_key,
+            }
+        });
+    }
+    params
+}
+
 /// Output of a synthesized [`PluginTool`] backed by an MCP tool. Mirrors
 /// the shape of [`crate::runner::ToolOutput`] so the host loader can treat
 /// MCP-bridge and subprocess-SDK plugins identically.
@@ -677,7 +654,10 @@ fn synthesize_plugin_tool(def: McpToolDef, runner: Arc<McpBridgePluginRunner>) -
             let runner = Arc::clone(&runner);
             let name = tool_name.clone();
             Box::pin(async move {
-                match runner.call_mcp_tool(&name, inv.input).await {
+                match runner
+                    .call_mcp_tool_with_effect_identity(&name, inv.input, inv.caps.effect.as_ref())
+                    .await
+                {
                     Ok(out) => ToolResult {
                         content: out.stdout,
                         is_error: out.is_error,
@@ -703,14 +683,40 @@ fn map_io_err(e: std::io::Error) -> SubprocessPluginError {
 
 #[cfg(test)]
 mod tests {
-    use super::FORWARDED_ENV_VARS;
+    // Both are consumed only by `mcp_bridge_env_clear_blocks_secret_vars`,
+    // which is `cfg(unix)` because it asserts POSIX env-clear semantics.
+    #[cfg(unix)]
+    use std::collections::HashMap;
+
+    use super::mcp_call_params;
+    use serde_json::json;
+    #[cfg(unix)]
+    use wcore_config::shell::McpStdioLaunchContext;
+    use wcore_plugin_api::tool::PluginToolEffectIdentity;
+
+    #[test]
+    fn durable_mcp_call_metadata_is_versioned_and_legacy_shape_is_unchanged() {
+        let input = json!({"amount": 42});
+        let legacy = mcp_call_params("charge", input.clone(), None);
+        assert_eq!(legacy, json!({"name": "charge", "arguments": input}));
+
+        let effect = PluginToolEffectIdentity::v1("execution-42", "stable-key-42");
+        let durable = mcp_call_params("charge", json!({"amount": 42}), Some(&effect));
+        assert_eq!(
+            durable["_meta"]["wayland/durable-effect"],
+            json!({
+                "version": 1,
+                "toolExecutionId": "execution-42",
+                "idempotencyKey": "stable-key-42"
+            })
+        );
+    }
 
     /// env_clear() — secret vars must NOT reach the MCP-bridge child process.
     ///
-    /// The `load()` path calls `env_clear()` then re-forwards only the
-    /// `FORWARDED_ENV_VARS` allowlist. This test directly exercises the
-    /// Command builder logic by constructing an equivalent command and
-    /// asserting the child does not inherit secret vars.
+    /// The `load()` path applies the canonical MCP stdio launch context. This
+    /// test directly exercises that context and proves the child does not
+    /// inherit unrelated ambient secrets.
     #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
@@ -728,17 +734,14 @@ mod tests {
         // environment concurrently.
         unsafe { std::env::set_var(secret_var, secret_val) };
 
+        let launch_context = McpStdioLaunchContext::capture(&HashMap::new())
+            .expect("canonical launch context should be captured");
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", &format!("printf '%s' \"${secret_var}\"")])
-            .env_clear()
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
-        for var in FORWARDED_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
-        }
+        launch_context.apply_to(&mut cmd);
 
         let mut child = cmd.spawn().expect("spawn /bin/sh failed");
         let mut stdout_buf = String::new();
@@ -754,16 +757,6 @@ mod tests {
 
         // SAFETY: single-threaded test context; no concurrent env mutation.
         unsafe { std::env::remove_var(secret_var) };
-    }
-
-    #[test]
-    fn mcp_bridge_forwarded_env_vars_contains_expected_minimum() {
-        assert!(FORWARDED_ENV_VARS.contains(&"PATH"));
-        assert!(FORWARDED_ENV_VARS.contains(&"HOME"));
-        assert!(FORWARDED_ENV_VARS.contains(&"USER"));
-        assert!(FORWARDED_ENV_VARS.contains(&"LANG"));
-        // C3 profile propagation.
-        assert!(FORWARDED_ENV_VARS.contains(&"WAYLAND_HOME"));
     }
 
     /// Audit rel-panic-68/M-21: a hostile MCP server that streams an endless

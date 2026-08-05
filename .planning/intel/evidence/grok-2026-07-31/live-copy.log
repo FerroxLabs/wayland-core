@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.70s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/migrate_grok.rs (/Users/seandonahoe/dev/.mac-target-grok/debug/deps/migrate_grok-9d358af2a5dfe974)
+
+running 1 test
+test live_drive_against_a_real_grok_install has been running for over 60 seconds
+LIVE-GROK peer=/private/tmp/claude-501/-Users-seandonahoe-dev-waylandcore/11929102-d58a-47e9-9644-0e9d530b58c4/scratchpad/grok-copy files=4009 version=Some("{\n  \"version\": \"0.2.103\",\n  \"stable_version\": \"0.2.103\",\n  \"checked_at\": \"2026-07-18T02:27:53.358405Z\"\n}") model=None provider=None has_credential=true mcp=0 skills=5 personas=0 memory=0 deferred_other={"bundled": 4, "marketplace-cache": 6, "sessions": 26} warnings=[] report={profiles_added:1, quarantined:0, discovered:6, imported:6, excluded:0, files_written:5}
+test live_drive_against_a_real_grok_install ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 73.93s
+

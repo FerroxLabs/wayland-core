@@ -17,18 +17,28 @@
 //! `WAYLAND_ALLOW_NO_SANDBOX=1` opt-in.
 
 pub mod backends;
+pub mod directory_authority;
 pub mod error;
 pub mod manifest;
+pub mod process_capture;
 
+pub use backends::HardContainmentMechanism;
+pub use directory_authority::{
+    DirectoryAuthority, DirectoryAuthorityIdentity, DirectoryHandleLoan, RegularFileAuthority,
+    RetainedWorkspaceAuthority,
+};
 pub use error::{Result, SandboxError};
-pub use manifest::{NetworkPolicy, SandboxManifest, SyscallPolicy};
+pub use manifest::{
+    ContainmentPolicyIdentity, HardContainmentFilesystem, NetworkPolicy, SandboxManifest,
+    SyscallPolicy,
+};
 
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
+use wcore_types::execution_policy::DangerousSessionGrant;
 
 /// Operator opt-in that permits running model-driven commands with NO
 /// isolation when the platform's real sandbox is unavailable. Without it
@@ -39,79 +49,21 @@ const ALLOW_NO_SANDBOX_ENV: &str = "WAYLAND_ALLOW_NO_SANDBOX";
 /// Env-var name selecting the sandbox backend (`none` / `docker`).
 const SANDBOX_ENV: &str = "WAYLAND_SANDBOX";
 
-/// #327: config-sourced sandbox toggle, installed once at bootstrap from
-/// `[tools] sandbox` / `[tools] allow_no_sandbox`.
-///
-/// This is a process-global fallback consulted only when the corresponding
-/// env var is unset — the `WAYLAND_SANDBOX` / `WAYLAND_ALLOW_NO_SANDBOX`
-/// env vars keep precedence for back-compat. Mirrors the process-global
-/// pattern used by `wcore_tools::env_passthrough::set_config_passthrough`.
-#[derive(Clone, Default)]
-struct SandboxConfigOverride {
-    /// Backend selection (`Some("none")` / `Some("docker")`), or `None` to
-    /// leave the platform default.
-    backend: Option<String>,
-    /// Operator opt-in to unsandboxed execution; `None` = unset.
-    allow_no_sandbox: Option<bool>,
-}
-
-fn sandbox_config_override() -> &'static RwLock<SandboxConfigOverride> {
-    static CFG: OnceLock<RwLock<SandboxConfigOverride>> = OnceLock::new();
-    CFG.get_or_init(|| RwLock::new(SandboxConfigOverride::default()))
-}
-
-/// Install the config-sourced sandbox toggle (#327).
-///
-/// Called once at host bootstrap with the resolved `[tools] sandbox` /
-/// `[tools] allow_no_sandbox` values. The `WAYLAND_SANDBOX` /
-/// `WAYLAND_ALLOW_NO_SANDBOX` env vars still take precedence — config is
-/// only the fallback when the env var is absent. Subsequent calls replace
-/// the previous config (the host owns the source of truth).
-pub fn set_config_sandbox(backend: Option<String>, allow_no_sandbox: Option<bool>) {
-    let normalized = backend.and_then(|b| {
-        let t = b.trim();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t.to_string())
-        }
-    });
-    let mut guard = match sandbox_config_override().write() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    };
-    *guard = SandboxConfigOverride {
-        backend: normalized,
-        allow_no_sandbox,
-    };
-}
-
-/// Resolve the effective sandbox backend selection: the `WAYLAND_SANDBOX`
-/// env var wins; otherwise the config-installed value (#327); otherwise
-/// `None` (platform default).
+/// Resolve the process-level compatibility backend selection. Hosted sessions
+/// never call this path; they resolve config into an immutable
+/// [`SandboxRegistry`] through [`SandboxRegistry::required_for_session`].
 fn resolved_sandbox_choice() -> Option<String> {
-    if let Ok(v) = std::env::var(SANDBOX_ENV) {
-        return Some(v);
-    }
-    sandbox_config_override()
-        .read()
-        .ok()
-        .and_then(|g| g.backend.clone())
+    std::env::var(SANDBOX_ENV).ok()
 }
 
 /// True iff the operator has explicitly opted in to unsandboxed execution.
 ///
-/// The `WAYLAND_ALLOW_NO_SANDBOX=1` (or `=true`) env var wins; otherwise
-/// the config-installed `[tools] allow_no_sandbox` value is consulted
-/// (#327).
+/// The compatibility path accepts only the process-start environment. Hosted
+/// config cannot mutate this value; explicit local Dangerous authority is
+/// carried by a per-session [`DangerousSessionGrant`].
 pub fn no_sandbox_opt_in() -> bool {
-    if let Ok(v) = std::env::var(ALLOW_NO_SANDBOX_ENV) {
-        return v == "1" || v.eq_ignore_ascii_case("true");
-    }
-    sandbox_config_override()
-        .read()
-        .ok()
-        .and_then(|g| g.allow_no_sandbox)
+    std::env::var(ALLOW_NO_SANDBOX_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
@@ -287,13 +239,46 @@ pub enum ResourceLimitEnforcement {
     Enforced,
 }
 
+#[derive(Clone)]
 pub struct SandboxRegistry {
     backend: Arc<dyn backends::SandboxBackend>,
+    /// Authority state, not a backend capability. Only `dangerous()` can set
+    /// this after receiving an opaque resolver-issued session grant.
+    bypasses_containment: bool,
+    /// Immutable environment-variable passthrough authority for this
+    /// session. Tool manifests read this snapshot instead of mutable
+    /// process-global configuration.
+    env_passthrough: Arc<HashSet<String>>,
 }
 
 impl SandboxRegistry {
     pub fn new(backend: Arc<dyn backends::SandboxBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            bypasses_containment: false,
+            env_passthrough: Arc::new(HashSet::new()),
+        }
+    }
+
+    /// Attach the resolved environment passthrough allowlist to this session.
+    pub fn with_env_passthrough<I, S>(mut self, var_names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let names = var_names
+            .into_iter()
+            .filter_map(|name| {
+                let trimmed = name.as_ref().trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            })
+            .collect();
+        self.env_passthrough = Arc::new(names);
+        self
+    }
+
+    pub fn env_passthrough(&self) -> &HashSet<String> {
+        &self.env_passthrough
     }
     pub async fn execute(
         &self,
@@ -302,6 +287,65 @@ impl SandboxRegistry {
     ) -> Result<SandboxOutput> {
         self.backend.execute(manifest, cmd).await
     }
+
+    /// Validate external filesystem authority at the final registry boundary,
+    /// immediately before the backend receives path-based grants.
+    pub async fn execute_authorized<F>(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        authorize: F,
+    ) -> Result<SandboxOutput>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        authorize()?;
+        self.backend.execute(manifest, cmd).await
+    }
+
+    /// Execute against an owner-bound retained workspace with a hard import
+    /// bound. The command's declared cwd must equal the retained checkout's
+    /// display path, external authority is revalidated, and the retained
+    /// workspace identity is re-proven before the backend receives it. Refuses
+    /// unless the selected backend actually binds workspace authority — there
+    /// is no path-based fallback for delegated mutation.
+    pub async fn execute_with_workspace_authority<F>(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        workspace: RetainedWorkspaceAuthority,
+        max_workspace_bytes: u64,
+        authorize: F,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<SandboxOutput>
+    where
+        F: Fn() -> Result<()> + Send + Sync,
+    {
+        if cmd.cwd.as_deref() != Some(workspace.workspace().display_path()) {
+            return Err(SandboxError::PathDenied(
+                "sandbox command cwd does not match retained workspace authority".to_owned(),
+            ));
+        }
+        authorize()?;
+        workspace.validate()?;
+        if !self.backend.binds_workspace_authority() {
+            return Err(SandboxError::PolicyNotSupported(format!(
+                "sandbox backend {} cannot bind retained workspace authority",
+                self.backend.name()
+            )));
+        }
+        self.backend
+            .execute_with_workspace_authority(
+                manifest,
+                cmd,
+                workspace,
+                max_workspace_bytes,
+                &authorize,
+                cancel,
+            )
+            .await
+    }
+
     /// Streaming execution — see [`backends::SandboxBackend::execute_streaming`].
     pub fn execute_streaming(
         &self,
@@ -310,11 +354,498 @@ impl SandboxRegistry {
     ) -> Result<tokio::sync::mpsc::Receiver<SandboxChunk>> {
         Arc::clone(&self.backend).execute_streaming(manifest, cmd)
     }
+
+    /// Streaming counterpart to [`Self::execute_authorized`]. Authority is
+    /// checked before the backend receives the manifest or starts its task.
+    pub fn execute_streaming_authorized<F>(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        authorize: F,
+    ) -> Result<tokio::sync::mpsc::Receiver<SandboxChunk>>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        authorize()?;
+        Arc::clone(&self.backend).execute_streaming(manifest, cmd)
+    }
     pub fn backend_name(&self) -> &'static str {
         self.backend.name()
     }
     pub fn is_available(&self) -> bool {
         self.backend.is_available()
+    }
+    pub fn enforces_read_deny(&self) -> bool {
+        self.backend.enforces_read_deny()
+    }
+    pub fn owns_descendants_hard(&self) -> bool {
+        self.backend.owns_descendants_hard()
+    }
+    pub fn binds_cwd_authority(&self) -> bool {
+        self.backend.binds_cwd_authority()
+    }
+    pub fn binds_workspace_authority(&self) -> bool {
+        self.backend.binds_workspace_authority()
+    }
+    pub fn bypasses_containment(&self) -> bool {
+        self.bypasses_containment
+    }
+    pub fn blocks_powershell(&self) -> bool {
+        self.backend.blocks_powershell()
+    }
+
+    /// Resolve one immutable, containment-required backend for an agent
+    /// session. Environment may select another real backend (Docker), but
+    /// neither environment nor persisted config may select `none`.
+    pub fn required_for_session(config_backend: Option<&str>) -> Result<Self> {
+        let choice = std::env::var(SANDBOX_ENV)
+            .ok()
+            .or_else(|| config_backend.map(str::to_owned));
+        let normalized = choice.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        let backend: Box<dyn backends::SandboxBackend> = match normalized {
+            // The readiness path: bootstrap resolves this BEFORE the
+            // `--json-stream` `ready` frame, so selection must not spend a
+            // startup-unsafe availability probe here. See
+            // [`select_without_startup_probe`].
+            None => real_platform_backend_with(select_without_startup_probe)
+                .unwrap_or_else(|| Box::new(FailClosedBackend::new())),
+            Some("docker") => {
+                use backends::SandboxBackend as _;
+                let docker = backends::docker::DockerBackend::new();
+                if docker.is_available() {
+                    Box::new(docker)
+                } else {
+                    tracing::error!(
+                        target: "wcore_sandbox",
+                        "Docker was selected for this session but is unavailable; failing closed"
+                    );
+                    Box::new(FailClosedBackend::new())
+                }
+            }
+            Some("none") => return Err(SandboxError::UnsafeBypassSource),
+            Some(other) => return Err(SandboxError::UnknownBackend(other.to_string())),
+        };
+
+        if no_sandbox_opt_in() {
+            tracing::warn!(
+                target: "wcore_sandbox",
+                "WAYLAND_ALLOW_NO_SANDBOX/config allow_no_sandbox is ignored for hosted sessions; \
+                 containment bypass requires an explicit local Dangerous launch"
+            );
+        }
+        Ok(Self::new(Arc::from(backend)))
+    }
+
+    /// Construct a production session runtime that deliberately has no OS
+    /// sandbox. The private fields on `DangerousSessionGrant` and its lack of
+    /// deserialization keep config/wire inputs away from this authority path.
+    /// [`Self::new`] remains public for trusted host integration and tests;
+    /// production launch code must use a validated policy constructor.
+    pub fn dangerous(grant: &DangerousSessionGrant) -> Self {
+        backends::no_sandbox::warn_once_sandbox_disabled();
+        tracing::warn!(
+            target: "wcore_sandbox",
+            activation_id = grant.activation_id(),
+            ttl_millis = grant.ttl_millis(),
+            "Dangerous session runtime selected: OS sandbox is disabled"
+        );
+        Self {
+            backend: Arc::new(backends::no_sandbox::NoSandboxBackend::new()),
+            bypasses_containment: true,
+            env_passthrough: Arc::new(HashSet::new()),
+        }
+    }
+
+    /// Mint a one-use [`HardContainmentAuthority`] for a hard-contained
+    /// execution.
+    ///
+    /// This is the ONLY constructor of the authority. It fails closed unless:
+    /// 1. this registry does not bypass containment (a Dangerous / no-sandbox
+    ///    runtime can never mint), AND
+    /// 2. the selected backend passes a semantic LIVE probe of its EXACT
+    ///    hard-containment mechanism under `fs`'s normalized policy — only the
+    ///    qualifying bubblewrap / docker / AppContainer backends can, because
+    ///    only they can construct the crate-private probe proof.
+    ///
+    /// The minted authority privately binds the backend, executable / runtime
+    /// identity, mechanism, process-tree mechanism, normalized policy identity,
+    /// and the exact spawn parameters. Any later drift refuses execution.
+    pub async fn establish_hard_containment(
+        &self,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+    ) -> Result<HardContainmentAuthority> {
+        // An authority runtime that bypasses containment can NEVER mint hard
+        // containment — a boolean/bypass source does not qualify.
+        if self.bypasses_containment {
+            return Err(SandboxError::UnsafeBypassSource);
+        }
+        // Live probe of the exact backend + normalized policy. Non-qualifying
+        // backends fail closed here (default `PolicyNotSupported`).
+        let probe = self.backend.probe_hard_containment(fs).await?;
+        // Cross-check the live probe's identity against the backend's cheap
+        // stable identity, so a backend that probes one mechanism cannot report
+        // another. Absence of a stable identity after a probe fails closed.
+        let cheap = self.backend.hard_containment_identity().ok_or_else(|| {
+            SandboxError::ExecFailed(
+                "backend produced a hard-containment probe but no stable identity".into(),
+            )
+        })?;
+        if cheap != probe.identity {
+            return Err(SandboxError::ExecFailed(
+                "hard-containment probe identity disagreed with the backend identity".into(),
+            ));
+        }
+        Ok(HardContainmentAuthority::mint(
+            self.backend.name(),
+            fs,
+            cmd,
+            probe,
+        ))
+    }
+
+    /// Consume a [`HardContainmentAuthority`] and verify it still binds THIS
+    /// registry's backend, the given normalized policy, and the exact spawn
+    /// parameters. Any drift (backend, executable, runtime, mechanism, policy,
+    /// or spawn parameters) refuses. Consuming the authority makes it one-use.
+    pub fn verify_hard_containment(
+        &self,
+        authority: HardContainmentAuthority,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+    ) -> Result<()> {
+        authority.verify_no_drift(&*self.backend, fs, cmd)
+    }
+}
+
+/// Opaque, one-use proof that a specific backend live-probed its exact
+/// hard-containment mechanism under an exact normalized policy, and that the
+/// upcoming spawn matches what was probed.
+///
+/// Structural properties (all load-bearing):
+/// - **Not serializable** (no `serde`) and **not cloneable / copyable** (no
+///   `Clone` / `Copy`): it cannot be persisted, transported, or duplicated.
+/// - **No public constructor:** the only mint is the crate-private [`mint`] fn,
+///   reachable only through [`SandboxRegistry::establish_hard_containment`].
+/// - **One-use:** [`Self::verify_no_drift`] takes `self` by value, so the
+///   authority is consumed on use and cannot be checked (or reused) twice.
+///
+/// It privately binds the backend, executable / runtime identity, mechanism,
+/// process-tree mechanism, normalized policy identity, and exact spawn
+/// parameters captured at mint. This type makes NO gate-result, receipt,
+/// candidate-acceptance, or landing claim — it is solely the containment
+/// authority.
+///
+/// [`mint`]: HardContainmentAuthority::mint
+pub struct HardContainmentAuthority {
+    backend_name: &'static str,
+    mechanism: backends::HardContainmentMechanism,
+    executable_identity: String,
+    runtime_identity: String,
+    process_tree_mechanism: backends::process_tree::ProcessTreeMechanism,
+    policy_identity: manifest::ContainmentPolicyIdentity,
+    spawn_identity: SpawnIdentity,
+}
+
+impl std::fmt::Debug for HardContainmentAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted: this authority binds the executable/runtime identity, the
+        // candidate + writable-root paths, and the exact spawn argv/cwd of a
+        // contained execution. Only the non-sensitive backend name and
+        // mechanism are shown so the capability's plan never leaks into logs.
+        f.debug_struct("HardContainmentAuthority")
+            .field("backend", &self.backend_name)
+            .field("mechanism", &self.mechanism)
+            .field("bound", &"<redacted>")
+            .finish()
+    }
+}
+
+/// The exact argv + cwd bound at mint. Compared by value at spawn.
+#[derive(Debug, PartialEq, Eq)]
+struct SpawnIdentity {
+    argv: Vec<String>,
+    cwd: Option<std::path::PathBuf>,
+}
+
+impl SpawnIdentity {
+    fn from_command(cmd: &SandboxCommand) -> Self {
+        Self {
+            argv: cmd.argv.clone(),
+            cwd: cmd.cwd.clone(),
+        }
+    }
+}
+
+impl HardContainmentAuthority {
+    /// Crate-private mint. Not `pub`, so only [`SandboxRegistry`] (in this
+    /// module) can construct the authority. Callers cannot fabricate one.
+    fn mint(
+        backend_name: &'static str,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+        probe: backends::HardContainmentProbe,
+    ) -> Self {
+        let identity = probe.identity;
+        Self {
+            backend_name,
+            mechanism: identity.mechanism,
+            executable_identity: identity.executable_identity,
+            runtime_identity: identity.runtime_identity,
+            process_tree_mechanism: identity.process_tree_mechanism,
+            policy_identity: fs.policy_identity(),
+            spawn_identity: SpawnIdentity::from_command(cmd),
+        }
+    }
+
+    /// The hard-containment mechanism this authority is bound to.
+    pub fn mechanism(&self) -> backends::HardContainmentMechanism {
+        self.mechanism
+    }
+
+    /// Consume the authority and refuse on ANY drift between mint and spawn.
+    ///
+    /// Re-derives the backend's cheap identity (no spawn) and the policy /
+    /// spawn identities, comparing each bound field. A mismatch — including a
+    /// backend that no longer offers hard containment — returns a fail-closed
+    /// error naming the field that drifted.
+    pub fn verify_no_drift(
+        self,
+        backend: &dyn backends::SandboxBackend,
+        fs: &HardContainmentFilesystem,
+        cmd: &SandboxCommand,
+    ) -> Result<()> {
+        let refuse = |field: &str| {
+            Err(SandboxError::ExecFailed(format!(
+                "hard containment refused: {field} changed between mint and spawn"
+            )))
+        };
+        if self.backend_name != backend.name() {
+            return refuse("backend");
+        }
+        let identity = backend.hard_containment_identity().ok_or_else(|| {
+            SandboxError::ExecFailed(
+                "hard containment refused: backend no longer offers hard containment".into(),
+            )
+        })?;
+        if identity.mechanism != self.mechanism {
+            return refuse("mechanism");
+        }
+        if identity.executable_identity != self.executable_identity {
+            return refuse("executable identity");
+        }
+        if identity.runtime_identity != self.runtime_identity {
+            return refuse("runtime identity");
+        }
+        if identity.process_tree_mechanism != self.process_tree_mechanism {
+            return refuse("process-tree mechanism");
+        }
+        if fs.policy_identity() != self.policy_identity {
+            return refuse("normalized policy");
+        }
+        if SpawnIdentity::from_command(cmd) != self.spawn_identity {
+            return refuse("spawn parameters");
+        }
+        Ok(())
+    }
+}
+
+/// How a backend candidate is admitted during selection. Both policies below
+/// have the same signature so exactly one platform cascade
+/// ([`real_platform_backend_with`]) serves both callers — a second cascade is
+/// how the two would drift apart.
+type SelectionPolicy =
+    fn(Box<dyn backends::SandboxBackend>) -> Option<Box<dyn backends::SandboxBackend>>;
+
+/// Selection policy: probe the candidate now, and drop it when unavailable.
+///
+/// This is the policy `default_for_platform` needs and MUST keep: its fallback
+/// branches on the verdict (`WAYLAND_ALLOW_NO_SANDBOX` can turn an unavailable
+/// real backend into an unsandboxed run), so deferring the probe there could
+/// convert a refusal into an *uncontained execution*.
+fn select_probing_now(
+    candidate: Box<dyn backends::SandboxBackend>,
+) -> Option<Box<dyn backends::SandboxBackend>> {
+    if candidate.is_available() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+/// Selection policy for an agent SESSION: never put a startup-unsafe
+/// availability probe on the readiness path.
+///
+/// Session selection runs inside bootstrap, before the `--json-stream` `ready`
+/// frame. A backend that declares its probe startup-unsafe
+/// ([`backends::SandboxBackend::availability_probe_is_startup_safe`]) is taken
+/// structurally here and enforces its own verdict at the first `execute`.
+///
+/// This is safe ONLY because both outcomes on the session path refuse:
+/// `required_for_session` has no `WAYLAND_ALLOW_NO_SANDBOX` branch, so an
+/// unavailable backend yields a refused command either way. Deferring changes
+/// *when* the operator learns, never *what* runs.
+fn select_without_startup_probe(
+    candidate: Box<dyn backends::SandboxBackend>,
+) -> Option<Box<dyn backends::SandboxBackend>> {
+    if !candidate.availability_probe_is_startup_safe() {
+        return Some(candidate);
+    }
+    select_probing_now(candidate)
+}
+
+/// The real backend this target ships, CONSTRUCTED ONLY — never probed.
+///
+/// Split from selection so the platform `cfg` cascade exists exactly once and
+/// every selection policy sees the same candidate. A second cascade is how the
+/// session path and the compatibility path would drift apart.
+fn platform_candidate() -> Option<Box<dyn backends::SandboxBackend>> {
+    #[cfg(target_os = "linux")]
+    {
+        let backend = backends::bwrap::BubblewrapBackend::new();
+        Some(Box::new(backend))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let backend = backends::sandbox_exec::SandboxExecBackend::new();
+        Some(Box::new(backend))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let backend = backends::appcontainer::AppContainerBackend::new();
+        Some(Box::new(backend))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        None
+    }
+}
+
+/// The single platform cascade. Returns the real native backend for this
+/// target when `select` admits it. Never consults process-global configuration
+/// and never falls back to NoSandbox.
+fn real_platform_backend_with(
+    select: SelectionPolicy,
+) -> Option<Box<dyn backends::SandboxBackend>> {
+    platform_candidate().and_then(select)
+}
+
+/// Return the real native backend when one is available *right now*, probing to
+/// find out. See [`select_probing_now`] for why this caller keeps the probe.
+fn real_platform_backend() -> Option<Box<dyn backends::SandboxBackend>> {
+    real_platform_backend_with(select_probing_now)
+}
+
+#[cfg(test)]
+mod selection_policy_tests {
+    //! The two selection policies, driven through the SAME functions
+    //! `real_platform_backend_with` calls. These run on every target because
+    //! the readiness contract is not Windows-specific: any backend that
+    //! declares its probe startup-unsafe must be admitted without one, and the
+    //! eager policy that `default_for_platform` depends on must keep probing.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingBackend {
+        startup_safe: bool,
+        available: bool,
+        probes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl backends::SandboxBackend for CountingBackend {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn is_available(&self) -> bool {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            self.available
+        }
+        fn availability_probe_is_startup_safe(&self) -> bool {
+            self.startup_safe
+        }
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            _cmd: SandboxCommand,
+        ) -> Result<SandboxOutput> {
+            Err(SandboxError::ExecFailed("counting backend".into()))
+        }
+    }
+
+    fn candidate(
+        startup_safe: bool,
+        available: bool,
+    ) -> (Box<dyn backends::SandboxBackend>, Arc<AtomicUsize>) {
+        let probes = Arc::new(AtomicUsize::new(0));
+        (
+            Box::new(CountingBackend {
+                startup_safe,
+                available,
+                probes: Arc::clone(&probes),
+            }),
+            probes,
+        )
+    }
+
+    /// The readiness fix, stated as a property: session selection admits a
+    /// startup-unsafe backend WITHOUT asking whether it is available.
+    ///
+    /// The candidate here reports `available == false`, so a policy that probed
+    /// would drop it. Selecting it anyway is only correct because the backend
+    /// enforces its own verdict at `execute` — which is what moves the cost off
+    /// the `ready` path without moving the containment decision.
+    #[test]
+    fn session_selection_admits_a_startup_unsafe_backend_without_probing() {
+        let (backend, probes) = candidate(false, false);
+        let selected = select_without_startup_probe(backend);
+        assert!(
+            selected.is_some(),
+            "a startup-unsafe backend must be admitted structurally"
+        );
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            0,
+            "session selection must not run a startup-unsafe availability probe"
+        );
+    }
+
+    /// …and it does NOT become a blanket "skip the probe": a startup-safe
+    /// backend is still probed and still dropped when unavailable, which is how
+    /// a bwrap-less Linux host still falls closed.
+    #[test]
+    fn session_selection_still_probes_a_startup_safe_backend() {
+        let (unavailable, probes) = candidate(true, false);
+        assert!(
+            select_without_startup_probe(unavailable).is_none(),
+            "an unavailable startup-safe backend must be dropped"
+        );
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+        let (usable, probes) = candidate(true, true);
+        assert!(select_without_startup_probe(usable).is_some());
+        assert_eq!(probes.load(Ordering::SeqCst), 1);
+    }
+
+    /// `default_for_platform` must KEEP the eager probe even for a
+    /// startup-unsafe backend. Its fallback branches on the verdict and
+    /// `WAYLAND_ALLOW_NO_SANDBOX=1` can turn "unavailable" into an unsandboxed
+    /// run, so admitting structurally there would risk trading a refusal for an
+    /// uncontained execution. Collapsing both callers onto one policy is the
+    /// tempting simplification this pins shut.
+    #[test]
+    fn eager_selection_probes_even_a_startup_unsafe_backend() {
+        let (backend, probes) = candidate(false, false);
+        assert!(
+            select_probing_now(backend).is_none(),
+            "the eager policy must drop an unavailable backend regardless of probe cost"
+        );
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            1,
+            "the eager policy must actually probe"
+        );
     }
 }
 
@@ -377,33 +908,7 @@ pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
             _ => {}
         }
     }
-    #[cfg(target_os = "linux")]
-    {
-        use backends::SandboxBackend as _;
-        let bwrap = backends::bwrap::BubblewrapBackend::new();
-        if bwrap.is_available() {
-            return Box::new(bwrap);
-        }
-        // S7 may add Docker fallback here; for now, fail closed (or
-        // NoSandbox under explicit opt-in).
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use backends::SandboxBackend as _;
-        let sbx = backends::sandbox_exec::SandboxExecBackend::new();
-        if sbx.is_available() {
-            return Box::new(sbx);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use backends::SandboxBackend as _;
-        let appc = backends::appcontainer::AppContainerBackend::new();
-        if appc.is_available() {
-            return Box::new(appc);
-        }
-    }
-    unsandboxed_fallback()
+    real_platform_backend().unwrap_or_else(unsandboxed_fallback)
 }
 
 /// Crate-wide serialization lock for tests that mutate the process-global
@@ -428,27 +933,15 @@ mod fail_closed_tests {
     /// RAII guard that snapshots and restores both sandbox env vars so a
     /// test never leaks state into a sibling.
     ///
-    /// These tests assert pure-env behavior, so `capture()` also clears the
-    /// `#327` config override (snapshotting it for restore) — otherwise a
-    /// config value left by a sibling `config_toggle_tests` case would bleed
-    /// into `no_sandbox_opt_in` / `default_for_platform`.
     struct EnvGuard {
         sandbox: Option<String>,
         allow: Option<String>,
-        cfg: SandboxConfigOverride,
     }
     impl EnvGuard {
         fn capture() -> Self {
-            let cfg = sandbox_config_override()
-                .read()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            // Clear config so these tests observe env-only behavior.
-            set_config_sandbox(None, None);
             Self {
                 sandbox: std::env::var("WAYLAND_SANDBOX").ok(),
                 allow: std::env::var(ALLOW_NO_SANDBOX_ENV).ok(),
-                cfg,
             }
         }
         fn set_sandbox(v: Option<&str>) {
@@ -474,7 +967,6 @@ mod fail_closed_tests {
         fn drop(&mut self) {
             Self::set_sandbox(self.sandbox.as_deref());
             Self::set_allow(self.allow.as_deref());
-            set_config_sandbox(self.cfg.backend.clone(), self.cfg.allow_no_sandbox);
         }
     }
 
@@ -561,6 +1053,87 @@ mod fail_closed_tests {
     }
 
     #[test]
+    fn required_session_rejects_environment_bypass_pair() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_sandbox(Some("none"));
+        EnvGuard::set_allow(Some("1"));
+
+        assert!(matches!(
+            SandboxRegistry::required_for_session(None),
+            Err(SandboxError::UnsafeBypassSource)
+        ));
+    }
+
+    #[test]
+    fn required_session_rejects_persisted_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_sandbox(None);
+        EnvGuard::set_allow(None);
+
+        assert!(matches!(
+            SandboxRegistry::required_for_session(Some("none")),
+            Err(SandboxError::UnsafeBypassSource)
+        ));
+    }
+
+    #[test]
+    fn session_runtimes_do_not_follow_later_global_changes() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_sandbox(None);
+        EnvGuard::set_allow(None);
+
+        let required = SandboxRegistry::required_for_session(None).unwrap();
+        let required_name = required.backend_name();
+        assert_ne!(required_name, "no_sandbox");
+
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(60, "isolation-test"),
+            10_000,
+        )
+        .unwrap();
+        let dangerous = SandboxRegistry::dangerous(&grant);
+        let unauthorised_no_sandbox =
+            SandboxRegistry::new(Arc::new(backends::no_sandbox::NoSandboxBackend::new()));
+        assert_eq!(dangerous.backend_name(), "no_sandbox");
+        assert!(dangerous.bypasses_containment());
+        assert!(!required.bypasses_containment());
+        assert!(!unauthorised_no_sandbox.bypasses_containment());
+
+        EnvGuard::set_sandbox(Some("none"));
+        EnvGuard::set_allow(Some("1"));
+
+        assert_eq!(required.backend_name(), required_name);
+        assert_ne!(required.backend_name(), dangerous.backend_name());
+        assert_eq!(dangerous.backend_name(), "no_sandbox");
+    }
+
+    #[test]
+    fn environment_passthrough_is_owned_by_each_session_runtime() {
+        let session_a = SandboxRegistry::new(Arc::new(FailClosedBackend::new()))
+            .with_env_passthrough(["SESSION_A_ONLY", " SHARED "]);
+        let session_b = SandboxRegistry::new(Arc::new(FailClosedBackend::new()))
+            .with_env_passthrough(["SESSION_B_ONLY", "SHARED"]);
+
+        assert!(session_a.env_passthrough().contains("SESSION_A_ONLY"));
+        assert!(!session_a.env_passthrough().contains("SESSION_B_ONLY"));
+        assert!(session_b.env_passthrough().contains("SESSION_B_ONLY"));
+        assert!(!session_b.env_passthrough().contains("SESSION_A_ONLY"));
+        assert!(session_a.env_passthrough().contains("SHARED"));
+        assert!(session_b.env_passthrough().contains("SHARED"));
+    }
+
+    #[test]
     fn fail_closed_backend_does_not_enforce_read_deny() {
         // FailClosedBackend never enforces deny rules (it refuses all
         // execution), so enforces_read_deny() must stay on the trait default
@@ -592,155 +1165,478 @@ mod fail_closed_tests {
 }
 
 #[cfg(test)]
-mod config_toggle_tests {
-    //! #327: `[tools] sandbox` / `[tools] allow_no_sandbox` config toggle.
-    //!
-    //! The config-installed values are a fallback consulted only when the
-    //! corresponding env var is unset; the env var keeps precedence. Both
-    //! the env vars and the config override are process-global, so these
-    //! tests serialize on the shared SANDBOX_TEST_LOCK (the same lock
-    //! fail_closed_tests uses) and restore all state on drop.
+mod authority_boundary_tests {
     use super::*;
+    use crate::backends::SandboxBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::SANDBOX_TEST_LOCK as ENV_LOCK;
+    struct CountingBackend(AtomicUsize);
 
-    /// Snapshot + restore both sandbox env vars AND the config override so a
-    /// test never leaks state into a sibling (config override is process-global).
-    struct StateGuard {
-        sandbox: Option<String>,
-        allow: Option<String>,
-        cfg: SandboxConfigOverride,
+    #[async_trait]
+    impl SandboxBackend for CountingBackend {
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            _cmd: SandboxCommand,
+        ) -> Result<SandboxOutput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "authority-counting"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
     }
-    impl StateGuard {
-        fn capture() -> Self {
-            let cfg = sandbox_config_override()
-                .read()
-                .map(|g| g.clone())
-                .unwrap_or_default();
+
+    fn command() -> SandboxCommand {
+        SandboxCommand {
+            argv: vec!["must-not-run".to_owned()],
+            cwd: None,
+        }
+    }
+
+    fn replace_directory(path: &std::path::Path) {
+        let original = path.with_extension("original");
+        std::fs::rename(path, original).unwrap();
+        std::fs::create_dir(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_authority_rejects_same_path_replacement_before_backend() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let authority = DirectoryAuthority::open(&root).unwrap();
+        replace_directory(&root);
+        let backend = Arc::new(CountingBackend(AtomicUsize::new(0)));
+        let registry = SandboxRegistry::new(backend.clone());
+
+        let error = registry
+            .execute_authorized(&SandboxManifest::default(), command(), || {
+                authority.validate_path(&root)
+            })
+            .await
+            .expect_err("same-path replacement reached buffered backend");
+
+        assert!(error.to_string().contains("identity changed"), "{error}");
+        assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_authority_rejects_same_path_replacement_before_backend() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let authority = DirectoryAuthority::open(&root).unwrap();
+        replace_directory(&root);
+        let backend = Arc::new(CountingBackend(AtomicUsize::new(0)));
+        let registry = SandboxRegistry::new(backend.clone());
+
+        let error = registry
+            .execute_streaming_authorized(&SandboxManifest::default(), command(), || {
+                authority.validate_path(&root)
+            })
+            .expect_err("same-path replacement reached streaming backend");
+
+        assert!(error.to_string().contains("identity changed"), "{error}");
+        assert_eq!(backend.0.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod hard_containment_tests {
+    use super::*;
+    use crate::backends::process_tree::ProcessTreeMechanism;
+    use crate::backends::{HardContainmentIdentity, HardContainmentProbe, SandboxBackend};
+
+    /// A crate-private test double standing in for a qualifying backend. It can
+    /// build the crate-private probe/identity types precisely BECAUSE it lives
+    /// inside the crate — an external backend cannot, which is the structural
+    /// seal. This double is never exported and grants no bypass outside the
+    /// crate.
+    struct QualBackend {
+        name: &'static str,
+        exec: String,
+        mechanism: HardContainmentMechanism,
+    }
+
+    impl QualBackend {
+        fn new(name: &'static str, exec: &str) -> Self {
             Self {
-                sandbox: std::env::var(SANDBOX_ENV).ok(),
-                allow: std::env::var(ALLOW_NO_SANDBOX_ENV).ok(),
-                cfg,
-            }
-        }
-        fn clear_env() {
-            // SAFETY: serialized via ENV_LOCK.
-            unsafe {
-                std::env::remove_var(SANDBOX_ENV);
-                std::env::remove_var(ALLOW_NO_SANDBOX_ENV);
+                name,
+                exec: exec.to_owned(),
+                mechanism: HardContainmentMechanism::BubblewrapPidNamespace,
             }
         }
     }
-    impl Drop for StateGuard {
-        fn drop(&mut self) {
-            // SAFETY: serialized via ENV_LOCK.
-            unsafe {
-                match &self.sandbox {
-                    Some(v) => std::env::set_var(SANDBOX_ENV, v),
-                    None => std::env::remove_var(SANDBOX_ENV),
-                }
-                match &self.allow {
-                    Some(v) => std::env::set_var(ALLOW_NO_SANDBOX_ENV, v),
-                    None => std::env::remove_var(ALLOW_NO_SANDBOX_ENV),
-                }
+
+    #[async_trait]
+    impl SandboxBackend for QualBackend {
+        async fn execute(&self, _m: &SandboxManifest, _c: SandboxCommand) -> Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+            Some(HardContainmentIdentity {
+                mechanism: self.mechanism,
+                executable_identity: self.exec.clone(),
+                runtime_identity: format!("runtime:{}", self.exec),
+                process_tree_mechanism: ProcessTreeMechanism::LinuxPidNamespaceReap,
+            })
+        }
+        async fn probe_hard_containment(
+            &self,
+            _fs: &HardContainmentFilesystem,
+        ) -> Result<HardContainmentProbe> {
+            Ok(HardContainmentProbe {
+                identity: self.hard_containment_identity().unwrap(),
+            })
+        }
+    }
+
+    /// A backend that keeps a stable `name` but no longer offers hard
+    /// containment (identity `None`) — models a backend whose live mechanism
+    /// vanished between mint and spawn (e.g. the `bwrap` binary was removed). The
+    /// name matches the minted authority, so the backend-name check passes and
+    /// the identity-`None` fail-closed branch is what must refuse.
+    struct VanishedBackend {
+        name: &'static str,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for VanishedBackend {
+        async fn execute(&self, _m: &SandboxManifest, _c: SandboxCommand) -> Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+            None
+        }
+    }
+
+    /// A qualifying-looking backend whose live probe fails at a named stage. It
+    /// reports a stable identity, so the failure is the PROBE, not the identity
+    /// cross-check — modeling a process-tree failure stage that must fail closed.
+    struct FailingProbe {
+        stage: &'static str,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for FailingProbe {
+        async fn execute(&self, _m: &SandboxManifest, _c: SandboxCommand) -> Result<SandboxOutput> {
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::Enforced,
+            })
+        }
+        fn name(&self) -> &'static str {
+            "failing-probe"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+            Some(HardContainmentIdentity {
+                mechanism: HardContainmentMechanism::BubblewrapPidNamespace,
+                executable_identity: "/probe".to_owned(),
+                runtime_identity: "runtime:/probe".to_owned(),
+                process_tree_mechanism: ProcessTreeMechanism::LinuxPidNamespaceReap,
+            })
+        }
+        async fn probe_hard_containment(
+            &self,
+            _fs: &HardContainmentFilesystem,
+        ) -> Result<HardContainmentProbe> {
+            // Each stage maps to the fail-closed error the real backends return
+            // after killing the owned process tree.
+            Err(match self.stage {
+                "timeout" => SandboxError::Timeout,
+                "overflow" => SandboxError::OutputLimitExceeded { limit_bytes: 8 },
+                other => SandboxError::ExecFailed(format!("hard-containment probe {other} failed")),
+            })
+        }
+    }
+
+    // Platform-absolute fixture root; see `manifest::hard_fixture_root` for why
+    // the previous unix-shaped literal could never validate on Windows.
+    use crate::manifest::hard_fixture_root;
+
+    fn fs_fixture() -> HardContainmentFilesystem {
+        let root = hard_fixture_root();
+        HardContainmentFilesystem::new(root.join("candidate"), vec![root.join("scratch")])
+            .expect("fixture policy validates")
+    }
+
+    fn cmd_fixture() -> SandboxCommand {
+        SandboxCommand {
+            argv: vec!["/bin/echo".into(), "hi".into()],
+            cwd: Some(hard_fixture_root().join("candidate")),
+        }
+    }
+
+    async fn mint(name: &'static str, exec: &str) -> (SandboxRegistry, HardContainmentAuthority) {
+        let registry = SandboxRegistry::new(Arc::new(QualBackend::new(name, exec)));
+        let authority = registry
+            .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+            .await
+            .expect("qualifying backend must mint");
+        (registry, authority)
+    }
+
+    #[tokio::test]
+    async fn qualifying_backend_mints_and_verifies_with_no_drift() {
+        let (registry, authority) = mint("q", "/a").await;
+        assert_eq!(
+            authority.mechanism(),
+            HardContainmentMechanism::BubblewrapPidNamespace
+        );
+        registry
+            .verify_hard_containment(authority, &fs_fixture(), &cmd_fixture())
+            .expect("no drift must verify");
+    }
+
+    #[tokio::test]
+    async fn spawn_parameter_drift_refuses() {
+        let (registry, authority) = mint("q", "/a").await;
+        let drifted = SandboxCommand {
+            argv: vec!["/bin/echo".into(), "TAMPERED".into()],
+            cwd: Some(hard_fixture_root().join("candidate")),
+        };
+        let err = registry
+            .verify_hard_containment(authority, &fs_fixture(), &drifted)
+            .expect_err("argv drift must refuse");
+        assert!(err.to_string().contains("spawn parameters"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn policy_drift_refuses() {
+        let (registry, authority) = mint("q", "/a").await;
+        let other_fs = HardContainmentFilesystem::new(
+            hard_fixture_root().join("candidate"),
+            vec![hard_fixture_root().join("other-scratch")],
+        )
+        .unwrap();
+        let err = registry
+            .verify_hard_containment(authority, &other_fs, &cmd_fixture())
+            .expect_err("policy drift must refuse");
+        assert!(err.to_string().contains("normalized policy"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn executable_and_runtime_drift_refuses() {
+        // Mint against exec "/a"; verify against a same-named backend whose
+        // executable identity changed to "/b".
+        let (_registry, authority) = mint("q", "/a").await;
+        let drifted_backend = QualBackend::new("q", "/b");
+        let err = authority
+            .verify_no_drift(&drifted_backend, &fs_fixture(), &cmd_fixture())
+            .expect_err("executable drift must refuse");
+        assert!(err.to_string().contains("executable identity"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn backend_drift_refuses() {
+        let (_registry, authority) = mint("q", "/a").await;
+        let other = QualBackend::new("other", "/a");
+        let err = authority
+            .verify_no_drift(&other, &fs_fixture(), &cmd_fixture())
+            .expect_err("backend drift must refuse");
+        assert!(err.to_string().contains("backend"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn non_qualifying_backend_at_spawn_refuses() {
+        // A backend that keeps the minted name but no longer offers hard
+        // containment (identity None) must refuse — a probe-time success cannot
+        // be spent against it. The same name passes the backend-name check, so
+        // the identity-None branch is the one under test.
+        let (_registry, authority) = mint("q", "/a").await;
+        let vanished = VanishedBackend { name: "q" };
+        let err = authority
+            .verify_no_drift(&vanished, &fs_fixture(), &cmd_fixture())
+            .expect_err("non-qualifying spawn backend must refuse");
+        assert!(
+            err.to_string()
+                .contains("no longer offers hard containment"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_debug_is_redacted() {
+        // The opaque authority's Debug must not leak the contained execution's
+        // plan (executable/runtime identity, bound paths, spawn argv/cwd).
+        let (_registry, authority) = mint("q", "/secret/bwrap-path").await;
+        let shown = format!("{authority:?}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(
+            !shown.contains("/secret/bwrap-path"),
+            "executable identity leaked: {shown}"
+        );
+        assert!(
+            !shown.contains("runtime:"),
+            "runtime identity leaked: {shown}"
+        );
+        assert!(!shown.contains("/bin/echo"), "spawn argv leaked: {shown}");
+        assert!(!shown.contains("scratch"), "writable root leaked: {shown}");
+        // Non-sensitive discriminants remain for diagnostics.
+        assert!(shown.contains("HardContainmentAuthority"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn non_qualifying_backends_cannot_mint() {
+        // FailClosed and NoSandbox keep the trait default and structurally
+        // cannot mint.
+        for registry in [
+            SandboxRegistry::new(Arc::new(FailClosedBackend::new())),
+            SandboxRegistry::new(Arc::new(backends::no_sandbox::NoSandboxBackend::new())),
+        ] {
+            let err = registry
+                .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+                .await
+                .expect_err("non-qualifying backend must not mint");
+            assert!(
+                matches!(err, SandboxError::PolicyNotSupported(_)),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bypass_registry_cannot_mint() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(60, "hard-containment-test"),
+            10_000,
+        )
+        .unwrap();
+        let dangerous = SandboxRegistry::dangerous(&grant);
+        assert!(dangerous.bypasses_containment());
+        let err = dangerous
+            .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+            .await
+            .expect_err("a containment-bypassing runtime must never mint");
+        assert!(matches!(err, SandboxError::UnsafeBypassSource), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn probe_failure_at_every_stage_fails_closed() {
+        // Each stage models a process-tree failure point that must kill the
+        // owned tree and fail closed; the boundary surfaces the fail-closed
+        // error rather than a mint. (The real owned-tree teardown is covered by
+        // the `required_live_*` tests in process_tree.rs.)
+        for stage in [
+            "spawn",
+            "identity",
+            "containment",
+            "cancellation",
+            "timeout",
+            "overflow",
+            "capture",
+            "wait",
+            "descendant-cleanup",
+        ] {
+            let registry = SandboxRegistry::new(Arc::new(FailingProbe { stage }));
+            let err = registry
+                .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+                .await
+                .expect_err("a failed probe stage must fail closed");
+            assert!(
+                matches!(
+                    err,
+                    SandboxError::ExecFailed(_)
+                        | SandboxError::Timeout
+                        | SandboxError::OutputLimitExceeded { .. }
+                ),
+                "stage {stage} produced unexpected error: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_identity_disagreement_fails_closed() {
+        // A backend whose probe proof disagrees with its cheap identity cannot
+        // mint — the registry cross-checks them.
+        struct Disagree;
+        #[async_trait]
+        impl SandboxBackend for Disagree {
+            async fn execute(
+                &self,
+                _m: &SandboxManifest,
+                _c: SandboxCommand,
+            ) -> Result<SandboxOutput> {
+                unreachable!("execute is never reached for a rejected mint")
             }
-            set_config_sandbox(self.cfg.backend.clone(), self.cfg.allow_no_sandbox);
+            fn name(&self) -> &'static str {
+                "disagree"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn hard_containment_identity(&self) -> Option<HardContainmentIdentity> {
+                Some(HardContainmentIdentity {
+                    mechanism: HardContainmentMechanism::BubblewrapPidNamespace,
+                    executable_identity: "/cheap".to_owned(),
+                    runtime_identity: "runtime:/cheap".to_owned(),
+                    process_tree_mechanism: ProcessTreeMechanism::LinuxPidNamespaceReap,
+                })
+            }
+            async fn probe_hard_containment(
+                &self,
+                _fs: &HardContainmentFilesystem,
+            ) -> Result<HardContainmentProbe> {
+                Ok(HardContainmentProbe {
+                    identity: HardContainmentIdentity {
+                        mechanism: HardContainmentMechanism::DockerContainer,
+                        executable_identity: "/probe".to_owned(),
+                        runtime_identity: "runtime:/probe".to_owned(),
+                        process_tree_mechanism: ProcessTreeMechanism::DockerContainerReap,
+                    },
+                })
+            }
         }
-    }
-
-    #[test]
-    fn config_allow_no_sandbox_opt_in_honored_when_env_unset() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _g = StateGuard::capture();
-        StateGuard::clear_env();
-        set_config_sandbox(None, None);
-        assert!(!no_sandbox_opt_in(), "default must be off");
-        set_config_sandbox(None, Some(true));
-        assert!(
-            no_sandbox_opt_in(),
-            "[tools] allow_no_sandbox = true must opt in when env is unset"
-        );
-    }
-
-    #[test]
-    fn env_allow_no_sandbox_wins_over_config() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _g = StateGuard::capture();
-        StateGuard::clear_env();
-        // Config says opt-in, env explicitly says off → env wins (back-compat).
-        set_config_sandbox(None, Some(true));
-        // SAFETY: serialized via ENV_LOCK.
-        unsafe { std::env::set_var(ALLOW_NO_SANDBOX_ENV, "0") };
-        assert!(
-            !no_sandbox_opt_in(),
-            "WAYLAND_ALLOW_NO_SANDBOX must take precedence over config"
-        );
-    }
-
-    #[test]
-    fn config_sandbox_none_honored_with_config_opt_in() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _g = StateGuard::capture();
-        StateGuard::clear_env();
-        // Pure-config path: sandbox=none + allow_no_sandbox=true, no env vars.
-        set_config_sandbox(Some("none".into()), Some(true));
-        let backend = default_for_platform();
-        assert_eq!(
-            backend.name(),
-            "no_sandbox",
-            "[tools] sandbox=\"none\" + allow_no_sandbox=true must select NoSandbox"
-        );
-    }
-
-    #[test]
-    fn config_sandbox_none_fails_closed_without_opt_in() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _g = StateGuard::capture();
-        StateGuard::clear_env();
-        // sandbox=none from config but no opt-in → must fail closed, exactly
-        // like the env-var path (audit M-2 invariant preserved).
-        set_config_sandbox(Some("none".into()), Some(false));
-        let backend = default_for_platform();
-        assert_eq!(
-            backend.name(),
-            "fail_closed",
-            "config sandbox=none without the opt-in must fail closed"
-        );
-    }
-
-    #[test]
-    fn env_sandbox_backend_wins_over_config_backend() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _g = StateGuard::capture();
-        StateGuard::clear_env();
-        // Config selects docker; env forces none. The env WAYLAND_SANDBOX
-        // backend selection wins. With the env opt-in set, none resolves to
-        // NoSandbox (proving env's `none` overrode config's `docker`).
-        set_config_sandbox(Some("docker".into()), Some(false));
-        // SAFETY: serialized via ENV_LOCK.
-        unsafe {
-            std::env::set_var(SANDBOX_ENV, "none");
-            std::env::set_var(ALLOW_NO_SANDBOX_ENV, "1");
-        }
-        let backend = default_for_platform();
-        assert_eq!(
-            backend.name(),
-            "no_sandbox",
-            "env WAYLAND_SANDBOX must take precedence over config sandbox backend"
-        );
-    }
-
-    #[test]
-    fn empty_config_backend_is_treated_as_unset() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let _g = StateGuard::capture();
-        StateGuard::clear_env();
-        // A whitespace-only [tools] sandbox must normalize to None (platform
-        // default), not a bogus backend name.
-        set_config_sandbox(Some("   ".into()), None);
-        assert!(
-            resolved_sandbox_choice().is_none(),
-            "blank config sandbox must resolve to None"
-        );
+        let registry = SandboxRegistry::new(Arc::new(Disagree));
+        let err = registry
+            .establish_hard_containment(&fs_fixture(), &cmd_fixture())
+            .await
+            .expect_err("probe/identity disagreement must fail closed");
+        assert!(err.to_string().contains("disagreed"), "{err}");
     }
 }

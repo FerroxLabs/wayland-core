@@ -23,6 +23,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Runtime capability advertised during `Init` by subprocess plugins that
+/// understand [`SubprocessVerb::CallToolV2`]. Hosts must not send the
+/// versioned verb unless this exact capability was negotiated.
+pub const CAPABILITY_CALL_TOOL_V2: &str = "wayland.subprocess.call_tool_v2";
+
 /// Host-to-plugin verb. The engine sends one of these per request line.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "verb", rename_all = "snake_case")]
@@ -37,8 +42,23 @@ pub enum SubprocessVerb {
         name: String,
         input: serde_json::Value,
     },
+    /// Versioned F13 call carrying a stable durable-effect identity. The
+    /// legacy `CallTool` verb remains unchanged for older hosts and plugins.
+    CallToolV2 {
+        name: String,
+        input: serde_json::Value,
+        effect: SubprocessToolEffectIdentity,
+    },
     /// Engine signals shutdown.
     Shutdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SubprocessToolEffectIdentity {
+    pub version: u32,
+    pub tool_execution_id: String,
+    pub idempotency_key: String,
 }
 
 /// Host → plugin envelope.
@@ -88,8 +108,9 @@ pub enum SubprocessResponseBody {
         /// already has the parsed manifest from disk).
         manifest_version: String,
         /// Capability tags the plugin claims at runtime. The host's
-        /// `PluginAccessGate` is the source of truth — this list is
-        /// informational only.
+        /// `PluginAccessGate` remains the authority for access. Reserved
+        /// `wayland.subprocess.*` tags additionally negotiate optional wire
+        /// extensions such as [`CAPABILITY_CALL_TOOL_V2`].
         capabilities: Vec<String>,
     },
     /// Reply to [`SubprocessVerb::ListTools`].
@@ -151,7 +172,19 @@ mod tests {
                     input: json!({"msg": "hi"}),
                 },
             ),
-            SubprocessRequest::new(4, SubprocessVerb::Shutdown),
+            SubprocessRequest::new(
+                4,
+                SubprocessVerb::CallToolV2 {
+                    name: "charge".to_string(),
+                    input: json!({"amount": 42}),
+                    effect: SubprocessToolEffectIdentity {
+                        version: 1,
+                        tool_execution_id: "execution-42".to_string(),
+                        idempotency_key: "stable-key-42".to_string(),
+                    },
+                },
+            ),
+            SubprocessRequest::new(5, SubprocessVerb::Shutdown),
         ];
         for req in cases {
             let line = serde_json::to_string(&req).unwrap();

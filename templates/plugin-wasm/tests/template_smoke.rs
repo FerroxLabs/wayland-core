@@ -62,8 +62,6 @@ fn template_renders_and_checks() {
         .arg(tmp_path)
         .arg("--define")
         .arg("description=smoke")
-        .arg("--define")
-        .arg("authors=tester <t@example.com>")
         .arg("--silent")
         .output()
         .expect("invoke cargo generate");

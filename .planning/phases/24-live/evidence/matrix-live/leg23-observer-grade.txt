@@ -1,0 +1,29 @@
+########## LEG 1' — the product's SENDs are really in the room ##########
+timeline_events=14
+control_nonce=mlact-1785383837 control_count=1
+nonce=mlact-1785383837 originals=1 all_bodies=2 ids=["$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA"]
+########## LEG 2 — EDIT: the replacement is visible, not just accepted ##########
+-- the homeserver's own bundled statement on the ORIGINAL --
+http_status=200
+event=$OgNmXoiV7SePcNAAfiv2zjKC2osCcw_xFHfv_36FmOA state=NOT-REDACTED body_present=true redacted_because=false
+body="wayland-core live probe mlact-1785383837 edit-target"
+bundled_replacement={"replacement_event_id":"$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4","new_body":"wayland-core live probe mlact-1785383837 edit-target EDITED"}
+-- the m.replace relations endpoint --
+http_status=404
+replacement_count=0
+-- known-negative: the DELETE target was never edited, so it must have 0 --
+http_status=404
+replacement_count=0
+########## LEG 3 — DELETE: graded from the BODY, not the status code ##########
+http_status=200
+event=$I38AFNsJlOe4v_iTWs-ENM1s9_M_-ev0h57B3PvRYB0 state=REDACTED body_present=false redacted_because=true
+body=null
+bundled_replacement=null
+-- known-negative in the same shape: the EDIT target was not deleted --
+http_status=200
+event=$8FWckEI9JPPdW1rnDXv9FvxzIUJf12y1PbeRaJL0rA4 state=NOT-REDACTED body_present=true redacted_because=false
+body="* wayland-core live probe mlact-1785383837 edit-target EDITED"
+bundled_replacement=null
+########## F-ML-3 corroboration: does matrix.org really 200 a redaction of nothing? ##########
+independent_curl_http=200
+response_keys= ['event_id']

@@ -10,9 +10,21 @@
 
 pub mod extractor;
 pub mod render;
+pub mod scope;
+pub mod search;
+pub mod store;
 pub mod types;
 
 pub use types::{FileSummary, IndexOptions, Language, RepoMap, RepoMapError, Symbol, SymbolKind};
+
+// F23-06 — the persistent index. ADDITIVE: everything above is unchanged and
+// its live consumers (`wcore-tools`' repomap agent tool, the CLI's
+// `engine_bridge` and at-reference resolution) keep their current semantics.
+pub use scope::{ScopeEntry, ScopeIdentity, normalize_rel, scope_files};
+pub use search::{
+    Hit, Modality, ModalityRank, SearchOutcome, SearchQuery, Staleness, search, semantic_status,
+};
+pub use store::{FileRecord, IndexStats, IndexStore, JournalMode, VerifyReport};
 
 use std::fs;
 use std::path::Path;

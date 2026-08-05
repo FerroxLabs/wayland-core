@@ -1,0 +1,24 @@
+F27-01-SC1-PtyTerminal: NOT RUN — no PTY drive of the terminal attachment
+affordance was performed.
+
+Reason, stated plainly rather than dressed up: the plan directs reusing the
+existing `crates/wcore-cli/tests/support/proving_ground/` cell runner to drive
+the real binary through a terminal and capture a screen record. That harness is
+a Rust test-support module, so driving it means compiling and running a
+`wcore-cli` test — which is a different thing from driving the SHIPPED release
+binary through a PTY, and the plan asks for the latter. Building a second,
+ad-hoc PTY driver to do it properly was in scope and was not done inside the
+time this phase had.
+
+What this means for the grade: any claim that "the terminal shows the
+attachment admitted with its detected type, and a hostile entry shows the
+refusal text" is UNPROVEN. The wire-level equivalent of both claims IS proven
+(see live/linux-host-valid-png.jsonl and live/host-mismatch-png-in-jpg.jsonl),
+but a wire event is not what a user sees, and this project's standing rule is
+that live testing ranks at least as high as green code. The TUI half of
+Criterion 1 is not evidenced.
+
+To close it: write a PTY driver that launches target/release/wayland-core to a
+workspace, attaches crates/wcore-fixture-harness/fixtures/f27/intake/
+valid-image.png through the terminal's own affordance, captures the final
+screen, and repeats with mismatch-png-body-jpg-ext.jpg.

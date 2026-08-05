@@ -1,0 +1,129 @@
+﻿F28H2 REPRO tag=before started=2026-07-29T00:09:51.3920361+07:00
+EXE=C:\f28h2-target\release\wayland-core.exe
+EXE_SHA256=91a1906da9a7bb12452f1be63a751605126e60f2a46a721e26c09a98e23edc22
+SRC_SHA=12fc794f08012333adc7c864cdeff95540c0f014
+SRC_DIRTY=0
+LEASEDIR=C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1
+QUIET_BUILD_PROCS=4
+AS_FOUND_LEASES=0
+===== OBSERVATION state=clean active_leases=0 quarantined=0 =====
+----- RAW sandbox status -----
+backend                   appcontainer
+available                 true
+bypasses containment      false
+enforces read deny        true
+owns descendants hard     true
+binds cwd authority       true
+binds workspace authority true
+
+----- END -----
+----- RAW sandbox exec -----
+Exit code: 0
+STDOUT:
+F28H2RAN
+
+STDERR:
+
+----- END -----
+F28H2=state=clean;active_leases=0;quarantined=0;available=True;ran=True;disabled=False;mismatch=False;reclaimed=False;transient_claim=False;names_lease_file=False
+WEDGE_INSTALLED=True
+===== OBSERVATION state=wedged active_leases=1 quarantined=0 =====
+----- RAW sandbox status -----
+wayland-core.exe : [2m2026-07-28T17:10:26.802974Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. If the failure is transient (AV, disk contention), the probe 
+re-runs after the negative-cache TTL. [3merror[0m[2m=[0msandbox child execution failed: 
+AppContainer ACL lease \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-s
+torage-00002d20-00000000000000f2.toml was written by wcore-sandbox's OWN TEST SUITE (it carries 
+the test SID sentinel) and can NEVER reconcile against a real AppContainer profile. This is not a 
+platform limitation, not an SSH or session-0 effect, and not transient: the sandbox stays 
+disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write 
+here; lease_directory() resolves to a temp root under cfg(test) so this cannot recur.
+At C:\f28h2\repro.ps1:55 char:10
++   $so = (& $Exe sandbox status 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...s cannot recur.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+backend                   fail_closed
+available                 true
+bypasses containment      false
+enforces read deny        false
+owns descendants hard     false
+binds cwd authority       false
+binds workspace authority false
+
+----- END -----
+----- RAW sandbox exec -----
+wayland-core.exe : [2m2026-07-28T17:10:26.894168Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. If the failure is transient (AV, disk contention), the probe 
+re-runs after the negative-cache TTL. [3merror[0m[2m=[0msandbox child execution failed: 
+AppContainer ACL lease \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-s
+torage-00002d20-00000000000000f2.toml was written by wcore-sandbox's OWN TEST SUITE (it carries 
+the test SID sentinel) and can NEVER reconcile against a real AppContainer profile. This is not a 
+platform limitation, not an SSH or session-0 effect, and not transient: the sandbox stays 
+disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write 
+here; lease_directory() resolves to a temp root under cfg(test) so this cannot recur.
+At C:\f28h2\repro.ps1:61 char:10
++   $eo = (& $Exe sandbox exec --workspace $ws --timeout-ms 90000 "cmd. ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...s cannot recur.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Refused: shell is unavailable because the active sandbox backend cannot enforce secret-read-deny for this workspace.
+wayland-core sandbox: sandboxed command reported an error
+
+----- END -----
+F28H2=state=wedged;active_leases=1;quarantined=0;available=True;ran=False;disabled=True;mismatch=True;reclaimed=False;transient_claim=True;names_lease_file=True
+===== OBSERVATION state=wedged-second-run active_leases=1 quarantined=0 =====
+----- RAW sandbox status -----
+backend                   fail_closed
+available                 true
+bypasses containment      false
+enforces read deny        false
+owns descendants hard     false
+binds cwd authority       false
+binds workspace authority false
+wayland-core.exe : [2m2026-07-28T17:10:26.952408Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. If the failure is transient (AV, disk contention), the probe 
+re-runs after the negative-cache TTL. [3merror[0m[2m=[0msandbox child execution failed: 
+AppContainer ACL lease \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-s
+torage-00002d20-00000000000000f2.toml was written by wcore-sandbox's OWN TEST SUITE (it carries 
+the test SID sentinel) and can NEVER reconcile against a real AppContainer profile. This is not a 
+platform limitation, not an SSH or session-0 effect, and not transient: the sandbox stays 
+disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write 
+here; lease_directory() resolves to a temp root under cfg(test) so this cannot recur.
+At C:\f28h2\repro.ps1:55 char:10
++   $so = (& $Exe sandbox status 2>&1 | Out-String)
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...s cannot recur.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+
+----- END -----
+----- RAW sandbox exec -----
+wayland-core.exe : [2m2026-07-28T17:10:27.020990Z[0m [31mERROR[0m AppContainer real-spawn 
+probe failed; sandbox disabled. If the failure is transient (AV, disk contention), the probe 
+re-runs after the negative-cache TTL. [3merror[0m[2m=[0msandbox child execution failed: 
+AppContainer ACL lease \\?\C:\Users\seand\AppData\Local\Wayland\Core\AppContainerLeases\v1\WCore-s
+torage-00002d20-00000000000000f2.toml was written by wcore-sandbox's OWN TEST SUITE (it carries 
+the test SID sentinel) and can NEVER reconcile against a real AppContainer profile. This is not a 
+platform limitation, not an SSH or session-0 effect, and not transient: the sandbox stays 
+disabled on this machine until this file is DELETED. Delete it and re-run. Tests must never write 
+here; lease_directory() resolves to a temp root under cfg(test) so this cannot recur.
+At C:\f28h2\repro.ps1:61 char:10
++   $eo = (& $Exe sandbox exec --workspace $ws --timeout-ms 90000 "cmd. ...
++          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([2m2026-07-28T...s cannot recur.:String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Refused: shell is unavailable because the active sandbox backend cannot enforce secret-read-deny for this workspace.
+wayland-core sandbox: sandboxed command reported an error
+
+----- END -----
+F28H2=state=wedged-second-run;active_leases=1;quarantined=0;available=True;ran=False;disabled=True;mismatch=True;reclaimed=False;transient_claim=True;names_lease_file=True
+LEASE_RESTORED count=0 expected=0
+finished=2026-07-29T00:10:27.0336892+07:00

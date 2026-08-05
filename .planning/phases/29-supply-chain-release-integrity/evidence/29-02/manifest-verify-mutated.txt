@@ -1,0 +1,24 @@
+F29-02 / TASK 3 -- ONE-BYTE SBOM MUTATION
+captured: 2026-07-27T23:50:57Z
+
+The pristine control above was ACCEPTED (exit 0) before this ran.
+
+sbom before: 5028fe289ceb05f39578c6e8848e8e91dba5aaef22a526a5396858f2a8ac9d1a  447364 bytes
+sbom after : 274263f14713f5728dadd9c9f6ab465f47e3c03b49330527b144751c813ecdc5  447364 bytes
+bytes differing between pristine and mutated: 1
+
+== rebuild the manifest body over the mutated store, splice into the SIGNED manifest ==
+MANIFEST BUILT body_sha256=2e9ced3821a001dace1e5ef5764a2f928d5a46c8fc0a0d31d3ef8e798a8b6d0d
+  signed body_sha256 : 00d5294c770f1d56864a9ee49419c69e18a59e9a6dbdb3fce8f1960a5267bb39
+  mutated body_sha256: 2e9ced3821a001dace1e5ef5764a2f928d5a46c8fc0a0d31d3ef8e798a8b6d0d
+  digest moved       : True
+  spliced: original signature + original body_sha256 + MUTATED body
+
+== VERIFY THE SPLICED MANIFEST (must be REFUSED) ==
+wayland-release: body digest mismatch
+F29-MANIFEST-VERIFY::MUTATED-SBOM::exit=1
+
+Reading: the pristine manifest verified (exit 0) and the same
+manifest with ONE BIT of the SBOM changed was refused (exit 1).
+The SBOM digest is therefore genuinely inside the signed body, and an SBOM
+regenerated after signing cannot be quietly substituted.

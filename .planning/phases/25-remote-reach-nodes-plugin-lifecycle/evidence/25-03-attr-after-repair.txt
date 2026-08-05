@@ -1,0 +1,55 @@
+[exit=0]
+
+###      submit to the REVOKED node (must exit non-zero)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+wayland-core node: REFUSED: node 'farnode' is REVOKED (operator withdrew authority for the F25-03 exercise); refusing to run and NOT falling back to another node (node 'farnode')
+[exit=1]
+
+###      submit to the OTHER healthy node (it must not have absorbed farnode's work)
+$ /root/wayland-25/target/release/wayland-core node submit selfnode
+ACCEPTED: node 'selfnode' may take work
+[exit=0]
+
+STATE: submit-to-revoked exit=1 ; submit-to-other exit=0
+STATE: the refusal names farnode and states plainly that nothing reroutes
+###      ATTRIBUTION after REVOKE
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      the revoked far end presenting a GENUINE proof still cannot re-pair itself
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge 86f03df22888)
+wayland-core node: receipt is invalid: node 'farnode' is REVOKED; re-pairing is an operator action (`wayland-core node repair farnode` after `node revoke --clear`)
+[exit=1]
+
+STATE: self re-pair of a revoked node exit=1 (non-zero required)
+###      operator clears the revocation
+$ /root/wayland-25/target/release/wayland-core node revoke farnode --clear
+cleared the revocation for 'farnode'; re-pair it deliberately with
+  wayland-core node pair farnode --target <ssh-target>
+[exit=0]
+
+###      operator deliberately re-pairs
+$ /root/wayland-25/target/release/wayland-core node pair farnode --target f25node --remote-bin /usr/local/bin/wayland-core
+pairing 'farnode' at f25node (challenge bff2b86cd30e)
+paired 'farnode'
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      ATTRIBUTION after REPAIR
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+

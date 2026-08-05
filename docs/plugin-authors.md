@@ -37,7 +37,7 @@ When in doubt, write WASM. The sandbox is the default; you graduate to subproces
 
 ## 2. Capability vs ownership
 
-This framing is lifted from OpenClaw research and is load-bearing for everything that follows.
+This framing is load-bearing for everything that follows.
 
 A **plugin** is a vendor / feature boundary. One author, one team, one organizational unit, one manifest, one trust anchor.
 

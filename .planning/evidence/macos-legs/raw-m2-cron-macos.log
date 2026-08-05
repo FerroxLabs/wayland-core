@@ -1,0 +1,113 @@
+### 24-C2 macOS leg
+host:  Seans-MacBook-Pro.local
+uname: Darwin Seans-MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+HEAD:  0675c051623dadb2c66b7ae250b4edbdc16fc3fb
+binary: /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/target/debug/wayland-core
+version: wayland-core 0.12.25
+date:  2026-07-31T00:49:20Z
+
+==============================================================================
+PART A — macOS evidence: refuse, accept, publish, fire
+==============================================================================
+WAYLAND_HOME=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-macos-pkqrda95
+
+$ wayland-core cron add --trigger webhook:/hooks/build --slash /brief
+wayland-core cron: refusing to create a webhook job: webhook triggers have no producer in this build: nothing routes an inbound HTTP request to a job, and no authentication scheme exists for one. This job will never fire. Use `cron publish` with an `event:` trigger instead.
+Nothing was written.
+  EXIT=1
+
+$ wayland-core cron add --trigger poll:https://status.test/health:300 --slash /brief
+wayland-core cron: refusing to create a poll job: poll triggers have no producer in this build: nothing performs the HTTP request, so no response can say work is due. This job will never fire. Use `every:SECONDS` if you wanted a plain timer.
+Nothing was written.
+  EXIT=1
+
+$ wayland-core cron list   (after both refusals)
+(no cron jobs)
+store: /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-macos-pkqrda95/cron/jobs.json
+  NOTHING_PERSISTED=True
+
+$ wayland-core cron add --trigger event:build.finished --channel team --text ...
+next:    driven externally (event) — not predictable from the clock
+added cf70372c-0180-41da-a6f9-420c1aaa081a
+  EXIT=0
+
+$ wayland-core cron history cf70372c-0180-41da-a6f9-420c1aaa081a   (BEFORE)
+(no fire records for cf70372c-0180-41da-a6f9-420c1aaa081a)
+  HISTORY_RECORDS_BEFORE=0
+
+$ wayland-core cron publish build.finished
+published "build.finished" (57326b78-a7d0-40b0-8109-002229e66226)
+1 subscribed job(s) will fire on the schedule owner's next tick
+  EXIT=0
+  QUEUED_EVENTS_ON_DISK=1 ['57326b78-a7d0-40b0-8109-002229e66226.json']
+
+$ wayland-core cron daemon
+cron daemon started (pid 21514)
+  pid:  /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-macos-pkqrda95/cron-daemon.pid
+  log:  /var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-macos-pkqrda95/cron-daemon.log
+  DAEMON_PID=21514 ALIVE=True
+
+$ wayland-core cron history cf70372c-0180-41da-a6f9-420c1aaa081a   (AFTER)
+2026-07-31T00:49:50Z  staged (no live dispatcher)
+  HISTORY_RECORDS_AFTER=1 QUEUE_DRAINED_TO=0
+PART-A-SUMMARY: webhook_refused=true poll_refused=true nothing_persisted=true event_accepted=true published=1 fired=True history_before=0 history_after=1 queue_after=0
+
+==============================================================================
+PART B — the PTY surface gate (real controlling terminal)
+==============================================================================
+WAYLAND_HOME=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-pty-jykmb75g
+instrument: under the PTY harness ->
+   ISATTY=1
+   10 60
+instrument: through a pipe        -> ISATTY=0
+
+--- PTY: wayland-core cron add --trigger webhook:/hooks/build --slash /brief
+PTY_ROWS=40 PTY_COLS=110 PTY_RAW_BYTES=298
+PTY_CHILD_RC=1
+    expected rc=1 got rc=1
+    ── rendered screen ──
+    | wayland-core cron: refusing to create a webhook job: webhook triggers have no producer in this build: nothing
+    | routes an inbound HTTP request to a job, and no authentication scheme exists for one. This job will never fire
+    | . Use `cron publish` with an `event:` trigger instead.
+    | Nothing was written.
+
+--- PTY: wayland-core cron add --trigger event:build.finished --slash /brief
+PTY_ROWS=40 PTY_COLS=110 PTY_RAW_BYTES=115
+PTY_CHILD_RC=0
+    expected rc=0 got rc=0
+    ── rendered screen ──
+    | next:    driven externally (event) — not predictable from the clock
+    | added 2a3c6e00-4da9-4af3-bdda-81d3895035f5
+
+--- PTY: wayland-core cron list
+PTY_ROWS=40 PTY_COLS=110 PTY_RAW_BYTES=135
+PTY_CHILD_RC=0
+    expected rc=0 got rc=0
+    ── rendered screen ──
+    | on  2a3c6e00-4da9-4af3-bdda-81d3895035f5  [event     ] @event build.finished         slash    /brief
+    |        last_fired=never
+
+PART-B-SUMMARY: pty_isatty=1 pipe_isatty=0 screens=3 rc_all_expected=True
+
+==============================================================================
+PART C — kill-mid-fire continuation (SIGKILL) + no-restart control
+==============================================================================
+
+--- ARM restart: WAYLAND_HOME=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-restart-m_87kdmv
+    staged: job=95cb94f1-2c8e-4553-96eb-ec63aab22889 queued_events=6 history=0
+    daemon started pid=28749 alive=True
+    SIGKILL sent at history=1; daemon_alive_after=False history_after_kill=1 queued_after_kill=5
+    daemon RESTARTED pid=33468 alive=True
+    FINAL history=4 queued=2
+
+--- ARM no-restart-control: WAYLAND_HOME=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-no-restart-control-1iyuf_en
+    staged: job=ae759655-3139-4072-8272-d404ac9ea8fd queued_events=6 history=0
+    daemon started pid=41049 alive=True
+    SIGKILL sent at history=1; daemon_alive_after=False history_after_kill=1 queued_after_kill=5
+    (control) daemon deliberately NOT restarted
+    FINAL history=1 queued=5
+
+PART-C-SUMMARY: {"no-restart-control": {"history_after_kill": 1, "history_final": 1, "killed_at_history": 1, "published": 6, "queued_after_kill": 5, "queued_final": 5}, "restart": {"history_after_kill": 1, "history_final": 4, "killed_at_history": 1, "published": 6, "queued_after_kill": 5, "queued_final": 2}}
+PART-C-VERDICT: continuation_after_kill=False no_restart_control_still_stuck=True discrimination=FAIL
+
+M2-RESULT: macos_evidence=True pty_surface_gate=True kill_mid_fire=False

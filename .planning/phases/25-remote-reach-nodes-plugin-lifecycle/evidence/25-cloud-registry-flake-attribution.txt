@@ -1,0 +1,13 @@
+=== WITH THE MERGE-BASE cloud.rs (this lane's change reverted) ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.85s
+MERGE-BASE cloud.rs: 6/12 runs had a FAILED lib result
+
+=== WITH THIS LANE'S cloud.rs ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.92s
+LANE cloud.rs: 8/12 runs had a FAILED lib result
+
+=== single-threaded, this lane's cloud.rs (races cannot occur) ===
+test result: ok. 84 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.15s
+
+=== restoration check ===
+RESTORED CLEAN (matches committed HEAD)

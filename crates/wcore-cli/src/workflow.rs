@@ -34,10 +34,12 @@ use clap::Subcommand;
 use serde_json::json;
 
 use wcore_agent::agents::bus::{AgentBus, AgentMessage};
+use wcore_agent::goal::StrategyTermination;
 use wcore_agent::orchestration::workflow::estimate::{self, CostEstimate};
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
 use wcore_agent::spawner::AgentSpawner;
 use wcore_config::config::{CliArgs, Config};
+use wcore_providers::LlmProvider;
 
 /// `wayland workflow <subcommand>`.
 #[derive(Subcommand, Debug)]
@@ -59,6 +61,12 @@ pub enum WorkflowCmd {
     Run {
         /// Saved-workflow name (the `.ron` stem under `.wayland/workflows/`).
         name: String,
+        /// Run this workflow as the ONE loop owner of a durable Goal, and
+        /// terminate it through the canonical Goal transition (F22C).
+        ///
+        /// Opt-in. Without `--goal` this is byte-for-byte the pre-F22C path.
+        #[command(flatten)]
+        goal: crate::goal_cmd::GoalAttachArgs,
     },
 }
 
@@ -67,7 +75,7 @@ pub async fn run(cmd: WorkflowCmd) -> anyhow::Result<()> {
     match cmd {
         WorkflowCmd::Validate { file } => validate(&file),
         WorkflowCmd::List => list(),
-        WorkflowCmd::Run { name } => run_workflow(&name).await,
+        WorkflowCmd::Run { name, goal } => run_workflow(&name, &goal).await,
     }
 }
 
@@ -163,11 +171,23 @@ fn print_list_line(plan: &WorkflowPlan, est: &CostEstimate) {
     println!("{}  ~{} agents{}", plan.meta.name, est.agents, desc);
 }
 
+fn governed_workflow_spawner(
+    provider: Arc<dyn LlmProvider>,
+    config: &Config,
+    agent_bus: Arc<AgentBus>,
+) -> anyhow::Result<AgentSpawner> {
+    Ok(wcore_agent::bootstrap::govern_standalone_spawner(
+        AgentSpawner::new(provider, config.clone()),
+        config,
+    )?
+    .with_bus(agent_bus))
+}
+
 /// `run <NAME>` — resolve, parse, and execute through `WorkflowRunner`.
 ///
 /// Wires the runner to the same provider/spawner construction path the main
 /// agent loop uses, so a `run` here is a real fleet execution — not a stub.
-async fn run_workflow(name: &str) -> anyhow::Result<()> {
+async fn run_workflow(name: &str, goal: &crate::goal_cmd::GoalAttachArgs) -> anyhow::Result<()> {
     let dir = find_workflows_dir()?;
     let path = dir.join(format!("{name}.ron"));
     let src = std::fs::read_to_string(&path)
@@ -206,7 +226,7 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
     // workflow that pins a node's provider (`Agent((provider: Some(..)))`)
     // resolves it from the on-disk `[providers]` map instead of hard-erroring.
     // Harmless for unpinned workflows (no pin → inherit the parent provider).
-    let mut spawner = AgentSpawner::new(provider, config.clone()).with_bus(agent_bus);
+    let mut spawner = governed_workflow_spawner(provider, &config, agent_bus)?;
     if let Ok(cf) = wcore_config::config::load_merged_config_file(None)
         && !cf.providers.is_empty()
     {
@@ -226,14 +246,58 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
     );
 
     let runner = WorkflowRunner::new(&spawner);
+
+    // ── F22C: the canonical terminal transition, when asked for ─────────────
+    //
+    // The engine invocation below is THE production one — the same
+    // `WorkflowRunner::run` over the same spawner, plan and state. Attaching a
+    // Goal does not build a second workflow path; it wraps the existing call in
+    // `GoalLoop::run_forgeflows`, whose closure return type is
+    // `StrategyTermination`, so there is no route out of it that reaches a
+    // terminal state any other way and none that terminates zero times.
+    if let Some((driver, goal_id)) = goal.resolve()? {
+        let cursor = driver
+            .run_forgeflows(&goal_id, |owner| async move {
+                match runner.run(&plan, json!({})).await {
+                    Ok(result) => {
+                        print_workflow_envelope(&plan.meta.name, &result);
+                        StrategyTermination::from_forgeflows(owner, Ok(&result))
+                    }
+                    // Carried into the terminal transition as the real error,
+                    // never swallowed into a clean terminal.
+                    Err(error) => {
+                        eprintln!("workflow '{name}' failed: {error}");
+                        StrategyTermination::from_forgeflows(owner, Err(&error))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+        crate::goal_cmd::print_canonical_transition(&driver, &goal_id, "forgeflows", &cursor);
+        return Ok(());
+    }
+
     let result = runner
         .run(&plan, json!({}))
         .await
         .map_err(|e| anyhow::anyhow!("workflow '{name}' failed: {e}"))?;
 
-    // Emit the structured outcome: per-stage records plus the final state.
+    print_workflow_envelope(&plan.meta.name, &result);
+    Ok(())
+}
+
+/// Emit the structured outcome: per-stage records plus the final state.
+///
+/// Extracted so the Goal-attached path and the unattached path print the SAME
+/// envelope. A second copy would let the two drift, and "the attached run
+/// produces the same output" is part of what makes the attachment a wrapper
+/// rather than a different workflow implementation.
+fn print_workflow_envelope(
+    name: &str,
+    result: &wcore_agent::orchestration::workflow::runner::WorkflowRunResult,
+) {
     let envelope = json!({
-        "workflow": plan.meta.name,
+        "workflow": name,
         "stages": result
             .stage_results
             .iter()
@@ -246,8 +310,10 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         "final_state": result.final_state,
     });
-    println!("{}", serde_json::to_string_pretty(&envelope)?);
-    Ok(())
+    match serde_json::to_string_pretty(&envelope) {
+        Ok(rendered) => println!("{rendered}"),
+        Err(error) => eprintln!("failed to render workflow envelope: {error}"),
+    }
 }
 
 /// Subscribe to `bus` and log sub-agent lifecycle events to stderr until the
@@ -346,6 +412,11 @@ fn read_ron_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wcore_agent::orchestration::workflow::runner::WorkflowRunError;
+    use wcore_providers::ProviderError;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
 
     /// A minimal, valid single-agent workflow.
     const GOOD: &str = r#"
@@ -385,6 +456,129 @@ Workflow(
 
     /// Syntactically invalid RON — exercises the `Ron` error arm.
     const BAD_SYNTAX: &str = "this is not ron at all {{{";
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    struct HungProvider;
+
+    #[async_trait]
+    impl LlmProvider for HungProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let _held_sender = tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Connection("test provider called".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_spawner_stops_before_provider_call_at_tiny_cap() {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            budget: wcore_budget::BudgetConfig {
+                max_tokens_in: Some(0),
+                max_tokens_out: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner =
+            governed_workflow_spawner(provider.clone(), &config, Arc::new(AgentBus::new(8)))
+                .expect("bind standalone workflow session authority");
+        let plan = WorkflowPlan::parse(GOOD).expect("fixture workflow parses");
+
+        let error = WorkflowRunner::new(&spawner)
+            .run(&plan, json!({}))
+            .await
+            .expect_err("zero-token session envelope must stop the workflow");
+
+        assert!(matches!(error, WorkflowRunError::StageFailed { .. }));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_spawner_cancels_a_hung_provider_at_the_wall_cap() {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            session_cap: Some(wcore_budget::BudgetConfig {
+                max_wall_time_secs: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let spawner =
+            governed_workflow_spawner(Arc::new(HungProvider), &config, Arc::new(AgentBus::new(8)))
+                .expect("bind standalone workflow session authority");
+        let plan = WorkflowPlan::parse(GOOD).expect("fixture workflow parses");
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            WorkflowRunner::new(&spawner).run(&plan, json!({})),
+        )
+        .await
+        .expect("standalone workflow must not outlive its wall-time envelope");
+
+        assert!(matches!(outcome, Err(WorkflowRunError::StageFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn workflow_spawner_binds_authority_and_cannot_downgrade_mutation() {
+        use wcore_types::spawner::{ForkOverrides, RequestedChildWorkspace};
+        // `workflow run` constructs its spawner through the same workspace-aware
+        // production path (`govern_standalone_spawner`), so it carries bound
+        // durable-session AND parent-workspace authority before any child runs.
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner =
+            governed_workflow_spawner(provider.clone(), &config, Arc::new(AgentBus::new(8)))
+                .expect("bind standalone workflow session authority");
+        assert!(
+            !spawner
+                .durable_session_id()
+                .expect("session authority is bound")
+                .is_empty()
+        );
+        // Authority binding runs no child.
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        // A mutating (Write/Edit) child request classifies as isolated — CLI
+        // construction cannot downgrade mutating work to shared parent access.
+        let mutating = ForkOverrides {
+            allowed_tools: vec!["Write".into(), "Edit".into()],
+            budget: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            mutating.requested_workspace(),
+            RequestedChildWorkspace::IsolatedMutation
+        );
+    }
 
     #[test]
     fn validate_good_file_ok() {

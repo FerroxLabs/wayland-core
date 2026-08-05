@@ -1,0 +1,12 @@
+COMMAND: Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*f25-04-win-orphan-40608*" } | Select-Object ProcessId,ParentProcessId,CommandLine
+
+
+ProcessId       : 6336
+ParentProcessId : 40608
+CommandLine     : "C:\WINDOWS\system32\cmd.exe" /c ping -n 600 127.0.0.1 > nul & rem 
+                  f25-04-win-orphan-40608 
+
+
+
+
+ROWS-MATCHING-NONCE: 1

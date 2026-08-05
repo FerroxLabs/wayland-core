@@ -1,0 +1,858 @@
+host=runnervmhisb5 os=Windows 2025Server
+cpus=4 profile=ci runs=10 retries=0
+conditions=['isolated', 'batch', 'loaded'] load_workers=4
+
+present targets: 6/6
+
+== condition: isolated ==
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  1/10  ERROR    14.5s  ────────────
+[32;1m     Summary[0m [   6.706s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  2/10  ERROR     9.9s  ────────────
+[32;1m     Summary[0m [   6.219s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  3/10  ERROR    11.0s  ────────────
+[32;1m     Summary[0m [   7.308s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  4/10  ERROR    11.3s  ────────────
+[32;1m     Summary[0m [   7.604s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  5/10  ERROR    11.6s  ────────────
+[32;1m     Summary[0m [   7.990s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  6/10  ERROR     8.5s  ────────────
+[32;1m     Summary[0m [   4.781s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  7/10  ERROR     8.2s  ────────────
+[32;1m     Summary[0m [   4.358s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  8/10  ERROR     8.0s  ────────────
+[32;1m     Summary[0m [   4.245s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run  9/10  ERROR     7.5s  ────────────
+[32;1m     Summary[0m [   3.780s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] packaged_core_recovers_after_two_503_responses                   run 10/10  ERROR    11.3s  ────────────
+[32;1m     Summary[0m [   7.597s] [1m1[0m test run: [1m1[0m [32;1mpassed[0m, [1m12[0m [33;1mskipped[0m
+[32;1m 
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  1/10  ERROR    10.7s  ────────────
+[32;1m Nextest run[0m ID [1m31b3aab6-9e69-493d-b7f3-205540adb765[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  2/10  ERROR     5.0s  ────────────
+[32;1m Nextest run[0m ID [1m981787b1-16d5-4ba0-8349-0936a747ce83[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  3/10  ERROR     5.0s  ────────────
+[32;1m Nextest run[0m ID [1mcdd97d80-a9cb-4f7a-b312-3284614b7454[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  4/10  ERROR     5.0s  ────────────
+[32;1m Nextest run[0m ID [1md6aa577b-ae95-4c3d-a501-086099081220[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  5/10  ERROR     5.0s  ────────────
+[32;1m Nextest run[0m ID [1mb0477473-6ba8-4f4b-b252-551e8886b955[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  6/10  ERROR     5.2s  ────────────
+[32;1m Nextest run[0m ID [1mbf72aba4-3b88-40f2-a844-cacdf816e851[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  7/10  ERROR     5.1s  ────────────
+[32;1m Nextest run[0m ID [1mc33b08fa-f472-4e7a-a07b-bd112e96a0d1[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  8/10  ERROR     5.0s  ────────────
+[32;1m Nextest run[0m ID [1mbe4582f8-4c45-4b91-b1ce-6d8fd1a22c32[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  9/10  ERROR     6.5s  ────────────
+[32;1m Nextest run[0m ID [1m8e2ce10e-1c3e-4bbd-a80d-5f11da05bd36[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run 10/10  ERROR     5.5s  ────────────
+[32;1m Nextest run[0m ID [1m5e4b60b2-1f3c-4fd2-b9fa-08f9f3178403[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  1/10  ERROR     5.6s  
+    failures:
+        malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  2/10  ERROR     5.3s  ────────────
+[32;1m Nextest run[0m ID [1m8b234300-c8af-43da-aa67-16777933e495[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  3/10  ERROR     5.4s  ────────────
+[32;1m Nextest run[0m ID [1m2830ac31-8653-44c7-a548-6230ba6fe99f[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  4/10  ERROR     5.0s  
+    failures:
+        malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  5/10  ERROR     5.4s  ────────────
+[32;1m Nextest run[0m ID [1m3a2d2cca-36a7-45e9-94c0-b9cd4d5fd720[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  6/10  ERROR     5.4s  ────────────
+[32;1m Nextest run[0m ID [1mb686c315-2f1e-4848-b258-cc16f31a3891[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  7/10  ERROR     5.1s  ────────────
+[32;1m Nextest run[0m ID [1m8331709a-4acf-47d1-b1bd-ab47bb9bcad8[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  8/10  ERROR     7.4s  
+    failures:
+        malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  9/10  ERROR     5.6s  ────────────
+[32;1m Nextest run[0m ID [1m4a52dc70-b3d5-4ee5-9f37-1706b07d1b91[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run 10/10  ERROR     5.2s  ────────────
+[32;1m Nextest run[0m ID [1mbbb80f92-0a36-4fef-919e-9b71107a1586[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  1/10  ERROR     5.4s  ────────────
+[32;1m Nextest run[0m ID [1maabc0d39-8622-4833-be30-5710bae0f4e1[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  2/10  ERROR     5.6s  ────────────
+[32;1m Nextest run[0m ID [1m05458ffa-055c-4b38-bbc5-6bab02593247[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  3/10  ERROR     5.5s  ────────────
+[32;1m Nextest run[0m ID [1mea7e7137-37ee-4810-9e0c-0edcd831cb3a[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  4/10  ERROR     5.2s  ────────────
+[32;1m Nextest run[0m ID [1mf5852a06-549e-4c48-95ad-697576d18995[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  5/10  ERROR     5.2s  ────────────
+[32;1m Nextest run[0m ID [1m48cceca3-aad3-4e2a-aaed-7344aa4fcae8[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  6/10  ERROR     5.3s  ────────────
+[32;1m Nextest run[0m ID [1m752235f0-f14b-4b09-b9cc-c5371991b0ef[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  7/10  ERROR     7.6s  ────────────
+[32;1m Nextest run[0m ID [1m0d1572ff-c91b-4dee-9461-ff2b607df434[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  8/10  ERROR     8.9s  ────────────
+[32;1m Nextest run[0m ID [1md91531c6-6719-4e1e-baa4-55e8a62f1066[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  9/10  ERROR     6.8s  ────────────
+[32;1m Nextest run[0m ID [1m557ec3a2-feb1-43c6-9337-fa406c2a8f3c[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run 10/10  ERROR     5.9s  ────────────
+[32;1m Nextest run[0m ID [1m8d2ffa30-9985-48e3-be9d-36add8c78c70[0m with nextest profile: [1mci[0m
+[32;1m    Startin
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  1/10  ERROR     4.3s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  2/10  ERROR     4.3s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  3/10  ERROR     4.4s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  4/10  ERROR     4.3s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  5/10  ERROR     4.3s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  6/10  ERROR     4.3s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  7/10  ERROR     4.2s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  8/10  ERROR     5.9s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run  9/10  ERROR     4.9s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.
+  [isolated] dispatches_4_noop_workers_in_parallel                            run 10/10  ERROR     4.2s  
+    failures:
+        dispatches_4_noop_workers_in_parallel
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  1/10  ERROR     4.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  2/10  ERROR     4.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  3/10  ERROR     4.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  4/10  ERROR     4.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  5/10  ERROR     4.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  6/10  ERROR     4.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  7/10  ERROR     4.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  8/10  ERROR     4.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  9/10  ERROR     4.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [isolated] multi_worker_output_exhaustion_fails_without_retaining_buffers   run 10/10  ERROR     4.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+== condition: batch ==
+  [batch] packaged_core_recovers_after_two_503_responses                   run  1/10  ERROR    24.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  1/10  ERROR    24.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  1/10  ERROR    24.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  1/10  ERROR    24.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  1/10  ERROR    24.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  1/10  ERROR    24.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  2/10  ERROR    12.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  2/10  ERROR    12.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  2/10  ERROR    12.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  2/10  ERROR    12.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  2/10  ERROR    12.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  2/10  ERROR    12.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  3/10  ERROR    20.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  3/10  ERROR    20.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  3/10  ERROR    20.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  3/10  ERROR    20.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  3/10  ERROR    20.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  3/10  ERROR    20.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  4/10  ERROR    14.9s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  4/10  ERROR    14.9s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  4/10  ERROR    14.9s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  4/10  ERROR    14.9s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  4/10  ERROR    14.9s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  4/10  ERROR    14.9s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  5/10  ERROR    15.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  5/10  ERROR    15.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  5/10  ERROR    15.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  5/10  ERROR    15.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  5/10  ERROR    15.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  5/10  ERROR    15.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  6/10  ERROR    15.8s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  6/10  ERROR    15.8s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  6/10  ERROR    15.8s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  6/10  ERROR    15.8s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  6/10  ERROR    15.8s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  6/10  ERROR    15.8s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  7/10  ERROR    16.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  7/10  ERROR    16.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  7/10  ERROR    16.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  7/10  ERROR    16.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  7/10  ERROR    16.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  7/10  ERROR    16.6s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  8/10  ERROR    16.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  8/10  ERROR    16.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  8/10  ERROR    16.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  8/10  ERROR    16.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  8/10  ERROR    16.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  8/10  ERROR    16.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run  9/10  ERROR    19.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  9/10  ERROR    19.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  9/10  ERROR    19.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  9/10  ERROR    19.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run  9/10  ERROR    19.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  9/10  ERROR    19.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] packaged_core_recovers_after_two_503_responses                   run 10/10  ERROR    17.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run 10/10  ERROR    17.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run 10/10  ERROR    17.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run 10/10  ERROR    17.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] dispatches_4_noop_workers_in_parallel                            run 10/10  ERROR    17.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [batch] multi_worker_output_exhaustion_fails_without_retaining_buffers   run 10/10  ERROR    17.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+== condition: loaded ==
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  1/10  ERROR    33.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  1/10  ERROR    33.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  1/10  ERROR    33.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  1/10  ERROR    33.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  1/10  ERROR    33.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  1/10  ERROR    33.7s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  2/10  ERROR    43.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  2/10  ERROR    43.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  2/10  ERROR    43.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  2/10  ERROR    43.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  2/10  ERROR    43.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  2/10  ERROR    43.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  3/10  ERROR    31.5s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  3/10  ERROR    31.5s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  3/10  ERROR    31.5s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  3/10  ERROR    31.5s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  3/10  ERROR    31.5s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  3/10  ERROR    31.5s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  4/10  ERROR    29.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  4/10  ERROR    29.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  4/10  ERROR    29.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  4/10  ERROR    29.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  4/10  ERROR    29.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  4/10  ERROR    29.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  5/10  ERROR    31.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  5/10  ERROR    31.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  5/10  ERROR    31.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  5/10  ERROR    31.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  5/10  ERROR    31.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  5/10  ERROR    31.0s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  6/10  ERROR    32.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  6/10  ERROR    32.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  6/10  ERROR    32.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  6/10  ERROR    32.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  6/10  ERROR    32.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  6/10  ERROR    32.4s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  7/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  7/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  7/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  7/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  7/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  7/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  8/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  8/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  8/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  8/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  8/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  8/10  ERROR    34.1s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run  9/10  ERROR    33.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run  9/10  ERROR    33.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run  9/10  ERROR    33.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run  9/10  ERROR    33.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run  9/10  ERROR    33.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run  9/10  ERROR    33.2s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] packaged_core_recovers_after_two_503_responses                   run 10/10  ERROR    28.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] required_live_windows_public_dispatch_refuses_bash_worker_and_pr run 10/10  ERROR    28.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] malformed_heartbeat_fails_closed_and_preserves_bounded_diagnosti run 10/10  ERROR    28.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] public_dispatch_owns_git_authority_and_preserves_parent_and_sibl run 10/10  ERROR    28.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] dispatches_4_noop_workers_in_parallel                            run 10/10  ERROR    28.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+  [loaded] multi_worker_output_exhaustion_fails_without_retaining_buffers   run 10/10  ERROR    28.3s  
+    failures:
+        multi_worker_output_exhaustion_fails_without_retaining_buffers
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 fil
+
+| test | condition | runs | passes | failures | verdict |
+|---|---|---:|---:|---:|---|
+| packaged_core_recovers_after_two_503_responses | isolated | 10 | 0 | 0 | ERROR |
+| packaged_core_recovers_after_two_503_responses | batch | 10 | 0 | 0 | ERROR |
+| packaged_core_recovers_after_two_503_responses | loaded | 10 | 0 | 0 | ERROR |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | isolated | 10 | 0 | 0 | ERROR |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | batch | 10 | 0 | 0 | ERROR |
+| required_live_windows_public_dispatch_refuses_bash_worker_and_preserves_parent_and_sibling_state | loaded | 10 | 0 | 0 | ERROR |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | isolated | 10 | 0 | 0 | ERROR |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | batch | 10 | 0 | 0 | ERROR |
+| malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic | loaded | 10 | 0 | 0 | ERROR |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | isolated | 10 | 0 | 0 | ERROR |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | batch | 10 | 0 | 0 | ERROR |
+| public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state | loaded | 10 | 0 | 0 | ERROR |
+| dispatches_4_noop_workers_in_parallel | isolated | 10 | 0 | 0 | ERROR |
+| dispatches_4_noop_workers_in_parallel | batch | 10 | 0 | 0 | ERROR |
+| dispatches_4_noop_workers_in_parallel | loaded | 10 | 0 | 0 | ERROR |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | isolated | 10 | 0 | 0 | ERROR |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | batch | 10 | 0 | 0 | ERROR |
+| multi_worker_output_exhaustion_fails_without_retaining_buffers | loaded | 10 | 0 | 0 | ERROR |
+
+wrote windows-hosted-flake-ledger.json

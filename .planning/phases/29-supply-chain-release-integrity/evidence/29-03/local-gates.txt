@@ -1,0 +1,71 @@
+# 29-03 local gates, run verbatim — 2026-07-28T02:37:57Z
+# HEAD: 3658c4281fe228af1f700a56a42e662d3d6a9c7c
+
+GATE::T1-FMT::PASS::rc=0
+GATE::T1-DECISION-EXTRACTED::PASS::rc=0
+GATE::T1-NO-REDIRECT-NO-REPLACEMENT::PASS::rc=0
+GATE::T1-HOSTILE-CORPUS::PASS::rc=0
+GATE::T1-HERMETIC-STATE-AS-WRITTEN::FAIL::rc=1
+GATE::T1-HERMETIC-STATE-SCOPE-CORRECTED::PASS::rc=0
+GATE::T1-FENCE::PASS::rc=0
+GATE::T2-TRUST-ROOT-AS-WRITTEN::FAIL::rc=1
+GATE::T2-TRUST-ROOT-SCOPE-CORRECTED::PASS::rc=0
+GATE::T2-VERIFY-ONLY-AS-WRITTEN::FAIL::rc=1
+GATE::T2-VERIFY-ONLY-SCOPE-CORRECTED::PASS::rc=0
+GATE::T2-ROTATION-DRILL-NAMES::PASS::rc=0
+GATE::T2-DRILL-CAPTURED::PASS::rc=0
+GATE::T2-INDEX-UNTOUCHED-SCOPE-CORRECTED::PASS::rc=0
+GATE::T3-LIVE-LEDGER::PASS::rc=0
+GATE::T3-CLAUSE-GRADE::PASS::rc=0
+GATE::T3-NO-OVERCLAIM::PASS::rc=0
+GATE::T3-REAL-KEY-LIMITS::PASS::rc=0
+GATE::T3-SEAM-FILED::PASS::rc=0
+GATE::T3-SURGICAL-DIFF::PASS::rc=0
+
+# measured counters at HEAD
+self_update.rs: verify_provenance=6 RELEASES_REPO=3 env::var(=0 UpdateDecision=2 signing=0 lines=792
+update_trust.rs: RELEASE_TRUST_ROOT=5 signing=0 wayland_config_dir=1 lines=1142
+
+READ THE THREE FAILURES
+-----------------------
+T1-HERMETIC-STATE-AS-WRITTEN, T2-TRUST-ROOT-AS-WRITTEN and
+T2-VERIFY-ONLY-AS-WRITTEN grep crates/wcore-cli/src/self_update.rs for
+RELEASE_TRUST_ROOT and wayland_config_dir. Those symbols live in
+crates/wcore-cli/src/update_trust.rs, because the SAME plan instructs:
+  "keep it under 1000 by extracting the trust-root and decision logic
+   into a sibling module under crates/wcore-cli/src/"
+and its own SURGICAL-DIFF gate whitelists src/update_trust.rs by name.
+The gates and the instruction contradict each other. Both forms are run
+above; the scope-corrected forms over the two-file artifact pair PASS.
+This is reported as a defect in the plan (SR-29-12), not repaired by
+adding a reference to self_update.rs purely to satisfy a grep.
+
+==========================================================================
+THE FENCE AND SURGICAL-DIFF GATES ABOVE ARE VACUOUS AS WRITTEN — RE-RUN
+==========================================================================
+Both use `git status --porcelain`, which reports only UNCOMMITTED changes.
+This plan commits per task, so by the time either gate runs the working tree
+is clean and the gate passes no matter what was changed. That is the
+'already green at base, so it proves nothing' class the lane brief names.
+
+The non-vacuous form, diffing against the MERGE-BASE SHA captured once at
+the start of the lane (never against the branch name, which moves):
+
+  BASE=6df10dab31e346a99f2644539cf9dc5518c8ba67
+  HEAD=92258e5ac76e60fbdab57efd76e840a0040e4b9f
+
+--- fenced paths touched between BASE and HEAD (must be empty) ---
+(0 lines)
+
+--- every crates/ path touched between BASE and HEAD ---
+crates/wcore-cli/src/self_update.rs
+crates/wcore-cli/src/update_trust.rs
+crates/wcore-cli/tests/self_update_trust.rs
+crates/wcore-eval-scenarios/bin/wayland-release.rs
+crates/wcore-eval-scenarios/src/release_integrity.rs
+crates/wcore-eval-scenarios/tests/release_integrity_contract.rs
+
+--- off-whitelist count: 0 ---
+
+This is the check that actually constrains the change. All six touched
+paths are on the plan's own whitelist; zero fenced files were touched.

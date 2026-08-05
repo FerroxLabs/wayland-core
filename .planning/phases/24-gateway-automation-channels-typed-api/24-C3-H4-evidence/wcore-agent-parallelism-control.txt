@@ -1,0 +1,25 @@
+### RUN 1: wcore-agent --lib at HEAD, re-run in isolation
+rc=101
+test result: FAILED. 2110 passed; 14 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.38s
+### RUN 2: wcore-agent --lib at HEAD, single-threaded
+rc=0
+test result: ok. 2124 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 137.70s
+### RUN 3: CONTROL — cron.rs reverted to base e6abc748, everything else identical
+rc=101
+test result: FAILED. 2109 passed; 15 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.38s
+### diff of failing-test NAMES, head vs control (empty == identical set)
+0a1
+>     engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+1a3
+>     engine::audit_2026_05_22_tests::invalid_live_session_switch_leaves_existing_authority_untouched
+2a5
+>     engine::audit_2026_05_22_tests::post_charge_budget_cap_recovers_terminal_without_running_tools
+9d11
+<     engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch
+10a13
+>     orchestration::f13_durability_tests::approval_crash_cuts_reopen_at_the_exact_durable_boundary
+13d15
+<     session::tests::cleanup_error_attempts_all_artifacts_but_retains_index_authority
+NAMEDIFF_RC=1
+TREE_RESTORED_RC=0
+CTLDONE

@@ -1,0 +1,13 @@
+support bundle written
+  path:             /root/wl-r2-bundle
+  members:          8
+  os / arch:        linux / x86_64
+  binary version:   0.12.25
+  gateway running:  yes
+  known secrets:    3
+  redactions made:  1
+
+READ IT BEFORE YOU SEND IT. It is a plain directory:
+    ls -la /root/wl-r2-bundle
+Archive it once you are satisfied:
+    tar czf support-bundle.tar.gz -C /root/wl-r2-bundle .

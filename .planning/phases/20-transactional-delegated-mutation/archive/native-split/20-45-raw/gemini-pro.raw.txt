@@ -1,0 +1,22 @@
+{
+  "checks": {
+    "all_severity": "PASS",
+    "evidence_integrity": "PASS",
+    "integration_authority": "PASS"
+  },
+  "deferred": [
+    "native_macos",
+    "native_windows"
+  ],
+  "findings": {
+    "blocker": 0,
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "guardrail_A_admission_budget": "PASS",
+  "guardrail_B_quoting_layer_only": "PASS",
+  "kimi_watchitems_carried": "PASS",
+  "disposition": "PASS"
+}

@@ -1,0 +1,7 @@
+pairing                        published   variantA(raw)  variantB(qstrip)
+POS cerebras/moonshot        11/0.3438     11/0.3438       11/0.3667
+POS deepseek/moonshot        13/0.2364     13/0.2281       13/0.2364
+NEG cooldown/errors.ts        0/0.0000      0/0.0000        0/0.0000
+NEG failover_policy           1/0.0435      1/0.0435        1/0.0435
+S1 failover                  10/0.1493     10/0.1471       10/0.1471
+S3 classify                  29/0.0948     29/0.0967       29/0.0973

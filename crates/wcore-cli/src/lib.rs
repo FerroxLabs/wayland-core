@@ -5,6 +5,16 @@
 
 pub mod plugin;
 
+// Shared packaged-process execution-policy and static-plugin link seam.
+pub mod packaged_runtime;
+
+/// At-most-once host budget-grant ledger shared by the JSON-stream runtime
+/// and its focused acceptance tests.
+pub mod budget_grants;
+
+/// Secure lowering of JSON-stream composer files into inline image blocks.
+pub mod attachments;
+
 // v0.7.0 Task 1.A.10: `acp` subcommand — production caller for the
 // `wcore-acp` crate (methodology #27). Lives in the lib so the e2e
 // `serve + request` round-trip test runs under `cargo test -p wcore-cli
@@ -101,6 +111,9 @@ pub mod self_update;
 // `doctor::run()` through the lib for the `--doctor` CLI flag.
 pub mod doctor;
 
+// Secret-safe live state projection for the JSON-stream diagnostics contract.
+pub mod runtime_diagnostics;
+
 // Wave 0 (CLI/TUI redesign): the ratatui terminal UI. `tui::run()` is the
 // entry point; the `main.rs` default-mode dispatch into it is deferred to
 // T2.3 (the binary is intentionally untouched in Wave 0).
@@ -127,6 +140,31 @@ pub mod profile;
 // CLI surface: `wayland-core migrate` — import Hermes/OpenClaw setups (#228).
 pub mod migrate;
 
+// F26-03/F26-04: CLI surface `wayland-core backup` — archive / verify / restore /
+// recover a Wayland home, with a write-ahead operation journal whose recovery
+// pass undoes an interrupted operation to the exact pre-operation tree. Lives in
+// the lib so the journal, remap and rollback logic are testable under
+// `cargo test -p wcore-cli --lib` against tempdir-backed synthetic homes.
+pub mod backup;
+
+// F23-02 (Phase 23B) — `wayland-core session`: the operator surface for
+// Success Criterion 2's verbs (list, search, show, checkpoint, rewind, retry,
+// fork, export, retain, reconcile, cancel). Lives in the lib so the
+// integration suite can drive it without the binary.
+pub mod session_cmd;
+
+// F23-06 (Phase 23B) — `wayland-core index`: build / status / search / verify
+// over `wcore-repomap`'s persistent index. Lives in the lib for the same
+// reason `session_cmd` does, and because it is the instrument the phase's
+// perf and retrieval-quality gates are measured through.
+pub mod index_cmd;
+
+// F23-04 (Phase 23B) — `wayland-core cache`: report / list / show / verify over
+// the engine's cache + compaction ledger. Lives in the lib for the same reason
+// `index_cmd` does — it is the instrument Success Criterion 4 is measured
+// through, so its output format is asserted on by the integration suite.
+pub mod cache_cmd;
+
 // CLI surface: `wayland-core image` — FluxRouter image generation
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.
@@ -136,3 +174,61 @@ pub mod image;
 // (`POST /v1/fetch`). Lives in the lib so credential resolution is
 // unit-testable; reuses the same Flux key/base resolution as `image`.
 pub mod fetch;
+
+// F25-01: CLI surface `wayland-core backend` — the execution-backend operator
+// surface (list / probe / run / cancel / orphans / receipt verify / diff).
+pub mod backend;
+
+// F24-B: CLI surface `wayland-core gateway` — the persistent-runtime operator
+// surface (install / uninstall / start / stop / restart / status / drain) plus
+// `run`, the long-lived runtime every generated service unit invokes. Lives in
+// the lib so the lifecycle projection and the unit/verb agreement are testable
+// under `cargo test -p wcore-cli --lib`.
+pub mod gateway;
+// F25-03: CLI surface `wayland-core node` — the node/device operator surface
+// (identity / pair / list / show / probe / revoke / submit / attribution).
+pub mod node;
+
+// F22-04: CLI surface `wayland-core goal` — the user-reachable surface over the
+// durable Goal kernel and its Fleet task ledger (open / task / run / status /
+// exec-task). Lives in the lib so the idempotency gate at the effect boundary is
+// testable under `cargo test -p wcore-cli --lib`, and so the kill/restart proof
+// runs against the shipped binary rather than an `examples/` instrument.
+pub mod goal_cmd;
+
+// F24-03: CLI surface `wayland-core channel` — the channel operator surface
+// (list / probe / health / reload). Lives in the lib so the observation
+// boundary (health is only ever reported from a LIVE gateway, never
+// fabricated by the reporting process) is testable under
+// `cargo test -p wcore-cli --lib`.
+pub mod channel;
+
+// F28 (F-28-02-001): CLI surface `wayland-core sandbox` — the platform
+// containment operator surface (status / exec). `exec` dispatches through
+// `BashTool::execute_with_ctx`, the agent's OWN shell tool, so the containment
+// an operator observes is the containment the agent applies — the evidence is
+// transitive rather than parallel. Lives in the lib so the selector's
+// bypass refusal and the contained-profile context are testable under
+// `cargo test -p wcore-cli --lib`.
+pub mod sandbox_cmd;
+
+// The single chokepoint that guarantees a `--json-stream` host is told WHY the
+// engine refused to start. Before this, three of four startup refusal paths
+// exited with ZERO protocol frames and put the reason on stderr, which the
+// protocol consumer does not read. Lives in the lib so the decision rule is
+// testable under `cargo test -p wcore-cli --lib`, while the end-to-end proof
+// drives the real binary and reads its stdout as the host does.
+pub mod startup_error;
+
+// 23A-C1: governed skill promotion, revocation and rollback, on the binary the
+// release actually ships. The capability existed in `wcore-skills` and in a
+// `wcore-skill-govern` helper that is packaged by nothing, so no installed copy of
+// the product could reach it.
+pub mod skill_govern;
+
+// Size-bounded rotation for `$WAYLAND_HOME/logs/wayland-core.log`. Lives in the
+// lib so the rotation invariants — that a rotation happens AND that the bytes
+// it keeps are the newest — are testable under `cargo test -p wcore-cli --lib`,
+// while the fallback-when-the-log-cannot-be-opened path is proven against the
+// real binary in `tests/log_rotation.rs`.
+pub mod log_rotate;

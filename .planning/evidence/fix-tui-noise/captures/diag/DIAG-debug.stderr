@@ -1,0 +1,70 @@
+[2m2026-07-30T13:47:25.094281Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+[2m2026-07-30T13:47:25.094340Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+[2m2026-07-30T13:47:25.094833Z[0m [34mDEBUG[0m on-disk plugins root does not exist — skipping [3mroot[0m[2m=[0m/root/wayland-fix-tui-noise-home/.wayland/plugins
+[2m2026-07-30T13:47:25.095004Z[0m [34mDEBUG[0m starting new connection: http://localhost:9377/
+[2m2026-07-30T13:47:25.095251Z[0m [34mDEBUG[0m connecting to 127.0.0.1:9377
+[2m2026-07-30T13:47:25.095423Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-30T13:47:25.095440Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-30T13:47:25.095725Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-30T13:47:25.095809Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-30T13:47:25.095823Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-30T13:47:25.095825Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-30T13:47:25.095828Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-30T13:47:25.095830Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-30T13:47:25.095832Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-30T13:47:25.095835Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-30T13:47:25.095842Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-30T13:47:25.095851Z[0m [33m WARN[0m image_gen: no API key found (OPENAI_API_KEY / FAL_API_KEY / GEMINI_API_KEY / HF_API_KEY) and Pollinations fallback disabled — tool hidden
+[2m2026-07-30T13:47:25.095861Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-30T13:47:25.095872Z[0m [32m INFO[0m vision: using Anthropic (ANTHROPIC_API_KEY found)
+[2m2026-07-30T13:47:25.095894Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[2m2026-07-30T13:47:25.095897Z[0m [33m WARN[0m tts: no TTS backend configured — set OPENAI_API_KEY or ELEVENLABS_API_KEY. Tool hidden.
+[2m2026-07-30T13:47:25.096097Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-30T13:47:25.096126Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-30T13:47:25.096248Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-30T13:47:25.096317Z[0m [34mDEBUG[0m honcho user-model: HONCHO_API_KEY absent — skipping live backend (local fallback applies) [3mplugin[0m[2m=[0mwayland-honcho [3mname[0m[2m=[0mhoncho
+[2m2026-07-30T13:47:25.096518Z[0m [34mDEBUG[0m sqlite journal mode selected [3mdb[0m[2m=[0m/root/wayland-fix-tui-noise-home/.config/wayland-core/memory/sessions/boot.db [3mclass[0m[2m=[0mLocal [3mmode[0m[2m=[0m"WAL"
+[2m2026-07-30T13:47:25.097097Z[0m [34mDEBUG[0m sqlite journal mode selected [3mdb[0m[2m=[0m/root/.wayland-core/memory/memory.db [3mclass[0m[2m=[0mLocal [3mmode[0m[2m=[0m"WAL"
+[2m2026-07-30T13:47:25.097555Z[0m [34mDEBUG[0m sqlite journal mode selected [3mdb[0m[2m=[0m/root/wayland-fix-tui-noise-home/.config/wayland-core/memory/memory.db [3mclass[0m[2m=[0mLocal [3mmode[0m[2m=[0m"WAL"
+[2m2026-07-30T13:47:25.098075Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-30T13:47:25.098150Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-30T13:47:25.098178Z[0m [34mDEBUG[0m W2: KG schema initialized in session tier
+[2m2026-07-30T13:47:25.098192Z[0m [34mDEBUG[0m W4: staleness table initialized in session tier
+[2m2026-07-30T13:47:25.098276Z[0m [34mDEBUG[0m bundled skill catalog initialised for session
+[2m2026-07-30T13:47:25.098385Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-30T13:47:25.098494Z[0m [34mDEBUG[0m skill_router: hydrated from GEPA `evolved_prompts` (bench scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-30T13:47:25.098502Z[0m [34mDEBUG[0m skill_router: hydrated auto-drafted skills (auto_drafter scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-30T13:47:25.099224Z[0m [34mDEBUG[0m child tool authority bound to the parent session registry
+[2m2026-07-30T13:47:34.909987Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY / OPENAI_API_KEY / FLUX_API_KEY, and no OpenAI-wire provider configured) — tool hidden
+[2m2026-07-30T13:47:34.910015Z[0m [32m INFO[0m vision: using Anthropic (ANTHROPIC_API_KEY found)
+[2m2026-07-30T13:47:34.910107Z[0m [34mDEBUG[0m F-024: TemplateRouter installed (Thompson-sampled orchestration active)
+[2m2026-07-30T13:47:34.910113Z[0m [34mDEBUG[0m v0.8.1 U6: SkillDrafter installed; auto-skill loop active
+[2m2026-07-30T13:47:34.910271Z[0m [34mDEBUG[0m F-039: SkillWatcher armed (skill hot-reload active)
+[2m2026-07-30T13:47:34.910317Z[0m [34mDEBUG[0m channels dir does not exist; nothing to auto-register [3mdir[0m[2m=[0m/root/wayland-fix-tui-noise-home/.wayland/channels
+[2m2026-07-30T13:47:34.910336Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-30T13:47:34.910357Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-30T13:47:34.911918Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m3136759 [3mdir[0m[2m=[0m/root/wayland-fix-tui-noise-home/.config/wayland-core/channels
+[2m2026-07-30T13:47:34.911936Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-30T13:47:34.965056Z[0m [34mDEBUG[0m session-start recall: injected durable facts into first turn [3mfacts[0m[2m=[0m1
+[2m2026-07-30T13:47:34.965470Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:34.965482Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:34.965485Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:34.965654Z[0m [34mDEBUG[0m starting new connection: https://api.anthropic.com/
+[2m2026-07-30T13:47:34.966680Z[0m [34mDEBUG[0m connecting to [2607:6bc0::10]:443
+[2m2026-07-30T13:47:34.968210Z[0m [34mDEBUG[0m connected to [2607:6bc0::10]:443
+[2m2026-07-30T13:47:34.968230Z[0m [34mDEBUG[0m No cached session for DnsName("api.anthropic.com")
+[2m2026-07-30T13:47:34.968234Z[0m [34mDEBUG[0m Not resuming any session
+[2m2026-07-30T13:47:34.970613Z[0m [34mDEBUG[0m Using ciphersuite TLS13_AES_256_GCM_SHA384
+[2m2026-07-30T13:47:34.970625Z[0m [34mDEBUG[0m Not resuming
+[2m2026-07-30T13:47:34.970684Z[0m [34mDEBUG[0m TLS1.3 encrypted extensions: ServerExtensions { server_name_ack: (), selected_protocol: SingleProtocolName(ProtocolName(687474702f312e31)), unknown_extensions: {}, .. }
+[2m2026-07-30T13:47:34.970691Z[0m [34mDEBUG[0m ALPN protocol is Some(b"http/1.1")
+[2m2026-07-30T13:47:36.894152Z[0m [34mDEBUG[0m pooling idle connection for ("https", api.anthropic.com)
+[2m2026-07-30T13:47:36.894250Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:36.894300Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:36.894309Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:36.894316Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:36.894578Z[0m [33m WARN[0m W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic [3mprovider[0m[2m=[0m"anthropic" [3mmodel[0m[2m=[0m"claude-sonnet-4-5-20250929"
+[2m2026-07-30T13:47:36.910364Z[0m [32m INFO[0m auto-memorize skipped this session; no facts saved [3mskip_reason[0m[2m=[0mSome(BelowFactThreshold) [3mcandidates[0m[2m=[0m0
+[2m2026-07-30T13:47:36.921822Z[0m [34mDEBUG[0m W5: fact extractor ingested 0 facts into the KG [3mfacts[0m[2m=[0m0
+
+[turns: 1 | tokens: 3 in (2434 cached) / 5 out | cache: 1106 created, 2434 read]

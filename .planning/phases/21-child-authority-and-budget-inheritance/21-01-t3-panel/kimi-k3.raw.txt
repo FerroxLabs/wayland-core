@@ -1,0 +1,38 @@
+• The question: pick one of hold, proceed-broad, proceed-scope-limited.
+
+  CTRL-01 OPEN, CTRL-02 NOT-OPEN (Desktop half). So proceed-broad is unavailable — a single NOT-OPEN removes it. So choice is hold vs proceed-scope-limited.
+
+  Checkpoint's last sentence: "Both receipts are required for a whole-Wayland claim; neither blocks Core-only engine claims outside the shared contract." Phase 21 is Core-side enforcement about child authority. Four HIGH findings are all Core-internal seams. So read Phase 21 largely as a Core-only engine claim; the two entangled dimensions (approval, attribution/correlation in 21-04) partly touch the shared contract. That argues for scope-limited: proceed with 21-02 (hostile corpus, both surfaces — though host-protocol corpus is pinned and measured STABLE), 21-03 (triage/repair of Core-internal HIGH findings), but gate 21-04's whole-Wayland verdict/attribution claim... Actually 21-04 is attribution + phase verdict. Scope limit: proceed with 21-02 and 21-03; 21-04 may proceed for Core-only attribution and verdict, but any whole-Wayland claim / cross-protocol conformance verdict is reserved until CTRL-02 closes.
+
+  The named risk (corpus encoding a contract that changes) was measured: contract pinned, byte-stable, live binary emits same descriptor. So the con of scope-limited is mitigated.
+
+  So pick proceed-scope-limited. Engage last sentence, name scope limit explicitly, state strongest counterargument (hold honors ROADMAP:83 exactly; the checkpoint says "Issue coordination is not completion" and the Desktop half could legitimately block; also scope-limit binds 21-04 which touches approval dimension crossing the wire).
+
+  Write concise answer, end with exact two lines.
+
+• ## Reading of the checkpoint's last sentence
+
+  "Both receipts are required for a whole-Wayland claim; neither blocks Core-only engine claims outside the shared contract."
+
+  Phase 21 proves that a child cannot widen authority or budget inside the engine. That is a Core-only engine claim. The authority census confirms it structurally: all four HIGH findings are Core-internal seams (Delegate tool's `toolsets` replacement into `ForkOverrides.allowed_tools`, no provider intersection channel, `PolicyGate` orphaned on the agent path, non-managed `with_requested_approvals` replacing instead of ratcheting). None of them requires a Desktop consumer to prove or disprove. The seams that do touch the shared contract — approval revisions crossing the wire, and attribution/correlation in 21-04 — are a minority of the phase's surface, and the verdict document that *defines* CTRL-02 says explicitly that the missing receipts do not block this class of claim.
+
+  So my reading: Phase 21 is predominantly a Core-only engine claim, with a contained shared-contract edge at approval and at the whole-Wayland attribution verdict in 21-04. The checkpoint's own scoping sentence excludes the former from the gate and reserves only the latter.
+
+  ## The pick and the scope limit
+
+  **proceed-scope-limited.** proceed-broad is off the table by its own terms — CTRL-02 returned NOT-OPEN, and selecting it anyway would be bypassing the gate. hold costs the phase everything while protecting nothing Core-side: the Desktop half lives in a different repository, is unreachable from this checkout, and the gate document says it doesn't block this work.
+
+  The binding limit, named exactly:
+
+  - **21-02 (dual-surface hostile corpus): proceeds.** The named risk — corpus encoding a contract that later changes — was measured at this commit, not argued: CONTRACT-DIGEST MATCH, CONTRACT-CHECK CURRENT, LIVE-READY EMITTED against the real shipped binary, CORPUS-PIN MATCH, all at SHA b6936299/bundle 3d80f146. The pinning *target* is exact and byte-stable; only the pinned *party* is missing. A corpus built against that target does not change when Desktop adopts it.
+  - **21-03 (triage + authorized repair): proceeds.** All four HIGH findings are Core-internal; repairs land inside Core authority logic. Constraint: no repair may change the serialized contract surface (fixtures, schema, digests) — if one must, it is deferred to 21-04 and the digests re-pinned.
+  - **21-04 (attribution + phase verdict): proceeds only as a Core-only claim.** Attribution, correlation, and the phase verdict may be proven against the standalone surface and the Core producer contract as pinned. Any whole-Wayland claim — i.e., any verdict statement about the Desktop consumer path or cross-repo conformance — is reserved until CTRL-02 closes. 21-04 may not assert what Section 9 items 1–2 have not yet demonstrated.
+
+  ## Strongest argument against my pick
+
+  The ROADMAP:83 text says "before broad Phase 21 execution" with no Core/Desktop carve-out, and the checkpoint itself says "Issue coordination is not completion" — a warning precisely against treating a published Core contract as discharge. Reading the last sentence as license to proceed is exactly the kind of scoping leniency a gate is meant to resist, and if the Desktop conformance suite later reveals the pinned contract is wrong (not merely unadopted), 21-02's protocol-surface cases and 21-04's approval-dimension proofs would need re-proving despite today's STABLE measurement. I weigh that and still pick scope-limited: the drift risk is the one thing that was measured byte-exact rather than reasoned about, the limit reserves the only claims the receipts actually cover, and hold converts an external-lane dependency into an indefinite stall for phases 21–23 with no Core-side safety gain.
+
+  BUNDLE=3d80f14662c3df9bd63aeb7ecffc144fe643a553
+  PANEL_POSITION=proceed-scope-limited
+
+To resume this session: kimi -r session_8d23dac3-1901-4ffd-9847-de91f7fbeeab

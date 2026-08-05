@@ -1,0 +1,30 @@
+### 24-C2 macOS leg
+host:  Seans-MacBook-Pro.local
+uname: Darwin Seans-MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:05 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T8142 arm64
+HEAD:  0675c051623dadb2c66b7ae250b4edbdc16fc3fb
+binary: /Users/seandonahoe/dev/waylandcore/.claude/worktrees/wf_df09ac5b-515-2/target/debug/wayland-core
+version: wayland-core 0.12.25
+date:  2026-07-31T00:53:13Z
+
+==============================================================================
+PART C — kill-mid-fire continuation (SIGKILL) + no-restart control
+==============================================================================
+
+--- ARM restart: WAYLAND_HOME=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-restart-ltneg959
+    staged: job=6c928109-acbf-4335-8dea-695de570ee4b queued_events=6 history=0
+    daemon started pid=46036 alive=True
+    SIGKILL sent at history=1; daemon_alive_after=False history_after_kill=1 queued_after_kill=5
+    daemon RESTARTED pid=47894 alive=True
+    FINAL history=4 queued=2
+
+--- ARM no-restart-control: WAYLAND_HOME=/var/folders/8h/chxws5390hx17g49p75b2xn00000gn/T/wl-24c2-no-restart-control-j9k0fpun
+    staged: job=45e79ac1-07cb-4033-9c8f-34fce753a08f queued_events=6 history=0
+    daemon started pid=58572 alive=True
+    SIGKILL sent at history=1; daemon_alive_after=False history_after_kill=1 queued_after_kill=5
+    (control) daemon deliberately NOT restarted
+    FINAL history=1 queued=5
+
+PART-C-SUMMARY: {"no-restart-control": {"history_after_kill": 1, "history_final": 1, "killed_at_history": 1, "published": 6, "queued_after_kill": 5, "queued_final": 5}, "restart": {"history_after_kill": 1, "history_final": 4, "killed_at_history": 1, "published": 6, "queued_after_kill": 5, "queued_final": 2}}
+PART-C-VERDICT: continuation_after_kill=True no_restart_control_made_no_progress=True events_conserved(fired+queued==published)=True discrimination=PASS
+
+M2-RESULT: macos_evidence=None pty_surface_gate=None kill_mid_fire=True

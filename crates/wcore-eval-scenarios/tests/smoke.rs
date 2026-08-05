@@ -50,7 +50,8 @@ async fn spawns_and_captures_help() {
         return;
     };
 
-    let mut child = spawn_with_args(&bin, &["--help"]).expect("spawn --help");
+    let env = tempfile::tempdir().expect("create isolated help environment");
+    let mut child = spawn_with_args(&bin, &["--help"], env.path()).expect("spawn isolated --help");
 
     // Capture stdout BEFORE wait so the pipe never fills (--help is
     // small enough that this would be safe either way, but the
@@ -116,29 +117,23 @@ async fn hung_scenario_does_not_leak_pid() {
     // Give the OS a moment to actually reap.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Post-check via libc::kill(pid, 0) — the canonical "does this
-    // process exist?" probe. Returns 0 if alive, -1 with ESRCH if gone.
-    // Originally shelled out to `/bin/kill -0 <pid>` but the ci-linux
-    // slim Debian docker image (`rust:1.95-slim-bookworm`) doesn't
-    // ship the kill binary, causing the test to panic with ENOENT and
-    // taking nextest down with it (CI run 26396718138, job 77699695683).
-    // The libc path has the same semantic check + no binary dep.
+    // Post-check that the child is really gone.
+    //
+    // Originally shelled out to `/bin/kill -0 <pid>` but the ci-linux slim
+    // Debian docker image (`rust:1.95-slim-bookworm`) doesn't ship the kill
+    // binary, causing the test to panic with ENOENT and taking nextest down
+    // with it (CI run 26396718138, job 77699695683). It then became an
+    // in-process `libc::kill(pid, 0)`, which has the same defect the shell
+    // form had: a **zombie** satisfies it, so a leaked-but-dead child and a
+    // genuinely leaked child are indistinguishable. Now uses the one
+    // zombie-aware probe. See `.planning/ZOMBIE-PROBE.md`.
     #[cfg(unix)]
     {
-        // SAFETY: kill(pid, 0) tests existence + permission only, no
-        // signal sent. Return 0 = alive; -1 with ESRCH = gone (success).
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        let alive = if rc == 0 {
-            true
-        } else {
-            !matches!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH)
-            )
-        };
+        use wcore_types::process_liveness::{process_is_alive, process_liveness};
         assert!(
-            !alive,
-            "PID {pid} should be gone after wait(); libc::kill(0) reports alive — likely leak"
+            !process_is_alive(pid),
+            "PID {pid} should be gone after wait(); probe reports {:?} — likely leak",
+            process_liveness(pid)
         );
     }
 
@@ -154,6 +149,7 @@ async fn hung_scenario_does_not_leak_pid() {
 /// ignored and the test falls back to the default — that would make
 /// `WCORE_EVAL_BIN` a footgun.
 #[test]
+#[serial_test::serial(wcore_eval_bin_env)]
 fn binary_discovery_rejects_missing_override() {
     let guard = EnvGuard::set("WCORE_EVAL_BIN", "/nonexistent/path/to/wayland-core");
     let r = discover_binary();
@@ -164,10 +160,38 @@ fn binary_discovery_rejects_missing_override() {
     );
 }
 
-/// Minimal RAII env-var guard for the discovery test. `tokio::test`
-/// processes share env state with sibling tests; nextest's
-/// `[profile.eval] test-threads = 1` makes this safe in the eval
-/// profile, but we restore on drop regardless.
+#[test]
+#[serial_test::serial(wcore_eval_bin_env)]
+fn binary_discovery_honors_absolute_cargo_target_dir() {
+    let temp = tempfile::TempDir::new().expect("target tempdir");
+    let bin_name = if cfg!(windows) {
+        "wayland-core.exe"
+    } else {
+        "wayland-core"
+    };
+    let expected = temp.path().join("debug").join(bin_name);
+    std::fs::create_dir_all(expected.parent().expect("debug target parent"))
+        .expect("create debug target");
+    std::fs::write(&expected, []).expect("seed binary artifact");
+
+    let eval_bin = EnvGuard::remove("WCORE_EVAL_BIN");
+    let target_dir = EnvGuard::set("CARGO_TARGET_DIR", temp.path());
+    let discovered = discover_binary().expect("discover binary in CARGO_TARGET_DIR");
+    drop(target_dir);
+    drop(eval_bin);
+
+    assert_eq!(discovered, expected);
+}
+
+/// Minimal RAII env-var guard for the discovery test.
+///
+/// Restoring on drop is NOT sufficient on its own: it does nothing for the
+/// window between set and restore, during which a concurrent test sees the
+/// mutated value. The previous comment leaned on nextest's
+/// `[profile.eval] test-threads = 1`, which is true for that profile and FALSE
+/// under plain `cargo test` -- where both discovery tests run in parallel in
+/// one process and both mutate `WCORE_EVAL_BIN`. They are now in a shared
+/// serial group; this guard still restores state on the way out.
 struct EnvGuard {
     key: &'static str,
     prev: Option<std::ffi::OsString>,
@@ -180,6 +204,14 @@ impl EnvGuard {
         // marked unsafe in newer std editions because of the FFI race
         // on libc envp, which we explicitly avoid here.
         unsafe { std::env::set_var(key, value.as_ref()) };
+        Self { key, prev }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: see `set`; this test process does not share its environment
+        // with another nextest case.
+        unsafe { std::env::remove_var(key) };
         Self { key, prev }
     }
 }

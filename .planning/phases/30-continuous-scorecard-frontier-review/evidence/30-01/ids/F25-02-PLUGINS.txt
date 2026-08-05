@@ -1,0 +1,22 @@
+EVIDENCE ID : F25-02-PLUGINS
+LEDGER ROW  : 27
+ARTIFACT    : `phases/25-remote-reach-nodes-plugin-lifecycle/25-02-SUMMARY.md` + `25-02-LIFECYCLE-TRANSCRIPT.md` — all twelve `wayland-core plugin` verbs plus all four negative cases driven through the shipped **release** binary on Linux **and** Windows; approval is a load-time gate the engine enforces, bound to the plugin directory's SHA-256. **Success Criterion 3 MET on Linux, MET-with-one-recorded-divergence on Windows** — the only MET Success Criterion produced by phases 21-29
+
+== PATH RESOLUTION ==
+[OK]   stat phases/25-remote-reach-nodes-plugin-lifecycle/25-02-SUMMARY.md
+       -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-02-SUMMARY.md  size=16150
+       head:
+---
+phase: 25-remote-reach-nodes-plugin-lifecycle
+plan: "02"
+subsystem: plugin-lifecycle
+tags: [f25-04, plugin, lifecycle, approval-gate, signing, generations, rollback, recover]
+status: complete
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 25-02-LIFECYCLE-TRANSCRIPT.md -> .planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-02-LIFECYCLE-TRANSCRIPT.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

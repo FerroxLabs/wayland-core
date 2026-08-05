@@ -2,8 +2,9 @@
 //! tracing::debug, never the transcript.
 //!
 //! Background: `AgentEngine::run()` runs a per-turn loop. After each
-//! provider response the engine compares `turn_usage.input_tokens` to a
-//! local estimate over `self.messages` and uses the max as the
+//! provider response the engine compares the disjoint provider input total
+//! (`input + cache_read + cache_creation`) to a local estimate over
+//! `self.messages` and uses the max as the
 //! autocompact watermark. When the local estimate exceeds the
 //! provider-reported count by more than 10k tokens (DeepSeek prefix
 //! caching, anything that under-reports prompt_tokens), the engine
@@ -163,7 +164,7 @@ fn token_watermark_routed_to_tracing_debug_v0913() {
     // Inspect a window around the emit site large enough to cover the
     // whole if-block but tight enough to not bleed into unrelated code.
     let window_start = source[..watermark_idx]
-        .rfind("if local_estimate > turn_usage.input_tokens")
+        .rfind("if local_estimate > provider_input")
         .expect("watermark guard if-block must precede the log line");
     let window_end = watermark_idx + 400;
     let window = &source[window_start..window_end.min(source.len())];

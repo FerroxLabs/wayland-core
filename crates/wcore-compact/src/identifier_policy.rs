@@ -1,14 +1,16 @@
 //! Identifier-preservation policy for semantic compaction.
 //!
-//! Ports the spirit of `IdentifierPolicy` from openclaw `agents/compaction.ts`,
-//! adapted to wayland-core's Rust chunk-priority compressor. The openclaw
-//! original is a *prompt-level* instruction policy (off / strict / custom)
-//! telling the summarizer LLM to preserve opaque identifiers (UUIDs, hashes,
-//! IDs, tokens, hostnames, IPs, ports, URLs, file names). Here we implement
-//! the same intent at the *chunk-selection* layer that runs *before* any LLM
-//! call: scan chunk contents for important identifiers and boost the priority
-//! of chunks that contain them, so the budget-bounded selector in
-//! [`crate::semantic::SemanticCompressor`] is less likely to evict them.
+//! Opaque identifiers (UUIDs, hashes, IDs, tokens, hostnames, IPs, ports,
+//! URLs, file names) are the tokens a summary can least afford to lose, and
+//! they are exactly the ones a summarizer LLM drops first because they carry
+//! no linguistic signal.
+//!
+//! Rather than instruct the summarizer to preserve them — which is advisory
+//! and unverifiable — this policy acts at the *chunk-selection* layer that
+//! runs *before* any LLM call: scan chunk contents for important identifiers
+//! and boost the priority of chunks that contain them, so the budget-bounded
+//! selector in [`crate::semantic::SemanticCompressor`] is less likely to
+//! evict them in the first place.
 //!
 //! The policy is pure re-prioritisation — it **never** rewrites chunk content.
 //!

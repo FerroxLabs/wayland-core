@@ -12,7 +12,12 @@ pub mod auto_skill;
 pub mod bootstrap;
 // W8a A.2: ExecutionBudget + ExecutionBudgetView (S2 foundation).
 pub mod budget;
+pub mod budget_authority;
 pub mod cache_diagnostics;
+// F23-04: the durable cache/compaction ledger — accumulates quality,
+// invalidation, token-pressure and cost-truth across a session and persists it
+// where `wayland-core cache` can read it without an engine.
+pub mod cache_ledger;
 // W8a A.2: cooperative cancellation primitives (re-export of tokio-util).
 pub mod cancel;
 // Inbound channel consumer: subscribes to the ChannelManager broadcast,
@@ -20,6 +25,24 @@ pub mod cancel;
 // drives an agent turn through the TurnDispatcher seam, then sends the
 // reply back. Completes the inbound path that was structurally missing.
 pub mod channel_inbound;
+/// F24-CL: the single-owner INBOUND POLLING lease. Three production sites each
+/// call `ChannelManager::start_all()` in a separate process, and polling is a
+/// destructive read — see the module docs for the measured loss.
+pub mod channel_lease;
+// F24-C3-H2 — the inbound stack (subscriber + dispatcher + webhook host)
+// assembled once, for any runtime that hosts channels. It was previously only
+// ever built inside `AgentBootstrap`, so the persistent `gateway run` runtime —
+// the systemd unit / launchd plist / scheduled task an operator installs —
+// polled its adapters and received nothing, while its own
+// `[inbound_webhook] enabled = true` said otherwise.
+pub mod channel_inbound_host;
+// F24-C3-H5 — the per-channel access policy AND tool posture as one shared,
+// swappable object. Both used to be owned maps captured at spawn, so a channel
+// added by `channel reload` was absent from them, fell through to the
+// fail-closed default, and had every message silently denied — while `channel
+// health` reported it healthy and its webhook returned 200. Consumed by
+// `channel_inbound` + `channel_dispatch` + `channel_inbound_host` + `bootstrap`.
+pub mod channel_policy;
 // Channel tool posture: maps a per-channel `ChannelToolPosture` onto a
 // reduced/jailed toolset for channel-originated engines (closes remote
 // host-secret exfiltration). Consumed by `bootstrap` + `channel_dispatch`.
@@ -29,10 +52,12 @@ pub mod channel_tools;
 // to avoid channel recursion) and drives an agent turn from each admitted
 // inbound message, returning the reply text the subscriber sends back.
 pub mod channel_dispatch;
+pub mod child_transaction;
 // Inbound media enrichment: resolves channel attachments (image/audio) to
 // derived text (description/transcript) via the host-wired vision /
 // transcription tools before the turn prompt is built. Inert when no
 // backend is configured. Consumed by `channel_dispatch` + `bootstrap`.
+pub mod capability_activation;
 pub mod capability_advisory;
 pub mod channel_media;
 // FleetDispatcher-class fix (audit 2026-05-24): bridges SendMessageTool's
@@ -45,12 +70,16 @@ pub mod context;
 // v0.8.1 U7 — production wire-up for `wcore-cron`. `bootstrap.rs`
 // spawns a `CronRunner` with the `EngineJobHandler` defined here.
 pub mod cron;
+pub mod durable_child;
+mod durable_spawner;
 // B2: the real egress policy (allowlist + ask-with-memory + exfil-class)
 // installed into the B1 wcore-egress chokepoint at bootstrap.
 pub mod egress;
 pub mod engine;
 // W8b C.6: FileHistory snapshot store for Rollback (root-level RealFs).
 pub mod file_history;
+// F22-02: the durable Goal kernel over the existing F12 session-journal chain.
+pub mod goal;
 // v0.9.0 Wave-4 E2 — provider health probes (HTTP HEAD/GET against
 // `/v1/models` with 5s cap) for the `/doctor` TUI diagnostics surface.
 pub mod health;
@@ -65,14 +94,21 @@ pub mod host_send_transport;
 // WhatsApp / Twilio SMS) to each channel's signature-verifying
 // `Channel::ingest_webhook` via the `ChannelManager`.
 pub mod inbound_webhook;
+pub mod journal_effects;
+pub mod journal_provider;
 pub mod mcp_curator;
+pub mod mcp_lifecycle;
 pub mod orchestration;
 pub mod output;
+mod output_redaction;
 pub mod plan;
 pub mod plugins;
+pub mod provider_recovery;
 // v0.7.0 Task 1.C.1 — WAYLAND.md / AGENTS.md / .wayland/context.md /
 // CLAUDE.md auto-detection.
 pub mod project_context;
+pub mod recovery;
+pub(crate) mod recovery_confidential;
 pub mod user_context;
 // v0.6.1 hardening (CRIT-1) — opt-in wcore-permissions gate at tool
 // dispatch boundary; without this, the M5.8 ACL shipped in v0.6.0 was
@@ -82,6 +118,10 @@ pub mod resilient_reporter;
 // W8b C.7: RollbackTool — consumes FileHistory to restore prior states.
 pub mod rollback_tool;
 pub mod session;
+pub mod session_journal;
+// F23-02 (Phase 23B) — operator verbs over the session substrate: search,
+// inspect, fork, retry, export, retain, reconcile and cancel.
+pub mod session_lifecycle;
 // v0.9.0 W1 B7 — in-process live state surfaces for wayland_status +
 // wayland_telemetry_query tools (introspection backend reads from this).
 pub mod session_state;

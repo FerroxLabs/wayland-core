@@ -1,0 +1,77 @@
+WLRC=0
+LABEL=q3-prefix-vault
+WLDONE
+=== LOG ===
+LABEL=q3-prefix-vault
+BIN=/root/wayland-fixhk/target/release/wayland-core
+MODE=vault
+BIN_SHA256=05116fee539dc04533c312a4f3c9ce18bd711cbec60ba6c40b270c842e8f418d
+BUILD_INFO_BEGIN
+  wayland-core 0.12.25 (source bc90ee1c1f08b76e6682b4beab2386fc7216a52e)
+BUILD_INFO_END
+VAULT_PASSPHRASE_SET=yes
+WAYLAND_HOME=/root/fixhk-home-q3-prefix-vault
+RUN_BEGIN
+[2m2026-07-30T12:04:07.633384Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-30T12:04:07.633576Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m35
+[2m2026-07-30T12:04:07.633690Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m35
+[2m2026-07-30T12:04:07.634772Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-30T12:04:07.634799Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-30T12:04:07.634966Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-30T12:04:07.635043Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-30T12:04:07.635057Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-30T12:04:07.635060Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-30T12:04:07.635063Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-30T12:04:07.635066Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-30T12:04:07.635069Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-30T12:04:07.635072Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-30T12:04:07.635080Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-30T12:04:07.635094Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-30T12:04:07.635104Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-30T12:04:07.635125Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T12:04:07.635146Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T12:04:07.635157Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-30T12:04:07.635354Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-30T12:04:07.635377Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-30T12:04:07.635534Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-30T12:04:07.648496Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-30T12:04:07.648826Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-30T12:04:07.648838Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-30T12:04:07.650890Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-30T12:04:17.658400Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T12:04:17.658428Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T12:04:17.658747Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-30T12:04:17.658780Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-30T12:04:17.660323Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m1271950 [3mdir[0m[2m=[0m/root/fixhk-home-q3-prefix-vault/channels
+[2m2026-07-30T12:04:17.660342Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+[2m2026-07-30T12:04:17.711200Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+Pricing unavailable for flux-router/flux-auto; the call remains bounded by the token envelope and cost is unpriced, not $0.
+* WLHK_TURN_OK
+[turns: 1 | tokens: 3049 in (128 cached) / 26 out | cache: 0 created, 128 read]
+
+RUN_END
+SESSION_FILES=2
+SESSION_DIR_LISTING_BEGIN
+  /root/fixhk-home-q3-prefix-vault/.credentials.confidential-backend.lock
+  /root/fixhk-home-q3-prefix-vault/channels/channel-poll.lock
+  /root/fixhk-home-q3-prefix-vault/credentials.kdf.json
+  /root/fixhk-home-q3-prefix-vault/sessions/7e3b68dac8f4.journal.writer.lock
+  /root/fixhk-home-q3-prefix-vault/sessions/7e3b68dac8f4.journal.authority
+  /root/fixhk-home-q3-prefix-vault/sessions/7e3b68dac8f4.journal
+  /root/fixhk-home-q3-prefix-vault/sessions/2026-07-30_7e3b68dac8f4.json
+  /root/fixhk-home-q3-prefix-vault/sessions/7e3b68dac8f4.journal.snapshot
+  /root/fixhk-home-q3-prefix-vault/sessions/index.json
+  /root/fixhk-home-q3-prefix-vault/memory/sessions/boot.db
+  /root/fixhk-home-q3-prefix-vault/memory/sessions/7e3b68dac8f4.db
+  /root/fixhk-home-q3-prefix-vault/memory/memory.db
+  /root/fixhk-home-q3-prefix-vault/memory/audit.db
+  /root/fixhk-home-q3-prefix-vault/memory/changelog/project.changelog.jsonl
+  /root/fixhk-home-q3-prefix-vault/memory/changelog/global.changelog.jsonl
+  /root/fixhk-home-q3-prefix-vault/memory/changelog/session.changelog.jsonl
+  /root/fixhk-home-q3-prefix-vault/cron/schedule.lock
+  /root/fixhk-home-q3-prefix-vault/.credentials.confidential-backend.json
+  /root/fixhk-home-q3-prefix-vault/cache-ledger/0118f1ed-70c3-4447-a71e-81343ce6c9e1.json
+  /root/fixhk-home-q3-prefix-vault/credentials.enc
+  /root/fixhk-home-q3-prefix-vault/credentials.confidential-key.lock
+  /root/fixhk-home-q3-prefix-vault/projects/-root/memory/user-model.json
+SESSION_DIR_LISTING_END

@@ -181,9 +181,20 @@ pub enum ConfigState {
     /// Tests the "corrupt config" error path.
     CorruptConfig,
 
-    /// No config file, but BOTH `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are
+    /// No config file, but BOTH `OPENAI_API_KEY` and `GROQ_API_KEY` are
     /// present in the child's environment.  Tests the "connect-all env-keys"
     /// path (the `a` shortcut that collects ≥2 detected env keys at once).
+    ///
+    /// **Neither key may belong to the DEFAULT provider** (`anthropic` — see
+    /// `wcore_config::config::default_provider`). The first-run gate
+    /// (`tui::is_first_run`) deliberately skips onboarding whenever a
+    /// credential *and* a model already resolve, and with no config on disk
+    /// the provider that resolves is the default one. So exporting
+    /// `ANTHROPIC_API_KEY` boots straight to the Workspace and the onboarding
+    /// surface — the thing under test — is never reached. That is intended
+    /// behaviour (commit c2963999), not a bug to route around: picking two
+    /// non-default providers is what keeps this cell pointed at the connect-all
+    /// flow instead of at the gate.
     MultiEnvKeys,
 }
 
@@ -233,9 +244,10 @@ impl ConfigState {
             }
             ConfigState::MultiEnvKeys => {
                 // Write both keys to the env sidecar — no config.toml written.
+                // Neither provider may be the default one; see the variant doc.
                 std::fs::write(
                     home.join(ENV_SIDECAR),
-                    "OPENAI_API_KEY=sk-test-harness-envonly-00000000\nANTHROPIC_API_KEY=sk-ant-harness-envonly-00000000\n",
+                    "OPENAI_API_KEY=sk-test-harness-envonly-00000000\nGROQ_API_KEY=gsk_harness-envonly-00000000\n",
                 )
                 .expect("write .proving-ground-env for MultiEnvKeys");
             }
@@ -250,7 +262,7 @@ impl ConfigState {
             ConfigState::EnvKeysOnly => &[("OPENAI_API_KEY", "sk-test-harness-envonly-00000000")],
             ConfigState::MultiEnvKeys => &[
                 ("OPENAI_API_KEY", "sk-test-harness-envonly-00000000"),
-                ("ANTHROPIC_API_KEY", "sk-ant-harness-envonly-00000000"),
+                ("GROQ_API_KEY", "gsk_harness-envonly-00000000"),
             ],
             _ => &[],
         }

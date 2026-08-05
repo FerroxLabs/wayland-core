@@ -1,0 +1,19 @@
+EVIDENCE ID : F22-VERDICT-2026-07-27
+LEDGER ROW  : 13
+ARTIFACT    : `phases/22-supervision-durable-goals-fleet-loops/22-PHASE-VERDICT.md`, the `UPDATE — 2026-07-27` section which supersedes the original grading. C1 FAILED (one surface of three), C2 PASSED both platforms, C3 FAILED unchanged, C4 PARTIAL, C5 PARTIAL. **Phase goal STILL NOT ACHIEVED**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/22-supervision-durable-goals-fleet-loops/22-PHASE-VERDICT.md
+       -> .planning/phases/22-supervision-durable-goals-fleet-loops/22-PHASE-VERDICT.md  size=13068
+       head:
+# Phase 22 — verdict against its own Success Criteria
+
+Tree: `2ecdfdf54ff7fda920eec7d068337006e5da4ee4` + this phase's commits.
+Graded 2026-07-26 by the executing agent. Criteria quoted verbatim from
+`.planning/ROADMAP.md`.
+
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

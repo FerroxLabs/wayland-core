@@ -53,9 +53,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use async_trait::async_trait;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use wcore_channels::{
-    AckMode, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DedupeCache, InboundPolicy,
-    IncomingMessage, OutgoingMessage, TurnAdmission, evaluate,
+    AckMode, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DedupeCache, IncomingMessage,
+    OutgoingMessage, TurnAdmission, evaluate,
 };
+
+use crate::channel_policy::ChannelPolicyRegistry;
 
 /// Depth of each per-session FIFO. Bounds how far one session may fall
 /// behind (turns are multi-minute) before the oldest-beyond-cap inbound is
@@ -123,11 +125,20 @@ pub trait TurnDispatcher: Send + Sync {
 pub struct InboundSubscriber {
     manager: Arc<RwLock<ChannelManager>>,
     dispatcher: Arc<dyn TurnDispatcher>,
-    /// Per-channel access policy, keyed by `channel_name`. A channel ABSENT
-    /// from this map uses [`InboundPolicy::default`] — which is fail-closed,
-    /// so unknown channels deny everything rather than getting an open
-    /// policy.
-    policies: HashMap<String, InboundPolicy>,
+    /// Per-channel access policy + tool posture, shared with the host and the
+    /// dispatcher. A channel ABSENT from it uses
+    /// [`wcore_channels::InboundPolicy::default`] —
+    /// which is fail-closed, so unknown channels deny everything rather than
+    /// getting an open policy.
+    ///
+    /// F24-C3-H5: this used to be a plain owned `HashMap` that was MOVED into
+    /// the spawned task, so nothing outside could ever refresh it. A channel
+    /// added by `channel reload` was therefore absent from a map captured
+    /// before it existed, fell through to the fail-closed default, and had
+    /// every message denied — while `channel health` reported it healthy and
+    /// its webhook returned 200. It is now a shared handle the runtime can
+    /// swap; see [`crate::channel_policy`].
+    policies: Arc<ChannelPolicyRegistry>,
     /// Shared duplicate-suppression cache. Its key already namespaces by
     /// platform / account / message-id, so one cache covers all channels.
     dedupe: DedupeCache,
@@ -151,7 +162,7 @@ impl InboundSubscriber {
     pub fn new(
         manager: Arc<RwLock<ChannelManager>>,
         dispatcher: Arc<dyn TurnDispatcher>,
-        policies: HashMap<String, InboundPolicy>,
+        policies: Arc<ChannelPolicyRegistry>,
         dedupe_ttl_ms: u64,
         dedupe_max_size: usize,
     ) -> Self {
@@ -246,10 +257,14 @@ impl InboundSubscriber {
                         let now_ms = start.elapsed().as_millis() as u64;
 
                         // Absent channel -> fail-closed default policy.
-                        let policy = policies
-                            .get(&tagged.channel_name)
-                            .cloned()
-                            .unwrap_or_default();
+                        //
+                        // F24-C3-H5: read through the shared registry on EVERY
+                        // event rather than out of a map captured at spawn, so
+                        // a channel introduced by `channel reload` is admitted
+                        // by its own policy instead of the empty default. The
+                        // read is a bounded map lookup that clones out and is
+                        // never held across an await.
+                        let policy = policies.policy_for(&tagged.channel_name);
 
                         let outcome =
                             evaluate(&tagged.channel_name, &msg, &policy, &mut dedupe, now_ms);
@@ -630,7 +645,9 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    use wcore_channels::{Channel, ChannelError, ChatType, DmPolicy, MessageReceipt};
+    use wcore_channels::{
+        Channel, ChannelError, ChatType, DmPolicy, InboundPolicy, MessageReceipt,
+    };
 
     /// Shared outbound log handle — what a `CapturingChannel` records.
     type OutboundLog = Arc<Mutex<Vec<OutgoingMessage>>>;
@@ -833,6 +850,13 @@ mod tests {
     /// subscriber over the given policy map, and spawn it. Returns the
     /// shared manager, the outbound log, the dispatcher call log, and the
     /// dispatch counter.
+    /// Wrap a bare policy map in a registry. Test-only convenience: the tests
+    /// below that predate F24-C3-H5 exercise admission, not posture, so they
+    /// pass an empty posture map explicitly rather than having one implied.
+    fn static_registry(policies: HashMap<String, InboundPolicy>) -> Arc<ChannelPolicyRegistry> {
+        Arc::new(ChannelPolicyRegistry::from_parts(policies, HashMap::new()))
+    }
+
     async fn harness(
         channel_name: &str,
         inbound: VecDeque<IncomingMessage>,
@@ -855,7 +879,7 @@ mod tests {
         let subscriber = InboundSubscriber::new(
             Arc::clone(&manager),
             Arc::new(dispatcher),
-            policies,
+            static_registry(policies),
             60_000,
             1024,
         );
@@ -1033,7 +1057,7 @@ mod tests {
         let subscriber = InboundSubscriber::new(
             Arc::clone(&manager),
             Arc::new(dispatcher),
-            policies,
+            static_registry(policies),
             60_000,
             4096,
         );
@@ -1180,7 +1204,7 @@ mod tests {
         let subscriber = InboundSubscriber::new(
             Arc::clone(&manager),
             Arc::new(dispatcher),
-            policies,
+            static_registry(policies),
             60_000,
             1024,
         )
@@ -1321,5 +1345,301 @@ mod tests {
         );
 
         manager.write().await.stop_all().await.unwrap();
+    }
+
+    // ---------------------------------------------------------------------
+    // F24-C3-H5 — a reloaded channel must actually be able to receive.
+    // ---------------------------------------------------------------------
+
+    /// A `Channel` whose inbound queue is SHARED with the test, so a message
+    /// can be injected AFTER the subscriber is already running.
+    ///
+    /// `CapturingChannel` takes its queue by value at construction, which
+    /// makes it impossible to express "the channel existed, then the operator
+    /// reloaded, then a message arrived" — the exact sequence F24-C3-H5 is
+    /// about.
+    struct SharedQueueChannel {
+        name: String,
+        started: bool,
+        inbound: Arc<Mutex<VecDeque<IncomingMessage>>>,
+        outbound: OutboundLog,
+        next_id: u64,
+    }
+
+    impl SharedQueueChannel {
+        fn new(name: &str) -> (Self, Arc<Mutex<VecDeque<IncomingMessage>>>, OutboundLog) {
+            let inbound = Arc::new(Mutex::new(VecDeque::new()));
+            let outbound: OutboundLog = Arc::new(Mutex::new(Vec::new()));
+            let ch = Self {
+                name: name.to_string(),
+                started: false,
+                inbound: Arc::clone(&inbound),
+                outbound: Arc::clone(&outbound),
+                next_id: 0,
+            };
+            (ch, inbound, outbound)
+        }
+    }
+
+    #[async_trait]
+    impl Channel for SharedQueueChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn platform(&self) -> &str {
+            "mock"
+        }
+        async fn start(&mut self) -> Result<(), ChannelError> {
+            self.started = true;
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), ChannelError> {
+            self.started = false;
+            Ok(())
+        }
+        async fn poll_events(&mut self) -> Result<Vec<ChannelEvent>, ChannelError> {
+            match self.inbound.lock().await.pop_front() {
+                Some(msg) => Ok(vec![ChannelEvent::MessageReceived { msg }]),
+                None => Ok(Vec::new()),
+            }
+        }
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<MessageReceipt, ChannelError> {
+            let id = format!("shared-out-{}", self.next_id);
+            self.next_id += 1;
+            let receipt = MessageReceipt {
+                id,
+                conversation_id: msg.conversation_id.clone(),
+                ts_secs: 0,
+            };
+            self.outbound.lock().await.push(msg);
+            Ok(receipt)
+        }
+        fn config_schema(&self) -> &str {
+            r#"{"name":"string","platform":"mock"}"#
+        }
+    }
+
+    /// A DM from `sender` on `conv`, with a distinct message id so the dedupe
+    /// cache never suppresses a later probe in the same test.
+    fn dm_from(id: &str, conv: &str, sender: &str) -> IncomingMessage {
+        let mut m = IncomingMessage::new(id, conv, sender, "ping", 0);
+        m.sender_id = sender.into();
+        m.chat_type = ChatType::Direct;
+        m
+    }
+
+    fn allowlist_policy(sender: &str) -> InboundPolicy {
+        InboundPolicy {
+            dm: DmPolicy::Allowlist,
+            dm_allowlist: vec![sender.to_string()],
+            ..Default::default()
+        }
+    }
+
+    /// THE repair test.
+    ///
+    /// A subscriber is running with a policy map that knows about `known` and
+    /// has never heard of `added`. Then the registry is swapped — the in-process
+    /// equivalent of what `gateway run`'s reload block now does — and `added`
+    /// must start being admitted, WITHOUT the subscriber being re-spawned.
+    ///
+    /// Three assertions, deliberately, because this defect is universal denial
+    /// and a test that only counted denials would pass on the broken build:
+    ///
+    /// 1. **positive control** — `known` is admitted throughout, so a zero for
+    ///    `added` can never be "the whole harness is dead";
+    /// 2. **known-negative** — `added` IS denied before the swap, so a pass
+    ///    cannot come from the policy having been present all along (this is the
+    ///    assertion that fails on the fixed code if the swap is a no-op, and it
+    ///    is what the pre-fix build satisfies *permanently*);
+    /// 3. **the repair** — `added` is admitted after the swap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registry_swap_admits_a_channel_the_running_subscriber_never_saw() {
+        let (known_ch, known_q, _known_out) = SharedQueueChannel::new("known");
+        let (added_ch, added_q, _added_out) = SharedQueueChannel::new("added");
+
+        let mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(5));
+        let manager = Arc::new(RwLock::new(mgr));
+
+        // The startup snapshot: `known` only. `added`'s config does not exist
+        // yet, exactly as it does not exist when a gateway starts.
+        let mut startup = HashMap::new();
+        startup.insert("known".to_string(), allowlist_policy("u-known"));
+        let registry = static_registry(startup);
+
+        let (dispatcher, calls, _count) = MockDispatcher::new();
+        let subscriber = InboundSubscriber::new(
+            Arc::clone(&manager),
+            Arc::new(dispatcher),
+            Arc::clone(&registry),
+            // Dedupe off: this test replays to the same channel across the
+            // swap and must not have a probe suppressed as a repeat.
+            0,
+            1024,
+        );
+        let handle = subscriber.spawn().await;
+
+        {
+            let mut guard = manager.write().await;
+            guard.register(Box::new(known_ch)).await;
+            guard.register(Box::new(added_ch)).await;
+            guard.start_all().await.unwrap();
+        }
+
+        // (1) POSITIVE CONTROL — the harness can deliver at all.
+        known_q
+            .lock()
+            .await
+            .push_back(dm_from("k1", "ck", "u-known"));
+        let n = wait_for_len(&calls, 1, Duration::from_secs(5)).await;
+        assert_eq!(
+            n, 1,
+            "positive control: the known channel must be admitted, or every zero below is \
+             meaningless"
+        );
+
+        // (2) KNOWN-NEGATIVE — the new channel is denied before the swap.
+        added_q
+            .lock()
+            .await
+            .push_back(dm_from("a1", "ca", "u-added"));
+        // Give it strictly more time than the control needed, then re-prove the
+        // pipe is still live so "nothing arrived" cannot mean "nothing works".
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        known_q
+            .lock()
+            .await
+            .push_back(dm_from("k2", "ck", "u-known"));
+        let n = wait_for_len(&calls, 2, Duration::from_secs(5)).await;
+        assert_eq!(
+            n, 2,
+            "the control channel must still be flowing while the new channel is denied"
+        );
+        {
+            let seen = calls.lock().await;
+            assert!(
+                !seen.iter().any(|(_, ch)| ch == "added"),
+                "pre-swap: a channel absent from the registry must be denied — this is the \
+                 fail-closed behaviour and it must NOT be what the repair removes. Saw: {seen:?}"
+            );
+        }
+
+        // The swap. Both facets move; there is no API to move only one.
+        let n_channels = registry.replace(crate::channel_policy::ChannelPolicySnapshot {
+            policies: HashMap::from([
+                ("known".to_string(), allowlist_policy("u-known")),
+                ("added".to_string(), allowlist_policy("u-added")),
+            ]),
+            postures: HashMap::new(),
+            generation: 0,
+        });
+        assert_eq!(n_channels, 2);
+        assert_eq!(registry.generation(), 1);
+
+        // (3) THE REPAIR — the same channel, the same sender, now admitted, by
+        // the SAME already-running subscriber.
+        added_q
+            .lock()
+            .await
+            .push_back(dm_from("a2", "ca", "u-added"));
+        let n = wait_for_len(&calls, 3, Duration::from_secs(5)).await;
+        assert_eq!(
+            n, 3,
+            "post-swap: the reloaded channel must be admitted by the running subscriber. A \
+             shortfall here is F24-C3-H5 itself: registered, healthy, 200 — and silently denied."
+        );
+        {
+            let seen = calls.lock().await;
+            assert!(
+                seen.iter().any(|(_, ch)| ch == "added"),
+                "post-swap: the admitted turn must be attributed to the reloaded channel. \
+                 Saw: {seen:?}"
+            );
+        }
+
+        // (4) FAIL-CLOSED SURVIVES — the reloaded channel still denies what its
+        // policy denies. Without this the "fix" could be an open policy, which
+        // would trade a silent-denial defect for a silent-admission one.
+        added_q
+            .lock()
+            .await
+            .push_back(dm_from("a3", "ca", "u-INTRUDER"));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        known_q
+            .lock()
+            .await
+            .push_back(dm_from("k3", "ck", "u-known"));
+        let n = wait_for_len(&calls, 4, Duration::from_secs(5)).await;
+        assert_eq!(
+            n, 4,
+            "control still flowing while the intruder is denied on the reloaded channel"
+        );
+        {
+            let seen = calls.lock().await;
+            let added_calls = seen.iter().filter(|(_, ch)| ch == "added").count();
+            assert_eq!(
+                added_calls, 1,
+                "the reloaded channel must still deny a sender outside its allowlist; only the \
+                 allowlisted message may have been dispatched. Saw: {seen:?}"
+            );
+        }
+
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
+    }
+
+    /// A channel REMOVED from disk must lose its admission on the next swap.
+    /// Without this the repair is a one-way ratchet: reload could grant
+    /// authority but never withdraw it, and revoking a channel's access would
+    /// silently require a full gateway restart.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_registry_swap_revokes_a_channel_removed_from_disk() {
+        let (ch, q, _out) = SharedQueueChannel::new("revoked");
+        let mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(5));
+        let manager = Arc::new(RwLock::new(mgr));
+
+        let mut startup = HashMap::new();
+        startup.insert("revoked".to_string(), allowlist_policy("u1"));
+        let registry = static_registry(startup);
+
+        let (dispatcher, calls, _count) = MockDispatcher::new();
+        let subscriber = InboundSubscriber::new(
+            Arc::clone(&manager),
+            Arc::new(dispatcher),
+            Arc::clone(&registry),
+            0,
+            1024,
+        );
+        let handle = subscriber.spawn().await;
+        {
+            let mut guard = manager.write().await;
+            guard.register(Box::new(ch)).await;
+            guard.start_all().await.unwrap();
+        }
+
+        // Positive control: it works before the revoke.
+        q.lock().await.push_back(dm_from("r1", "cr", "u1"));
+        assert_eq!(
+            wait_for_len(&calls, 1, Duration::from_secs(5)).await,
+            1,
+            "positive control: the channel must be admitted before it is revoked"
+        );
+
+        registry.replace(crate::channel_policy::ChannelPolicySnapshot::default());
+
+        q.lock().await.push_back(dm_from("r2", "cr", "u1"));
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(
+            calls.lock().await.len(),
+            1,
+            "after the swap the channel is absent from the registry and must fall back to the \
+             fail-closed default"
+        );
+
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
     }
 }

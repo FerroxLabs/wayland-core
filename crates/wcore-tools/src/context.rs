@@ -20,11 +20,21 @@
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use wcore_sandbox::{FailClosedBackend, SandboxRegistry, default_for_platform};
 
 use crate::file_write_notifier::FileWriteNotifier;
 use crate::vfs::{RealFs, VirtualFs};
 use crate::workspace_policy::WorkspacePolicy;
 use crate::{NullToolOutputSink, ToolOutputSink};
+
+/// Durable identity supplied by orchestration for one physical tool attempt.
+/// Adapters may forward the idempotency key without changing their recovery
+/// contract; declaring a stronger contract still requires proving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolEffectContext {
+    pub tool_execution_id: String,
+    pub idempotency_key: String,
+}
 
 /// Per-tool-call context. Cheap to construct in tests via
 /// `ToolContext::test_default()`; orchestration builds one per dispatch
@@ -70,6 +80,11 @@ pub struct ToolContext {
     /// network) from it; in `Contained` mode the dispatcher also installs a
     /// `SandboxedFs ∘ SecretDenyFs` jail as `vfs`.
     pub workspace: Option<Arc<WorkspacePolicy>>,
+
+    /// Immutable sandbox backend selected for this agent session. Hosted
+    /// dispatch always installs the registry-owned handle so another session
+    /// cannot change this tool call's containment by mutating process globals.
+    pub sandbox: Arc<SandboxRegistry>,
 }
 
 impl ToolContext {
@@ -84,13 +99,15 @@ impl ToolContext {
             sink: Arc::new(NullToolOutputSink),
             file_write_notifier: None,
             workspace: None,
+            sandbox: Arc::new(SandboxRegistry::new(Arc::from(default_for_platform()))),
         }
     }
 
     /// Builder helper used by orchestration to mint a context for one
     /// tool call from the root state. The `file_write_notifier` field
     /// defaults to `None`; callers that have a live watcher use
-    /// `with_file_write_notifier` to attach one.
+    /// `with_file_write_notifier` to attach one. Its sandbox fails closed
+    /// until the host attaches the registry-owned session runtime.
     pub fn new(
         call_id: impl Into<String>,
         cancel: CancellationToken,
@@ -106,6 +123,7 @@ impl ToolContext {
             sink,
             file_write_notifier: None,
             workspace: None,
+            sandbox: Arc::new(SandboxRegistry::new(Arc::new(FailClosedBackend::new()))),
         }
     }
 
@@ -120,6 +138,11 @@ impl ToolContext {
 
     pub fn with_workspace(mut self, policy: Arc<WorkspacePolicy>) -> Self {
         self.workspace = Some(policy);
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: Arc<SandboxRegistry>) -> Self {
+        self.sandbox = sandbox;
         self
     }
 }
@@ -142,6 +165,18 @@ mod tests {
         let policy = Arc::new(WorkspacePolicy::trusted_local(dir.path()));
         let ctx = ctx.with_workspace(Arc::clone(&policy));
         assert_eq!(ctx.workspace.as_ref().unwrap().root(), policy.root());
+    }
+
+    #[test]
+    fn production_context_constructor_fails_closed_until_runtime_attached() {
+        let ctx = ToolContext::new(
+            "call",
+            CancellationToken::new(),
+            Arc::new(RealFs),
+            None,
+            Arc::new(NullToolOutputSink),
+        );
+        assert_eq!(ctx.sandbox.backend_name(), "fail_closed");
     }
 
     #[derive(Default)]

@@ -1,0 +1,51 @@
+THE `report` CHECK GOES GREEN WHEN ZERO TESTS RAN — measured, 14 samples, no counter-example.
+
+A. Live known-positive on a run this lane caused deliberately.
+   lane/fix-clippy-gate-negctl2 @ c4371a99, CI run 30550569196 (the clippy negative control).
+     failure   | CI (Array)
+                 failure   | Clippy (warnings = errors)
+                 skipped   | Run tests (nextest CI profile)
+                 success   | Upload nextest JUnit report
+     failure   | CI (linux-containerized)
+                 failure   | Clippy (warnings = errors)
+                 skipped   | Run tests (nextest CI profile)
+                 success   | Upload nextest JUnit report
+     success   | report
+                 success   | Download nextest JUnit artifacts
+                 skipped   | Publish test report
+
+   Both test-running legs die at Clippy, both skip 'Run tests', the JUnit upload
+   'succeeds' having uploaded nothing (if-no-files-found: ignore), and `report`
+   concludes SUCCESS with its only real step skipped.
+
+B. Enumerated across 14 completed CI runs -- 3 on the integration branch and 11 across
+   11 different lane branches, including the negative control above. Each run queried
+   individually with explicit error detection, because a first attempt that walked the
+   run LIST silently under-reported (2 of 14) when API responses came back empty and the
+   loop treated a missing 'jobs' key as "no report job". Runs that cannot be read are
+   counted as NOT COUNTED rather than as evidence:
+
+     run 30550569196  lane/fix-clippy-gate-negctl2         run=failure   report=success  publish=skipped
+     run 30547839653  lane/fix-tui-tool-results            run=failure   report=success  publish=skipped
+     run 30543806309  lane/fix-headless-keyring            run=failure   report=success  publish=skipped
+     run 30541940915  lane/fix-tui-first-message           run=failure   report=success  publish=skipped
+     run 30541594538  lane/fix-headless-keyring            run=failure   report=success  publish=skipped
+     run 30540940077  lane/fix-channel-health-truth        run=failure   report=success  publish=skipped
+     run 30540221042  lane/fix-channel-onboarding          run=failure   report=success  publish=skipped
+     run 30538315218  lane/uat-tui-windows                 run=failure   report=success  publish=skipped
+     run 30536450631  lane/uat-tui-unix                    run=failure   report=success  publish=skipped
+     run 30536347571  lane/uat-channels-live               run=failure   report=success  publish=skipped
+     run 30534321358  lane/uat-desktop-contract            run=failure   report=success  publish=skipped
+     run 30517009690  plan/f20-unified-audit-repair        run=failure   report=success  publish=skipped
+     run 30487303246  plan/f20-unified-audit-repair        run=failure   report=success  publish=skipped
+     run 30480095699  plan/f20-unified-audit-repair        run=failure   report=success  publish=skipped
+
+     counted 14 runs, 0 not counted (API error / no report job).
+     Of the 14 counted: report=success on every one, publish=skipped on every one.
+
+C. No counter-example found, and no known-positive either. Across the last 93 completed CI
+   runs I could not find a single one where 'Publish test report' actually executed. So I am
+   NOT claiming that path is known-live -- only that the absence of test evidence has been
+   rendering as a green check, which is the defect being closed. The clippy fixes in this
+   branch are what give the new assertion a reachable pass state: until a leg gets past
+   Clippy there is no JUnit to publish.

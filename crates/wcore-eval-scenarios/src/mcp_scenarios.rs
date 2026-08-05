@@ -71,7 +71,7 @@ use std::time::Duration;
 
 use crate::assertions::{Assertion, TraceAssertion};
 use crate::providers::ProviderChoice;
-use crate::scenario::{Category, Scenario, Turn};
+use crate::scenario::{Category, Platform, Scenario, Turn};
 
 /// The mock MCP server script, embedded so the scenario is self-contained
 /// (no dependency on the `tests/fixtures/` copy being present at the
@@ -158,6 +158,7 @@ fn setup_mock_mcp(cwd: &std::path::Path) -> anyhow::Result<()> {
 ///     user. (The model is instructed to repeat the tool's exact output.)
 pub fn mcp_echo_roundtrip() -> Scenario {
     Scenario::new("mcp_echo_roundtrip", Category::Coverage)
+        .platforms([Platform::Linux, Platform::Macos])
         .provider(ProviderChoice::ForceDeepSeek)
         .max_total_time(Duration::from_secs(120))
         .max_total_cost_usd(0.05)

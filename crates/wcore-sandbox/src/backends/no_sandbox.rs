@@ -11,9 +11,11 @@
 use super::SandboxBackend;
 use crate::error::{Result, SandboxError};
 use crate::manifest::SandboxManifest;
-use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
+use crate::{ResourceLimitEnforcement, SandboxChunk, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
-use std::sync::Once;
+use std::process::Stdio;
+use std::sync::{Arc, Once};
+use tokio::io::AsyncReadExt;
 
 static WARN_ONCE: Once = Once::new();
 
@@ -34,6 +36,31 @@ pub struct NoSandboxBackend;
 impl NoSandboxBackend {
     pub fn new() -> Self {
         Self
+    }
+
+    fn command(
+        manifest: &SandboxManifest,
+        cmd: &SandboxCommand,
+    ) -> Result<tokio::process::Command> {
+        let program = cmd
+            .argv
+            .first()
+            .ok_or_else(|| SandboxError::ExecFailed("empty argv".into()))?;
+        let mut builder = tokio::process::Command::new(program);
+        if cmd.argv.len() > 1 {
+            builder.args(&cmd.argv[1..]);
+        }
+        if let Some(cwd) = &cmd.cwd {
+            builder.current_dir(cwd);
+        }
+        builder.kill_on_drop(true);
+        super::process_tree::isolate(&mut builder);
+        builder.env_clear();
+        for (k, v) in &manifest.env {
+            builder.env(k, v);
+        }
+        builder.stdout(Stdio::piped()).stderr(Stdio::piped());
+        Ok(builder)
     }
 }
 
@@ -58,41 +85,110 @@ impl SandboxBackend for NoSandboxBackend {
         manifest: &SandboxManifest,
         cmd: SandboxCommand,
     ) -> Result<SandboxOutput> {
-        let program = cmd
-            .argv
-            .first()
-            .ok_or_else(|| SandboxError::ExecFailed("empty argv".into()))?;
-        let mut builder = tokio::process::Command::new(program);
-        if cmd.argv.len() > 1 {
-            builder.args(&cmd.argv[1..]);
-        }
-        if let Some(cwd) = &cmd.cwd {
-            builder.current_dir(cwd);
-        }
         // S9: kill the child if this future is dropped (e.g. when a caller
         // races us against a timeout / cancellation token). Without this
         // a dropped `output()` future leaves a zombie subprocess — the
         // same reliability blocker `wcore_config::shell` fixed for the
         // shell helpers. Routing BashTool through the sandbox must not
         // reintroduce that leak.
-        builder.kill_on_drop(true);
-        // Scrub host env, then inject only what the manifest declares.
-        // Mirrors the real backends so disabling sandbox does not silently
-        // leak host secrets to the child.
-        builder.env_clear();
-        for (k, v) in &manifest.env {
-            builder.env(k, v);
-        }
-        let output = builder
-            .output()
-            .await
+        let mut child = Self::command(manifest, &cmd)?
+            .spawn()
             .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
+        let mut process_tree = super::process_tree::ProcessTreeGuard::new(child.id())
+            .map_err(|e| SandboxError::ExecFailed(format!("process-tree ownership: {e}")))?;
+        let output =
+            super::wait_with_bounded_output_on_exit(&mut child, || process_tree.disarm()).await?;
         Ok(SandboxOutput {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: output.stdout,
             stderr: output.stderr,
             resource_limits: ResourceLimitEnforcement::None,
         })
+    }
+
+    fn execute_streaming(
+        self: Arc<Self>,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+    ) -> Result<tokio::sync::mpsc::Receiver<SandboxChunk>> {
+        let mut child = Self::command(manifest, &cmd)?
+            .spawn()
+            .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| SandboxError::ExecFailed("child stdout was not piped".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SandboxError::ExecFailed("child stderr was not piped".into()))?;
+        let process_tree = super::process_tree::ProcessTreeGuard::new(child.id())
+            .map_err(|e| SandboxError::ExecFailed(format!("process-tree ownership: {e}")))?;
+        let (tx, rx) = tokio::sync::mpsc::channel(super::STREAM_CHANNEL_CAP);
+
+        tokio::spawn(async move {
+            let mut process_tree = process_tree;
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+            let mut stdout_buf = [0_u8; 8 * 1024];
+            let mut stderr_buf = [0_u8; 8 * 1024];
+            let mut exit_code = None;
+            let wait = child.wait();
+            tokio::pin!(wait);
+
+            while stdout_open || stderr_open || exit_code.is_none() {
+                tokio::select! {
+                    _ = tx.closed() => return,
+                    read = stdout.read(&mut stdout_buf), if stdout_open => match read {
+                        Ok(0) => stdout_open = false,
+                        Ok(n) => {
+                            if tx.send(SandboxChunk::Stdout(stdout_buf[..n].to_vec())).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(SandboxChunk::Stderr(
+                                format!("failed to read child stdout: {error}").into_bytes(),
+                            )).await;
+                            return;
+                        }
+                    },
+                    read = stderr.read(&mut stderr_buf), if stderr_open => match read {
+                        Ok(0) => stderr_open = false,
+                        Ok(n) => {
+                            if tx.send(SandboxChunk::Stderr(stderr_buf[..n].to_vec())).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(SandboxChunk::Stderr(
+                                format!("failed to read child stderr: {error}").into_bytes(),
+                            )).await;
+                            return;
+                        }
+                    },
+                    status = &mut wait, if exit_code.is_none() => match status {
+                        Ok(status) => exit_code = Some(status.code().unwrap_or(-1)),
+                        Err(error) => {
+                            let _ = tx.send(SandboxChunk::Stderr(
+                                format!("failed to wait for child: {error}").into_bytes(),
+                            )).await;
+                            return;
+                        }
+                    },
+                }
+            }
+
+            process_tree.disarm();
+            let _ = tx
+                .send(SandboxChunk::Exit {
+                    exit_code: exit_code.expect("loop exits only after child status is available"),
+                    resource_limits: ResourceLimitEnforcement::None,
+                })
+                .await;
+        });
+
+        Ok(rx)
     }
 }
 
@@ -144,6 +240,265 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SandboxError::ExecFailed(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn buffered_output_is_bounded() {
+        let Some(yes) = ["/usr/bin/yes", "/bin/yes"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).exists())
+        else {
+            eprintln!("skip: no yes binary on this host");
+            return;
+        };
+        let backend = NoSandboxBackend::new();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            backend.execute(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec![yes.into(), "0123456789abcdef".into()],
+                    cwd: None,
+                },
+            ),
+        )
+        .await
+        .expect("output ceiling must stop an infinite producer promptly")
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SandboxError::OutputLimitExceeded {
+                limit_bytes: super::super::BUFFERED_OUTPUT_LIMIT_BYTES
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_stream_kills_direct_child_and_background_descendant() {
+        use std::sync::Arc;
+
+        // Second of the four hand-rolled zombie checks; Linux-only, so this
+        // containment assertion was still zombie-blind on macOS. Replaced by
+        // the single cross-platform probe. See `.planning/ZOMBIE-PROBE.md`.
+        use wcore_types::process_liveness::process_is_alive as process_running;
+
+        async fn read_pid(path: &std::path::Path) -> u32 {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Ok(raw) = std::fs::read_to_string(path)
+                        && let Ok(pid) = raw.trim().parse()
+                    {
+                        break pid;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("child must publish its PID")
+        }
+
+        async fn wait_gone(pid: u32) {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while process_running(pid) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("process group member must die after receiver drop");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let shell_pid_file = dir.path().join("shell.pid");
+        let child_pid_file = dir.path().join("child.pid");
+        let script = format!(
+            "echo $$ > '{}'; sleep 30 & echo $! > '{}'; wait",
+            shell_pid_file.display(),
+            child_pid_file.display()
+        );
+        let backend = Arc::new(NoSandboxBackend::new());
+        let rx = backend
+            .execute_streaming(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec!["/bin/sh".into(), "-c".into(), script],
+                    cwd: None,
+                },
+            )
+            .unwrap();
+        let shell_pid = read_pid(&shell_pid_file).await;
+        let child_pid = read_pid(&child_pid_file).await;
+        assert!(process_running(shell_pid));
+        assert!(process_running(child_pid));
+
+        drop(rx);
+
+        wait_gone(shell_pid).await;
+        wait_gone(child_pid).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_execute_future_prevents_delayed_descendant_effect() {
+        let dir = tempfile::tempdir().expect("create sentinel directory");
+        let started = dir.path().join("started");
+        let sentinel = dir.path().join("escaped");
+        let backend = NoSandboxBackend::new();
+        let manifest = SandboxManifest::default();
+
+        {
+            let execution = backend.execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "/usr/bin/touch \"$1\"; (/bin/sleep 1; /usr/bin/touch \"$2\") & wait"
+                            .into(),
+                        "wcore-sentinel".into(),
+                        started.to_string_lossy().into_owned(),
+                        sentinel.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            );
+            tokio::pin!(execution);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    tokio::select! {
+                        result = &mut execution => {
+                            panic!("child exited before cancellation: {result:?}");
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                            if started.exists() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("child must start before future drop");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_250)).await;
+        assert!(
+            !sentinel.exists(),
+            "background descendant wrote after execute future drop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_direct_child_cannot_leave_background_descendant() {
+        let dir = tempfile::tempdir().expect("create sentinel directory");
+        let sentinel = dir.path().join("escaped-after-success");
+        let backend = NoSandboxBackend::new();
+        let output = backend
+            .execute(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec![
+                        "/bin/sh".into(),
+                        "-c".into(),
+                        "(/bin/sleep 1; /usr/bin/touch \"$1\") &".into(),
+                        "wcore-success-sentinel".into(),
+                        sentinel.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("direct child should exit successfully");
+        assert_eq!(output.exit_code, 0);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_250)).await;
+        assert!(
+            !sentinel.exists(),
+            "background descendant survived successful direct-child completion"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dropping_stream_reaps_windows_job_descendant() {
+        use std::sync::Arc;
+
+        let system_root = std::env::var_os("SYSTEMROOT").expect("SYSTEMROOT must be set");
+        let cmd = std::path::PathBuf::from(&system_root)
+            .join("System32")
+            .join("cmd.exe");
+        let choice = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("choice.exe");
+        let dir = tempfile::tempdir().expect("create process-tree test directory");
+        let heartbeat = dir.path().join("heartbeat.txt");
+        let script = dir.path().join("heartbeat.cmd");
+        std::fs::write(
+            &script,
+            format!(
+                "@echo off\r\n:loop\r\necho x>>heartbeat.txt\r\n\"{}\" /t 1 /d y /n >nul\r\ngoto loop\r\n",
+                choice.display()
+            ),
+        )
+        .expect("write process-tree heartbeat script");
+        // The nested command line carries NO quotes and NO absolute paths. The
+        // previous form embedded two quoted absolute paths
+        // (`"<cmd.exe>" /d /c "<script>"`); passing that through the argv vector
+        // let std's `CommandLineToArgvW` quoting escape the inner quotes as
+        // `\"`, which cmd.exe does not understand, so the inner shell never
+        // launched and the heartbeat was never written. Setting the child's
+        // working directory to the temp directory lets both the script and its
+        // output file be BARE relative names, which removes the nesting instead
+        // of escaping it harder. `cmd` resolves through PATH.
+        //
+        // Two process levels are RETAINED deliberately: the reaped descendant is
+        // the inner shell, so collapsing this to a single level would delete the
+        // property the test exists to prove.
+        let nested = "cmd /d /c heartbeat.cmd".to_owned();
+        let backend = Arc::new(NoSandboxBackend::new());
+        let rx = backend
+            .execute_streaming(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec![
+                        cmd.display().to_string(),
+                        "/d".into(),
+                        "/s".into(),
+                        "/c".into(),
+                        nested,
+                    ],
+                    cwd: Some(dir.path().to_path_buf()),
+                },
+            )
+            .expect("spawn nested Windows command");
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if std::fs::metadata(&heartbeat)
+                    .map(|meta| meta.len() > 0)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("descendant must begin writing its heartbeat");
+
+        drop(rx);
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let settled = std::fs::metadata(&heartbeat)
+            .expect("heartbeat remains readable")
+            .len();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let final_len = std::fs::metadata(&heartbeat)
+            .expect("heartbeat remains readable")
+            .len();
+        assert_eq!(final_len, settled, "Windows Job descendant survived drop");
     }
 
     #[test]

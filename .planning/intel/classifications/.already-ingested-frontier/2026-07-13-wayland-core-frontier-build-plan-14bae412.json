@@ -1,0 +1,25 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-gsd-control/docs/design/2026-07-13-wayland-core-frontier-build-plan.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Wayland Core Frontier Build Plan",
+  "summary": "Canonical technical build plan defining architecture, milestones, task dependencies, evidence gates, and release criteria for the Wayland Core frontier program.",
+  "scope": [
+    "Wayland Core frontier program",
+    "Core engine",
+    "standalone TUI/CLI",
+    "Desktop protocol contracts",
+    "cross-platform proof",
+    "evidence receipts"
+  ],
+  "cross_refs": [
+    "2026-07-13-wayland-core-frontier-evaluation-program.md",
+    "2026-07-13-wayland-core-frontier-gap-audit-and-execution-plan.md",
+    "2026-07-14-wayland-core-f06-session-catalog-addendum.md",
+    "docs/advanced.md"
+  ],
+  "locked": false,
+  "precedence": 0,
+  "notes": ""
+}

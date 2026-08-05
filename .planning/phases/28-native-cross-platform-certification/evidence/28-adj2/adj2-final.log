@@ -1,0 +1,119 @@
+﻿F28ADJ2 FINAL started=2026-07-29T01:59:07.5242028+07:00
+SRC_SHA=9c4d2612157851abc6d810fc75d153410372dafa
+SRC_DIRTY=0
+===== CLIPPY =====
+cargo.exe :     Checking wcore-types v0.12.25 (C:\f28h2-repo\crates\wcore-types)
+At C:\f28h2\adj2-final.ps1:16 char:7
++ $c = (& cargo clippy -p wcore-sandbox --all-targets 2>&1 | Out-String ...
++       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (    Checking wc...es\wcore-types):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Checking wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+warning: unused import: `std::process::Command`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:34:5
+   |
+34 | use std::process::Command;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `SandboxCommand` and `SandboxManifest`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:39:21
+   |
+39 | use wcore_sandbox::{SandboxCommand, SandboxManifest};
+   |                     ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `hold_iterations`, `live_descendant_pids`, and `resolve_anchor_pid`
+  --> crates\wcore-sandbox\tests\hard_process_containment_windows.rs:43:65
+   |
+43 |     capture_alive_descendant_pids, cmd_script, descendant_hold, hold_iterations, inline_hold,
+   |                                                                 ^^^^^^^^^^^^^^^
+44 |     live_descendant_count, live_descendant_pids, manifest, reap_stray_descendants,
+   |                            ^^^^^^^^^^^^^^^^^^^^
+45 |     require_live_windows, resolve_anchor_pid, surviving_captured_descendant_pids, wait_until,
+   |                           ^^^^^^^^^^^^^^^^^^
+
+warning: `wcore-sandbox` (test "hard_process_containment_windows") generated 3 warnings (run 
+`cargo clippy --fix --test "hard_process_containment_windows" -p wcore-sandbox -- ` to apply 3 
+suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.25s
+
+CLIPPY_WARNINGS=4
+CLIPPY_ERRORS=0
+===== LIVE ACCEPTANCE =====
+cargo.exe :    Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+At C:\f28h2\adj2-final.ps1:22 char:7
++ $o = (& cargo test -p wcore-sandbox --lib -- --ignored --test-threads ...
++       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling wc...\wcore-sandbox):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.42s
+     Running unittests src\lib.rs (C:\f28h2-target\debug\deps\wcore_sandbox-d9612696e1348a08.exe)
+
+running 23 tests
+test backends::appcontainer::appcontainer_acl_lease::mutation_lock::tests::global_user_keyed_mutex_serializes_processes ... 
+running 1 test
+test backends::appcontainer::appcontainer_acl_lease::mutation_lock::tests::mutation_lock_helper_entry ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 158 filtered out; finished in 2.00s
+
+ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::atomic_rewrite_is_old_or_new_across_injected_crash_phases ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::equivalent_windows_spellings_resolve_to_one_file_identity ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::lease_root_junction_is_rejected_before_external_mutation ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::lease_symlink_is_rejected_without_following_it ... ok
+test backends::appcontainer::appcontainer_acl_lease::storage::tests::opened_lease_cannot_be_swapped_under_validation ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::killed_owner_is_recovered_before_next_execution ... 
+running 1 test
+ok
+test backends::appcontainer::appcontainer_acl_lease::tests::live_owner_is_never_reclaimed ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::malformed_or_unknown_lease_fails_closed ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::real_profile_collision_allocates_a_new_identity ... ok
+test backends::appcontainer::appcontainer_acl_lease::tests::setup_failure_after_durable_lease_cleans_up ... ok
+test backends::appcontainer::windows_impl::tests::echo_runs_live ... ok
+test backends::appcontainer::windows_impl::tests::large_output_survives_live ... ok
+test backends::bwrap::tests::allow_hosts_unsupported ... ok
+test backends::bwrap::tests::bwrap_denied_directory_is_not_writable ... ok
+test backends::bwrap::tests::bwrap_denies_read_of_secret_under_allowed_root ... ok
+test backends::bwrap::tests::bwrap_enforces_read_deny_returns_true ... ok
+test backends::bwrap::tests::echo_runs_under_bwrap ... ok
+test backends::bwrap::tests::missing_bind_source_is_skipped_not_fatal ... ok
+test backends::bwrap::tests::relative_path_rejected ... ok
+test backends::bwrap::tests::required_live_bwrap_admission ... FAILED
+test backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift ... FAILED
+test backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement ... FAILED
+
+failures:
+
+---- backends::bwrap::tests::required_live_bwrap_admission stdout ----
+
+thread 'backends::bwrap::tests::required_live_bwrap_admission' (2036) panicked at crates\wcore-sandbox\src\backends\bwrap.rs:813:9:
+required live bwrap must be installed and usable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift stdout ----
+
+thread 'backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift' (28496) panicked at crates\wcore-sandbox\src\backends\bwrap.rs:851:9:
+required live bwrap must be installed and usable
+
+---- backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement stdout ----
+
+thread 'backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement' (46868) panicked at crates\wcore-sandbox\src\backends\bwrap.rs:904:9:
+required live bwrap must be installed and usable
+
+
+failures:
+    backends::bwrap::tests::required_live_bwrap_admission
+    backends::bwrap::tests::required_live_bwrap_hard_containment_mint_and_drift
+    backends::bwrap::tests::required_live_bwrap_retained_cwd_enforcement
+
+test result: FAILED. 20 passed; 3 failed; 0 ignored; 0 measured; 136 filtered out; finished in 4.58s
+
+error: test failed, to rerun pass `-p wcore-sandbox --lib`
+
+LIVE_RESULT=result=FAILED;passed=20;failed=3;ignored=0;summaries=2
+finished=2026-07-29T01:59:31.5946860+07:00

@@ -106,7 +106,24 @@ impl SandboxExecBackend {
         // the root inode lookup explicitly; allowlisting `/usr` etc. is
         // not enough.
         p.push_str("(allow file-read* (literal \"/\"))\n");
-        p.push_str("(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/private/var/db/dyld\"))\n");
+        // macOS spells `/var`, `/tmp` and `/etc` as SYMLINKS into `/private`.
+        // Seatbelt evaluates the symlink node itself before it follows the
+        // link, so a path spelled through one of them (`/tmp/x`,
+        // `$TMPDIR/x` — TMPDIR is `/var/folders/…` on every macOS host) is
+        // denied at the link lookup even when the canonical target
+        // (`/private/var/folders/…`) is granted by an explicit `(subpath …)`
+        // allow. Granting the same `/var` spelling as another `(subpath …)`
+        // does NOT help — the denial is on the link node, so it needs a
+        // `literal` READ grant on the three link nodes themselves. This grants
+        // read of three symlink inodes, not of their targets: everything under
+        // `/private` stays governed by the manifest allow/deny rules below.
+        // Manifest paths are canonicalized upstream, but the shell command is
+        // LLM-authored text that we neither can nor should rewrite.
+        p.push_str("(allow file-read* (literal \"/var\") (literal \"/tmp\") (literal \"/etc\"))\n");
+        // `/private/var/select/sh` is the selector symlink macOS's `sh` reads
+        // at startup; without it every sandboxed shell prints
+        // `Error opening /private/var/select/sh: Operation not permitted`.
+        p.push_str("(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/private/var/db/dyld\") (subpath \"/private/var/select\"))\n");
         p.push_str("(allow file-read* (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/dtracehelper\"))\n");
         p.push_str("(allow file-write* (literal \"/dev/null\"))\n");
         // TAHOE FIX: bake hw.* sysctl-read for zsh + future tools.
@@ -268,20 +285,22 @@ impl SandboxBackend for SandboxExecBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Reap the child if this future is dropped — e.g. when the
-        // `tokio::time::timeout` below elapses and drops the in-flight
-        // `run_fut` (which owns the Child). Without this the sandboxed
-        // process tree escapes on timeout. Mirrors no_sandbox.rs.
+        // Keep the direct-child kill as defense in depth, and isolate the
+        // wrapper into its own process group so the guard below also owns
+        // every sandboxed descendant.
         child_cmd.kill_on_drop(true);
+        super::process_tree::isolate(&mut child_cmd);
 
         let run_fut = async {
-            let child = child_cmd
+            let mut child = child_cmd
                 .spawn()
                 .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
-            child
-                .wait_with_output()
-                .await
-                .map_err(|e| SandboxError::ExecFailed(e.to_string()))
+            let mut process_tree = super::process_tree::ProcessTreeGuard::new(child.id())
+                .map_err(|e| SandboxError::ExecFailed(format!("process-tree ownership: {e}")))?;
+            let output =
+                super::wait_with_bounded_output_on_exit(&mut child, || process_tree.disarm())
+                    .await?;
+            Ok::<_, SandboxError>(output)
         };
 
         let output = if let Some(timeout) = manifest.timeout {
@@ -456,6 +475,115 @@ mod tests {
         );
     }
 
+    /// 21-C3-01 cross-backend check: macOS must NOT have bubblewrap's
+    /// overlapping-deny defect.
+    ///
+    /// bubblewrap enforces a deny by MOUNTING over the denied path, so a deny
+    /// nested inside a directory deny needed a mount point in a read-only mask
+    /// and aborted the spawn (`bwrap: Can't mkdir …/.git: Read-only file
+    /// system`). SBPL has no mounts: `(deny file-read* (subpath …))` rules are
+    /// independent predicates under last-match-wins, so a nested pair should
+    /// simply be enforced twice.
+    ///
+    /// That is a claim about the OS, so it is MEASURED here rather than argued:
+    /// the profile is built by the production `build_profile` from the exact
+    /// pair `spawner.rs` hands the sandbox for an isolated-mutation child, and
+    /// run through the production `execute`. Arm 1 is the instrument control —
+    /// with no deny the probe must read BOTH secrets, otherwise a "refused"
+    /// reading in arm 2 would be free.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "sandbox-exec is macOS-only")]
+    async fn overlapping_read_deny_runs_shell_and_still_contains() {
+        let backend = SandboxExecBackend::new();
+        assert!(
+            backend.is_available(),
+            "sandbox-exec must be usable on a macOS host"
+        );
+
+        let parent = tempfile::tempdir().expect("parent workspace");
+        let parent_root = std::fs::canonicalize(parent.path()).expect("canonicalize parent");
+        std::fs::create_dir_all(parent_root.join(".git")).expect("parent .git");
+        std::fs::write(parent_root.join("secret.txt"), b"PARENTSECRET\n").expect("parent secret");
+        std::fs::write(parent_root.join(".git").join("config"), b"GITSECRET\n")
+            .expect("git secret");
+
+        // Both denies must reach the profile as independent rules — the SBPL
+        // analogue of the two bwrap mounts, minus the mount.
+        let overlapping = vec![parent_root.clone(), parent_root.join(".git")];
+        let profile = SandboxExecBackend::build_profile(&SandboxManifest {
+            fs_read_allow: vec![parent_root.clone()],
+            fs_read_deny: overlapping.clone(),
+            ..Default::default()
+        })
+        .expect("profile builds from an overlapping deny pair");
+        for path in &overlapping {
+            assert!(
+                profile.contains(&format!(
+                    "(deny file-read* (subpath \"{}\"))",
+                    path.to_string_lossy()
+                )),
+                "both nested denies must be emitted as independent SBPL rules; profile={profile}"
+            );
+        }
+
+        // The marker is joined by the shell at runtime, so only a shell that
+        // actually ran can produce it (21-C3 §6).
+        let script = format!(
+            "printf %s%s SHELL RAN; echo; \
+             cat {parent}/secret.txt 2>/dev/null; \
+             cat {parent}/.git/config 2>/dev/null; \
+             exit 0",
+            parent = parent_root.display()
+        );
+        let run = |deny: Vec<std::path::PathBuf>| {
+            let manifest = SandboxManifest {
+                fs_read_allow: vec![parent_root.clone()],
+                fs_read_deny: deny,
+                env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+                ..Default::default()
+            };
+            let script = script.clone();
+            async move {
+                SandboxExecBackend::new()
+                    .execute(
+                        &manifest,
+                        SandboxCommand {
+                            argv: vec!["/bin/sh".into(), "-c".into(), script],
+                            cwd: None,
+                        },
+                    )
+                    .await
+            }
+        };
+
+        // ── Arm 1: control. No deny — the probe MUST see both secrets. ───────
+        let control = run(Vec::new()).await.expect("control execution");
+        let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+        assert!(
+            control_stdout.contains("SHELLRAN")
+                && control_stdout.contains("PARENTSECRET")
+                && control_stdout.contains("GITSECRET"),
+            "instrument is dead: with NO deny the probe must run and read both secrets; \
+             stdout={control_stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+
+        // ── Arm 2: the overlapping pair. ─────────────────────────────────────
+        let denied = run(overlapping).await.expect("overlapping-deny execution");
+        let denied_stdout = String::from_utf8_lossy(&denied.stdout).into_owned();
+        let denied_stderr = String::from_utf8_lossy(&denied.stderr).into_owned();
+        assert!(
+            denied_stdout.contains("SHELLRAN"),
+            "sandbox-exec must run the shell under an overlapping deny pair — the bubblewrap \
+             defect must NOT have a macOS analogue; stdout={denied_stdout:?} \
+             stderr={denied_stderr:?}"
+        );
+        assert!(
+            !denied_stdout.contains("PARENTSECRET") && !denied_stdout.contains("GITSECRET"),
+            "both nested denies must still be enforced; stdout={denied_stdout:?}"
+        );
+    }
+
     // ── End Task 2 tests ──────────────────────────────────────────────────────
 
     #[test]
@@ -468,6 +596,108 @@ mod tests {
         );
         assert!(p.contains("(allow sysctl-read (sysctl-name-prefix \"kern.\"))"));
         assert!(p.contains("(deny default)"));
+    }
+
+    #[test]
+    fn profile_grants_read_of_the_private_symlink_nodes() {
+        // Without a `literal` read grant on `/var`, `/tmp` and `/etc`, seatbelt
+        // denies at the symlink node, so any path spelled through one of them
+        // fails even though its canonical target is allowed.
+        let m = SandboxManifest::default();
+        let p = SandboxExecBackend::build_profile(&m).expect("default profile builds");
+        assert!(
+            p.contains(
+                "(allow file-read* (literal \"/var\") (literal \"/tmp\") (literal \"/etc\"))"
+            ),
+            "the three /private symlink nodes need literal read grants; profile={p}"
+        );
+        assert!(
+            p.contains("(subpath \"/private/var/select\")"),
+            "`sh` reads /private/var/select/sh at startup; profile={p}"
+        );
+        // The grant must stay a `literal` on the link node — a `subpath "/var"`
+        // would re-open the whole of /private/var through the alias.
+        assert!(
+            !p.contains("(subpath \"/var\")") && !p.contains("(subpath \"/tmp\")"),
+            "symlink nodes must be granted as literals, never as subpaths; profile={p}"
+        );
+    }
+
+    /// The R1 defect, measured rather than argued: with the workspace granted
+    /// only under its canonical `/private/var/…` spelling, a write addressed
+    /// through the `/var/…` alias must still land, and the shell must not emit
+    /// a sandbox denial on stderr.
+    ///
+    /// Arm 1 is the instrument control — the same write through the canonical
+    /// spelling must succeed, otherwise a success in arm 2 would be free.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn symlinked_temp_spelling_reaches_the_same_allowed_root() {
+        let backend = SandboxExecBackend::new();
+        assert!(backend.is_available(), "sandbox-exec must be usable");
+
+        // `tempfile` builds from `std::env::temp_dir()`, i.e. `$TMPDIR`, which
+        // on macOS is always spelled `/var/folders/…`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let aliased = dir.path().to_path_buf();
+        let canonical = std::fs::canonicalize(&aliased).expect("canonicalize");
+        assert_ne!(
+            aliased, canonical,
+            "fixture is dead: $TMPDIR must be spelled through the /var symlink"
+        );
+
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![canonical.clone()],
+            fs_write_allow: vec![canonical.clone()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+        let write_to = |target: std::path::PathBuf| {
+            let manifest = manifest.clone();
+            let cwd = canonical.clone();
+            async move {
+                SandboxExecBackend::new()
+                    .execute(
+                        &manifest,
+                        SandboxCommand {
+                            argv: vec![
+                                "/bin/sh".into(),
+                                "-c".into(),
+                                format!("echo MARKER > {}", target.display()),
+                            ],
+                            cwd: Some(cwd),
+                        },
+                    )
+                    .await
+                    .expect("execution")
+            }
+        };
+
+        let control = write_to(canonical.join("canon.txt")).await;
+        assert_eq!(
+            control.exit_code,
+            0,
+            "instrument is dead: the canonical spelling must be writable; stderr={:?}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+
+        let aliased_run = write_to(aliased.join("alias.txt")).await;
+        let stderr = String::from_utf8_lossy(&aliased_run.stderr).into_owned();
+        assert_eq!(
+            aliased_run.exit_code, 0,
+            "a path spelled through the /var symlink must reach the same allowed root; \
+             stderr={stderr:?}"
+        );
+        assert!(
+            canonical.join("alias.txt").is_file(),
+            "the aliased write must have landed on the real file"
+        );
+        // The profile gap also printed a denial on EVERY sandboxed shell; the
+        // fix must leave stderr clean so no later filter is tempted to hide it.
+        assert!(
+            !stderr.contains("Operation not permitted"),
+            "no sandbox denial may remain on a fully-allowed command; stderr={stderr:?}"
+        );
     }
 
     #[test]
@@ -612,5 +842,100 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
         assert_eq!(out.resource_limits, ResourceLimitEnforcement::None);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn delayed_sentinel_command(
+        started: &std::path::Path,
+        sentinel: &std::path::Path,
+    ) -> SandboxCommand {
+        SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "/usr/bin/touch \"$1\"; (sleep 2; /usr/bin/touch \"$2\") & wait".into(),
+                "wcore-sentinel".into(),
+                started.to_string_lossy().into_owned(),
+                sentinel.to_string_lossy().into_owned(),
+            ],
+            cwd: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn timeout_reaps_delayed_background_descendant() {
+        let backend = SandboxExecBackend::new();
+        assert!(backend.is_available(), "sandbox-exec must be available");
+        let dir = tempfile::tempdir().expect("create sentinel directory");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize sentinel directory");
+        let started = root.join("started");
+        let sentinel = root.join("escaped");
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![root.clone()],
+            fs_write_allow: vec![root],
+            timeout: Some(std::time::Duration::from_secs(1)),
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        let result = backend
+            .execute(&manifest, delayed_sentinel_command(&started, &sentinel))
+            .await;
+        assert!(matches!(result, Err(SandboxError::Timeout)));
+        assert!(
+            started.exists(),
+            "sandboxed command must start before timeout"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_250)).await;
+        assert!(
+            !sentinel.exists(),
+            "background descendant wrote after sandbox timeout"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn future_drop_reaps_delayed_background_descendant() {
+        let backend = SandboxExecBackend::new();
+        assert!(backend.is_available(), "sandbox-exec must be available");
+        let dir = tempfile::tempdir().expect("create sentinel directory");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize sentinel directory");
+        let started = root.join("started");
+        let sentinel = root.join("escaped");
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![root.clone()],
+            fs_write_allow: vec![root],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        {
+            let execution =
+                backend.execute(&manifest, delayed_sentinel_command(&started, &sentinel));
+            tokio::pin!(execution);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    tokio::select! {
+                        result = &mut execution => {
+                            panic!("sandboxed command exited before cancellation: {result:?}");
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                            if started.exists() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("sandboxed command must start");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(2_250)).await;
+        assert!(
+            !sentinel.exists(),
+            "background descendant wrote after execution future drop"
+        );
     }
 }

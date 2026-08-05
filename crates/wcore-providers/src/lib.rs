@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod anthropic_shared;
+pub mod attempt_lifecycle;
 pub mod azure_openai;
 pub mod bedrock;
 pub mod cache_observation;
@@ -12,6 +13,7 @@ pub mod cohere;
 pub mod cooldown;
 pub mod deepseek;
 pub mod failover;
+pub mod failover_policy;
 pub mod fingerprint;
 pub mod fireworks;
 pub mod flux_fetch;
@@ -57,8 +59,16 @@ pub use catalog::{CatalogProviderConfig, provider_for_entry, register_catalog};
 // `LlmRequest`. Re-exported here for backward compatibility.
 pub use chain::{ProviderChain, ProviderSlot};
 pub use classify::classify_failover;
-pub use cooldown::{CooldownClass, CooldownState, CooldownTracker};
+pub use cooldown::{
+    CooldownClass, CooldownClock, CooldownPermit, CooldownState, CooldownTracker,
+    SystemCooldownClock,
+};
 pub use failover::{FailoverError, FailoverReason, wrap_provider_error};
+pub use failover_policy::{
+    CandidateCapabilities, CandidateReceipt, CandidateRejection, FailoverCandidateMetadata,
+    FailoverReceipt, FailoverRoutingPolicy, PricingEvidence, RequestRequirements,
+    evaluate_candidate,
+};
 pub use key_rotation::{KeyPool, split_keys};
 pub use openai::{AsyncTokenSource, OpenAIProvider, is_flux_tier_alias};
 pub use openai_chatgpt::{AsyncBearerSource, BearerCreds, OpenAIChatGptProvider};
@@ -169,6 +179,11 @@ pub enum ProviderError {
         "No API key. Set an api_key via --api-key, the config file, or an API-key environment variable."
     )]
     MissingApiKey,
+    /// The provider wrapper proved that no physical provider request was
+    /// attempted. This is deliberately distinct from `Connection`, whose
+    /// outcome may be ambiguous and therefore remains conservatively billed.
+    #[error("Provider request was not attempted: {reason}")]
+    NotAttempted { reason: String },
     /// FluxRouter 402 — a paid-only capability was requested on a key that is
     /// not entitled to it (free or paid-but-uncleared). This is a FEATURE lock,
     /// not an account state: the user must be on a paid plan with a cleared
@@ -214,6 +229,18 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// True only when the error proves the request could not have reached a
+    /// provider or incurred provider-side usage.
+    pub fn was_not_attempted(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::MissingApiKey
+                | ProviderError::NotAttempted { .. }
+                | ProviderError::Egress(wcore_egress::EgressError::Denied(_))
+                | ProviderError::Egress(wcore_egress::EgressError::BeforeDispatch(_))
+        )
+    }
+
     /// True for errors a retry (same request, possibly after backoff) may
     /// resolve.
     ///
@@ -237,6 +264,7 @@ impl ProviderError {
             | ProviderError::PromptTooLong(_)
             // Missing credential is terminal — no retry will conjure a token.
             | ProviderError::MissingApiKey
+            | ProviderError::NotAttempted { .. }
             // Flux 402 entitlement failures are terminal: the same request on
             // the same (unentitled / no-account) key will 402 again. The user
             // must change plan / clear a charge / add a payment method first.

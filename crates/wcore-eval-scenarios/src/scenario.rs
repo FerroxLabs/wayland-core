@@ -9,6 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use wcore_protocol::events::{CapabilityId, CapabilityReasonCode};
+
 use crate::assertions::{Assertion, TraceAssertion};
 use crate::providers::ProviderChoice;
 
@@ -24,6 +28,9 @@ pub type ScenarioHook = Arc<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>;
 /// crate) can read them without going through accessors — external
 /// callers should use the builder.
 pub struct Scenario {
+    /// Immutable machine identity used by CLI selection and evidence reports.
+    /// Renaming this is a compatibility break; add separate display text when
+    /// a human-friendly title is needed.
     pub name: &'static str,
     pub category: Category,
     pub turns: Vec<Turn>,
@@ -32,6 +39,9 @@ pub struct Scenario {
     /// clone the scenario without giving up ownership of the closure.
     pub setup: Option<ScenarioHook>,
     pub cleanup: Option<ScenarioHook>,
+    /// Operating systems on which this scenario's fixtures and assertions are
+    /// valid. Portable scenarios support all three targets by default.
+    pub supported_platforms: Vec<Platform>,
     /// Hard wall-time budget for the WHOLE scenario, enforced by the
     /// runner via `tokio::time::timeout` + `kill_on_drop` (M-1).
     pub max_total_time: Duration,
@@ -51,10 +61,26 @@ pub struct Scenario {
     /// `ApprovalRequired` per tool) and the runner auto-responds — letting QA
     /// scenarios exercise the real trust/approval gate.
     pub approval: ApprovalPolicy,
+    /// F05 packaged-proof requirements evaluated against the complete typed
+    /// activation stream. These are outcome gates, not capability advertising.
+    pub capability_expectations: Vec<CapabilityExpectation>,
+}
+
+/// Exact capability truth a scenario requires from the packaged engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityExpectation {
+    Unavailable {
+        capability: CapabilityId,
+        reason: CapabilityReasonCode,
+    },
+    OutcomeObserved {
+        capability: CapabilityId,
+    },
 }
 
 /// How the runner answers the engine's tool-approval gate (D3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalPolicy {
     /// Spawn with `--yolo`; the engine auto-approves. No `ApprovalRequired`
     /// events are emitted. This is the default (persona happy-path).
@@ -63,6 +89,66 @@ pub enum ApprovalPolicy {
     ApproveAll,
     /// Spawn without `--yolo`; the runner denies every `ApprovalRequired`.
     DenyAll,
+}
+
+impl std::fmt::Display for ApprovalPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Yolo => "yolo",
+            Self::ApproveAll => "approve_all",
+            Self::DenyAll => "deny_all",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Platform {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl Platform {
+    pub const ALL: [Self; 3] = [Self::Linux, Self::Macos, Self::Windows];
+
+    pub const fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        return Self::Linux;
+        #[cfg(target_os = "macos")]
+        return Self::Macos;
+        #[cfg(target_os = "windows")]
+        return Self::Windows;
+        #[allow(unreachable_code)]
+        Self::Linux
+    }
+}
+
+impl std::fmt::Display for Platform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+            Self::Windows => "windows",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlatformDisposition {
+    Runnable,
+    Skipped {
+        current: Platform,
+        supported: Vec<Platform>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("scenario `{scenario}` does not support {current}; supported platforms: {supported:?}")]
+pub struct UnsupportedPlatform {
+    pub scenario: &'static str,
+    pub current: Platform,
+    pub supported: Vec<Platform>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -140,11 +226,13 @@ impl Scenario {
             turns: Vec::new(),
             setup: None,
             cleanup: None,
+            supported_platforms: Platform::ALL.to_vec(),
             max_total_time: Duration::from_secs(120),
             max_total_cost_usd: 0.10,
             provider: ProviderChoice::Default,
             strict: false,
             approval: ApprovalPolicy::Yolo,
+            capability_expectations: Vec::new(),
         }
     }
 
@@ -167,6 +255,34 @@ impl Scenario {
     {
         self.cleanup = Some(Arc::new(f));
         self
+    }
+
+    pub fn platforms(mut self, platforms: impl IntoIterator<Item = Platform>) -> Self {
+        self.supported_platforms = platforms.into_iter().collect();
+        self
+    }
+
+    pub fn resolve_platform(
+        &self,
+        current: Platform,
+        strict: bool,
+    ) -> Result<PlatformDisposition, UnsupportedPlatform> {
+        if self.supported_platforms.contains(&current) {
+            return Ok(PlatformDisposition::Runnable);
+        }
+
+        if strict {
+            return Err(UnsupportedPlatform {
+                scenario: self.name,
+                current,
+                supported: self.supported_platforms.clone(),
+            });
+        }
+
+        Ok(PlatformDisposition::Skipped {
+            current,
+            supported: self.supported_platforms.clone(),
+        })
     }
 
     pub fn max_total_time(mut self, d: Duration) -> Self {
@@ -192,6 +308,26 @@ impl Scenario {
 
     pub fn strict(mut self, on: bool) -> Self {
         self.strict = on;
+        self
+    }
+
+    /// Require an exact terminal unavailable state and reason. A transient or
+    /// earlier `ready` claim fails this expectation.
+    pub fn require_capability_unavailable(
+        mut self,
+        capability: CapabilityId,
+        reason: CapabilityReasonCode,
+    ) -> Self {
+        self.capability_expectations
+            .push(CapabilityExpectation::Unavailable { capability, reason });
+        self
+    }
+
+    /// Require the production path to reach a real side effect and emit the
+    /// complete ready/reached/outcome-changed/observed proof cycle.
+    pub fn require_capability_outcome(mut self, capability: CapabilityId) -> Self {
+        self.capability_expectations
+            .push(CapabilityExpectation::OutcomeObserved { capability });
         self
     }
 

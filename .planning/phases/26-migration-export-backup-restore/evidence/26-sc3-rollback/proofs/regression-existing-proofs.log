@@ -1,0 +1,63 @@
+=== 1. existing restore interrupt proof (regression) ===
+INTERRUPT-PLATFORM: linux
+KILL-MECHANISM: SIGKILL CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: yes
+MIDFLIGHT-TARGET-INTERMEDIATE: yes
+MIDFLIGHT-TIMING: op_expected_ms=3459 kill_at_ms=900 completed_before_kill=no
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-POST: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-EQUAL: yes
+PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state
+=== 2. existing migrate interrupt proof hermes (regression) ===
+TRIAL: 4 73 mid ok 71 72 1 0 0 yes
+TRIAL: 5 92 mid ok 62 63 1 0 0 yes
+TRIAL: 6 110 mid ok 125 126 1 0 0 yes
+TRIAL: 7 128 mid ok 168 169 1 0 0 yes
+TRIAL: 8 147 mid ok 200 200 0 0 0 yes
+TRIAL: 9 165 post ok 220 220 0 9 0 yes
+SENTINEL-DIGEST-POST: 080403a916669851499985ac962320f9731d54ba627ce23d5414e8efc6f880d4
+SENTINEL-UNCHANGED: yes
+CLASS-PRE: 2
+CLASS-MID: 6
+CLASS-POST: 1
+RECOVERED: 9
+NOT-RECOVERED: 0
+REDRIVE-NONZERO: 0
+CORRUPT-INDEX-TRIALS: 0
+EMPTY-INDEX-TRIALS: 0
+ORPHAN-PAYLOAD-TRIALS: 5
+PROOF: PASS peer=hermes trials=9 mid=6 recovered=9
+=== 3. backup sweep re-run with swept create arm ===
+ROLLBACK-ARM-JOURNAL-RESIDUE: 0
+ROLLBACK-ARM-RECOVERED: 9
+ROLLBACK-ARM-BYTE-DIFF-UNEXPLAINED: 0
+NOROLLBACK-ARM-MID: 9
+NOROLLBACK-ARM-MID-DAMAGED: 9
+NOKILL-ARM-POST: 9
+NOKILL-ARM-RECOVERED: 0
+NOKILL-ARM-COMPLETED-REVERTED: 0
+CREATE-ARM-SOURCE-MOVED: 0
+CREATE-ARM-UNVERIFIABLE-ARCHIVES: 0
+CREATE-ARM-NO-ARCHIVE-PUBLISHED: 6
+CREATE-ARM-DURATION-MS: 58
+
+PROOF: PASS
+  restore: 9/9 kills landed mid-flight (open journal record); all 9
+  interrupted homes came back byte-identical to 1e96962c54d7a30fb85190fe9c0401a78e79701fe0bf5515afe00f42b7465c5d, 0 unexplained byte diffs,
+  no journal residue, 9 operations recovered. Known-negative: 9/9
+  mid-flight kills left the home DIFFERENT from PRE without a rollback.
+  No-kill arm: 9/9 completed, 0 recovered, 0 reverted.
+  backup: 9 kills, source home moved 0 times, 0 unverifiable archives published.
+=== 4. clippy ===
+    Checking wcore-evolve v0.12.25 (/root/wayland-26sc3/crates/wcore-evolve)
+    Checking wasmtime-wasi-io v36.0.12
+    Checking wasmtime-wasi v36.0.12
+    Checking wcore-plugin-wasm v0.12.25 (/root/wayland-26sc3/crates/wcore-plugin-wasm)
+    Checking wcore-agent v0.12.25 (/root/wayland-26sc3/crates/wcore-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 12s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+=== ALLDONE ===

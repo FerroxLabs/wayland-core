@@ -14,6 +14,7 @@ fn synth_trace(touched: &[&str]) -> TurnTrace {
         cache_write: 0,
         cache_hit_rate: 0.0,
         cost_usd: 0.01,
+        cost_priced: true,
         tool_calls: vec![],
         hook_actions: vec![],
         source_product: "wayland-core".into(),

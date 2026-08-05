@@ -1,0 +1,35 @@
+=== NORMALIZED DIFF ===
+receipts compared: 3
+  local      transport=local      endpoint=localhost wall_ms=1
+  container  transport=container  endpoint=wayland-f25-f25-reference wall_ms=357
+  ssh        transport=ssh        endpoint=f25-ssh-target wall_ms=206
+
+EXPECTED-DIVERGENT fields (excluded from the normalized body by design):
+  local      backend.backend_id     local
+  local      backend.instance_id    37f314c11f1b4dd48e9189ccb1d0b8a2
+  local      backend.version        0.12.25
+  local      backend.key_id         7158df91edb7e74b2be799df20ea1455194ef15cce23d32fc6a0c0bf67faee77
+  local      transport.kind         local
+  local      transport.endpoint     localhost
+  local      timing.wall_ms         1
+  local      hibernation            {"kind":"not_applicable"}
+  container  backend.backend_id     container
+  container  backend.instance_id    37f314c11f1b4dd48e9189ccb1d0b8a2
+  container  backend.version        0.12.25
+  container  backend.key_id         50951c59a8fb045fa8fb2da4214d5016acd5a6e58a95d591c47afa0a63baa44c
+  container  transport.kind         container
+  container  transport.endpoint     wayland-f25-f25-reference
+  container  timing.wall_ms         357
+  container  hibernation            {"kind":"not_applicable"}
+  ssh        backend.backend_id     ssh
+  ssh        backend.instance_id    37f314c11f1b4dd48e9189ccb1d0b8a2
+  ssh        backend.version        0.12.25
+  ssh        backend.key_id         63b113fe020b9fcb7810b3c0310d33ff1f6694343887c1413aaf1aeb95bc8b13
+  ssh        transport.kind         ssh
+  ssh        transport.endpoint     f25-ssh-target
+  ssh        timing.wall_ms         206
+  ssh        hibernation            {"kind":"not_applicable"}
+
+NORMALIZED DIFF: EQUIVALENT
+The four normalized bodies agree on task digests, resource budget, backend ceiling, event ordering and content digests, artifact digest, terminal status, exposed-secret names and egress decision.
+DIFF_EXIT=0

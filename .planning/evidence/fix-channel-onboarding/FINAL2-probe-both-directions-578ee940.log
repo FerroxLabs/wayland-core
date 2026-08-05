@@ -1,0 +1,66 @@
+ls: cannot access '/root/chanonb-tok.tmp': No such file or directory
+WLRC=0
+WLDONE
+=====F2=====
+commit=578ee940d5da5041fa5b9c4155114b29a5146446
+### rebuild
+RELEASE_RC=0
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+sha256=59dee2753073745f39da2ecd188b9c9792f5f10a68e1432265f2047f035efdaa
+
+### suites after the auto-register change
+REGISTRY_RC=0
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/channels_doc_configs_load.rs (target/debug/deps/channels_doc_configs_load-6e132f4d1adbaae4)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+CLIPPY_REGISTRY_RC=0
+FMT_RC=0
+
+credential stored rc=0
+
+############ PROBE GATE — BOTH DIRECTIONS, with a reachable PASS ############
+===== CONTROL: can it PASS? one good Discord channel, nothing else (expect RC=0) =====
+RC=0
+  outcome:  Ok
+  identity: 1532224324075913297
+
+===== a DISABLED channel must stay exempt (expect RC=0 — gate satisfiable) =====
+RC=0
+  outcome:  Ok
+  identity: 1532224324075913297
+
+===== DEFECT DIRECTION: unparseable config beside a good one (expect RC=1, names it) =====
+RC=1
+  outcome:  Ok
+  identity: 1532224324075913297
+wayland-core channel: 1 configured channel(s) could not be probed at all:
+  - broken: config: broken: TOML parse error at line 1, column 1
+
+===== [secrets] beside a good one — must be the NAMED migration, not 'unknown field' =====
+RC=1
+  outcome:  Ok
+  identity: 1532224324075913297
+wayland-core channel: 1 configured channel(s) could not be probed at all:
+  - legacy: config: legacy: the `[secrets]` table is no longer accepted, and never had any effect — no code ever read its values, so this channel has not been authenticating. Move each secret into the credentials store with `wayland-core channel credential set <handle>`, then reference it from `[options]` by this platform's `*credential_handle*` key. Run `wayland-core channel credential list` to see the handles your configs expect. See docs/channels.md.
+
+--- explicit check: which message did probe emit? ---
+named migration present: 2
+generic serde line present (must be 0): 0
+KNOWN-POSITIVE, a string certainly in that output: 2
+
+############ gateway run still works with the documented config ############
+[gateway] channels registered=1
+[gateway] started pid=2553104 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+HEALTH_RC=0
+configured: 1   registered: 1
+  state:      Healthy
+gateway stopped
+
+=== SWEEP: live Discord token occurrences (repaired instrument) ===
+/root/chanonb-final2.log: 0
+/root/chanonb-gw2.log: 0
+/root/chanonb-final2.sh: 0
+worktree files containing it: 0
+KNOWN-POSITIVE, store files containing it (must be >=1): 1

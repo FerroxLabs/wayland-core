@@ -1,0 +1,39 @@
+   Compiling wcore-agent v0.12.25 (/root/wayland-23b-h1/crates/wcore-agent)
+warning: function `is_absent_json_value` is never used
+  --> crates/wcore-agent/src/session_journal/model.rs:40:4
+   |
+40 | fn is_absent_json_value(value: &Option<serde_json::Value>) -> bool {
+   |    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-agent` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.45s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/journal_envelope_roundtrip.rs (target/debug/deps/journal_envelope_roundtrip-aed7978480c53715)
+
+running 5 tests
+test nested_object_key_order_is_stable_across_a_round_trip ... ok
+test float_bearing_values_are_stable_across_a_round_trip ... ok
+test plain_events_are_stable_across_a_round_trip ... ok
+test option_value_null_is_stable_across_a_round_trip ... FAILED
+test a_null_receipt_survives_a_real_journal_write_and_read ... ok
+
+failures:
+
+---- option_value_null_is_stable_across_a_round_trip stdout ----
+
+thread 'option_value_null_is_stable_across_a_round_trip' (2197316) panicked at crates/wcore-agent/tests/journal_envelope_roundtrip.rs:53:5:
+assertion `left == right` failed: effect_receipt = Some(Value::Null): re-serializing a decoded event must reproduce the bytes it came from — otherwise the journal's own checksum check rejects a journal the product wrote correctly
+  left: "{\"type\":\"tool_intent_recorded_v2\",\"tool_execution_id\":\"x1\",\"idempotency_key\":\"k1\",\"provider_call_id\":\"c1\",\"turn_id\":\"t1\",\"ordinal\":0,\"tool\":\"Read\",\"requested_input\":{\"storage\":\"redacted\",\"exact_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"summary\":null},\"requested_input_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"effective_input\":{\"storage\":\"redacted\",\"exact_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"summary\":null},\"effective_input_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"effect_contract\":{\"kind\":\"opaque\",\"reconciler\":null},\"effect_receipt\":null}"
+ right: "{\"type\":\"tool_intent_recorded_v2\",\"tool_execution_id\":\"x1\",\"idempotency_key\":\"k1\",\"provider_call_id\":\"c1\",\"turn_id\":\"t1\",\"ordinal\":0,\"tool\":\"Read\",\"requested_input\":{\"storage\":\"redacted\",\"exact_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"summary\":null},\"requested_input_digest\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"effective_input\":{\"storage\":\"redacted\",\"exact_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"summary\":null},\"effective_input_digest\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"effect_contract\":{\"kind\":\"opaque\",\"reconciler\":null}}"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    option_value_null_is_stable_across_a_round_trip
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p wcore-agent --test journal_envelope_roundtrip`

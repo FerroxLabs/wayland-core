@@ -44,7 +44,11 @@ use wcore_tools::google_meet_tool::{
 };
 
 /// Provider name used by [`OAuthStorage`] when persisting tokens.
-const PROVIDER: &str = "google_meet";
+///
+/// Public so the `/config` status row names the same provider slug this
+/// backend stores under. A row that re-spells it is a row that reports a
+/// signed-in user as unconfigured.
+pub const PROVIDER: &str = "google_meet";
 
 /// Refresh tokens this many seconds before they expire to absorb clock skew.
 const REFRESH_LEAD_SECS: u64 = 60;
@@ -72,7 +76,9 @@ pub struct HttpGoogleMeetBackend {
     single_flight: Arc<SingleFlightRefresh>,
     /// SSRF-safe non-streaming client (AUDIT B-5 + #279 redirect policy).
     client: Client,
-    /// File-backed OAuth token storage (`~/.wayland/oauth/google_meet.json`).
+    /// OAuth token storage, routed through the credential ladder (OS keyring →
+    /// encrypted vault → REFUSE). `~/.wayland/oauth/google_meet.json` is the
+    /// pre-migration form: still readable, promoted and removed on first load.
     storage: OAuthStorage,
     /// In-memory cached tokens. Loaded lazily on first call; the storage
     /// layer is the source of truth across processes.
@@ -112,12 +118,16 @@ impl HttpGoogleMeetBackend {
     /// hyper listener; this method is a stub that returns the same
     /// `MeetError::BackendNotConfigured` until W4 E1 wires the listener.
     /// Until then, the user must seed `~/.wayland/oauth/google_meet.json`
-    /// manually (or the test path passes seeded tokens in).
+    /// manually (or the test path passes seeded tokens in). That seeding path
+    /// still works after the credential-ladder move: the first load promotes
+    /// the file into the ladder and then removes it, which is why the message
+    /// says the file will disappear rather than leaving the user to wonder.
     pub async fn authenticate_blocking(&self) -> Result<OAuthTokens, MeetError> {
         Err(MeetError::BackendNotConfigured(
             "/auth google-meet is wired in Wave-1 W4 E1 — until then, seed \
              ~/.wayland/oauth/google_meet.json with the access_token/refresh_token \
-             from a manual oauth2l flow."
+             from a manual oauth2l flow. The first use moves that token into the \
+             secure credential store and deletes the file; that is expected."
                 .into(),
         ))
     }
@@ -162,7 +172,8 @@ impl HttpGoogleMeetBackend {
         let Some(tokens) = existing else {
             return Err(MeetError::BackendNotConfigured(
                 "no stored Google Meet OAuth tokens — run `/auth google-meet` first \
-                 (or seed ~/.wayland/oauth/google_meet.json manually)."
+                 (or seed ~/.wayland/oauth/google_meet.json manually; the first use \
+                 moves it into the secure credential store and deletes the file)."
                     .into(),
             ));
         };
@@ -560,7 +571,11 @@ mod tests {
         api_base: String,
         storage_root: std::path::PathBuf,
     ) -> HttpGoogleMeetBackend {
-        let storage = OAuthStorage::at_root(storage_root).unwrap();
+        let storage = OAuthStorage::at_root(
+            storage_root,
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .unwrap();
         let flow = OAuthFlow::new(
             "test-client-id",
             Some("test-client-secret".into()),

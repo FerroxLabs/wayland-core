@@ -20,7 +20,50 @@ use tokio::task::JoinHandle;
 use crate::Channel;
 use crate::error::ChannelError;
 use crate::event::{ChannelEvent, ConnectionState, MessageReceipt};
+use crate::health::{ChannelHealth, HealthState};
 use crate::outgoing::OutgoingMessage;
+use crate::probe::ProbeReport;
+
+/// Shared per-adapter health map. A `std::sync::Mutex` on purpose: every
+/// critical section is a map write with no `await` inside it, so an async mutex
+/// would buy nothing and would make the poll task's hot path yield.
+type HealthMap = Arc<std::sync::Mutex<HashMap<String, ChannelHealth>>>;
+
+/// Take the health lock, recovering from a poisoned mutex.
+///
+/// A panic in another thread must not turn the health surface into a permanent
+/// error — a health surface that stops answering after an unrelated panic is
+/// worse than one reporting stale data, because nothing reports that it stopped.
+fn health_lock(map: &HealthMap) -> std::sync::MutexGuard<'_, HashMap<String, ChannelHealth>> {
+    map.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Record an observed health transition for `name`.
+///
+/// `reason` is `None` only for [`HealthState::Healthy`]; the invariant is
+/// asserted here rather than trusted, because every other caller of this
+/// function is a code path that could forget.
+fn record_health(
+    map: &HealthMap,
+    name: &str,
+    state: HealthState,
+    reason: Option<String>,
+    consecutive_errors: u32,
+    reconnect_delta: u32,
+) {
+    let mut guard = health_lock(map);
+    let Some(entry) = guard.get_mut(name) else {
+        return;
+    };
+    entry.state = state;
+    entry.reason = if state.requires_reason() {
+        Some(reason.unwrap_or_else(|| "no reason recorded".to_string()))
+    } else {
+        None
+    };
+    entry.consecutive_errors = consecutive_errors;
+    entry.reconnects = entry.reconnects.saturating_add(reconnect_delta);
+}
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 250;
 const EVENT_CHANNEL_CAP: usize = 256;
@@ -46,6 +89,43 @@ pub struct ChannelManager {
     poll_tasks: HashMap<String, JoinHandle<()>>,
     poll_interval: Duration,
     events_tx: broadcast::Sender<TaggedEvent>,
+    /// Observed per-adapter health, written by the poll tasks and read by the
+    /// operator surfaces. Registered-but-unpolled adapters sit at
+    /// [`HealthState::Unknown`], never `Healthy`.
+    health: HealthMap,
+}
+
+/// Whether a [`ChannelManager::reload`] may begin polling what it registered.
+///
+/// F24-C3-H6b. Deliberately has **no `Default`** and is a required positional
+/// argument: the right to poll a home belongs to whoever holds the single-owner
+/// inbound polling lease, which is knowledge this crate does not have. A default
+/// would be a guess made in the one place that cannot know the answer, and the
+/// measured defect was exactly that guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartPolicy {
+    /// Spawn poll tasks for adapters that do not already have one. The caller is
+    /// asserting it holds the right to poll this home.
+    StartNewlyRegistered,
+    /// Register and replace adapters but spawn NO poll task. The adapter set is
+    /// updated so outbound sends use current configuration, while inbound
+    /// polling is left to whichever process owns it.
+    LeaveStopped,
+}
+
+/// What a [`ChannelManager::reload`] did to the registered set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReloadReport {
+    /// Newly configured adapters, registered and started.
+    pub added: Vec<String>,
+    /// Adapters whose configuration fingerprint changed — stopped, replaced by
+    /// the new instance, and restarted.
+    pub replaced: Vec<String>,
+    /// Adapters no longer configured — stopped and removed.
+    pub removed: Vec<String>,
+    /// Adapters whose fingerprint matched. The RUNNING INSTANCE IS KEPT: not
+    /// stopped, not restarted, not replaced. See [`ChannelManager::reload`].
+    pub unchanged: Vec<String>,
 }
 
 /// One `ChannelEvent` annotated with the channel that produced it.
@@ -63,6 +143,7 @@ impl ChannelManager {
             poll_tasks: HashMap::new(),
             poll_interval: Duration::from_millis(DEFAULT_POLL_INTERVAL_MS),
             events_tx,
+            health: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -76,9 +157,14 @@ impl ChannelManager {
     /// same name (stops the old poll task first).
     pub async fn register(&mut self, ch: Box<dyn Channel>) {
         let name = ch.name().to_string();
+        let platform = ch.platform().to_string();
         if let Some(handle) = self.poll_tasks.remove(&name) {
             handle.abort();
         }
+        // Seed health at Unknown — registered, nothing observed. A newly
+        // registered adapter that read `Healthy` would be claiming a liveness
+        // nobody measured.
+        health_lock(&self.health).insert(name.clone(), ChannelHealth::unknown(&name, &platform));
         self.channels.insert(name, Arc::new(Mutex::new(ch)));
     }
 
@@ -109,6 +195,14 @@ impl ChannelManager {
                         error = %e,
                         "channel start() failed; skipping and continuing with the rest"
                     );
+                    record_health(
+                        &self.health,
+                        name,
+                        HealthState::Disconnected,
+                        Some(format!("start() failed: {e}")),
+                        0,
+                        0,
+                    );
                     let _ = self.events_tx.send(TaggedEvent {
                         channel_name: name.clone(),
                         event: ChannelEvent::ConnectionStateChanged {
@@ -118,9 +212,11 @@ impl ChannelManager {
                     continue;
                 }
             }
+            record_health(&self.health, name, HealthState::Healthy, None, 0, 0);
             let task_slot = Arc::clone(slot);
             let task_name = name.clone();
             let task_tx = self.events_tx.clone();
+            let task_health = Arc::clone(&self.health);
             let interval = self.poll_interval;
             let handle = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
@@ -134,35 +230,61 @@ impl ChannelManager {
                     let evs = {
                         let mut guard = task_slot.lock().await;
                         // Detect a dead internal background task (longpoll/gateway/
-                        // sync loop panicked or exited) BEFORE polling. The
-                        // inbox-drain connectors return Ok(vec![]) forever once
-                        // their task is gone, so without this check a silent task
-                        // death looks alive. Read is_finished() into a bool here:
-                        // task_handle() borrows &self while poll_events() needs
-                        // &mut self, so the copy breaks the borrow. A dead task
-                        // routes straight into the same supervised-reconnect
-                        // machinery the error-threshold path uses (we skip the
-                        // poll, since a dead-task connector just returns
-                        // Ok(vec![]) and would otherwise reset the error count).
+                        // sync loop panicked or exited). The inbox-drain connectors
+                        // return Ok(vec![]) forever once their task is gone, so
+                        // without this check a silent task death looks alive. Read
+                        // is_finished() into a bool here: task_handle() borrows
+                        // &self while poll_events() needs &mut self, so the copy
+                        // breaks the borrow.
                         let task_dead = guard.task_handle().is_some_and(|h| h.is_finished());
-                        let poll_outcome = if task_dead {
-                            tracing::warn!(
-                                target: "wcore_channels::manager",
-                                channel = %task_name,
-                                "connector internal task finished unexpectedly; forcing supervised reconnect"
-                            );
-                            Err(ChannelError::Transport(
-                                "connector internal task finished unexpectedly".into(),
-                            ))
-                        } else {
-                            guard.poll_events().await
+                        // DRAIN FIRST, judge the task dead second. A connector
+                        // pushes its TERMINAL event — an auth rejection above all
+                        // — immediately before its task exits, so a dead-task check
+                        // that skips the drain strands the one event that explains
+                        // WHY it exited and misreports a rejected credential as a
+                        // generic transport fault. Only an EMPTY inbox on a dead
+                        // task is a silent death; that is precisely the signal the
+                        // check was written for, and it is preserved below.
+                        let drained = guard.poll_events().await;
+                        let poll_outcome = match drained {
+                            Ok(ref evs) if evs.is_empty() && task_dead => {
+                                tracing::warn!(
+                                    target: "wcore_channels::manager",
+                                    channel = %task_name,
+                                    "connector internal task finished unexpectedly; forcing supervised reconnect"
+                                );
+                                Err(ChannelError::Transport(
+                                    "connector internal task finished unexpectedly".into(),
+                                ))
+                            }
+                            other => other,
                         };
                         match poll_outcome {
                             Ok(v) => {
+                                if consecutive_errors > 0 {
+                                    record_health(
+                                        &task_health,
+                                        &task_name,
+                                        HealthState::Healthy,
+                                        None,
+                                        0,
+                                        0,
+                                    );
+                                }
                                 consecutive_errors = 0;
                                 v
                             }
-                            Err(ChannelError::NotStarted) => break,
+                            Err(ChannelError::NotStarted) => {
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Disconnected,
+                                    Some("adapter reported not started; poll loop ended".into()),
+                                    consecutive_errors,
+                                    0,
+                                );
+                                break;
+                            }
                             Err(e) => {
                                 // A dead task jumps straight to the reconnect
                                 // threshold; a normal poll error backs off one
@@ -179,6 +301,14 @@ impl ChannelManager {
                                         "poll_events errored; backing off one tick"
                                     );
                                 }
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Degraded,
+                                    Some(format!("poll_events failed: {e}")),
+                                    consecutive_errors,
+                                    0,
+                                );
                                 if consecutive_errors < RECONNECT_ERROR_THRESHOLD {
                                     continue;
                                 }
@@ -191,6 +321,14 @@ impl ChannelManager {
                                 // succeeds. The task is stopped via handle.abort()
                                 // (stop_all / register replace), so the sleeps
                                 // below double as the abort points.
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Degraded,
+                                    Some("supervised reconnect in progress".into()),
+                                    consecutive_errors,
+                                    0,
+                                );
                                 let _ = task_tx.send(TaggedEvent {
                                     channel_name: task_name.clone(),
                                     event: ChannelEvent::ConnectionStateChanged {
@@ -212,10 +350,30 @@ impl ChannelManager {
                                                 "channel reconnected; resuming polling"
                                             );
                                             consecutive_errors = 0;
+                                            // The reconnect count is what
+                                            // distinguishes a channel that is
+                                            // healthy from one that is flapping
+                                            // and happens to be up right now.
+                                            record_health(
+                                                &task_health,
+                                                &task_name,
+                                                HealthState::Healthy,
+                                                None,
+                                                0,
+                                                1,
+                                            );
                                             break;
                                         }
                                         Err(re) => {
                                             backoff = (backoff * 2).min(RECONNECT_BACKOFF_CAP);
+                                            record_health(
+                                                &task_health,
+                                                &task_name,
+                                                HealthState::Degraded,
+                                                Some(format!("reconnect start() failed: {re}")),
+                                                consecutive_errors,
+                                                0,
+                                            );
                                             tracing::warn!(
                                                 target: "wcore_channels::manager",
                                                 channel = %task_name,
@@ -232,11 +390,68 @@ impl ChannelManager {
                             }
                         }
                     };
+                    // Set when this batch carried a credential rejection. An
+                    // auth failure is TERMINAL: see the break below.
+                    let mut auth_rejected = false;
                     for event in evs {
+                        // The adapter's OWN published state outranks the poll
+                        // loop's inference: a connector that knows its token was
+                        // rejected is reporting a fact the poll loop can only
+                        // guess at from a generic transport error.
+                        match &event {
+                            ChannelEvent::ConnectionStateChanged { state } => {
+                                let mapped = HealthState::from_connection_state(*state);
+                                if mapped == HealthState::Unauthenticated {
+                                    auth_rejected = true;
+                                }
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    mapped,
+                                    Some(format!("adapter published {state:?}")),
+                                    consecutive_errors,
+                                    0,
+                                );
+                            }
+                            ChannelEvent::AuthExpired { reason } => {
+                                auth_rejected = true;
+                                record_health(
+                                    &task_health,
+                                    &task_name,
+                                    HealthState::Unauthenticated,
+                                    Some(format!("adapter reported auth expired: {reason}")),
+                                    consecutive_errors,
+                                    0,
+                                );
+                            }
+                            _ => {}
+                        }
                         let _ = task_tx.send(TaggedEvent {
                             channel_name: task_name.clone(),
                             event,
                         });
+                    }
+                    // A rejected credential is terminal until an operator rotates
+                    // it, which is the distinction `HealthState::Unauthenticated`
+                    // exists to draw: "rotate a token", not "wait". Leaving the
+                    // poll loop running would walk the channel straight back to a
+                    // FALSE `Healthy` — the next tick's dead-task check forces
+                    // supervised reconnect, and `start()` on these adapters only
+                    // re-reads the credential out of the store and respawns, so it
+                    // CANNOT fail on a token the platform is rejecting. It returns
+                    // Ok, the reconnect arm records `Healthy`, and the surface is
+                    // lying again within one tick. So stop here and leave the
+                    // observation standing; `channel reload` and a gateway restart
+                    // both re-register the adapter and clear it.
+                    if auth_rejected {
+                        tracing::error!(
+                            target: "wcore_channels::manager",
+                            channel = %task_name,
+                            "channel credential was rejected by the platform; \
+                             health is Unauthenticated and polling has stopped. \
+                             Rotate the credential and run `channel reload`"
+                        );
+                        break;
                     }
                 }
             });
@@ -256,8 +471,265 @@ impl ChannelManager {
                 let mut guard = slot.lock().await;
                 let _ = guard.stop().await;
             }
+            record_health(
+                &self.health,
+                &name,
+                HealthState::Disconnected,
+                Some("stopped by operator".into()),
+                0,
+                0,
+            );
         }
         Ok(())
+    }
+
+    /// Per-adapter health as the manager has OBSERVED it, sorted by name.
+    ///
+    /// This reads the poll tasks' recorded observations. It does not ask the
+    /// adapters how they are — an adapter reporting on its own liveness is the
+    /// witness problem this phase measured at the delivery sink.
+    pub fn health(&self) -> Vec<ChannelHealth> {
+        let guard = health_lock(&self.health);
+        let mut out: Vec<ChannelHealth> = guard.values().cloned().collect();
+        out.sort_by(|a, b| a.channel.cmp(&b.channel));
+        out
+    }
+
+    /// Health of one named adapter, or `None` if it is not registered.
+    pub fn health_of(&self, name: &str) -> Option<ChannelHealth> {
+        health_lock(&self.health).get(name).cloned()
+    }
+
+    /// Run the setup and authentication probe on one adapter.
+    pub async fn probe_one(&self, name: &str) -> Result<ProbeReport, ChannelError> {
+        let slot = self
+            .channels
+            .get(name)
+            .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
+        let guard = slot.lock().await;
+        guard.probe().await
+    }
+
+    /// Probe every registered adapter, sorted by name.
+    ///
+    /// A probe that ERRORS is reported as [`crate::probe::ProbeOutcome::Unreachable`]
+    /// rather than omitted: a channel missing from a probe listing is
+    /// indistinguishable from one that was never configured.
+    pub async fn probe_all(&self) -> Vec<ProbeReport> {
+        let mut names = self.list_names();
+        names.sort();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(slot) = self.channels.get(&name) else {
+                continue;
+            };
+            let guard = slot.lock().await;
+            let platform = guard.platform().to_string();
+            match guard.probe().await {
+                Ok(report) => out.push(report),
+                Err(e) => out.push(ProbeReport::unreachable(&name, &platform, e.to_string())),
+            }
+        }
+        out
+    }
+
+    /// Edit an already-sent message through channel `name`. Unknown channel →
+    /// `Config` error; platforms with no edit API →
+    /// [`ChannelError::Unsupported`] via the trait default.
+    pub async fn edit_on(
+        &self,
+        name: &str,
+        conversation_id: &str,
+        message_id: &str,
+        new_text: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        let slot = self
+            .channels
+            .get(name)
+            .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
+        let guard = slot.lock().await;
+        guard
+            .edit_message(conversation_id, message_id, new_text)
+            .await
+    }
+
+    /// Delete an already-sent message through channel `name`. Mirrors
+    /// [`Self::edit_on`].
+    pub async fn delete_on(
+        &self,
+        name: &str,
+        conversation_id: &str,
+        message_id: &str,
+    ) -> Result<(), ChannelError> {
+        let slot = self
+            .channels
+            .get(name)
+            .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
+        let guard = slot.lock().await;
+        guard.delete_message(conversation_id, message_id).await
+    }
+
+    /// Take every registered adapter OUT of this manager, leaving it empty.
+    ///
+    /// Exists so a caller can build a DESIRED adapter set with the registry's
+    /// existing loader — which registers into a `ChannelManager` and nothing
+    /// else — and then hand that set to [`Self::reload`] on the live manager.
+    /// The alternative was a second loader that produces a bare `Vec`, i.e. two
+    /// code paths deciding which adapters exist, which is how the loaded set
+    /// and the reloaded set drift apart.
+    ///
+    /// An adapter whose poll task is still running is SKIPPED rather than
+    /// forcibly extracted: its `Arc` has a second owner, and tearing it out
+    /// from under a live task is not something a staging helper should do.
+    /// Callers use this on a freshly loaded, unstarted manager.
+    pub async fn take_registered(&mut self) -> Vec<Box<dyn Channel>> {
+        let names: Vec<String> = self.list_names();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(handle) = self.poll_tasks.remove(&name) {
+                handle.abort();
+            }
+            let Some(slot) = self.channels.remove(&name) else {
+                continue;
+            };
+            match Arc::try_unwrap(slot) {
+                Ok(mutex) => out.push(mutex.into_inner()),
+                Err(shared) => {
+                    tracing::warn!(
+                        target: "wcore_channels::manager",
+                        channel = %name,
+                        "adapter is still shared with a running task; leaving it registered"
+                    );
+                    self.channels.insert(name, shared);
+                }
+            }
+        }
+        health_lock(&self.health).retain(|k, _| self.channels.contains_key(k));
+        out
+    }
+
+    /// Apply a new configured adapter set without disturbing adapters whose
+    /// configuration did not change.
+    ///
+    /// # The property that matters: an unchanged adapter keeps its INSTANCE
+    ///
+    /// The obvious implementation — clear the registry, register everything
+    /// from the new set, start it all — is wrong in a way that is invisible
+    /// from the outside. Adapters hold state that is not in their
+    /// configuration: buffered inbound events not yet polled, an open socket, a
+    /// platform session, outbound work handed to them but not yet acknowledged.
+    /// Replacing an instance whose configuration did not change discards all of
+    /// it, and the operator who edited ONE channel's token pays a reconnect and
+    /// a dropped buffer on all ten. So an unchanged adapter is not stopped, not
+    /// replaced, and not restarted; its running instance is kept.
+    ///
+    /// # Which direction "cannot tell" resolves, and why
+    ///
+    /// Sameness is decided by [`Channel::config_fingerprint`]. When EITHER side
+    /// returns `None` the adapter is treated as CHANGED and replaced. The
+    /// asymmetry is deliberate: treating unknown as unchanged means an operator
+    /// rotates a credential, reloads, sees success, and keeps sending through
+    /// the adapter holding the old one.
+    ///
+    /// # Why the caller must state a [`StartPolicy`]
+    ///
+    /// F24-C3-H6b. This used to end with an unconditional `let _ =
+    /// self.start_all()`, which made "apply a new adapter set" and "begin
+    /// polling" one indivisible act. They are not the same decision, because
+    /// polling is gated by something this type knows nothing about: the
+    /// single-owner inbound polling lease. The gateway gates its STARTUP
+    /// `start_all` on owning that lease and then reached this method, which
+    /// started the poll tasks anyway.
+    ///
+    /// Polling is a DESTRUCTIVE read — Telegram's `offset=` confirm deletes,
+    /// IMAP sets `\Seen` — so a second poller does not cause a duplicate, it
+    /// causes the rightful owner to see nothing at all. A reload silently
+    /// re-acquiring that right is data loss, not a cosmetic defect.
+    ///
+    /// Measured on the shipped binary: a gateway that had correctly declined to
+    /// poll (`state: Unknown, reason: "registered; no poll observed yet"`) was
+    /// driven through one `channel reload` and came back `state: Disconnected,
+    /// reason: "start() failed: …"` — proof that `start()` had been attempted on
+    /// a process that did not hold the lease.
+    ///
+    /// So the decision is the caller's and there is no default. A caller that
+    /// must not poll passes [`StartPolicy::LeaveStopped`] and cannot forget to,
+    /// because the parameter has no default value to omit.
+    pub async fn reload(
+        &mut self,
+        desired: Vec<Box<dyn Channel>>,
+        start: StartPolicy,
+    ) -> ReloadReport {
+        let mut report = ReloadReport::default();
+
+        let desired_names: std::collections::HashSet<String> =
+            desired.iter().map(|c| c.name().to_string()).collect();
+
+        // Remove adapters that are no longer configured.
+        let registered: Vec<String> = self.list_names();
+        for name in registered {
+            if !desired_names.contains(&name) {
+                if let Some(handle) = self.poll_tasks.remove(&name) {
+                    handle.abort();
+                }
+                if let Some(slot) = self.channels.remove(&name) {
+                    let mut guard = slot.lock().await;
+                    let _ = guard.stop().await;
+                }
+                health_lock(&self.health).remove(&name);
+                report.removed.push(name);
+            }
+        }
+
+        for candidate in desired {
+            let name = candidate.name().to_string();
+            let existing_fp = match self.channels.get(&name) {
+                Some(slot) => Some(slot.lock().await.config_fingerprint()),
+                None => None,
+            };
+            match existing_fp {
+                None => {
+                    self.register(candidate).await;
+                    report.added.push(name);
+                }
+                Some(current) => {
+                    let incoming = candidate.config_fingerprint();
+                    // `None` on either side means "cannot tell" — replace.
+                    let same = match (current, incoming) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => false,
+                    };
+                    if same {
+                        report.unchanged.push(name);
+                        // The candidate is dropped WITHOUT being started, and
+                        // the running instance is left completely alone.
+                    } else {
+                        if let Some(handle) = self.poll_tasks.remove(&name) {
+                            handle.abort();
+                        }
+                        if let Some(slot) = self.channels.get(&name) {
+                            let mut guard = slot.lock().await;
+                            let _ = guard.stop().await;
+                        }
+                        self.register(candidate).await;
+                        report.replaced.push(name);
+                    }
+                }
+            }
+        }
+
+        report.added.sort();
+        report.replaced.sort();
+        report.removed.sort();
+        report.unchanged.sort();
+        // Start anything newly registered, but ONLY if the caller holds
+        // whatever right entitles this process to poll. `start_all` skips
+        // adapters that already have a poll task, so an unchanged adapter is
+        // untouched either way.
+        if start == StartPolicy::StartNewlyRegistered {
+            let _ = self.start_all().await;
+        }
+        report
     }
 
     /// Send a message through a named channel.
@@ -265,6 +737,90 @@ impl ChannelManager {
         &self,
         name: &str,
         msg: OutgoingMessage,
+    ) -> Result<MessageReceipt, ChannelError> {
+        self.send_to_keyed(name, msg, None).await
+    }
+
+    /// Whether the named adapter transmits an idempotency key its destination
+    /// will honour.
+    ///
+    /// The delivery spine reads this BEFORE it retries an outcome-unknown
+    /// delivery. An unknown channel answers `false` rather than erroring: the
+    /// question being asked is "is a retry safe here", and the safe answer for
+    /// a destination that cannot even be resolved is no.
+    ///
+    /// # This answer is CAP-BLIND — prefer the per-message form
+    ///
+    /// This is a property of the ADAPTER, and the key only actually rides the
+    /// wire when the body fits in one platform message: [`send_to_keyed`] drops
+    /// it on the chunked path, for the reason documented there. So above
+    /// [`Channel::max_message_len`] this method answers `true` about a send that
+    /// will carry no key, and a caller that retries on the strength of it
+    /// duplicates.
+    ///
+    /// The question a caller almost always means is "is a retry of THIS message
+    /// safe", which is [`supports_outbound_idempotency_for`]. This form is
+    /// retained for the callers that genuinely ask about the adapter (capability
+    /// reporting, the `delivery-semantics` drift test) and for the case where no
+    /// body is in hand yet.
+    ///
+    /// [`send_to_keyed`]: Self::send_to_keyed
+    /// [`supports_outbound_idempotency_for`]: Self::supports_outbound_idempotency_for
+    pub async fn supports_outbound_idempotency(&self, name: &str) -> bool {
+        match self.channels.get(name) {
+            Some(slot) => slot.lock().await.supports_outbound_idempotency(),
+            None => false,
+        }
+    }
+
+    /// Whether an idempotency key will actually ride **this body** to this
+    /// destination — the truthful, per-message form of
+    /// [`supports_outbound_idempotency`](Self::supports_outbound_idempotency).
+    ///
+    /// Answers `true` only when the adapter transmits a key the destination
+    /// honours AND `text` fits in a single platform message, because those are
+    /// exactly the two conditions under which
+    /// [`send_to_keyed`](Self::send_to_keyed) puts a key on the wire. An
+    /// over-cap body is N destination messages carrying no key at all, so a
+    /// retry of it duplicates even on Matrix.
+    ///
+    /// The cap decision is read from [`Self::chunks_for`] — the same function
+    /// the send itself uses — so this answer cannot drift away from the
+    /// behaviour it describes. That sharing is the point: a parallel
+    /// reimplementation here would be a second opinion about the send rather
+    /// than a report of it.
+    pub async fn supports_outbound_idempotency_for(&self, name: &str, text: &str) -> bool {
+        match self.channels.get(name) {
+            Some(slot) => {
+                let guard = slot.lock().await;
+                guard.supports_outbound_idempotency()
+                    && Self::chunks_for(guard.max_message_len(), text).len() <= 1
+            }
+            None => false,
+        }
+    }
+
+    /// The chunk split [`send_to_keyed`](Self::send_to_keyed) will perform for
+    /// `text` under `max`.
+    ///
+    /// Factored out of the send so the send and
+    /// [`supports_outbound_idempotency_for`](Self::supports_outbound_idempotency_for)
+    /// share one decision. `None`, or a zero cap, means the connector declares
+    /// no limit and the body goes as one message.
+    fn chunks_for(max: Option<usize>, text: &str) -> Vec<String> {
+        match max {
+            Some(max) if max > 0 => crate::chunk::chunk_message(text, max),
+            _ => vec![text.to_string()],
+        }
+    }
+
+    /// [`send_to`](Self::send_to), optionally carrying the delivery ledger's
+    /// idempotency key so the destination can recognise a replay.
+    pub async fn send_to_keyed(
+        &self,
+        name: &str,
+        msg: OutgoingMessage,
+        key: Option<&str>,
     ) -> Result<MessageReceipt, ChannelError> {
         let slot = self
             .channels
@@ -276,12 +832,25 @@ impl ChannelManager {
         // delivered in pieces rather than rejected+dropped (HIGH-6). When the
         // connector declares no cap (or the body already fits) this is a
         // single send, byte-identical to the pre-chunking path.
-        let chunks = match guard.max_message_len() {
-            Some(max) if max > 0 => crate::chunk::chunk_message(&msg.text, max),
-            _ => vec![msg.text.clone()],
-        };
+        let chunks = Self::chunks_for(guard.max_message_len(), &msg.text);
         if chunks.len() <= 1 {
-            return guard.send_message(msg).await;
+            return match key {
+                // The key rides only the single-send path on purpose. A chunked
+                // body is N messages at the destination under one logical
+                // delivery, so one key cannot identify them; handing the same
+                // key to every chunk would make a correct destination suppress
+                // chunks 2..N as replays and silently truncate the message.
+                //
+                // That makes the guarantee CONDITIONAL on the body fitting, so
+                // the question "may I retry this" is per-message, not
+                // per-adapter: ask `supports_outbound_idempotency_for`, which
+                // reads the same `chunks_for` decision this line does. The
+                // cap-blind `supports_outbound_idempotency` answers about the
+                // adapter and will say `true` about this send even when the
+                // branch below is the one taken.
+                Some(k) => guard.send_message_idempotent(msg, k).await,
+                None => guard.send_message(msg).await,
+            };
         }
 
         // Multi-chunk: each piece keeps the conversation + reply target;
@@ -349,6 +918,23 @@ impl ChannelManager {
     /// channel's mutex across the download, briefly pausing that one channel's
     /// poll/send while its own just-received media is fetched. The enricher
     /// bounds the call with a timeout so a slow media host can't stall it.
+    ///
+    /// # This is where a declared bound stops being decorative
+    ///
+    /// The payload is checked against the originating channel's
+    /// [`Channel::media_bounds`](crate::Channel::media_bounds) before it is
+    /// handed back. This is the ONLY production path to adapter media
+    /// (`ChannelMediaEnricher` reaches every attachment through here), so it is
+    /// the one site that can make every adapter's declaration load-bearing —
+    /// including the adapters that carry no size check of their own and would
+    /// otherwise be bounded by nothing but the trait default they never read.
+    ///
+    /// An adapter's own fetch path is still expected to cap the *streamed* read
+    /// at the same number, so a hostile payload is refused before it is
+    /// buffered rather than after. That per-adapter cap and this one are read
+    /// from a single constant per crate precisely so they cannot drift apart —
+    /// which is exactly what they had done: every adapter that enforced a cap
+    /// enforced a different number from the one it advertised.
     pub async fn fetch_media_on(
         &self,
         name: &str,
@@ -359,7 +945,65 @@ impl ChannelManager {
             .get(name)
             .ok_or_else(|| ChannelError::Config(format!("unknown channel: {name}")))?;
         let guard = slot.lock().await;
-        guard.fetch_media(attachment).await
+        let bounds = guard.media_bounds();
+        let bytes = guard.fetch_media(attachment).await?;
+        let len = bytes.len() as u64;
+        if len > bounds.max_bytes {
+            return Err(ChannelError::Rejected(format!(
+                "attachment is {len} bytes, over channel {name}'s declared \
+                 {} byte media bound",
+                bounds.max_bytes
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// The bounds channel `name` declares via
+    /// [`Channel::media_bounds`](crate::Channel::media_bounds), or `None` if no
+    /// such channel is registered.
+    ///
+    /// Exposed so the inbound media enricher can apply `max_attachments`, which
+    /// [`Self::fetch_media_on`] structurally cannot: that method sees one
+    /// attachment at a time and a per-message count bound needs the whole list.
+    pub async fn media_bounds_on(&self, name: &str) -> Option<crate::MediaBounds> {
+        let slot = self.channels.get(name)?;
+        let guard = slot.lock().await;
+        Some(guard.media_bounds())
+    }
+
+    /// The native-action surface channel `name` declares via
+    /// [`Channel::native_actions`](crate::Channel::native_actions), or `None`
+    /// if no such channel is registered.
+    ///
+    /// Read this BEFORE calling [`Self::edit_on`] / [`Self::delete_on`] when the
+    /// answer matters and the call does not: a delete is a request a caller may
+    /// not want to issue speculatively just to discover the platform has no
+    /// delete endpoint.
+    pub async fn native_actions_on(&self, name: &str) -> Option<crate::NativeActions> {
+        let slot = self.channels.get(name)?;
+        let guard = slot.lock().await;
+        Some(guard.native_actions())
+    }
+
+    /// Every registered adapter's `(name, platform, declared actions)`, sorted
+    /// by name — the machine-readable native-action matrix.
+    ///
+    /// Sorted so a rendered matrix is diffable between runs; an unsorted matrix
+    /// whose rows shuffle looks changed when it is not.
+    pub async fn native_action_matrix(&self) -> Vec<(String, String, crate::NativeActions)> {
+        let mut out = Vec::with_capacity(self.channels.len());
+        for name in self.list_names() {
+            let Some(slot) = self.channels.get(&name) else {
+                continue;
+            };
+            let guard = slot.lock().await;
+            out.push((
+                name.clone(),
+                guard.platform().to_string(),
+                guard.native_actions(),
+            ));
+        }
+        out
     }
 
     /// List names of registered channels, sorted alphabetically.
@@ -571,6 +1215,201 @@ mod tests {
         fn max_message_len(&self) -> Option<usize> {
             Some(self.cap)
         }
+    }
+
+    /// A capped adapter that DOES transmit an idempotency key, and records the
+    /// key that rode each send (`None` for the unkeyed path).
+    ///
+    /// This is the Matrix shape: `supports_outbound_idempotency() == true` plus
+    /// a finite `max_message_len`. Without both, the conditional guarantee of
+    /// `docs/delivery-semantics.md` §4.1 cannot be exercised at all.
+    struct KeyedCappedChannel {
+        name: String,
+        cap: usize,
+        keys: std::sync::Arc<tokio::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl KeyedCappedChannel {
+        #[allow(clippy::type_complexity)]
+        fn new(
+            name: &str,
+            cap: usize,
+        ) -> (
+            Self,
+            std::sync::Arc<tokio::sync::Mutex<Vec<Option<String>>>>,
+        ) {
+            let keys = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    name: name.into(),
+                    cap,
+                    keys: std::sync::Arc::clone(&keys),
+                },
+                keys,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Channel for KeyedCappedChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn platform(&self) -> &str {
+            "keyed-capped"
+        }
+        async fn start(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+        async fn poll_events(&mut self) -> Result<Vec<ChannelEvent>, ChannelError> {
+            Ok(Vec::new())
+        }
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<MessageReceipt, ChannelError> {
+            let idx = {
+                let mut log = self.keys.lock().await;
+                log.push(None);
+                log.len() - 1
+            };
+            Ok(MessageReceipt {
+                id: format!("keyed-out-{idx}"),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+        async fn send_message_idempotent(
+            &mut self,
+            msg: OutgoingMessage,
+            key: &str,
+        ) -> Result<MessageReceipt, ChannelError> {
+            let idx = {
+                let mut log = self.keys.lock().await;
+                log.push(Some(key.to_string()));
+                log.len() - 1
+            };
+            Ok(MessageReceipt {
+                id: format!("keyed-out-{idx}"),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+        fn supports_outbound_idempotency(&self) -> bool {
+            true
+        }
+        fn config_schema(&self) -> &str {
+            r#"{"name":"string","platform":"keyed-capped"}"#
+        }
+        fn max_message_len(&self) -> Option<usize> {
+            Some(self.cap)
+        }
+    }
+
+    /// Under the cap: the per-message answer is `true` AND the key really rode.
+    ///
+    /// Asserting the answer alone would be a claim about a bool. The point is
+    /// that the bool describes the wire, so the wire is read back.
+    #[tokio::test]
+    async fn under_the_cap_the_key_rides_and_the_per_message_answer_says_so() {
+        let (ch, keys) = KeyedCappedChannel::new("kc", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        let body = "short";
+        assert!(
+            mgr.supports_outbound_idempotency_for("kc", body).await,
+            "a body inside the cap is a single keyed send"
+        );
+
+        mgr.send_to_keyed("kc", OutgoingMessage::text("c1", body), Some("delivery-1"))
+            .await
+            .expect("send");
+
+        let log = keys.lock().await;
+        assert_eq!(log.len(), 1, "one message");
+        assert_eq!(
+            log[0].as_deref(),
+            Some("delivery-1"),
+            "the key must actually be on the wire"
+        );
+    }
+
+    /// Over the cap: no key rides, and the per-message answer says `false`
+    /// while the cap-blind answer still says `true`.
+    ///
+    /// This is the whole defect in one test. The per-adapter bit is what the
+    /// delivery spine used to consult before deciding a retry was safe, and it
+    /// is `true` here for a send that carried no key at all — so a retry would
+    /// have produced a second full copy.
+    #[tokio::test]
+    async fn over_the_cap_no_key_rides_and_only_the_per_message_answer_notices() {
+        let (ch, keys) = KeyedCappedChannel::new("kc", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        // 25 chars at cap 10 → three chunks.
+        let body = "abcdefghijklmnopqrstuvwxy";
+
+        assert!(
+            mgr.supports_outbound_idempotency("kc").await,
+            "known-positive: the cap-blind form answers true, which is the whole problem. If \
+             this were false the test below would pass for the wrong reason."
+        );
+        assert!(
+            !mgr.supports_outbound_idempotency_for("kc", body).await,
+            "an over-cap body is sent unkeyed, so a retry of it is NOT safe"
+        );
+
+        mgr.send_to_keyed("kc", OutgoingMessage::text("c1", body), Some("delivery-1"))
+            .await
+            .expect("send");
+
+        let log = keys.lock().await;
+        assert_eq!(log.len(), 3, "25 chars at cap 10 → 3 sends");
+        assert!(
+            log.iter().all(|k| k.is_none()),
+            "NO chunk may carry the key — one key cannot identify N destination messages, and \
+             reusing it would make a correct destination suppress chunks 2..N: {log:?}"
+        );
+    }
+
+    /// An adapter that cannot deduplicate at all answers `false` at every
+    /// length, so the per-message form never over-promises for it.
+    #[tokio::test]
+    async fn a_non_idempotent_adapter_is_false_under_and_over_the_cap() {
+        let (ch, _sent) = CappedChannel::new("capped", 10);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        assert!(!mgr.supports_outbound_idempotency_for("capped", "hi").await);
+        assert!(
+            !mgr.supports_outbound_idempotency_for("capped", "abcdefghijklmnopqrstuvwxy")
+                .await
+        );
+    }
+
+    /// An uncapped adapter keeps the unconditional answer at any length — the
+    /// cap check must not turn `None` into a false negative.
+    #[tokio::test]
+    async fn an_uncapped_idempotent_adapter_is_true_at_any_length() {
+        let (ch, _keys) = KeyedCappedChannel::new("kc", 0);
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(ch)).await;
+
+        // cap 0 is the "no cap declared / disabled" sentinel `chunks_for` honours.
+        let long = "x".repeat(100_000);
+        assert!(mgr.supports_outbound_idempotency_for("kc", &long).await);
+    }
+
+    /// Unknown channel: the safe answer, matching the cap-blind form.
+    #[tokio::test]
+    async fn an_unknown_channel_is_not_replay_safe() {
+        let mgr = ChannelManager::new();
+        assert!(!mgr.supports_outbound_idempotency_for("nope", "hi").await);
     }
 
     #[tokio::test]
@@ -967,6 +1806,284 @@ mod tests {
         assert!(
             saw_good_message,
             "expected the healthy channel to actually poll + deliver"
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential rejection — giving `HealthState::Unauthenticated` a producer.
+    //
+    // Measured defect: the gateway reported a Matrix channel `Healthy` while
+    // the homeserver 401'd every `/sync`, through 21 consecutive failures and a
+    // `delivered:false` send. `Unauthenticated` existed and nothing could
+    // produce it on any of the three MVP channels.
+    //
+    // The four quadrants are asserted here at the health-projection layer, and
+    // again over real HTTP in `wcore-channel-matrix`'s `sync.rs`.
+    // -----------------------------------------------------------------------
+
+    /// Models an adapter whose background task discovers a rejected credential:
+    /// it pushes the terminal event into its inbox and its task exits
+    /// immediately, which is exactly what `wcore-channel-matrix`'s `/sync` loop
+    /// and `wcore-channel-telegram`'s long-poll both do.
+    ///
+    /// `starts` counts `start()` calls, so a test can prove the manager did NOT
+    /// walk the channel back through supervised reconnect.
+    struct AuthRejectingChannel {
+        name: String,
+        handle: Option<JoinHandle<()>>,
+        inbox: std::collections::VecDeque<ChannelEvent>,
+        starts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl AuthRejectingChannel {
+        fn new(name: &str) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    name: name.into(),
+                    handle: None,
+                    inbox: std::collections::VecDeque::new(),
+                    starts: Arc::clone(&starts),
+                },
+                starts,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Channel for AuthRejectingChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn platform(&self) -> &str {
+            "authreject"
+        }
+        fn task_handle(&self) -> Option<&JoinHandle<()>> {
+            self.handle.as_ref()
+        }
+        async fn start(&mut self) -> Result<(), ChannelError> {
+            // Note this returns Ok: `start()` on the real adapters only re-reads
+            // the credential out of the store and respawns, so it CANNOT fail on
+            // a token the platform rejects. That is precisely why supervised
+            // reconnect would record a false `Healthy` here.
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inbox.push_back(ChannelEvent::AuthExpired {
+                reason: "homeserver rejected the access token: HTTP 401 M_UNKNOWN_TOKEN".into(),
+            });
+            // The background task pushes the event and then dies.
+            self.handle = Some(tokio::spawn(async {}));
+            Ok(())
+        }
+        async fn stop(&mut self) -> Result<(), ChannelError> {
+            if let Some(h) = self.handle.take() {
+                h.abort();
+            }
+            Ok(())
+        }
+        async fn poll_events(&mut self) -> Result<Vec<ChannelEvent>, ChannelError> {
+            Ok(self.inbox.drain(..).collect())
+        }
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<MessageReceipt, ChannelError> {
+            Ok(MessageReceipt {
+                id: "auth-out".into(),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+        fn config_schema(&self) -> &str {
+            r#"{"name":"string","platform":"authreject"}"#
+        }
+    }
+
+    /// **QUADRANT 1 — the platform rejects a present credential.**
+    ///
+    /// Health must reach `Unauthenticated`, carry an actionable reason, and
+    /// STAY there: an auth failure is terminal until an operator rotates the
+    /// token.
+    ///
+    /// This reddens on the unfixed code twice over. (a) The adapter's task is
+    /// already finished when the first tick runs, and the old `task_dead` check
+    /// returned `Err(Transport)` *instead of* draining — so the `AuthExpired`
+    /// was stranded in the inbox and never seen at all. (b) Even once seen, the
+    /// old loop continued, and the next tick's dead-task detection drove
+    /// supervised reconnect, whose `start()` returns `Ok` and records `Healthy`.
+    #[tokio::test]
+    async fn a_rejected_credential_reports_unauthenticated_and_stays_there() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        let (ch, starts) = AuthRejectingChannel::new("rejected");
+        mgr.register(Box::new(ch)).await;
+        mgr.start_all().await.unwrap();
+
+        // Bounded wait for the state to appear.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut got = None;
+        while std::time::Instant::now() < deadline {
+            let h = mgr.health_of("rejected").expect("channel is registered");
+            if h.state == HealthState::Unauthenticated {
+                got = Some(h);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let h = got.expect(
+            "health never reached Unauthenticated — the adapter's AuthExpired was \
+             either stranded by the dead-task check or overwritten by reconnect",
+        );
+        assert!(
+            h.reason
+                .as_deref()
+                .is_some_and(|r| r.contains("M_UNKNOWN_TOKEN")),
+            "the reason must name the platform's rejection so an operator can \
+             act on it: {:?}",
+            h.reason
+        );
+
+        // STICKINESS. Reconnect backoff base is 1s, so waiting past it is what
+        // makes this assertion mean something: on the unfixed loop the channel
+        // is back to `Healthy` by now.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let after = mgr.health_of("rejected").expect("still registered");
+        assert_eq!(
+            after.state,
+            HealthState::Unauthenticated,
+            "a rejected credential must not drift back to {:?} — reconnecting \
+             cannot fix a token the platform refuses",
+            after.state
+        );
+        assert_eq!(
+            starts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "supervised reconnect must NOT re-start a channel whose credential \
+             was rejected; that is the loop that manufactured the false Healthy"
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    /// **QUADRANT 2 — the credential is ABSENT. Proof the working case still
+    /// works.**
+    ///
+    /// This is the behaviour the live UAT confirmed was already correct, and
+    /// the one most at risk from this change. `start()` fails, so the channel
+    /// must read `Disconnected` — NOT `Unauthenticated` — and the reason must
+    /// still name the handle. Two distinct non-healthy states with two distinct
+    /// operator actions: "configure the credential" vs "rotate it".
+    #[tokio::test]
+    async fn an_absent_credential_still_reports_disconnected_naming_the_handle() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        mgr.register(Box::new(FailingStartChannel {
+            name: "absent".into(),
+        }))
+        .await;
+        mgr.start_all().await.unwrap();
+
+        let h = mgr.health_of("absent").expect("registered");
+        assert_eq!(
+            h.state,
+            HealthState::Disconnected,
+            "an absent credential is Disconnected, not Unauthenticated"
+        );
+        assert_ne!(
+            h.state,
+            HealthState::Unauthenticated,
+            "the new auth path must not swallow the absent-credential case"
+        );
+        assert!(
+            h.reason
+                .as_deref()
+                .is_some_and(|r| r.contains("missing credential")),
+            "the reason must still name what is missing: {:?}",
+            h.reason
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    /// **QUADRANT 3 — everything is fine.** A working channel must never be
+    /// dragged into `Unauthenticated` by the new path. A health surface that
+    /// cries "rotate your token" at a healthy channel is worse than the bug
+    /// this fixes, so this control is load-bearing.
+    ///
+    /// The delivered message is the known-positive: without it a channel that
+    /// polled nothing at all would pass the absence assertion for free.
+    #[tokio::test]
+    async fn a_working_channel_is_never_reported_unauthenticated() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        let mut rx = mgr.subscribe();
+        let mut ok = MockChannel::new("fine");
+        ok.inject_text("c1", "alice", "hi");
+        mgr.register(Box::new(ok)).await;
+        mgr.start_all().await.unwrap();
+
+        // Known-positive: the channel really is polling and delivering.
+        let mut delivered = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && !delivered {
+            if let Ok(Ok(tagged)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await
+                && matches!(tagged.event, ChannelEvent::MessageReceived { .. })
+            {
+                delivered = true;
+            }
+        }
+        assert!(
+            delivered,
+            "known-positive failed: the healthy channel delivered nothing, so \
+             the assertion below would be vacuous"
+        );
+
+        // Poll repeatedly across many ticks — a spurious fire would show up as
+        // a transition at some point, not necessarily the first sample.
+        for _ in 0..40 {
+            let h = mgr.health_of("fine").expect("registered");
+            assert_ne!(
+                h.state,
+                HealthState::Unauthenticated,
+                "a healthy channel was reported as having a rejected credential"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            mgr.health_of("fine").expect("registered").state,
+            HealthState::Healthy,
+            "a working channel must end Healthy"
+        );
+        mgr.stop_all().await.unwrap();
+    }
+
+    /// A dead task with an EMPTY inbox must still drive supervised reconnect.
+    ///
+    /// The drain-before-dead reordering could plausibly have disabled the
+    /// silent-death detection entirely; `dead_internal_task_triggers_supervised_reconnect`
+    /// above is that guard, and this asserts the health projection side of it —
+    /// a silently dead task is `Degraded`, never `Unauthenticated`.
+    #[tokio::test]
+    async fn a_silently_dead_task_is_degraded_not_unauthenticated() {
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(10));
+        mgr.register(Box::new(DeadTaskChannel::new("silent"))).await;
+        mgr.start_all().await.unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut saw_degraded = false;
+        while std::time::Instant::now() < deadline {
+            let h = mgr.health_of("silent").expect("registered");
+            assert_ne!(
+                h.state,
+                HealthState::Unauthenticated,
+                "a dead task is not a credential rejection"
+            );
+            if h.state == HealthState::Degraded {
+                saw_degraded = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            saw_degraded,
+            "the empty-inbox dead-task signal must still be detected after the \
+             drain-first reordering"
         );
         mgr.stop_all().await.unwrap();
     }

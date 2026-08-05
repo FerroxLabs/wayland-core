@@ -1,0 +1,65 @@
+WLRC=0
+LABEL=q1-postfix-novault
+WLDONE
+=== LOG ===
+LABEL=q1-postfix-novault
+BIN=/root/wayland-fixhk/target/release/wayland-core
+MODE=novault
+BIN_SHA256=cad46008fb467d19ebaf90ab4f03b8636fde41acd0ad1b1b126c5d36ad924fc3
+BUILD_INFO_BEGIN
+  wayland-core 0.12.25 (source d51287b1b20de2c78334a2813d0b5c88541bec65)
+BUILD_INFO_END
+VAULT_PASSPHRASE_SET=no
+WAYLAND_HOME=/root/fixhk-home-q1-postfix-novault
+RUN_BEGIN
+warning: WAYLAND_HOME is set (isolated profile) but no vault passphrase was supplied; storing credentials as plaintext-0600 at /root/fixhk-home-q1-postfix-novault/credentials.toml. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS keyring are not auto-imported into isolated profiles — re-enter them for this profile.
+notice: durable session persistence is OFF for this run. This host has no usable OS keyring and no unlocked credentials vault, and a durable session seals every provider request into its recovery journal, which cannot be done without one. Everything else works normally — prompts, channels, tools and replies — but conversation history is not saved to disk and an interrupted turn cannot be recovered. To turn durable sessions back on, unlock the encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To accept this and silence the notice, set [session] enabled = false in config.toml.
+[2m2026-07-30T12:37:54.705962Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m35
+[2m2026-07-30T12:37:54.706081Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m35
+[2m2026-07-30T12:37:54.707305Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-30T12:37:54.707331Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-30T12:37:54.707477Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-30T12:37:54.707563Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-30T12:37:54.707576Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-30T12:37:54.707579Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-30T12:37:54.707590Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-30T12:37:54.707593Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-30T12:37:54.707595Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-30T12:37:54.707597Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-30T12:37:54.707609Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-30T12:37:54.707623Z[0m [32m INFO[0m image_gen: using flux-image at https://api.fluxrouter.ai/v1/images/generations (active OpenAI-wire provider)
+[2m2026-07-30T12:37:54.707638Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-30T12:37:54.707664Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T12:37:54.707683Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T12:37:54.707693Z[0m [32m INFO[0m tts: using OpenAI TTS at  (active OpenAI-wire provider)
+[2m2026-07-30T12:37:54.707974Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-30T12:37:54.707997Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-30T12:37:54.708145Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-browser [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mBrowser::execute
+[2m2026-07-30T12:37:54.720085Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-30T12:37:54.720206Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-30T12:37:54.720215Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-30T12:37:54.722095Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-30T12:38:04.807226Z[0m [32m INFO[0m transcription: using flux-voice-fast at https://api.fluxrouter.ai/v1/audio/transcriptions (active OpenAI-wire provider)
+[2m2026-07-30T12:38:04.807259Z[0m [32m INFO[0m vision: using flux-auto at https://api.fluxrouter.ai/v1/chat/completions (active OpenAI-wire provider)
+[2m2026-07-30T12:38:04.807572Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-30T12:38:04.807607Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-30T12:38:04.809082Z[0m [32m INFO[0m F24_CHANNEL_LEASE=owner — this process owns inbound polling for this home [3mholder[0m[2m=[0m"session" [3mpid[0m[2m=[0m1923417 [3mdir[0m[2m=[0m/root/fixhk-home-q1-postfix-novault/channels
+[2m2026-07-30T12:38:04.809102Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+Pricing unavailable for flux-router/flux-auto; the call remains bounded by the token envelope and cost is unpriced, not $0.
+* WLHK_TURN_OK
+[turns: 1 | tokens: 2887 in / 60 out]
+
+RUN_END
+SESSION_FILES=0
+SESSION_DIR_LISTING_BEGIN
+  /root/fixhk-home-q1-postfix-novault/channels/channel-poll.lock
+  /root/fixhk-home-q1-postfix-novault/memory/sessions/boot.db
+  /root/fixhk-home-q1-postfix-novault/memory/memory.db
+  /root/fixhk-home-q1-postfix-novault/memory/audit.db
+  /root/fixhk-home-q1-postfix-novault/memory/changelog/project.changelog.jsonl
+  /root/fixhk-home-q1-postfix-novault/memory/changelog/global.changelog.jsonl
+  /root/fixhk-home-q1-postfix-novault/memory/changelog/session.changelog.jsonl
+  /root/fixhk-home-q1-postfix-novault/cron/schedule.lock
+  /root/fixhk-home-q1-postfix-novault/cache-ledger/9aebdedd-e7a7-48be-a36a-61c252d923fa.json
+  /root/fixhk-home-q1-postfix-novault/projects/-root/memory/user-model.json
+SESSION_DIR_LISTING_END

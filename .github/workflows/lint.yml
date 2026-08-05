@@ -1,0 +1,195 @@
+# Lint — a fast fmt + clippy verdict that the integration branch can actually GET.
+#
+# WHY THIS FILE EXISTS (measured 2026-07-30, lane/fix-clippy-gate).
+#
+# `cargo clippy --workspace --all-targets -- -D warnings` exited 101 at integration
+# head `e7bc6d88`, with nine lint errors across four crates. Eighteen merges had
+# landed that day without anyone noticing. The obvious hypothesis — that CI runs a
+# narrower clippy scope — is FALSE: `ci.yml`'s "Clippy (warnings = errors)" step
+# runs the exact full-workspace command, and `ci.yml` fires on pushes to the
+# integration branch and to `lane/**`.
+#
+# The real cause is that `ci.yml` almost never REACHES that step on the integration
+# branch. Its concurrency group is `${{ github.workflow }}-${{ github.ref }}` with
+# `cancel-in-progress: false` for branch pushes — deliberately, so that the parallel
+# `lane/**` fan-out does not cancel itself. But `cancel-in-progress: false` does not
+# mean "run them all": GitHub holds at most ONE pending run per group and CANCELS the
+# older pending one when a newer run enters. The integration branch receives merges
+# far faster than a full `ci.yml` run completes, so each queued run is superseded
+# before a single job is created.
+#
+# Measured via the REST API, `branch=plan/f20-unified-audit-repair`:
+#
+#   * 2026-07-30: 45 runs — 42 cancelled, 1 failure, 2 still pending.
+#     ONE verdict out of 43 completed runs.
+#   * last 100 runs (since 2026-07-29T06:22Z): 91 cancelled, 5 failure, 2 success.
+#   * four cancelled runs sampled individually: `jobs.total_count == 0` for every one
+#     — they were cancelled at the concurrency gate before any job existed. Each
+#     run's `updated_at` matches the next run's `created_at` to within a second,
+#     which is the supersede-the-pending-run mechanism, visible in the timestamps.
+#
+# `ci.yml`'s comment already recorded the symptom ("The integration branch got NINE
+# macOS jobs in 10.8 h and produced ZERO CI verdicts in 9 h") without naming this as
+# the cause.
+#
+# So the gap is not scope and not the command — it is that the expensive matrix run
+# is structurally unable to report on a branch that moves this fast. This workflow
+# is the cheap half of `ci.yml` (fmt + clippy, Linux only, no matrix, no tests, no
+# artifacts) with `cancel-in-progress: TRUE`, which inverts the failure mode: a burst
+# of merges cancels the STALE lint runs and always leaves the CURRENT head with a
+# verdict in progress. `ci.yml` is untouched — its `cancel-in-progress: false` is
+# correct for what it does, and changing it would break the lane artifact fan-out
+# documented at the top of that file.
+#
+# `--keep-going` is deliberate and is the second lesson of the same lane. Without it
+# cargo stops scheduling units at the first failing crate, so the run reports a LOWER
+# BOUND rather than an inventory: the fail-fast run at `e7bc6d88` showed two errors in
+# one file, and the `--keep-going` run at the same SHA showed nine across four. A
+# previous lane's finding was wrongly written off as stale on the strength of the
+# fail-fast list. Same family as the `--no-fail-fast` drift `ci.yml` documents at its
+# nextest step.
+#
+# ── WHY THIS WORKFLOW DOES NOT USE vx, AND ASSERTS THE TOOLCHAIN ────────────
+#
+# The first cut of this workflow used `loonghao/vx@v0.9.17` with `setup: 'true'`
+# and ran `vx cargo clippy`, on the strength of AGENTS.md's claim that "the
+# justfile and CI workflows route every tool invocation through vx so the Rust +
+# just versions pinned in vx.toml are used deterministically across local dev and
+# CI". **That claim is false in CI, and this workflow is how it was caught.**
+#
+# Run 30548558624 was RED on a tree that `cargo clippy --workspace --all-targets
+# --keep-going -- -D warnings` passes cleanly on a pinned 1.95.0 host. Its own log
+# says why, in the vx setup step:
+#
+#     info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+#     info: default toolchain set to stable-x86_64-unknown-linux-gnu
+#     stable-x86_64-unknown-linux-gnu installed - rustc 1.97.1 (8bab26f4f 2026-07-14)
+#
+# and the lint it then reported cites `rust-clippy/rust-1.97.0`. Note that this
+# repo ALSO carries a `rust-toolchain.toml` pinning `channel = "1.95.0"` with the
+# clippy and rustfmt components, and rustup honours it — that is why a plain
+# `cargo clippy` on the build host resolves 1.95.0 without anyone asking. vx
+# defeats it: the setup action prepends its own store to `PATH`, and the `cargo`
+# found there is a real toolchain binary rather than the rustup shim, so
+# `rust-toolchain.toml` is never consulted. The pin loses silently, and the
+# workflow lints against whatever `stable` happens to be that week.
+#
+# `ci.yml`'s clippy step is unaffected only because it runs inside a
+# `rust:1.95-slim-bookworm` container and never touches vx — but every `ci.yml` job
+# that DOES use the vx setup action (the native `ci` matrix, `build`, eval-gate) is
+# on floating stable for the same reason. That is reported separately; it is not
+# this workflow's to fix.
+#
+# Left alone it would have made this gate PERMANENTLY RED — the §3b-iii failure
+# mode, worth exactly as little as a gate that cannot fail. So this workflow drops
+# vx, lets `rust-toolchain.toml` do its job, and then ASSERTS that the toolchain
+# which actually resolved is the pinned one. It also cross-checks the two pin
+# files against each other, because nothing else in the repo does and a divergence
+# would put the lint verdict and local dev on different compilers.
+
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      - plan/f20-unified-audit-repair
+      - 'lane/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keyed per ref, and cancelling UNCONDITIONALLY — unlike `ci.yml`. For a lint
+  # verdict only the current head is interesting, and cancel-on-supersede is
+  # precisely what stops a fast-moving branch from starving the gate. See the
+  # header for the measurement that motivated the difference.
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: fmt + clippy (workspace, all targets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      # Same disk reclaim the ci.yml Linux legs use — a full --all-targets
+      # clippy of this 54-crate workspace does not fit in the default free space.
+      - name: Free disk space (drop unused preinstalled toolchains)
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          echo "=== AFTER ==="; df -h /
+
+      - name: Install Linux system deps (libdbus + libseccomp + mold linker)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
+
+      # Two files in this repo claim to pin the Rust version — `rust-toolchain.toml`
+      # (which rustup obeys, and which already carries the clippy + rustfmt
+      # components) and `vx.toml` (which vx claims to obey and, in CI, does not).
+      # They agree today at 1.95.0. Nothing was checking that they keep agreeing,
+      # and a divergence would mean the lint verdict and the local dev experience
+      # came from different compilers. This step reads both and refuses to lint if
+      # they disagree — a control that can genuinely fail, and whose passing state
+      # is the current tree.
+      - name: Cross-check the two Rust pins
+        id: pin
+        run: |
+          set -euo pipefail
+          RT=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          VX=$(sed -n 's/^rust[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' vx.toml | head -1)
+          echo "rust-toolchain.toml channel : ${RT:-<unreadable>}"
+          echo "vx.toml rust                : ${VX:-<unreadable>}"
+          [ -n "$RT" ] || { echo "could not read the channel out of rust-toolchain.toml" >&2; exit 1; }
+          [ -n "$VX" ] || { echo "could not read the rust pin out of vx.toml" >&2; exit 1; }
+          if [ "$RT" != "$VX" ]; then
+            echo "PIN DRIFT: rust-toolchain.toml pins $RT but vx.toml pins $VX" >&2
+            exit 1
+          fi
+          echo "pinned=$RT" >> "$GITHUB_OUTPUT"
+
+      # No `+toolchain` and no manual install: `rust-toolchain.toml` is the repo's
+      # own mechanism and rustup auto-installs from it, components included. What
+      # DOES need asserting is that the toolchain actually resolved is the pinned
+      # one — because run 30548558624 proved the resolution can be hijacked. vx put
+      # its own cargo (from a floating `stable`, rustc 1.97.1) ahead of the rustup
+      # shim on PATH, and a non-shim cargo does not read `rust-toolchain.toml` at
+      # all, so the pin was bypassed in silence and the gate went red on a clean
+      # tree citing `rust-clippy/rust-1.97.0`. This assertion is what turns that
+      # from an invisible red into a named one.
+      - name: Assert the resolved toolchain IS the pin
+        run: |
+          set -euo pipefail
+          PINNED='${{ steps.pin.outputs.pinned }}'
+          which cargo
+          rustup show active-toolchain
+          ACTUAL=$(rustc --version)
+          echo "expected rustc $PINNED"
+          echo "actual   $ACTUAL"
+          case "$ACTUAL" in
+            "rustc $PINNED "*|"rustc $PINNED") ;;
+            *) echo "TOOLCHAIN DRIFT: the pin is $PINNED but rustc resolves to '$ACTUAL'" >&2; exit 1 ;;
+          esac
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # `--keep-going` so the report is an inventory, not a lower bound. See header.
+      - name: Clippy (warnings = errors, workspace, all targets)
+        run: cargo clippy --workspace --all-targets --keep-going -- -D warnings

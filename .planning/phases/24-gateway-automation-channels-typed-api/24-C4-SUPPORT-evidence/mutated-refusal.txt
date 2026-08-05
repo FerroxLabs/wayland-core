@@ -1,0 +1,1 @@
+wayland-core gateway: REDACTION FAILURE — do NOT send this bundle. 1 member(s) under /root/wl-24c4-mut-bundle still contain a known secret value: /root/wl-24c4-mut-bundle/recent-log.txt

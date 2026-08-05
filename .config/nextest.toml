@@ -1,4 +1,66 @@
+# TEST-THREAD STACK SIZE lives in `.cargo/config.toml`, NOT here.
+#
+# Do not re-add an `[env]` table to this file. cargo-nextest has NO top-level
+# `[env]` key: 0.9.138 responds with
+#   `warning: in config file .config/nextest.toml, ignoring unknown
+#    configuration key: env`
+# and the variable never reaches the test process — measured on SEANDESKTOP, a
+# 3 MiB probe thread still overflowed with the table present. nextest sources
+# test environment from CARGO's configuration (see nextest_runner::cargo_config::
+# env), so `.cargo/config.toml` is the only config-file mechanism that works.
+# The full stack-size rationale is recorded there.
+
+# ── Anti-vacuity: an invocation that matches ZERO tests must FAIL ──────────
+#
+# THIS FILE USED TO CARRY `no-tests = "fail"` UNDER `[profile.default]`.
+# IT NEVER WORKED. Measured 2026-07-29 on hetzner-dsm with cargo-nextest
+# 0.9.137, printed on EVERY `nextest run` and `nextest list` this repo has ever
+# executed:
+#
+#   warning: in config file .config/nextest.toml, ignoring unknown
+#            configuration key: profile.default.no-tests
+#
+# There is no such profile key (it is absent from nexte.st/schemas/repo-config.json).
+# `no-tests` is a CLI option only: `--no-tests=fail|pass|warn`. Verified both
+# directions on the SAME empty binary, so this is measured, not inferred:
+#   `nextest run --no-tests=fail --test packaged_driver_gate` -> rc=4, "no tests to run"
+#   `nextest run --no-tests=pass --test packaged_driver_gate` -> rc=0
+#
+# The fail-closed behaviour the repo has been getting is therefore the CLI
+# DEFAULT of whatever nextest is installed — which is exactly the dependency
+# the deleted key's own comment said it existed to remove. The intent was
+# right; the mechanism was a no-op reporting reassurance.
+#
+# THE REPLACEMENT, which IS honoured (measured: `required = "0.9.200"` against
+# an installed 0.9.137 aborts with `error: this repository requires nextest
+# version 0.9.200, but the current version is 0.9.137`):
+#
+# The floor is set to the oldest version whose zero-test behaviour has actually
+# been MEASURED on this repo — 0.9.137 — not to the oldest version that might
+# happen to work. `vx.toml` declares nextest as `nextest = "cargo nextest"`
+# with no version, and CI installs are unpinned (`tool: nextest`) or `^0.9`,
+# so without this floor any 0.9.x could supply a permissive default.
+nextest-version = { required = "0.9.137" }
+
 [profile.default]
+# Belt and braces for the gates that must never be vacuous: the
+# release-integrity invocations additionally pass `--no-tests=fail` explicitly
+# at the call site, so they do not depend on any default at all. See
+# .github/workflows/{ci,supply-chain}.yml and the justfile
+# `f01-packaged-driver-gate` / `harness` recipes.
+#
+# The population this protects, re-measured 2026-07-29 (the previous comment
+# here claimed 22; a full-file scan — the old count used a truncated
+# head-of-file window and missed gates below it — gives 44):
+#   44 test binaries carry a file-level `#![cfg(...)]`
+#      17 feature-gated, 27 platform-gated,
+#   23 more have every case `#[ignore]`d,
+#   out of ~488 integration-test binaries reachable by a bare `cargo test`.
+# Each compiles or collects to EMPTY under the wrong feature/platform/filter
+# and prints `test result: ok`. `cargo test` has no fail-closed option at all,
+# which is why `scripts/check-no-vacuous-cargo-test.py` forbids bare
+# `cargo test` in the justfile, workflows and scripts.
+
 # Local dev: friendly output, show failures immediately
 failure-output = "immediate"
 success-output = "never"
@@ -10,9 +72,42 @@ retries = 1
 slow-timeout = { period = "30s", terminate-after = 2 }
 test-threads = "num-cpus"
 
+# ── junit.path is relative to the PROFILE STORE DIR, not the workspace root ──
+#
+# All four `junit.path` keys in this file used to read
+# `path = "target/nextest/<profile>/junit.xml"`. That is the doubled form.
+# nextest resolves `junit.path` against the profile's store directory, which is
+# ALREADY `target/nextest/<profile>/`, so those values produced
+#   target/nextest/ci/target/nextest/ci/junit.xml
+# and the path every consumer looks at, `target/nextest/ci/junit.xml`, has never
+# existed on any platform in this repository's history.
+#
+# Measured on hetzner-dsm 2026-08-01, both directions on the same tree:
+#   before: find target/nextest -name junit.xml
+#             -> target/nextest/ci/target/nextest/ci/junit.xml        (2.7 MB)
+#             -> target/nextest/default/target/nextest/default/junit.xml
+#           ls target/nextest/ci/junit.xml -> No such file or directory
+#   after (path = "junit.xml"), one real `--profile ci` run:
+#             -> target/nextest/ci/junit.xml                          (21 KB)
+#
+# What this silently broke, everywhere, for as long as it has been wrong:
+#   * `Upload nextest JUnit report` uploaded NOTHING on every leg. It carries
+#     `if-no-files-found: ignore`, so it reported success while producing no
+#     artifact.
+#   * The per-leg `Assert this leg produced test signal` gate could never pass.
+#     Worse, it fails with the text "cargo-nextest never ran on this leg ...
+#     a shell/interpreter mismatch on Windows does exactly this" — on the very
+#     run where Windows executed 13,352 tests. A gate that cannot pass, whose
+#     failure text names the wrong cause, is worse than no gate.
+#   * The aggregate `Assert test evidence exists` gate in the `report` job
+#     counts downloaded *.xml and fails closed at zero — so it too could never
+#     pass, and `Publish test report` had nothing to publish.
+#
+# If you ever change these, verify by RUNNING nextest and looking at where the
+# file lands. Do not reason about it from the key name.
 [profile.default.junit]
 # Generate JUnit XML for local tooling if wanted
-path = "target/nextest/default/junit.xml"
+path = "junit.xml"
 
 # Per-test overrides (same philosophy as the CI profile): the genuinely-heavy
 # tests get an explicit, documented exception instead of loosening everyone's
@@ -33,12 +128,108 @@ path = "target/nextest/default/junit.xml"
 filter = 'binary(/bootstrap/) or binary(/registry_inventory_snapshot/) or test(/bootstrap/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
 
+# `fix1_dispatch_budget_aborts_with_partial_result` is slow INHERENTLY, not
+# merely under load, which is why it gets its own entry rather than joining the
+# cohort above. Measured 2026-07-27: it completes in 65.97s under `cargo test`
+# and the abort it asserts on works correctly — the 60s death under this profile
+# (30s x kill-after-2) was a harness kill, never a hang, and the "it hangs"
+# reading was investigated and DISPROVED rather than assumed. The cost is real
+# and is recorded so it stays visible: ~47ms of inline CPU per dispatch in a
+# debug build, 44.8ms of it inside `engine.run()`, against 6.9ms in release.
+# Note this test already PASSES in CI, whose 90s x 2 = 180s budget covers it;
+# only the stricter local default profile killed it, so this aligns the two
+# rather than loosening either.
+#
+# A HIGH concurrency defect was suspected here (`buffer_unordered` measuring
+# 0.96x across widths 1/4/20) and then RETRACTED: varying only provider latency
+# gives 0.96x / 2.0x / 8.0x at 0 / 50 / 500ms, so the 1x was an artifact of a
+# zero-latency fixture and the pipeline does stream in production. Filed LOW as
+# `pipeline-cpu-floor`. If that LOW is ever fixed this override should shrink,
+# so it is deliberately scoped to the one test.
+#
+# `retries` is left at the profile default: this test shells out to no build, so
+# a retry costs only its own runtime (same reasoning as the packaged_f04 entry).
+[[profile.default.overrides]]
+filter = 'test(=fix1_dispatch_budget_aborts_with_partial_result)'
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# The F01 packaged-driver gate drives the REAL packaged `wayland-core` binary
+# through complete scenario runs — three of them in the identity test alone,
+# plus a live MCP fixture, a live egress fixture, a materialized repository and
+# two `wayland-receipt` invocations. It is long because it is end-to-end, not
+# because anything in it hangs.
+#
+# MEASURED, hetzner-dsm (96 cores), warm cache, `--profile eval` (test-threads
+# = 1, so these are isolated single-test costs, not contended ones):
+#   packaged_candidate_cannot_replace_authenticated_egress_evidence   36.99s
+#   packaged_core_proves_capability_unavailability_and_outcome        54.68s
+#   packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine  80.94s
+#   packaged_core_identity_and_driver_gates_are_enforced             100.07s
+#
+# Against the global default budget (30s x kill-after-2 = 60s) TWO of those
+# four are terminated mid-run and a third sits 5s under the line. Both the CI
+# job (.github/workflows/ci.yml) and the `f01-packaged-driver-gate` justfile
+# recipe invoke this binary with NO `--profile`, so the default profile is what
+# governs the gate in practice — that is, the gate could not pass on time even
+# when every assertion in it holds. A gate that cannot reach a pass state
+# proves as little as one that cannot fail.
+#
+# `period` is deliberately set BELOW the slowest measured run (60s < 100s), so
+# nextest still prints the "running for over 60 seconds" notice on every run
+# and the cost stays visible in the log instead of being silently absorbed.
+# terminate-after = 5 gives a 300s hard kill, 3x the slowest measured test —
+# headroom for a contended scheduler slot, and still a real ceiling.
+#
+# Scoped to the binary, not the workspace: nothing else's budget moves.
+[[profile.default.overrides]]
+filter = 'binary(packaged_driver_gate)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit
 failure-output = "immediate-final"
 success-output = "never"
-status-level = "fail"
+# `"retry"`, NOT `"fail"`. This is the profile every CI leg runs under, so it is
+# the only nextest output anyone ever reads — and with `"fail"` a retried-away
+# failure left NO trace of itself at all.
+#
+# MEASURED on Windows CI run 30699019736, job 91372229704 (the `CI (Array)`
+# leg). Its log contains:
+#     6  `FLAKY` lines
+#    66  `TRY 3 FAIL` lines
+#     0  `TRY 1` lines
+#     0  `TRY 2` lines
+# `FLAKY 3/3` means the test failed TWICE and passed on the third attempt, so
+# those six lines account for at least eight failed attempts whose panic
+# message, stdout and stderr were all discarded. One of them,
+# `wcore-swarm::worker_runtime_limits
+# multi_worker_output_exhaustion_fails_without_retaining_buffers`, was
+# `FLAKY 3/3` in that run AND in run 30698794888 before it — four consecutive
+# failed attempts, no diagnostic surviving from any of them, and the summary
+# line counted it as passed both times.
+#
+# nextest's status levels are ordered
+#   none < fail < retry < slow < leak < pass < skip < all
+# so `"fail"` prints only the FINAL status. `"retry"` adds every intermediate
+# attempt with its captured output. REPRODUCED BOTH DIRECTIONS on hetzner-dsm
+# against a purpose-built test that fails on attempt 1 and passes on attempt 2,
+# same binary, same `retries = 2`, only this key changed:
+#   status-level = "fail"   -> `Summary ... 1 passed (1 flaky)` and
+#                              `FLAKY 2/3`. Nothing else. No TRY line, no panic
+#                              message, no stderr.
+#   status-level = "retry"  -> `TRY 1 FAIL`, the captured stdout/stderr, the
+#                              `deliberate failure on attempt 1` panic, then
+#                              `TRY 2 PASS`.
+# The other two retrying profiles were checked and are already safe: `default`
+# is at `"pass"` and `eval` at `"all"`, both of which sit above `"retry"` in
+# that order (verified by running the same probe under `"pass"` -- TRY 1 FAIL
+# printed).
+#
+# This changes ONLY what is printed. No test, timeout, retry count or selector
+# moves. It costs some log volume on a run with retries in it; a run with no
+# retries prints exactly what it printed before.
+status-level = "retry"
 final-status-level = "all"
 # Retry flaky tests up to 2 times in CI
 retries = 2
@@ -73,8 +264,40 @@ filter = 'test(/release_binary_/)'
 slow-timeout = { period = "180s", terminate-after = 2 }
 retries = 0
 
+# `packaged_f04_run_is_repeatable_and_content_addressed` drives the sealed F04
+# artifact through TWO complete packaged runs and then cross-checks every
+# content-addressed digest between them. It is genuinely long, not hung.
+#
+# MEASURED, not assumed (hetzner-dsm, 96 cores, warm cache, 60565c53, the test
+# alone in its process with nothing else scheduled):
+#     run 1: `test result: ok. 1 passed ... finished in 188.43s`
+#     run 2: `test result: ok. 1 passed ... finished in 188.03s`
+#     wall 3:08, user 185.02s, sys 3.34s → ~98% of ONE core for the whole run
+# It PASSES in isolation. Both spawned `wayland-core` children live under two
+# seconds each (2s process sampling caught each exactly once); the cost is
+# in-process work in the test, not a stalled child, and every wait in the
+# harness is already bounded (30s scenario guard, 5s child reap, 5s cgroup
+# drain). So THIS TEST NEEDS ~188s; the global CI budget kills at
+# 90s × 2 = 180s, which it crosses by ~8s even with zero contention. That is
+# the entire failure: it was terminated ~4% short of finishing.
+#
+# Override set to 120s × 4 = 480s hard kill — 2.55× the measured 188s, enough
+# headroom for a contended scheduler slot. `period` is deliberately set BELOW
+# the measured runtime rather than above it, so nextest still prints the
+# "running for over 120 seconds" notice on every run and the cost stays
+# visible in the log instead of being silently absorbed.
+#
+# `retries` is deliberately NOT set to 0 here (unlike the two overrides above).
+# Those two shell out to `cargo`, so a retry re-pays a build; this one does
+# not, and leaving the CI default keeps it identical to every other test.
+#
+# The global slow-timeout is untouched.
+[[profile.ci.overrides]]
+filter = 'test(=packaged_f04_run_is_repeatable_and_content_addressed)'
+slow-timeout = { period = "120s", terminate-after = 4 }
+
 [profile.ci.junit]
-path = "target/nextest/ci/junit.xml"
+path = "junit.xml"
 
 # ── E2E profile ─────────────────────────────────────────────────────────────
 # Run with: cargo nextest run --profile e2e --test e2e
@@ -91,7 +314,7 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 test-threads = 1
 
 [profile.e2e.junit]
-path = "target/nextest/e2e/junit.xml"
+path = "junit.xml"
 
 # ── EVAL profile ─────────────────────────────────────────────────────────────
 # Per cross-audit M-6 (serialize per-provider to avoid hammering provider
@@ -112,4 +335,78 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 test-threads = 1
 
 [profile.eval.junit]
-path = "target/nextest/eval/junit.xml"
+path = "junit.xml"
+
+# ── Native Windows live-containment serialization (F20-43, belt-and-braces) ──
+# The `#![cfg(windows)]` `#[ignore]`d native containment / ACL acceptance
+# targets both spawn `choice.exe` idlers on the self-hosted msvc runner. The
+# containment count is already scoped to each test's own tagged process tree
+# (by ParentProcessId), so correctness does not depend on this group — it is a
+# defense-in-depth measure that serializes the two `choice`-spawning targets so
+# they never overlap on one runner. `platform = 'cfg(windows)'` restricts the
+# override to Windows targets: on Linux (the Hetzner aggregate, `--profile ci`)
+# these files compile to empty binaries and the override does not apply, so the
+# 11509/0/48 aggregate is untouched. Concurrency only — no test or selector is
+# added or removed.
+[test-groups]
+native-windows-live = { max-threads = 1 }
+
+[[profile.default.overrides]]
+platform = 'cfg(windows)'
+filter = 'binary(/hard_process_containment_windows/) or binary(/live_fs_acl/)'
+test-group = 'native-windows-live'
+
+# ---------------------------------------------------------------------------
+# wcore-swarm process/timing tests: reserve capacity so they are not starved.
+#
+# MEASURED, 2026-07-31, hetzner-dsm (96 cores), the merge test gate:
+#   * Full workspace, `--profile ci --no-fail-fast`: one wcore-swarm test failed
+#     per run and it was a DIFFERENT test each time --
+#       run B  wcore-swarm::heartbeat_test worker_writes_heartbeat_during_long_running_task
+#       run C  wcore-swarm worktree::tests::linux::status_output_cap_kills_git_descendant
+#     at the SAME commit, while run A at a neighbouring commit was clean. So 2 of
+#     3 full runs reddened, on a rotating cast.
+#   * wcore-swarm ALONE, `--profile ci`, 3 reps: 150 tests run, 150 passed, every
+#     time, in ~2.2 s.
+#   * The heartbeat test alone: 16 consecutive passes, including with eight
+#     background `cargo check` jobs running.
+#   * `retries = 2` is already set for this profile, so each of those failures
+#     was a test failing THREE times inside the suite and passing 16/16 outside it.
+#
+# THE TWO FAILURES HAD DIFFERENT CAUSES, and only one of them belongs here.
+# Recorded separately because "they were both flaky under load" is the kind of
+# summary that hides a real bug inside a scheduling excuse:
+#
+#   * status_output_cap_kills_git_descendant was NOT a scheduling problem. It
+#     failed in 0.057s with `ParseIntError { kind: Empty }`: the fixture script
+#     writes its child PID with `printf ... > $FILE`, and `>` creates the file
+#     EMPTY before printf writes, so the test read zero bytes and unwrapped the
+#     parse. Load only widened a window that was always open. FIXED AT SOURCE in
+#     crates/wcore-swarm/src/worktree_tests/linux.rs -- it now polls for a
+#     parseable PID. That fix, not this override, is what closed it.
+#
+#   * worker_writes_heartbeat_during_long_running_task IS genuine starvation, and
+#     is why this override exists. It polls every 40ms and must observe >=3
+#     DISTINCT heartbeats from a worker emitting them 150ms apart over a ~450ms
+#     life. Miss enough 40ms ticks and the observation count comes up short even
+#     though the worker behaved perfectly. Nothing in the test's logic is wrong;
+#     it just has to be scheduled to see what it is watching.
+#
+# `threads-required` is the lever that matches THAT cause. A test-group with
+# `max-threads` would not: groups bound concurrency WITHIN the group, and the
+# pressure comes from the other ~13,450 tests in the run. `threads-required`
+# reserves slots from the global pool for the test's duration, which is exactly
+# the contended resource.
+#
+# Scoped to the whole package deliberately. wcore-swarm is 150 tests that finish
+# in 2.2s, so reserving capacity across all of them is close to free, and this
+# crate is where the observe-a-live-process tests live. Cheaper than a gate people
+# learn to re-run until it is green.
+#
+# This is a SCHEDULING change only. No test, assertion, timeout, or selector is
+# added, removed, or loosened -- a starved test still fails, it just is not
+# starved by our own runner. If any of these ever fails again, that failure is
+# real and must be treated as real.
+[[profile.ci.overrides]]
+filter = 'package(wcore-swarm)'
+threads-required = 4

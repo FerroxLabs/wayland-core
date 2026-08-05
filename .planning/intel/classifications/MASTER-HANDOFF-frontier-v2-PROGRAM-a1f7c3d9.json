@@ -1,0 +1,13 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-ferrox/.planning/inbox/MASTER-HANDOFF-frontier-v2-PROGRAM.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "MASTER HANDOFF — Wayland Core Frontier Candidate v2 (WHOLE PROGRAM, F00→F30)",
+  "summary": "Whole-program consolidation and status handoff for Frontier Candidate v2: parity thesis vs Hermes/OpenClaw, live state, phase map, program controls, and document map.",
+  "scope": ["Frontier Candidate v2 program", "F00-F30 phase map", "parity thesis (Hermes/OpenClaw)", "Phase 20 transactional delegated mutation", "program controls CTRL-01..04/D1/D2", "document map"],
+  "cross_refs": [".planning/exports/2026-07-20-CLAUDE-FULL-PROGRAM-TRANSFER.md", "docs/design/2026-07-13-*", ".planning/inbox/MASTER-HANDOFF-phase20-native-parity.md", ".planning/inbox/native-uat-repair-BRIEF.md", "PROJECT.md"],
+  "locked": false,
+  "precedence": 1,
+  "notes": ""
+}

@@ -1,0 +1,30 @@
+binary: wayland-core 0.12.25
+binary path: /root/wayland-29-deny/target/debug/wayland-core
+binary mtime: 2026-07-28 19:39:51.176019481 +0000
+server pid=2204330 bound to 127.0.0.1:18929
+waiting for listener: iteration 1, 19:53:35
+server up after 2s
+=== GET /openapi.json (real HTTP, real binary) ===
+http_status=200
+bytes=18286
+openapi_version=3.1.0
+path_count=8
+schema_count=21
+--- keystone paths ---
+  /v1/sessions: PRESENT
+  /v1/sessions/{id}: PRESENT
+  /v1/sessions/{id}/prompt: PRESENT
+--- 3.0-vs-3.1 SHAPE differential (repaired instrument + self-test) ---
+  SELF_TEST=PASS (known-positive, known-negative, and old-matcher-blind)
+  count_3_0_form_nullable_true = 0   (must be 0 under 3.1)
+  count_3_1_form_type_null     = 9   (must be > 0, else the doc
+                                          only changed its version
+                                          string, not its shape)
+  SHAPE_DIFFERENTIAL=PASS
+=== GET /doc (spec viewer, also public carve-out) ===
+doc_status=200
+=== NEGATIVE control: a NON-carve-out endpoint without a key ===
+  (if this were also 200, the 200s above would prove nothing)
+sessions_no_key_status=401
+server stopped
+LIVE_RESULT=DONE

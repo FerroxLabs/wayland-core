@@ -52,6 +52,85 @@ jobs:
           version="${RELEASE_TAG#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+          # The tag is the ONLY input to everything downstream — the manifest,
+          # the signed digests, the asset names. Nothing ever asked the tree
+          # whether it agreed. On 2026-08-04 the workspace still read 0.12.25
+          # while the RC was to be tagged v0.12.26-rc.1, so tagging would have
+          # published a binary whose own `--version` contradicted the signed
+          # manifest shipped beside it, and no gate anywhere would have said so.
+          #
+          # Compares the RELEASE core (X.Y.Z with any -rc.N / -wayland-<suffix>
+          # stripped) against `[workspace.package] version`. A pre-release tag
+          # is expected to share its base version with the tree; a MISMATCHED
+          # base is a packaging error that must not reach a signature.
+          core="${version%%-*}"
+          workspace="$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ -z "${workspace}" ]; then
+            echo "::error::could not read [workspace.package] version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "${core}" != "${workspace}" ]; then
+            echo "::error::tag/tree version mismatch — tag '${RELEASE_TAG}' implies ${core} but Cargo.toml declares ${workspace}. Bump [workspace.package] version (and refresh Cargo.lock) before tagging." >&2
+            exit 1
+          fi
+          echo "tag ${RELEASE_TAG} agrees with workspace version ${workspace}"
+
+      # ── The Desktop wire contract, published as a release asset ─────────────
+      # `contracts/desktop/v1` is what a host implements against: 52 event
+      # fixtures, 23 command fixtures, three JSON Schemas, the adversarial
+      # vectors and the manifest that pins the generator and all three digests.
+      # Until now it shipped in NO release — a host had to clone the repo at a
+      # tag and hope it read the same bytes we built. There was no signed
+      # artifact to check that hope against.
+      #
+      # It is emitted HERE, in `prepare-release`, and NOT in `github-release`,
+      # entirely because of ordering. Uploading it as a build artifact means
+      # `github-release`'s `download-artifact` (merge-multiple: true) lands it in
+      # ./artifacts BEFORE all three coverage mechanisms run, so the bundle gets
+      # every one of them:
+      #   1. `attest-build-provenance` — its subject glob is
+      #      artifacts/wayland-core-*.tar.gz, which the bundle name matches;
+      #   2. `Generate checksums` — `sha256sum wayland-core-*`;
+      #   3. `manifest-build`, which digests every file in ./artifacts, and whose
+      #      output is then signed.
+      # Creating it inside `github-release` instead would land it after step 1
+      # and silently drop the attestation. That is the ordering constraint the
+      # SR-29-9 block below states in its own words: "a manifest cannot digest
+      # itself" — anything to be covered must exist before the thing covering it.
+      #
+      # `--sort=name --mtime` + a fixed owner make the tarball byte-reproducible
+      # from the tag, so the published digest is checkable by rebuilding it.
+      - name: Bundle the Desktop wire contract
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          root="crates/wcore-protocol/contracts/desktop/v1"
+          test -f "${root}/manifest.json" \
+            || { echo "::error title=No Desktop contract::${root}/manifest.json is \
+          missing, so this tag would publish an empty contract bundle"; exit 1; }
+          # Fail closed on an empty or truncated tree rather than shipping one.
+          files=$(find "${root}" -type f | wc -l)
+          echo "contract files: ${files}"
+          test "${files}" -ge 80 \
+            || { echo "::error title=Desktop contract too small::found ${files} files \
+          under ${root}, expected >= 80 (52 events + 23 commands + schemas + \
+          manifest); refusing to publish a partial contract"; exit 1; }
+          mkdir -p dist
+          tar --sort=name \
+              --mtime="@0" --owner=0 --group=0 --numeric-owner \
+              -czf "dist/wayland-core-${RELEASE_TAG}-desktop-contract-v1.tar.gz" \
+              -C crates/wcore-protocol/contracts desktop/v1
+          ls -l "dist/wayland-core-${RELEASE_TAG}-desktop-contract-v1.tar.gz"
+
+      - name: Upload the Desktop contract bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-contract-v1
+          path: dist/wayland-core-*-desktop-contract-v1.tar.gz
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -60,13 +139,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Both Linux targets build inside a PINNED container, and the runner
+          # image is now irrelevant to their glibc floor. `build_container`
+          # sets the floor; `glibc_floor` is what we promise and what
+          # check_glibc_floor.py enforces. See
+          # .github/scripts/build-linux-release.sh for why these two images and
+          # not an older pair (short version: `NEEDED libssl.so.3`).
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: wayland-core
+            build_container: almalinux:9
+            glibc_floor: "2.34"
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary_name: wayland-core
-            use_cross: true
+            build_container: ubuntu:22.04
+            # ubuntu:22.04's sysroot is 2.35, but the binary references no 2.35
+            # symbol, so the achieved floor is 2.34 — measured, not assumed. The
+            # promise is set to what is achieved rather than to what the sysroot
+            # permits: if a future change does pull in a 2.35 symbol, the gate
+            # reddens and we get to decide, instead of silently dropping RHEL 9.
+            glibc_floor: "2.34"
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: wayland-core
@@ -85,14 +178,8 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
 
-      # Linux: mirror the setup that ci.yml's build: job uses. Native
-      # x86_64-unknown-linux-gnu needs libdbus-1-dev for the keyring crate's
-      # transitive `libdbus-sys` dep; without it the build fails with
-      # `pkg_config failed: dbus-1 not found` (release run 25961407439 for
-      # tag v0.2.3-wayland-base). Cross-compile aarch64 is handled by the
-      # cross docker image (Cross.toml pre-build) so doesn't need host libs.
       - name: Free disk space (drop unused preinstalled toolchains)
-        if: runner.os == 'Linux' && matrix.use_cross != true
+        if: runner.os == 'Linux'
         run: |
           set -e
           echo "=== BEFORE ==="; df -h /
@@ -106,19 +193,21 @@ jobs:
           sudo rm -rf /home/linuxbrew
           echo "=== AFTER ==="; df -h /
 
-      - name: Install Linux system deps (libdbus + libseccomp + libasound + mold linker)
-        if: runner.os == 'Linux' && matrix.use_cross != true
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
-
+      # Linux builds no longer install system deps on the RUNNER: they happen
+      # inside the pinned container (build-linux-release.sh installs the same
+      # libdbus-1-dev / libseccomp-dev / libasound2-dev / libssl-dev set there).
+      # Installing them here would be inert, since the compiler never sees the
+      # runner's sysroot. `mold` is dropped with them — nothing in
+      # .cargo/config.toml ever selected it as the linker.
       - name: Setup vx (installs Rust from vx.toml)
+        if: runner.os != 'Linux'
         uses: loonghao/vx@v0.9.17
         with:
           setup: 'true'
           cache: 'true'
 
       - name: Add cross-compile target
+        if: runner.os != 'Linux'
         run: rustup target add ${{ matrix.target }}
 
       - name: Fix MSVC linker (remove Git's link.exe)
@@ -131,18 +220,41 @@ jobs:
         with:
           shared-key: release-${{ matrix.target }}
 
-      - name: Install cross (Linux aarch64)
-        if: matrix.use_cross == true
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build release binary
+      # `cross` is gone from the RELEASE path. It was only ever used for
+      # aarch64-linux, and its default image had itself moved to Ubuntu 24.04
+      # with a glibc 2.39 aarch64 sysroot — so the cross leg had exactly the
+      # same 2.39 floor as the native one, for the same reason. Pinning our own
+      # container is what fixes both legs, and it makes the floor explicit
+      # rather than inherited. ci.yml still uses cross, so Cross.toml stays.
+      - name: Build release binary (Linux, pinned container)
+        if: runner.os == 'Linux'
         shell: bash
+        env:
+          BUILD_CONTAINER: ${{ matrix.build_container }}
+          TARGET: ${{ matrix.target }}
+        run: .github/scripts/build-linux-release.sh "$BUILD_CONTAINER" "$TARGET"
+
+      # THE GATE. Without it the floor silently tracks the base image again the
+      # next time someone bumps it, and the first symptom is a user on a
+      # supported distro getting `version GLIBC_2.39 not found`. The self-test
+      # runs first so the gate is proved able to fail BEFORE it is trusted.
+      - name: Verify the glibc floor of the built binary
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          GLIBC_FLOOR: ${{ matrix.glibc_floor }}
         run: |
-          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} -p wcore-cli
-          else
-            vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
-          fi
+          set -euo pipefail
+          python3 .github/scripts/check_glibc_floor.py --self-test
+          python3 .github/scripts/check_glibc_floor.py \
+            --binary "target/${TARGET}/release/wayland-core" \
+            --max-glibc "${GLIBC_FLOOR}"
+
+      - name: Build release binary (macOS / Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
@@ -203,11 +315,278 @@ jobs:
             artifacts/wayland-core-*.tar.gz
             artifacts/wayland-core-*.zip
 
+      # ── SR-29-9 — the signed release manifest ─────────────────────────────
+      # `self-update` verifies a signed release manifest against the trust root
+      # bundled in the shipped binary, and installs NOTHING without one. Until
+      # this existed, every release published seven assets and none of them was
+      # a manifest, so the updater refused every install and fell back to npm
+      # (open HIGH F29-03-01). The manifest is what the attestation structurally
+      # cannot say: that this release is NEWER than the one running, that the
+      # view is current rather than a frozen mirror, that the version has not
+      # been revoked, and that the key vouching for it has not been retired.
+      #
+      # Ordering is load-bearing. `manifest-build` digests EVERY file in the
+      # artifacts directory, so the SBOM must land before the checksums, the
+      # checksums before the manifest, and the SIGNED manifest only afterwards —
+      # a manifest cannot digest itself.
+      - name: Checkout source (for the release-manifest tooling)
+        uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+          # Into a subdirectory: `actions/checkout` cleans its target, and the
+          # release artifacts are already sitting in ./artifacts.
+          path: source
+
+      - name: Guard — release-acceptance signing seed present
+        id: manifest_guard
+        shell: bash
+        env:
+          WAYLAND_RELEASE_ACCEPTANCE_SEED: ${{ secrets.WAYLAND_RELEASE_ACCEPTANCE_SEED }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WAYLAND_RELEASE_ACCEPTANCE_SEED:-}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No signed release manifest::WAYLAND_RELEASE_ACCEPTANCE_SEED \
+          is not set, so this release publishes NO *-release-manifest.json asset. \
+          \`wayland-core self-update\` will REFUSE to install this release and will direct \
+          users to the provenance-backed npm route instead. This is fail-closed, not a \
+          security hole, but the update path is broken until the secret is restored."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Same set the `build` job installs for Linux. `wayland-release` pulls in
+      # `wcore-config`, which pulls `keyring`; a missing system library here
+      # would fail the tool build and take the whole release with it, so this
+      # mirrors the proven list rather than guessing a smaller one.
+      - name: Install Linux system deps
+        if: steps.manifest_guard.outputs.skip == 'false'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config
+
+      - name: Setup vx (installs Rust from vx.toml)
+        if: steps.manifest_guard.outputs.skip == 'false'
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Cache cargo
+        if: steps.manifest_guard.outputs.skip == 'false'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+          shared-key: release-manifest
+
+      - name: Build the release-manifest tool
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          cargo build --release -p wcore-eval-scenarios --bin wayland-release
+          ./target/release/wayland-release --help > /dev/null
+          echo "wayland-release built"
+
+      # Both scripts gate the manifest, so both must be proved working BEFORE
+      # they are trusted with it. Each self-test carries a known-positive, a
+      # known-negative, and a third assertion showing the obvious-but-wrong
+      # implementation would answer differently — without that third one, a
+      # self-test passes on a broken instrument.
+      - name: Self-test the release-manifest scripts
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release_manifest_sequence.py --self-test
+          python3 .github/scripts/extract_bundled_trust_root.py --self-test
+
+      # A real, byte-deterministic CycloneDX SBOM over the LOCKED dependency
+      # graph. Bound into the manifest by digest, so `sbom` records
+      # `Observed`. The other two clean-room results are deliberately OMITTED:
+      # no dependency-policy verdict is produced in this pipeline and no second
+      # clean-room build happens here, and `Evidence` models an omission as
+      # "no result was produced" rather than "the result was fine". Recording
+      # an unearned pass for either would be worse than recording their
+      # absence. Closing them is SR-29-13's and SR-29-6's business.
+      - name: Generate SBOM
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd source
+          cargo metadata --locked --format-version 1 > "${RUNNER_TEMP}/cargo-metadata.json"
+          ./target/release/wayland-release sbom \
+            --metadata "${RUNNER_TEMP}/cargo-metadata.json" \
+            --output "../artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
+
       - name: Generate checksums
         shell: bash
         run: |
           cd artifacts
           sha256sum wayland-core-* > wayland-core-checksums.txt
+
+      # `sequence` IS the client's freeze protection: `decide_update` refuses a
+      # manifest at or below the highest sequence the machine has already
+      # installed. A repeat or a decrease does not merely annoy — it disables
+      # the check, silently, on the client. So it is derived from the very
+      # artifacts the client compares against: the max over EVERY manifest ever
+      # published, plus one. That survives a deleted or re-run release, which a
+      # "count the releases" or "latest + 1" rule would not.
+      - name: Derive the manifest sequence from every published manifest
+        id: sequence
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          previous="${RUNNER_TEMP}/previous-manifests"
+          mkdir -p "${previous}"
+
+          # Instrument-aliveness first. "No manifest has ever been published" is
+          # an ABSENCE claim, and an absence is what a broken query, a wrong
+          # repo or a silently-empty response all return for free. So count the
+          # releases and their assets too: zero manifests is only believable
+          # alongside a non-zero asset count from the same query.
+          gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[].tag_name' \
+            > "${RUNNER_TEMP}/releases.txt"
+          gh api "repos/${REPOSITORY}/releases" --paginate --jq '.[].assets[].name' \
+            > "${RUNNER_TEMP}/assets.txt"
+          releases=$(wc -l < "${RUNNER_TEMP}/releases.txt")
+          assets=$(wc -l < "${RUNNER_TEMP}/assets.txt")
+          echo "query saw ${releases} release(s) carrying ${assets} asset(s)"
+          if [ "${releases}" -gt 0 ] && [ "${assets}" -eq 0 ]; then
+            echo "::error::The release query returned ${releases} releases but zero assets. \
+          That is not a believable state for this repository and almost certainly means the \
+          query is broken. Refusing to derive a sequence from it, because a broken query \
+          would yield sequence=1 and silently disable client freeze protection."
+            exit 1
+          fi
+
+          gh api "repos/${REPOSITORY}/releases" --paginate \
+            --jq '.[].assets[] | select(.name | endswith("-release-manifest.json")) | .browser_download_url' \
+            > "${RUNNER_TEMP}/manifest-urls.txt"
+          index=0
+          while IFS= read -r url; do
+            [ -n "${url}" ] || continue
+            index=$((index + 1))
+            curl -fsSL "${url}" -o "${previous}/${index}.json"
+          done < "${RUNNER_TEMP}/manifest-urls.txt"
+          echo "downloaded ${index} previously published manifest(s)"
+
+          python3 source/.github/scripts/release_manifest_sequence.py \
+            --manifests-dir "${previous}" | tee "${RUNNER_TEMP}/sequence.txt"
+          grep -E '^(sequence|previous_max|considered)=' "${RUNNER_TEMP}/sequence.txt" \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Build and sign the release manifest
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          # STDIN ONLY. `wayland-release` has no flag that accepts a seed and no
+          # subcommand that prints one; an argv-passed secret would appear in
+          # process listings and in any command trace. `set -x` is deliberately
+          # NOT enabled anywhere in this step.
+          WAYLAND_RELEASE_ACCEPTANCE_SEED: ${{ secrets.WAYLAND_RELEASE_ACCEPTANCE_SEED }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          SEQUENCE: ${{ steps.sequence.outputs.sequence }}
+        run: |
+          set -euo pipefail
+          tool="source/target/release/wayland-release"
+
+          # The trust root the SHIPPED binary bundles, lifted from the constant
+          # it actually reads. Any other copy could drift from it, and then this
+          # verification would prove the wrong thing.
+          python3 source/.github/scripts/extract_bundled_trust_root.py \
+            --source source/crates/wcore-cli/src/update_trust.rs \
+            --output "${RUNNER_TEMP}/bundled-trust-root.json"
+
+          # The key id comes from that root rather than a literal here, so a
+          # rotation cannot leave the two disagreeing.
+          key_id=$(jq -r '[.keys[] | select(.role == "release_acceptance") | .key_id] | unique | .[]' \
+            "${RUNNER_TEMP}/bundled-trust-root.json")
+          if [ "$(printf '%s\n' "${key_id}" | grep -c .)" -ne 1 ]; then
+            echo "::error::The bundled trust root holds $(printf '%s\n' "${key_id}" | grep -c .) \
+          release_acceptance keys. Exactly one must be active for a release run to know which \
+          seed the CI secret is."
+            exit 1
+          fi
+          echo "signing with key id ${key_id}"
+
+          "${tool}" manifest-build \
+            --artifacts artifacts \
+            --output "${RUNNER_TEMP}/manifest.json" \
+            --release-id "${RELEASE_TAG}" \
+            --source-commit "${GITHUB_SHA}" \
+            --sequence "${SEQUENCE}" \
+            --issued-at "$(date -u +%s)" \
+            --sbom "artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
+
+          # The suffix is not cosmetic: `update_trust::RELEASE_MANIFEST_ASSET_SUFFIX`
+          # is what the updater scans the release's assets for, and a near-miss
+          # filename fails SILENTLY — the updater simply reports that the release
+          # publishes no manifest and refuses, exactly as if the step had never
+          # run. Asserted below rather than trusted to this format string.
+          signed="artifacts/wayland-core-${RELEASE_TAG}-release-manifest.json"
+
+          printf '%s' "${WAYLAND_RELEASE_ACCEPTANCE_SEED}" | "${tool}" manifest-sign \
+            --manifest "${RUNNER_TEMP}/manifest.json" \
+            --output "${signed}" \
+            --key-id "${key_id}"
+
+          case "${signed}" in
+            *-release-manifest.json) ;;
+            *) echo "::error::${signed} does not end in the suffix the updater scans for"; exit 1 ;;
+          esac
+          test -s "${signed}"
+          echo "signed manifest: $(basename "${signed}")"
+
+      # THE GATE THAT MATTERS. `manifest-sign` signs with whatever seed it is
+      # given. If the CI secret has drifted from the bundled public key — a
+      # rotation applied on one side only, a seed pasted from the wrong key
+      # file, a key retired in the root — the release still publishes, and every
+      # user's `self-update` then refuses with "signature does not verify", days
+      # later, with a green release run behind it. Verifying here turns that
+      # into a failed release step.
+      - name: Verify the signed manifest against the SHIPPED trust root
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          source/target/release/wayland-release manifest-verify \
+            --manifest "artifacts/wayland-core-${RELEASE_TAG}-release-manifest.json" \
+            --trust-root "${RUNNER_TEMP}/bundled-trust-root.json" \
+            --role release_acceptance \
+            --now "$(date -u +%s)"
+
+      # The tooling checkout must not become a release asset. `Upload release
+      # assets` globs artifacts/*, and ./source is a sibling, but this asserts
+      # rather than assumes — and it re-asserts the manifest is present, so a
+      # silently skipped manifest step cannot reach publish unnoticed.
+      - name: Assert the asset set before publishing
+        if: steps.manifest_guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          set -euo pipefail
+          manifests=$(find artifacts -maxdepth 1 -name '*-release-manifest.json' | wc -l)
+          if [ "${manifests}" -ne 1 ]; then
+            echo "::error::expected exactly one *-release-manifest.json in artifacts, found ${manifests}"
+            exit 1
+          fi
+          test -f "artifacts/wayland-core-${RELEASE_TAG}-sbom.json"
+          test ! -e artifacts/source
+          echo "asset set:"
+          ls -1 artifacts
 
       - name: Upload release assets
         shell: bash
@@ -354,6 +733,29 @@ jobs:
           echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
             || { echo "ERROR: --version output did not match expected shape"; exit 1; }
 
+      # Symbol-level compliance is checked at build time by
+      # check_glibc_floor.py. This is the EXECUTABLE-level counterpart: actually
+      # run the published artifact on a distro sitting exactly AT the declared
+      # floor. `ubuntu-latest` is 24.04, so the existing `--version` step above
+      # would keep passing even if the floor silently rose again — it cannot
+      # detect the very regression this lane exists to prevent.
+      #
+      # rockylinux:9 is glibc 2.34 (the declared floor) and is a different
+      # distro family from the almalinux:9 build container, so this also
+      # catches an accidental build-container-only dependency.
+      - name: Execute the artifact on a distro at the declared glibc floor
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm -v "$PWD/smoke/extracted:/s:ro" rockylinux:9 bash -c '
+            dnf -y -q install openssl-libs libseccomp dbus-libs >/dev/null 2>&1
+            /s/wayland-core --version
+          ')
+          echo "version output on rockylinux:9 (glibc 2.34): ${out}"
+          echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "ERROR: artifact did not run at the declared glibc floor"; exit 1; }
+
       - name: Verify Linux aarch64 binary file shape only (cannot execute on amd64 runner)
         if: matrix.use_qemu == true
         shell: bash
@@ -423,8 +825,23 @@ jobs:
   # desktop's prepareWaylandCore.js (node_modules resolution path) — pull the
   # ONE binary matching their platform via npm's os/cpu + optionalDependencies.
   #
-  # Gated on post-tag-smoke: npm only ever serves a binary that already ran
-  # `--version` on its native OS. Requires the org secret NPM_TOKEN (an
+  # Gated on post-tag-smoke — but NOT uniformly, and the difference matters.
+  # This comment previously read "npm only ever serves a binary that already ran
+  # `--version` on its native OS". That is FALSE for the two aarch64 packages,
+  # which are header-verified only (see the arch-check at :624-684) because no
+  # aarch64 runner executes them here. Measured 2026-07-30 by lane
+  # `27c5-aarch64`, which then retired the linux half by actually running it:
+  # aarch64-unknown-linux-gnu is 8 PASS / 1 RED at v0.12.25 and 9 PASS / 0 RED
+  # at candidate b7560018 on real Apple ARM cores.
+  #
+  # `aarch64-pc-windows-msvc` remains UNEXECUTED and cannot be executed on any
+  # host we have: the ARM64 PE (machine 0xAA64) returns NOLAUNCH /
+  # ERROR_BAD_EXE_FORMAT on the x86_64 Windows box, with an x86_64 PE in the
+  # same session returning 0 as the known-positive. So npm can still serve one
+  # binary that has never run anywhere. Do not restore the old sentence without
+  # a Windows-on-ARM runner to make it true.
+  #
+  # Requires the org secret NPM_TOKEN (an
   # automation token for the @ferroxlabs npm org); without it the job no-ops
   # with a notice instead of failing the release.
   publish-npm:

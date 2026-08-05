@@ -1,0 +1,26 @@
+{
+  "source_path": "/Users/seandonahoe/dev/waylandcore-gsd-control/docs/design/2026-07-13-wayland-core-frontier-evaluation-program.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "Wayland Core Frontier Evaluation Program",
+  "summary": "Defines the cross-platform evaluation contract, evidence tiers, safety gates, scenario corpus, comparison protocol, workstreams, and release criteria for Wayland Core.",
+  "scope": [
+    "Wayland Core",
+    "Wayland Desktop host contract",
+    "frontier evaluation program",
+    "operator modes",
+    "evidence tiers",
+    "scenario corpus",
+    "capability activation",
+    "cross-platform certification",
+    "Hermes Agent",
+    "OpenClaw"
+  ],
+  "cross_refs": [
+    "docs/advanced.md"
+  ],
+  "locked": false,
+  "precedence": 1,
+  "notes": ""
+}

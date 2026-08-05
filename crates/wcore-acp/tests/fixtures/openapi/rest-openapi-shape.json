@@ -1,0 +1,39 @@
+{
+  "_what": "Wire-shape fixture for the public, unauthenticated GET /openapi.json endpoint.",
+  "_why": [
+    "On 2026-07-29 the utoipa 4->5 bump (taken to remove RUSTSEC-2024-0370 at source) moved",
+    "this document from OpenAPI 3.0.3 to 3.1.0. That is a wire-visible change to a PUBLIC",
+    "endpoint, and it changed the SHAPE, not only the version string: nine nullable fields",
+    "moved from 3.0's `nullable: true` to 3.1's `type: [T, \"null\"]`. A client pinned strictly",
+    "to 3.0.x cannot read the 3.1 encoding.",
+    "Nothing outside the emitting crate could fail on that. The only assertions that existed",
+    "were version-PREFIX checks living in the same crate as the emitter, and they were edited",
+    "from \"3.0\" to \"3.1\" inside the very commit that made the change.",
+    "This fixture is the external artifact. Changing the emitted version or the nullable",
+    "encoding now requires a deliberate, reviewable edit to THIS file."
+  ],
+  "_regenerating": [
+    "If a test fails against this fixture, do NOT edit the file to make it green until you have",
+    "answered: is this a wire change our consumers can absorb? Record the answer, then update.",
+    "Measure with: GET /openapi.json off a running `wayland-core acp serve`, then scan for",
+    "`type` arrays containing \"null\" and for `nullable: true`."
+  ],
+  "_measured": "2026-07-29, live curl against `wayland-core 0.12.25` acp serve on hetzner-dsm; 18286 bytes, 8 paths, 10 operations.",
+
+  "openapi_version": "3.1.0",
+  "nullable_encoding": "type-array",
+
+  "type_array_null_sites": [
+    "/components/schemas/AgentInfo/properties/description",
+    "/components/schemas/ApprovalResolveRequest/properties/answer",
+    "/components/schemas/ApprovalResolveRequest/properties/prefix",
+    "/components/schemas/ApprovalResolveRequest/properties/resume_token",
+    "/components/schemas/SessionCreateRequest/properties/agent",
+    "/components/schemas/SessionCreateRequest/properties/model",
+    "/components/schemas/SessionCreateRequest/properties/system_prompt",
+    "/components/schemas/SessionCreateResponse/properties/model",
+    "/components/schemas/SessionMetadata/properties/model"
+  ],
+
+  "nullable_keyword_sites": []
+}

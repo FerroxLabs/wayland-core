@@ -1,0 +1,5 @@
+=== claim under test: does --no-tui with no provider exit immediately? ===
+NOTUI_RC=1
+ELAPSED_SECS=12  (if <12 the process exited on its own; if ~12 it idled until stdin closed)
+--- what the user saw ---
+Error: No API key found. Provide via --api-key, config file, or environment variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).

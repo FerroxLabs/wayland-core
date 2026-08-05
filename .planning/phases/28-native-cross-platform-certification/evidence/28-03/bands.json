@@ -1,0 +1,152 @@
+{
+  "schema": "f28-soak-bands/v1",
+  "requirement": "F28-02",
+  "decision": {
+    "question": "What counts as an unacceptable quality/performance delta over a 1,000-session soak, and how is it measured?",
+    "option": "C",
+    "option_name": "drift-within-run as the primary gate, plus deliberately loose absolute sanity floors",
+    "votes": {
+      "codex": "C",
+      "gemini": "C",
+      "kimi": "C",
+      "internal_adversarial": "C"
+    },
+    "unanimous": true,
+    "confidence": {
+      "codex": "high",
+      "gemini": "high",
+      "kimi": "medium",
+      "internal_adversarial": "medium"
+    },
+    "evidence_dir": ".planning/phases/28-native-cross-platform-certification/28-03-decision-evidence",
+    "dissent_ref": "28-03-decision-evidence/decision-dissent.txt",
+    "numbers_are_measured": false,
+    "numbers_provenance": "PRE-REGISTERED AND UNMEASURED. Every threshold below was set by argument before any soak session ran, because a threshold derived from the run it judges cannot fail that run. None of them has a measurement behind it and none may be presented as an empirical limit.",
+    "supersedes_clause": "The first complete soak on all three families archives its observed distributions as the program's first per-platform baseline. A later phase is REQUIRED to re-derive these bands from that baseline for the NEXT candidate. Without this clause today's invented numbers become precedent. Re-deriving them for THIS candidate would be option D and is forbidden.",
+    "widening_after_measurement": "FORBIDDEN. A band widened after a result is a finding against the certifier, not a correction to the band."
+  },
+
+  "session_target": 1000,
+  "block_size": 100,
+  "block_count": 10,
+  "min_concurrency": 2,
+
+  "workload": {
+    "surface_source": "evidence/28-01/candidate.json resolved surfaces, read at execution time",
+    "interleave": "round-robin over the workload surfaces so every block carries the same surface mix; without this the late window is a different workload from the early window and the drift measures the mix",
+    "safety_filter": "read-only leaf verbs only; a soak that runs self-update or plugin install a thousand times is a hazard, not a measurement"
+  },
+
+  "warmup": {
+    "mode": "one occurrence of every workload surface, executed before the 1,000 counted sessions and excluded from them",
+    "sanity_schema": {
+      "required_exit_status": 0,
+      "require_non_empty_output": true,
+      "forbidden_output_sentinels": ["panicked at", "STATUS_ACCESS_VIOLATION", "stack backtrace:"]
+    },
+    "invariant_captured": ["exit_status", "output_non_empty", "structural_signature"],
+    "structural_signature": "sorted top-level key set when the output parses as JSON; otherwise the line count and the absence of every forbidden sentinel",
+    "broken_inventory_rule": "a surface whose warm-up fails the sanity schema establishes NO invariant and is recorded as broken inventory. Warm-up may bind a value; it may never define whatever happened as correct.",
+    "max_broken_inventory_fraction": 0.05,
+    "on_broken_inventory_exceeded": "VOID"
+  },
+
+  "windows": {
+    "early_blocks": [1, 2, 3],
+    "guard_blocks": [4, 5, 6, 7],
+    "late_blocks": [8, 9, 10],
+    "aggregation": "compute the statistic per 100-session block, then compare the MEDIAN OF THE EARLY BLOCK VALUES against the MEDIAN OF THE LATE BLOCK VALUES. A single load spike must move the median of three separate blocks to move the verdict.",
+    "cold_start_handling": "block 1 is INCLUDED in the early window. Discarding it would delete a real product property from the measurement; it is instead retained and the per-block series is published so a reader can see it."
+  },
+
+  "sampling": {
+    "resource_interval_sessions": 10,
+    "sample_at": "quiescent points between sessions, after all concurrent children of the preceding sessions have been joined",
+    "resource_min_samples": 90
+  },
+
+  "drift": [
+    {
+      "metric": "latency_p50_block_median_ms",
+      "max_ratio": 1.5,
+      "rationale": "a 50% degradation of the median across a thousand sessions is generous for a shared host and far short of what accumulated on-disk state produces once it is O(N)."
+    },
+    {
+      "metric": "latency_p90_block_median_ms",
+      "max_ratio": 2.0,
+      "rationale": "the tail degrades first under resource pressure; p90 over a 100-session block has ten samples above it, which is enough to be an estimator rather than an outlier."
+    },
+    {
+      "metric": "quality_correct_rate_block_mean",
+      "max_absolute_drop": 0.02,
+      "rationale": "a rate near 1.0 has no room for a ratio band; two percentage points of late-run correctness loss is a definitive signal and is not reachable by host noise."
+    }
+  ],
+
+  "floors": [
+    {
+      "metric": "quality_correct_rate_run",
+      "op": ">=",
+      "value": 0.99,
+      "rationale": "this is the floor that answers the uniformly-broken run, which drift cannot see. It is the reason the decision is C and not A."
+    },
+    {
+      "metric": "session_wall_ms_max",
+      "op": "<=",
+      "value": 60000,
+      "rationale": "also the harness per-session timeout. One minute for a local CLI invocation is operationally defective on any of the three boxes."
+    },
+    {
+      "metric": "session_wall_ms_p95",
+      "op": "<=",
+      "value": 10000,
+      "rationale": "deliberately catastrophic-only and identical on all three platforms. Fabricating per-platform ceilings with no per-platform baseline would be inventing three numbers instead of one."
+    }
+  ],
+
+  "slopes": [
+    {
+      "metric": "state_dir_bytes",
+      "max_growth": 2.0,
+      "ratio": true,
+      "rationale": "the primary unbounded-growth path in a soak of fresh short-lived processes: nothing survives a process except what it wrote down."
+    },
+    {
+      "metric": "live_product_processes",
+      "max_growth": 0.0,
+      "ratio": false,
+      "rationale": "sampled at quiescent points, so any growth at all is a product process that outlived the session that spawned it."
+    },
+    {
+      "metric": "harness_active_handles",
+      "max_growth": 0.0,
+      "ratio": false,
+      "rationale": "a child whose pipes are never closed leaks a handle per session; measured on the harness because that is the side that holds them."
+    },
+    {
+      "metric": "harness_rss_bytes",
+      "max_growth": 2.0,
+      "ratio": true,
+      "rationale": "recorded honestly as a property of the measuring process, not of the product; a doubling would mean the harness is the thing leaking and the run is suspect."
+    }
+  ],
+
+  "positive_controls": {
+    "canary": "one control canary is deliberately leaked into a scanned channel and MUST be detected; a clean scan with an undetected control is VOID",
+    "orphan": "one control process is deliberately orphaned and MUST be found; a zero census with an unfound control is VOID",
+    "resource": "one control lane grows deliberately and its slope MUST be flagged by the same evaluator; a flat verdict from an evaluator that cannot see growth is VOID",
+    "drift": "the bands file itself is the drift control: with no bands file the drift verdict is VOID rather than defaulted"
+  },
+
+  "noise_rule": {
+    "record_covariates": ["host_load_1m", "live_soak_children"],
+    "on_drift_breach": "RED. The covariate series is evidence that may justify exactly one re-run on a quiet host; it may never convert a breach into a pass.",
+    "third_verdict_between_pass_and_fail": "NOT PERMITTED. A load-adjusted INCONCLUSIVE is a dismissal lever with a statistician's vocabulary, and inventing a state to escape an unwanted result is a named prohibition on this program.",
+    "rerun_rule": "a re-run must be green on its own numbers; a second breach is final."
+  },
+
+  "naming_honesty": {
+    "quality": "This is a DETERMINISM-AND-STABILITY measurement, not a semantic quality measurement. It detects a surface that stops behaving as it behaved at warm-up. It does not detect a surface that behaves consistently and wrongly. The results document must say so in those words.",
+    "drift_coverage": "In a soak of 1,000 fresh short-lived processes a per-process leak cannot accumulate, so latency drift can only fire through state that survives a process — accumulated on-disk state, orphaned children, or host contention. The detection weight for unbounded resource use therefore sits on the SLOPE bands, not on the drift bands."
+  }
+}

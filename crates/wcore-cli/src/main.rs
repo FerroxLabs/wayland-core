@@ -1,27 +1,22 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 // `doctor` lives in the `wcore_cli` lib so the TUI diagnostics surface can
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
+use wcore_cli::budget_grants::BudgetGrantLedger;
 use wcore_cli::doctor;
-
-// Force-link the plugin crates so their `inventory::submit!` factories
-// fire at static-init time and `PluginLoader::discover` can find them.
-// Without these `use ... as _;` references Rust's linker dead-code-strips
-// the entire crate — including the `link_section` static items inventory
-// relies on — because nothing in this binary names a symbol from them.
-// Each crate registers itself via inventory; we never need a typed import.
-// Removing any line silently disables the corresponding plugin in the
-// shipped binary. Covered by `tests/plugin_discovery_e2e.rs`.
-use wayland_browser as _;
-use wayland_cua as _;
-use wayland_honcho as _;
+use wcore_cli::log_rotate;
+use wcore_cli::packaged_runtime::{
+    LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
+};
+use wcore_cli::runtime_diagnostics::RuntimeDiagnosticsState;
 // Wave OL: typed import — `OllamaProvider` is downcast from
 // `Arc<dyn PluginProvider>` in `make_plugin_provider_router` below to
 // route `--model ollama:*` through the wayland-ollama plugin. The
@@ -30,20 +25,34 @@ use wayland_honcho as _;
 use wayland_ollama::OllamaProvider;
 
 use wcore_agent::bootstrap::{AgentBootstrap, PluginProviderRouter};
+use wcore_agent::mcp_lifecycle::{
+    McpConfigIdentity, McpConnectionReservation, McpLifecycleCatalog, McpLifecycleState,
+    McpReservationOutcome,
+};
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::protocol_sink::ProtocolSink;
 use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session;
 use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome};
 use wcore_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
-use wcore_mcp::manager::McpManager;
+use wcore_mcp::manager::{McpManager, McpServerHealth};
 use wcore_mcp::tool_proxy::register_single_server_tools;
-use wcore_protocol::commands::ProtocolCommand;
-use wcore_protocol::events::{FinishReason, ProtocolEvent};
+use wcore_protocol::commands::{
+    MCP_LIFECYCLE_VERSION, ProtocolCommand, RemoveMcpServerCommand, ResumeTurnAction,
+};
+use wcore_protocol::events::{
+    BudgetGrantRefusalReason, FinishReason, McpRemovalOutcome, ProtocolEvent, RecoveryLifecycle,
+    RecoveryReconcileReason, RecoveryUnavailableReason,
+};
+use wcore_protocol::execution_policy::{
+    ExecutionPolicyChangeReason, ExecutionPolicySequence, ExecutionPolicySequenceError,
+    ExecutionPolicySnapshot,
+};
 use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_providers::LlmProvider;
+use wcore_types::execution_policy::{ApprovalPolicy, DEFAULT_DANGEROUS_SESSION_TTL_SECS};
 
 // v0.8.0 N.1+N.2+N.3 — slash-runtime dispatch helpers.
 //
@@ -74,7 +83,18 @@ fn build_slash_dispatcher(engine: &wcore_agent::engine::AgentEngine) -> SlashDis
     let memory_api = engine.memory_api().clone();
     let plugin_handles = engine.plugin_runtime_handles_arc();
     let skill_catalog = engine.skill_catalog().cloned();
-    SlashDispatcher::with_runtime(memory_api, plugin_handles, skill_catalog)
+    let mut dispatcher = SlashDispatcher::with_runtime(memory_api, plugin_handles, skill_catalog);
+    // 23B-C3: register `/usermodel` only when bootstrap actually opened a
+    // correction store, so the command is absent rather than present-and-inert.
+    if let Some((store, user_id)) = engine.user_correction_store() {
+        let mut handler =
+            wcore_agent::slash::usermodel::UserModelHandler::new(store.clone(), user_id);
+        if let Some(backend) = engine.user_model_backend() {
+            handler = handler.with_backend(backend.clone());
+        }
+        dispatcher.register(std::sync::Arc::new(handler));
+    }
+    dispatcher
 }
 
 /// Pre-process one input line through the slash dispatcher, falling through
@@ -195,6 +215,50 @@ fn apply_no_memory_flag(config: &mut Config, no_memory: bool) {
     }
 }
 
+/// Consume an evaluator-supplied credential file exactly once. The path may
+/// appear in argv; the credential itself never does, and the file is removed
+/// before provider bootstrap can spawn hooks, tools, plugins, or MCP servers.
+fn read_one_use_api_key(path: &Path) -> anyhow::Result<String> {
+    const MAX_CREDENTIAL_BYTES: u64 = 16 * 1024;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("--api-key-file must name a regular non-symlink file");
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_CREDENTIAL_BYTES {
+        let _ = std::fs::remove_file(path);
+        anyhow::bail!("--api-key-file must contain 1..={MAX_CREDENTIAL_BYTES} bytes");
+    }
+    let read = std::fs::read(path);
+    let removed = std::fs::remove_file(path);
+    let bytes = read.map_err(|error| anyhow::anyhow!("read --api-key-file: {error}"))?;
+    removed.map_err(|error| anyhow::anyhow!("remove --api-key-file: {error}"))?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("--api-key-file was not valid UTF-8"))
+}
+
+fn read_one_use_eval_egress_key(path: &Path) -> anyhow::Result<ed25519_dalek::SigningKey> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != 32 {
+        let _ = std::fs::remove_file(path);
+        anyhow::bail!("--eval-egress-key-file must contain exactly 32 bytes in a regular file");
+    }
+    let read = std::fs::read(path);
+    let removed = std::fs::remove_file(path);
+    let mut bytes =
+        read.map_err(|error| anyhow::anyhow!("read --eval-egress-key-file: {error}"))?;
+    if bytes.len() != 32 {
+        bytes.fill(0);
+        removed.map_err(|error| anyhow::anyhow!("remove --eval-egress-key-file: {error}"))?;
+        anyhow::bail!("--eval-egress-key-file must contain exactly 32 bytes");
+    }
+    let mut seed = [0_u8; 32];
+    seed.copy_from_slice(&bytes);
+    bytes.fill(0);
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    seed.fill(0);
+    removed.map_err(|error| anyhow::anyhow!("remove --eval-egress-key-file: {error}"))?;
+    Ok(key)
+}
+
 #[derive(Parser)]
 #[command(
     name = "wayland-core",
@@ -209,6 +273,14 @@ struct Cli {
     /// API key
     #[arg(short = 'k', long, env = "API_KEY")]
     api_key: Option<String>,
+
+    /// Internal one-use credential transport for isolated hosts/evaluators.
+    #[arg(long, hide = true, value_name = "PATH", conflicts_with = "api_key")]
+    api_key_file: Option<PathBuf>,
+
+    /// Internal one-use evaluator evidence signing key transport.
+    #[arg(long, hide = true, value_name = "PATH")]
+    eval_egress_key_file: Option<PathBuf>,
 
     /// Base URL for the API
     #[arg(short, long, env = "BASE_URL")]
@@ -225,10 +297,10 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
 
-    /// #111 — the host's active assistant identity, for per-assistant MCP
-    /// scoping. A config MCP server marked `only_for_assistant` is injected
-    /// only when this matches its allow-list (fail-closed otherwise). Distinct
-    /// from `--agent` (persona/system-prompt); the desktop host sets this when
+    /// The host's active assistant identity, for per-assistant MCP scoping.
+    /// A config MCP server marked `only_for_assistant` is injected only when
+    /// this matches its allow-list (fail-closed otherwise). Distinct from
+    /// `--agent` (persona/system-prompt); the desktop host sets this when
     /// spawning the json-stream engine.
     #[arg(long, value_name = "NAME", env = "WAYLAND_ASSISTANT")]
     assistant: Option<String>,
@@ -257,18 +329,64 @@ struct Cli {
     #[arg(long)]
     auto_approve: bool,
 
-    /// Force mode: approve every tool call without prompting. Only use for
-    /// trusted, scripted runs — there is NO interactive permission gate
-    /// once this is set. Equivalent to flipping the engine's session
-    /// approval mode to `Force` for the entire run. The TUI surfaces a
-    /// `· FORCE` badge in the bottom status bar so the mode is impossible
-    /// to forget. Aliases: `--yolo`, `--dangerously-skip-permissions`.
-    #[arg(long = "force", aliases = ["yolo", "dangerously-skip-permissions"])]
-    force: bool,
+    /// TIER 1 — bypass approval prompts ONLY. Every tool call is approved
+    /// without asking and the OS sandbox STAYS ON. `--force` and `--yolo` are
+    /// aliases of this one flag, so they are the same tier by construction and
+    /// cannot drift apart. Only use for trusted, scripted runs: there is NO
+    /// interactive permission gate once this is set. The TUI surfaces a
+    /// `· FORCE` badge in the bottom status bar so the mode is impossible to
+    /// forget. To bypass the sandbox as well, use the tier-2 superset
+    /// `--dangerously-skip-permissions-and-sandbox`.
+    #[arg(
+        long = "dangerously-skip-permissions",
+        visible_aliases = ["force", "yolo"],
+        conflicts_with = "dangerous"
+    )]
+    dangerously_skip_permissions: bool,
+
+    /// TIER 2, a superset of tier 1 — bypass approvals AND the OS sandbox
+    /// until a time-bounded lease expires. Cannot be activated by config,
+    /// environment, protocol, ACP, TUI commands, resumed state, or child
+    /// agents: argv on a local launch is the only provenance that mints the
+    /// lease. `--dangerous` is still accepted as a DEPRECATED alias.
+    #[arg(
+        long = "dangerously-skip-permissions-and-sandbox",
+        visible_alias = "dangerous",
+        conflicts_with = "dangerously_skip_permissions"
+    )]
+    dangerous: bool,
+
+    /// Lease lifetime in seconds for
+    /// `--dangerously-skip-permissions-and-sandbox` (maximum one hour).
+    #[arg(long, value_name = "SECONDS", requires = "dangerous")]
+    dangerous_ttl_secs: Option<u64>,
 
     /// Project directory to load .wayland-core.toml from (defaults to CWD)
     #[arg(long)]
     project_dir: Option<std::path::PathBuf>,
+
+    /// Trust the current repository's executable configuration fingerprint in
+    /// Core's external trust store, then start the session. Material changes
+    /// to hooks, MCP config or project skills automatically revoke eligibility.
+    #[arg(long, conflicts_with = "untrust_workspace")]
+    trust_workspace: bool,
+
+    /// Remove the current repository from Core's external trust store, then
+    /// start with the strict untrusted-workspace profile.
+    #[arg(long, conflicts_with = "trust_workspace")]
+    untrust_workspace: bool,
+
+    /// Permit this JSON-stream host to approve read-only, process-lifetime
+    /// developer capabilities. This launch opt-in does not permit writes,
+    /// untrusted/remote grants, or sandbox bypass.
+    #[arg(long, requires = "json_stream")]
+    allow_host_workspace_grants: bool,
+
+    /// Permit this local JSON-stream host to grant additional provider spend
+    /// after Core has emitted a budget-exceeded receipt. Default-deny; managed
+    /// sessions still refuse grants.
+    #[arg(long, requires = "json_stream")]
+    allow_host_budget_grants: bool,
 
     /// Resume a previous session
     #[arg(long)]
@@ -296,6 +414,14 @@ struct Cli {
     #[arg(long)]
     json_stream: bool,
 
+    /// Host-supplied engine-mode evidence for local runtime diagnostics.
+    #[arg(long, value_enum, requires = "json_stream", hide = true)]
+    runtime_engine_mode: Option<RuntimeEngineModeArg>,
+
+    /// Host-supplied workspace-role evidence for local runtime diagnostics.
+    #[arg(long, value_enum, requires = "json_stream", hide = true)]
+    runtime_workspace_kind: Option<RuntimeWorkspaceKindArg>,
+
     /// Disable the ratatui TUI — fall back to the line-based REPL even
     /// on an interactive terminal. The TUI is the default for
     /// `wayland-core` on a TTY with no prompt; this is the escape hatch
@@ -322,23 +448,23 @@ struct Cli {
     #[arg(long)]
     skills_path: bool,
 
-    /// W5 (A.5): run the system-dependency doctor. Probes external
-    /// binaries (`wlrctl`, `grim`, `chromium`, `ollama`), environment
-    /// signals (`WAYLAND_DISPLAY`, `DISPLAY`, `BROWSERBASE_API_KEY`,
+    /// Run the system-dependency doctor. Probes external binaries
+    /// (`wlrctl`, `grim`, `chromium`, `ollama`), environment signals
+    /// (`WAYLAND_DISPLAY`, `DISPLAY`, `BROWSERBASE_API_KEY`,
     /// `OLLAMA_BASE_URL`), and surfaces missing dependencies with
     /// per-distro install hints. Exit code `1` if any required check
     /// fails on the current platform, otherwise `0`.
     #[arg(long)]
     doctor: bool,
 
-    /// A4b: when running --doctor, actually CONNECT-TEST each declared MCP
+    /// When running --doctor, actually CONNECT-TEST each declared MCP
     /// server (spawns stdio commands / dials URLs) instead of only listing
     /// them. Off by default so bare --doctor stays side-effect-free.
     #[arg(long, requires = "doctor")]
     probe_mcp: bool,
 
-    /// W4 F19: run the skills audit. Writes JSON to
-    /// .wayland-core/skills-audit.json and renders Markdown to stdout.
+    /// Run the skills audit. Writes JSON to .wayland-core/skills-audit.json
+    /// and renders Markdown to stdout.
     #[arg(long)]
     skills_audit: bool,
 
@@ -348,33 +474,53 @@ struct Cli {
     #[arg(long, default_value_t = 180, requires = "skills_audit")]
     skills_audit_stale_days: u64,
 
-    /// W9.1 T4 (T11): promote a P4 procedure (drafted skill) from
-    /// `Staged` → `Active`. The argument is the procedure's UUID as
-    /// emitted in `skill_drafted` TraceEvents (or as listed by
-    /// internal tooling). Reads + writes the project's
-    /// `.wayland-core/memory/memory.db`.
-    #[arg(long, value_name = "PROCEDURE_ID")]
+    /// Promote a drafted skill from `Staged` to `Active`.
+    ///
+    /// Accepts a skill NAME or a procedure UUID. The UUID form is what
+    /// anyone who scripted the historical flag passes; the name form is
+    /// what `--skills-govern` prints. Reads and writes the project's
+    /// `.wayland-core/memory/memory.db`. Promotion is governed: the grant is
+    /// bound to a content digest, revoked artifacts are refused, and every
+    /// outcome is journalled.
+    #[arg(long, value_name = "SKILL_OR_PROCEDURE_ID")]
     skills_promote: Option<String>,
 
-    /// W9.1 T4 (T11): archive a P4 procedure. Accepts either a
-    /// `Staged` or `Active` row (W9 T0.5 amendment to the
-    /// state-machine allows `Staged → Archived` directly so curators
-    /// can dismiss losing drafts without a detour through Active).
-    /// Pinned rows are NOT archivable from the CLI — promote → archive
-    /// or unpin them through the curator UI first.
+    /// Archive a drafted skill. Accepts either a `Staged` or an `Active`
+    /// row — `Staged → Archived` is allowed directly, so losing drafts can
+    /// be dismissed without a detour through Active. Pinned rows are NOT
+    /// archivable from the CLI: promote then archive, or unpin them through
+    /// the curator UI first.
     #[arg(long, value_name = "PROCEDURE_ID")]
     skills_archive: Option<String>,
 
-    /// M3.4: dump the memory state for a given session id. Prints all
-    /// episodes scoped to that session at the session+project tiers,
-    /// plus all project-tier facts and procedures. Intended for human
-    /// inspection; the format is a plain text table (not JSON) and may
-    /// change between releases. Exits 0 even if the session has no
-    /// recorded data so scripts can probe state without try/catch.
+    // ---- governed skill lifecycle (one contiguous additive block) ----
+    /// Revoke an installed skill. Retains every byte first, then removes it,
+    /// then suppresses re-drafting, so the auto-draft loop cannot silently
+    /// recreate what you removed. Undo with `--skills-rollback`.
+    #[arg(long, value_name = "SKILL")]
+    skills_revoke: Option<String>,
+
+    /// Restore a revoked skill byte for byte and clear its suppression. The
+    /// argument is the revocation id printed by `--skills-revoke` and listed
+    /// by `--skills-govern`.
+    #[arg(long, value_name = "REVOCATION_ID")]
+    skills_rollback: Option<String>,
+
+    /// List installed skills with their promotion status, every revocation in
+    /// force, and the append-only governance journal.
+    #[arg(long)]
+    skills_govern: bool,
+
+    /// Dump the memory state for a given session id. Prints all episodes
+    /// scoped to that session at the session+project tiers, plus all
+    /// project-tier facts and procedures. Intended for human inspection; the
+    /// format is a plain text table (not JSON) and may change between
+    /// releases. Exits 0 even if the session has no recorded data so scripts
+    /// can probe state without try/catch.
     #[arg(long, value_name = "SESSION_ID")]
     memory_show: Option<String>,
 
-    /// M5.2: replay a session trace JSON file. Validates schema + the
+    /// Replay a session trace JSON file. Validates the schema and the
     /// version-skew guard (refuses traces recorded by a different
     /// wcore-core build unless --replay-force-version-skew is set).
     /// Prints the event count for the session. Combine with
@@ -383,13 +529,13 @@ struct Cli {
     #[arg(long, value_name = "TRACE_PATH")]
     replay: Option<std::path::PathBuf>,
 
-    /// M5.2: compare the trace passed to --replay against this second
-    /// trace and print the changed/added/removed entries.
+    /// Compare the trace passed to --replay against this second trace and
+    /// print the changed/added/removed entries.
     #[arg(long, value_name = "OTHER_TRACE_PATH", requires = "replay")]
     replay_diff: Option<std::path::PathBuf>,
 
-    /// M5.2: skip the wcore-version guard in --replay (use only when
-    /// inspecting traces from another release on purpose).
+    /// Skip the wcore-version guard in --replay (use only when inspecting
+    /// traces from another release on purpose).
     #[arg(long, requires = "replay")]
     replay_force_version_skew: bool,
 
@@ -401,11 +547,11 @@ struct Cli {
     #[arg(long)]
     toon: bool,
 
-    /// F-092 (W7-N): enable live online evolution. At session-end the engine
-    /// emits one `evolution_event` and applies the Paraphrase mutator to
-    /// successful trajectories (≥50% of turns had tool calls). Evolved
-    /// system-prompt variants are persisted to `$WAYLAND_HOME/evolved/`.
-    /// Equivalent to `[observability] online_evolution = true` in config.
+    /// Enable live online evolution. At session-end the engine emits one
+    /// `evolution_event` and applies the Paraphrase mutator to successful
+    /// trajectories (≥50% of turns had tool calls). Evolved system-prompt
+    /// variants are persisted to `$WAYLAND_HOME/evolved/`. Equivalent to
+    /// `[observability] online_evolution = true` in config.
     #[arg(long)]
     online_evolution: bool,
 
@@ -419,7 +565,7 @@ struct Cli {
     #[arg(long)]
     no_memory: bool,
 
-    /// FluxRouter web_search grounding (contract §5): attach a server-side
+    /// FluxRouter web_search grounding: attach a server-side
     /// `web_search` tool to every turn so Flux grounds the answer via
     /// Perplexity Sonar and renders citations. Only fires when the active
     /// model is a Flux tier alias (`flux-auto` / `flux-fast` / `flux-standard`
@@ -431,32 +577,92 @@ struct Cli {
     #[arg(trailing_var_arg = true)]
     prompt: Vec<String>,
 
-    /// M5.4: optional subcommand (currently `plugin`). When present
-    /// this short-circuits the agent/REPL path and runs the subcommand
-    /// dispatcher instead. Kept optional so every existing flag-driven
-    /// invocation (`wayland-core --doctor`, `wayland-core "prompt"`,
-    /// REPL, json-stream) keeps working unchanged.
+    /// Optional subcommand. When present this short-circuits the agent/REPL
+    /// path and runs the subcommand dispatcher instead. Kept optional so every
+    /// existing flag-driven invocation (`wayland-core --doctor`,
+    /// `wayland-core "prompt"`, REPL, json-stream) keeps working unchanged.
     #[command(subcommand)]
     command: Option<TopCmd>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RuntimeEngineModeArg {
+    Standard,
+    Raw,
+}
+
+fn runtime_engine_mode(
+    value: Option<RuntimeEngineModeArg>,
+) -> wcore_protocol::diagnostics::RuntimeEngineMode {
+    match value {
+        Some(RuntimeEngineModeArg::Standard) => {
+            wcore_protocol::diagnostics::RuntimeEngineMode::Standard
+        }
+        Some(RuntimeEngineModeArg::Raw) => wcore_protocol::diagnostics::RuntimeEngineMode::Raw,
+        None => wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RuntimeWorkspaceKindArg {
+    None,
+    Project,
+    Temporary,
+    ProfileHome,
+}
+
+fn runtime_workspace_kind(
+    value: Option<RuntimeWorkspaceKindArg>,
+) -> wcore_protocol::diagnostics::RuntimeWorkspaceKind {
+    match value {
+        Some(RuntimeWorkspaceKindArg::None) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::None
+        }
+        Some(RuntimeWorkspaceKindArg::Project) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Project
+        }
+        Some(RuntimeWorkspaceKindArg::Temporary) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Temporary
+        }
+        Some(RuntimeWorkspaceKindArg::ProfileHome) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::ProfileHome
+        }
+        None => wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+    }
 }
 
 /// M5.4: top-level subcommands. We add new subcommands here as the CLI
 /// grows.
 #[derive(Subcommand)]
 enum TopCmd {
-    /// F-089: model catalog commands.
+    /// Browse the bundled model catalog.
     Models {
         #[command(subcommand)]
         cmd: ModelsCmd,
     },
     /// Manage installed plugins (install / list / available / remove).
     Plugin(wcore_cli::plugin::PluginArgs),
-    /// v0.6.4 Task 2.4: serve the engine's tool registry as an MCP server
-    /// (stdio or SSE transport). Used by external MCP clients like Claude
-    /// Desktop, mcp-cli, etc. to call wayland-core's tools.
+    /// Serve the engine's tool registry as an MCP server (stdio or SSE
+    /// transport), so external MCP clients such as Claude Desktop or mcp-cli
+    /// can call wayland-core's tools.
     McpServe(wcore_cli::mcp_serve::McpServeArgs),
-    /// v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm.
+    /// Dispatch a worktree-isolated worker swarm.
     Swarm(wcore_cli::swarm::SwarmArgs),
+    /// Operate on saved sessions — list, search, show, checkpoint, rewind,
+    /// retry, fork, export, retain, reconcile and cancel. Every operation
+    /// prints a machine-readable `F23_SESSION=` token to STDOUT and uses the
+    /// exit-code map documented in `session_cmd`.
+    Session(wcore_cli::session_cmd::SessionArgs),
+    /// Manage the persistent repository index — `build`, `status`, `search`
+    /// and `verify`. Every verb prints greppable `F23_INDEX=` lines to STDOUT;
+    /// `verify` exits 6 when the store disagrees with the working tree.
+    Index(wcore_cli::index_cmd::IndexArgs),
+    /// Inspect the cache + compaction ledger — `report`, `list`, `show` and
+    /// `verify` over what the prompt cache and the compactor actually did.
+    /// Every verb prints greppable `F23_CACHE=` lines; `verify` exits 7 when
+    /// the session's cost is not fully priced (the USD figure is then a floor,
+    /// not spend) and 8 when there is no ledger to check.
+    Cache(wcore_cli::cache_cmd::CacheArgs),
     /// ForgeFlows: validate / list / run saved `.ron` workflows from
     /// `.wayland/workflows/`.
     #[command(visible_alias = "forgeflows")]
@@ -508,33 +714,31 @@ enum TopCmd {
     /// gate (tests / build / lint), then stamp a verified receipt. Requires
     /// ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite.
     Forge(wcore_cli::anvil::ForgeArgs),
-    /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
-    /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
+    /// Print resolved project context from WAYLAND.md / AGENTS.md /
+    /// .wayland/context.md / CLAUDE.md, walking up from the current directory.
     ProjectContext,
-    /// v0.7.0 1.B.2: scaffold .wayland/config.toml + WAYLAND.md in cwd.
+    /// Scaffold .wayland/config.toml + WAYLAND.md in the current directory.
     Init(wcore_cli::init::InitArgs),
-    /// v0.7.0 1.A.10: ACP server + client surface. `acp serve`
-    /// binds the HTTP/SSE transport; `acp request` drives a one-shot
-    /// session/message round-trip.
+    /// ACP server + client surface. `acp serve` binds the HTTP/SSE transport;
+    /// `acp request` drives a one-shot session/message round-trip.
     Acp(wcore_cli::acp::AcpArgs),
-    /// v0.7.0 3.B.2: manage user-defined agents (create, list, show,
-    /// edit, delete). Built-ins from the bundled pack are read-only.
+    /// Manage user-defined agents (create, list, show, edit, delete).
+    /// Built-ins from the bundled pack are read-only.
     Agent {
         #[command(subcommand)]
         cmd: wcore_cli::agent_cmd::AgentCmd,
     },
-    /// v0.8.1 U7: manage scheduled cron jobs (add / list / remove /
-    /// enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`;
-    /// the background runner spawned at session boot picks up changes
-    /// on its next tick.
+    /// Manage scheduled cron jobs (add / list / remove / enable / disable).
+    /// Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner
+    /// spawned at session boot picks up changes on its next tick.
     Cron {
         #[command(subcommand)]
         cmd: wcore_cli::cron::CronCmd,
     },
-    /// v0.8.1 U9: update wayland-core to the latest signed release
-    /// from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact
-    /// against the pinned marketplace pubkey (ed25519) before atomic
-    /// swap. Use `--check-only` to print versions without installing.
+    /// Update wayland-core to the latest signed release from
+    /// `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the
+    /// pinned marketplace pubkey (ed25519) before atomic swap. Use
+    /// `--check-only` to print versions without installing.
     SelfUpdate {
         /// Print current vs. latest version and exit without installing.
         #[arg(long)]
@@ -563,6 +767,25 @@ enum TopCmd {
     /// free / paid-but-uncleared Flux key returns an `upgrade_required`
     /// message — web_fetch is a paid-only capability.
     Fetch(wcore_cli::fetch::FetchArgs),
+    /// Manage execution backends — list / probe / run / cancel / orphans /
+    /// receipt verify / diff across local, container, ssh and cloud.
+    Backend(wcore_cli::backend::BackendArgs),
+    /// Manage the persistent gateway runtime — install / uninstall / start /
+    /// stop / restart / status / drain, plus the `run` verb every generated
+    /// launchd, systemd and scheduled-task unit invokes.
+    Gateway(wcore_cli::gateway::GatewayArgs),
+    /// Manage paired nodes — pair / list / show / probe / revoke / submit /
+    /// attribution across machines that host execution backends.
+    Node(wcore_cli::node::NodeArgs),
+    /// Manage durable Goals and their Fleet task ledger — open / task / run /
+    /// status / exec-task. `run` recovers a killed Goal, revokes expired claim
+    /// leases, drains completions the dead parent never observed, and drives the
+    /// remaining tasks through the Fleet dispatcher.
+    Goal(wcore_cli::goal_cmd::GoalArgs),
+    /// Manage channel adapters — list / probe / health / reload. `probe` asks
+    /// the platform and needs no gateway; `health` reports only what a RUNNING
+    /// gateway has observed and refuses otherwise.
+    Channel(wcore_cli::channel::ChannelArgs),
     /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
     /// home with its own config, credentials, memory, and skills.
     Profile {
@@ -574,9 +797,19 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::migrate::MigrateCmd,
     },
+    /// Archive, verify, restore and recover a Wayland home.
+    Backup {
+        #[command(subcommand)]
+        cmd: wcore_cli::backup::BackupCmd,
+    },
+    /// Inspect platform containment — `status` reports the selected sandbox
+    /// backend and its properties; `exec` runs a command through the agent's
+    /// own shell tool so you can observe, from the child's own output, that
+    /// the sandbox was ACTIVE rather than merely available.
+    Sandbox(wcore_cli::sandbox_cmd::SandboxArgs),
 }
 
-/// F-089: `models` sub-subcommands.
+/// `models` sub-subcommands.
 #[derive(Subcommand)]
 enum ModelsCmd {
     /// List known models from the bundled pricing catalog.
@@ -621,12 +854,21 @@ fn print_known_models(provider: Option<&str>) {
     }
 }
 
-/// v0.9.1 W2 cycle-2 HIGH 2: open the TUI-mode tracing log file in
-/// append mode. Lives under `$WAYLAND_HOME/logs/wayland-core.log`, with
-/// `~/.wayland/logs/` as the platform default. The parent directory is
-/// created lazily; any error is surfaced to the caller which falls back
-/// to stderr (better than no traces at all).
-fn open_tui_log_file() -> std::io::Result<std::fs::File> {
+/// v0.9.1 W2 cycle-2 HIGH 2: bind the tracing log file for append.
+/// Lives under `$WAYLAND_HOME/logs/wayland-core.log`, with `~/.wayland/logs/`
+/// as the platform default. Any error is surfaced to the caller, which prints
+/// [`log_rotate::LOG_FALLBACK_NOTICE`] and falls back to stderr (better than
+/// no traces at all).
+///
+/// #932: neither the directory nor the file is created here. This runs BEFORE
+/// the subcommand short-circuit, so `$WAYLAND_HOME` may well be the directory
+/// the subcommand is about to refuse to touch — see [`log_rotate::RotatingLog`]
+/// for the two measured failures that caused. The file appears with the first
+/// record.
+///
+/// The writer is size-bounded — see [`log_rotate`]. It was not, and on a
+/// gateway host that is a file which grows for as long as the host runs.
+fn open_tui_log_file() -> std::io::Result<log_rotate::RotatingLog> {
     let base = if let Some(home) = std::env::var_os("WAYLAND_HOME") {
         std::path::PathBuf::from(home)
     } else if let Some(home) = std::env::var_os("HOME") {
@@ -637,12 +879,10 @@ fn open_tui_log_file() -> std::io::Result<std::fs::File> {
             "no $WAYLAND_HOME or $HOME for log file",
         ));
     };
-    let log_dir = base.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join("wayland-core.log"))
+    log_rotate::RotatingLog::open(
+        base.join("logs").join("wayland-core.log"),
+        log_rotate::MAX_LOG_BYTES,
+    )
 }
 
 /// 3A / D3 fail-closed guard for `--json-stream` host mode.
@@ -677,6 +917,59 @@ fn json_stream_profile_guard(
     Ok(())
 }
 
+/// Own the process-level bundled reference tree outside the cancellable root
+/// future. On signal shutdown, `run_until_shutdown` first drops that future
+/// (releasing session/catalog handles), then this guard removes the exact root
+/// while the entry thread unwinds normally.
+struct BundledSkillTmpCleanup;
+
+impl Drop for BundledSkillTmpCleanup {
+    fn drop(&mut self) {
+        wcore_skills::bundled::cleanup_bundled_skill_extract_dir();
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler install");
+        let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler install");
+        let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler install");
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv()  => {}
+            _ = hup.recv()  => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Ctrl+C handler install");
+    }
+}
+
+async fn run_until_shutdown<R, S>(run_future: R, signal_future: S) -> anyhow::Result<ExitCode>
+where
+    R: std::future::Future<Output = anyhow::Result<ExitCode>>,
+    S: std::future::Future<Output = ()>,
+{
+    let mut run_future = Box::pin(run_future);
+    tokio::select! {
+        result = &mut run_future => result,
+        _ = signal_future => {
+            // Explicitly drop all bootstrap/session state before the outer
+            // cleanup guard runs. This also releases every Windows capability
+            // handle clone so the no-delete process root can be removed.
+            drop(run_future);
+            wcore_cli::profile_router::reap_all_children_blocking();
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
 fn main() -> anyhow::Result<ExitCode> {
     // Resolve the active isolated profile ONCE, here at process entry, and
     // materialize it into WAYLAND_HOME (C2). This MUST precede
@@ -709,10 +1002,44 @@ fn main() -> anyhow::Result<ExitCode> {
         .name("wcore-main".into())
         .stack_size(ENTRY_STACK_SIZE)
         .spawn(|| {
+            // Declared before runtime/bootstrap state. Normal reverse drop
+            // order shuts down the runtime first; signal shutdown additionally
+            // drops the root future before returning from block_on.
+            let _bundled_skill_cleanup = BundledSkillTmpCleanup;
+            // The entry thread above carries a large explicit stack, but the
+            // runtime built inside it spawns WORKER threads at the platform
+            // default, so every `tokio::spawn`ed task runs on a 2 MiB stack on
+            // Windows. `WorktreeManager::create_isolated_checkout` is reached in
+            // production from the agent's spawner, its durable-launch path, the
+            // anvil forge and the child-transaction gates, and it drives the same
+            // chain of large futures that overflows in tests.
+            //
+            // HONEST FRAMING: the production path was NOT observed to overflow.
+            // What WAS measured is that the nearest path's headroom is under
+            // 256 KiB over this same 2 MiB default (a full-suite sweep: unset
+            // (2 MiB) -> 4 aborts, 2359296 (2.25 MiB) -> 0). This is
+            // defense-in-depth against a measured-narrow margin, NOT a repair for
+            // a reproduced production crash. 8 MiB matches the unix main-thread
+            // default and stays small enough that a genuinely unbounded recursion
+            // still overflows, so it cannot mask a runaway. The cost is virtual
+            // address-space RESERVE, not commit — negligible on 64-bit.
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
+                .thread_stack_size(8 * 1024 * 1024)
                 .build()?;
-            runtime.block_on(run())
+            let outcome = runtime.block_on(run_until_shutdown(run(), shutdown_signal()));
+            // The startup-refusal chokepoint. Any error escaping `run()` before
+            // the `ready` frame went out is a refusal the `--json-stream` host
+            // must hear about on STDOUT — anyhow would otherwise print it to
+            // stderr, which the protocol consumer does not read, leaving the
+            // desktop app with a pipe that opened and closed carrying nothing.
+            // Runs while `runtime` is still alive and is a no-op for non-
+            // protocol runs, for runs that reached `ready`, and for the
+            // pre-existing #186 sites that already reported.
+            if let Err(error) = &outcome {
+                wcore_cli::startup_error::report_startup_refusal(error);
+            }
+            outcome
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn wcore-cli entry thread: {e}"))?;
     entry
@@ -749,8 +1076,72 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
     msg
 }
 
+/// The ONE wiring point from parsed argv to the two danger tiers, returning
+/// `(approval_bypass, dangerous_launch)`.
+///
+/// Tier 1 (`--dangerously-skip-permissions`, aliases `--force` / `--yolo`)
+/// bypasses approvals and leaves the OS sandbox REQUIRED. Tier 2
+/// (`--dangerously-skip-permissions-and-sandbox`, deprecated alias
+/// `--dangerous`) additionally bypasses the sandbox, under a lease that only a
+/// local argv launch can mint. Tier 2 does not need `approval_bypass`: its
+/// grant already resolves approvals to `Bypass`.
+///
+/// `run()` and the tier-regression test both read the wiring from here, so an
+/// edit that moves a tier-1 alias into tier 2 cannot pass the test.
+fn danger_tiers(cli: &Cli) -> (bool, bool) {
+    (cli.dangerously_skip_permissions, cli.dangerous)
+}
+
+/// The advice printed when stdin is not a TTY and no prompt was given.
+///
+/// Lifted out of `run()` for the same reason as `danger_tiers` above: the
+/// product and the test read the SAME bytes, so the test cannot pass against
+/// a stale copy of the message.
+///
+/// UAT-W1: this used to end `pass a prompt with -p`. `-p` is the short form of
+/// `--provider` (see the `Cli` derive), so a user who followed the product's
+/// own advice got `Unknown provider: '<their prompt>'`. The prompt is a
+/// trailing positional, not a flag.
+const NON_TTY_NO_PROMPT_ADVICE: &str = "wayland-core: stdin is not a terminal and no prompt was given.\n\
+     Use --json-stream for headless/piped use, or pass the prompt as an\n\
+     argument: wayland-core \"your prompt here\".";
+
 async fn run() -> anyhow::Result<ExitCode> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // Record protocol mode before ANY fallible startup work, so every refusal
+    // from here to the `ready` frame reaches the host as an error frame rather
+    // than as stderr text the protocol consumer never reads. The emit itself
+    // happens once, at the process-exit chokepoint in `main`.
+    if cli.json_stream {
+        wcore_cli::startup_error::mark_json_stream_active();
+    }
+    let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
+    let dangerous_ttl_secs = cli
+        .dangerous_ttl_secs
+        .unwrap_or(DEFAULT_DANGEROUS_SESSION_TTL_SECS);
+    // The compatibility notice stays scoped to the danger-NAMED tier-1
+    // spelling, exactly as before the rename, so existing `--force` / `--yolo`
+    // runs keep byte-identical stderr. All three spellings are one clap field
+    // and therefore one tier; only this advisory text is spelling-scoped.
+    if cli.dangerously_skip_permissions
+        && std::env::args().any(|arg| arg == "--dangerously-skip-permissions")
+    {
+        eprintln!(
+            "wayland-core: --dangerously-skip-permissions bypasses approval prompts only; \
+             the OS sandbox remains required. Use \
+             --dangerously-skip-permissions-and-sandbox for an explicit, time-bounded \
+             local sandbox bypass."
+        );
+    }
+    let eval_egress_key = cli
+        .eval_egress_key_file
+        .take()
+        .map(|path| read_one_use_eval_egress_key(&path))
+        .transpose()?;
+    wcore_agent::egress::install_eval_egress_observer(eval_egress_key)?;
+    if let Some(path) = cli.api_key_file.take() {
+        cli.api_key = Some(read_one_use_api_key(&path)?);
+    }
 
     // v0.9.1 W2 cycle-2 HIGH 2: when the binary will enter the
     // alt-screen TUI, route INFO/WARN traces and startup notices to a
@@ -781,8 +1172,65 @@ async fn run() -> anyhow::Result<ExitCode> {
     // so trace output never lands on the alt-screen-bound stdio. Failure
     // to open the file degrades silently to stderr — we'd rather have
     // visible traces than none.
-    let tui_log_file: Option<std::fs::File> = if will_enter_tui {
-        open_tui_log_file().ok()
+    //
+    // ── lane fix-tui-noise: quiet by default, diagnostics never lost ────────
+    // UAT-TUI-UNIX F4 / UAT-TUI-WINDOWS F3: a single trivial headless turn
+    // printed 42 lines of engine internals to stderr before the answer
+    // (measured at e7bc6d88: 20 INFO + 19 WARN — capability advisories about
+    // Spotify, Postgres, TTS, ffmpeg and browser backends the user never
+    // invoked). TUI mode was already fixed by routing traces to a file; every
+    // other mode still wrote them to the terminal.
+    //
+    // The rule now is: `RUST_LOG` is authoritative and UNCHANGED when set —
+    // `RUST_LOG=info wayland-core "…"` reproduces the previous behaviour
+    // byte for byte, on stderr, in every mode. When `RUST_LOG` is UNSET the
+    // full INFO record goes to `$WAYLAND_HOME/logs/wayland-core.log` and only
+    // ERROR reaches stderr. That is strictly MORE diagnosable than before:
+    // headless runs previously kept no log at all, so the record was lost the
+    // moment the terminal scrolled.
+    //
+    // No new flag is introduced. `RUST_LOG` already existed, already worked and
+    // is already the documented lever.
+    //
+    // ── B2.2: should a one-shot headless run write a trace file at all? ─────
+    // DECISION: yes, it keeps writing one, and the defect was the missing
+    // bound, not the file. `log_rotate` supplies the bound.
+    //
+    // Justified against the gateway case specifically, because that is the
+    // case that makes the question sharp: a host answering channel messages
+    // runs headless CONTINUOUSLY, so "headless writes a trace by default" is at
+    // its most expensive there. It is also at its most necessary there. That
+    // host has no terminal anyone is watching, no TUI to route traces to, and
+    // it is the one deployment whose failures (a channel that stopped polling,
+    // a credential that expired, a delivery abandoned at 04:00) are discovered
+    // hours later from the record or not at all. Defaulting headless to no file
+    // would leave the gateway as the only mode of the product with no
+    // diagnostics whatsoever — the exact "a trace record existing nowhere"
+    // state the fix-tui-noise change was made to end.
+    //
+    // The cost it was actually challenged on — unbounded growth on a
+    // continuously-running host — is answered by bounding the file at
+    // 2 × MAX_LOG_BYTES rather than by removing it. A gateway now holds at most
+    // 10 MiB of its own most recent diagnostics, forever.
+    //
+    // The short-lived one-shot run is the cheap case, not the expensive one:
+    // ~7 kB, into a file that is now capped. `RUST_LOG` remains the lever for
+    // anyone who wants the old stderr behaviour instead.
+    let rust_log_set = std::env::var_os("RUST_LOG").is_some();
+    let log_to_file = will_enter_tui || !rust_log_set;
+    let tui_log_file: Option<log_rotate::RotatingLog> = if log_to_file {
+        match open_tui_log_file() {
+            Ok(f) => Some(f),
+            Err(e) => {
+                // B2.3: the fallback must be OBSERVABLE. A product that cannot
+                // open its log must still run — and must say so, or "it exited
+                // 0" is equally consistent with logging being dead, disabled,
+                // or never attempted. This line is the degraded-mode marker the
+                // integration test asserts on.
+                eprintln!("{}: {e}", log_rotate::LOG_FALLBACK_NOTICE);
+                None
+            }
+        }
     } else {
         None
     };
@@ -799,11 +1247,26 @@ async fn run() -> anyhow::Result<ExitCode> {
     if let Some(file) = tui_log_file {
         let (non_blocking, guard) = tracing_appender::non_blocking(file);
         _log_guard = Some(guard);
-        let _ = fmt()
-            .with_env_filter(env_filter)
-            .with_writer(non_blocking)
-            .with_target(false)
-            .try_init();
+        if will_enter_tui {
+            // Unchanged: the alt-screen owns the terminal, so NOTHING may reach
+            // stdio — not even an error.
+            let _ = fmt()
+                .with_env_filter(env_filter)
+                .with_writer(non_blocking)
+                .with_target(false)
+                .try_init();
+        } else {
+            // Headless / REPL / json-stream with RUST_LOG unset: tee. The file
+            // takes everything the filter admits; stderr takes ERROR only, so a
+            // genuine failure is still visible without opening a log.
+            use tracing_subscriber::fmt::writer::MakeWriterExt;
+            let writer = non_blocking.and(std::io::stderr.with_max_level(tracing::Level::ERROR));
+            let _ = fmt()
+                .with_env_filter(env_filter)
+                .with_writer(writer)
+                .with_target(false)
+                .try_init();
+        }
     } else {
         let _ = fmt()
             .with_env_filter(env_filter)
@@ -867,78 +1330,6 @@ async fn run() -> anyhow::Result<ExitCode> {
             }
         }
     };
-
-    // F-062: install signal handlers (SIGTERM / SIGINT / SIGHUP) that
-    // remove the crash sentinel before exit so the next restart does NOT
-    // falsely report a crash. Without these handlers, SIGTERM from the OS
-    // (e.g. `kill`, systemd, launchd) bypasses Drop and leaves the flag
-    // behind, causing every restart to claim the prior run crashed.
-    //
-    // Implementation: spawn a background task that waits for any of the
-    // three signals, removes the sentinel file best-effort, and calls
-    // std::process::exit(0). The tokio runtime is shut down by exit() so
-    // all other tasks are cancelled; the sentinel file removal is the
-    // only ordering-critical step.
-    #[cfg(unix)]
-    {
-        let sentinel_path_for_sig = wcore_cli::crash_sentinel::CrashSentinel::default_path();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler install");
-            let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler install");
-            let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler install");
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = int.recv()  => {}
-                _ = hup.recv()  => {}
-            }
-            // Best-effort: remove the sentinel so the next restart
-            // doesn't falsely report a crash.
-            let _ = std::fs::remove_file(&sentinel_path_for_sig);
-            // PR-7: reap any live per-profile supervisor children before exit.
-            // std::process::exit bypasses Drop, so the router's Drop-based
-            // reaping never runs on a signal — without this, SIGTERM/SIGINT/
-            // SIGHUP orphans every credential-bearing `acp serve --profile` child.
-            wcore_cli::profile_router::reap_all_children_blocking();
-            std::process::exit(0);
-        });
-    }
-    // Audit W-2 fix (E2E-WINDOWS-ADDENDUM-2026-05-24 §2.2):
-    // On Windows there is no SIGTERM/SIGINT/SIGHUP — the previous code had
-    // no #[cfg(not(unix))] branch, so the sentinel was never cleaned up when
-    // the Electron app (or OS) killed the engine process via TerminateProcess.
-    // This caused every Windows restart to falsely report a crash.
-    // Ctrl+C is the closest Windows equivalent an external manager can send
-    // before falling back to TerminateProcess.
-    #[cfg(not(unix))]
-    {
-        let sentinel_path_for_sig = wcore_cli::crash_sentinel::CrashSentinel::default_path();
-        tokio::spawn(async move {
-            // On Windows, tokio::signal::ctrl_c() fires on Ctrl+C (CTRL_C_EVENT
-            // and CTRL_BREAK_EVENT). This is what the Electron wrapper sends
-            // before a hard kill.
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = std::fs::remove_file(&sentinel_path_for_sig);
-            // PR-7: reap live per-profile children before exit (exit bypasses
-            // Drop). Without this, a Ctrl+C / TerminateProcess orphans every
-            // credential-bearing `acp serve --profile` child.
-            wcore_cli::profile_router::reap_all_children_blocking();
-            std::process::exit(0);
-        });
-    }
-
-    // F-086: register a cleanup guard for the per-process bundled-skill
-    // extraction directory (`$TMPDIR/wayland-core-bundled-skills-{pid}/`).
-    // The guard's Drop impl calls `cleanup_bundled_skill_extract_dir()` so
-    // the temp directory is removed on both graceful exit and panic unwind,
-    // preventing accumulation across restarts.
-    struct BundledSkillTmpCleanup;
-    impl Drop for BundledSkillTmpCleanup {
-        fn drop(&mut self) {
-            wcore_skills::bundled::cleanup_bundled_skill_extract_dir();
-        }
-    }
-    let _bundled_skill_cleanup = BundledSkillTmpCleanup;
 
     // M5.4: subcommand short-circuit. Subcommands run before any of the
     // flag-driven modes (doctor, REPL, etc.) so a user who runs
@@ -1008,6 +1399,20 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
+            // F23-02: dispatched here, alongside the other subcommands and
+            // before `Config::resolve`, so listing and searching sessions work
+            // for a first-run user with no provider key — the same contract the
+            // root `--list-sessions` flag already honours.
+            TopCmd::Session(args) => wcore_cli::session_cmd::run(args),
+            // F23-06: dispatched beside `session` and before `Config::resolve`
+            // for the same reason — indexing and searching a checkout needs no
+            // provider credential.
+            TopCmd::Index(args) => wcore_cli::index_cmd::run(args),
+            // F23-04: dispatched beside `index` and before `Config::resolve` —
+            // reading a ledger a past session already wrote needs no provider
+            // credential, and refusing to report on a session because the
+            // current environment has no key would be absurd.
+            TopCmd::Cache(args) => wcore_cli::cache_cmd::run(args),
             TopCmd::Workflow { cmd } => match wcore_cli::workflow::run(cmd).await {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
@@ -1130,7 +1535,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let cwd = std::env::current_dir()?.to_string_lossy().to_string();
                 // Setup subcommand never honours --force: the onboarding
                 // flow makes no tool calls. web_search is irrelevant here.
-                run_tui_mode(config, &cwd, None, None, true, false, false).await?;
+                let execution = resolve_local_execution(
+                    &config,
+                    false,
+                    false,
+                    DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                    false,
+                )?;
+                run_tui_mode(config, &cwd, None, None, None, true, execution, false).await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1167,6 +1579,48 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
+            TopCmd::Backend(args) => match wcore_cli::backend::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core backend: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Gateway(args) => match wcore_cli::gateway::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core gateway: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Node(args) => match wcore_cli::node::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core node: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Goal(args) => match wcore_cli::goal_cmd::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core goal: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Channel(args) => match wcore_cli::channel::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core channel: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Sandbox(args) => match wcore_cli::sandbox_cmd::run_sandbox(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core sandbox: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
             // `profile::run` is synchronous — no `.await` (mirrors `TopCmd::Plugin`).
             TopCmd::Profile { cmd } => match wcore_cli::profile::run(cmd) {
                 Ok(()) => Ok(ExitCode::SUCCESS),
@@ -1180,6 +1634,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core migrate: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            // `backup::run` is synchronous — no `.await` (mirrors `TopCmd::Migrate`).
+            TopCmd::Backup { cmd } => match wcore_cli::backup::run(cmd) {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core backup: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },
@@ -1237,6 +1699,19 @@ async fn run() -> anyhow::Result<ExitCode> {
         run_skills_archive(id).await?;
         return Ok(ExitCode::SUCCESS);
     }
+    // ---- 23A-C1 governed skill lifecycle (one contiguous additive block) ----
+    if let Some(name) = cli.skills_revoke.as_deref() {
+        wcore_cli::skill_govern::run_revoke(name)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(id) = cli.skills_rollback.as_deref() {
+        wcore_cli::skill_govern::run_rollback(id)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.skills_govern {
+        wcore_cli::skill_govern::run_list()?;
+        return Ok(ExitCode::SUCCESS);
+    }
 
     // M3.4: dump memory state for a given session.
     if let Some(session) = cli.memory_show.as_deref() {
@@ -1270,7 +1745,15 @@ async fn run() -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let terminal = Arc::new(TerminalSink::new(cli.no_color));
+    // lane fix-tui-noise: a prompt on argv means exactly one answer then exit,
+    // so the sink drops the `⏺ `/`* ` speaker marker and terminates stdout with
+    // a newline (UAT-TUI-WINDOWS F4/F5, UAT-TUI-UNIX F8). Interactive REPL runs
+    // — where the marker separates turns — are unaffected.
+    let terminal = Arc::new(if cli.prompt.is_empty() {
+        TerminalSink::new(cli.no_color)
+    } else {
+        TerminalSink::new(cli.no_color).one_shot()
+    });
     let output: Arc<dyn OutputSink> = terminal.clone();
 
     // v0.7.0 Task 3.A.1: resolve --agent overlay so the built-in's
@@ -1366,6 +1849,24 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     // Resolve config from files + CLI args + env vars
+    let workspace_for_trust = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
+    let trust_store = wcore_config::workspace_trust::WorkspaceTrustStore::for_current_home();
+    if cli.trust_workspace {
+        let fingerprint = trust_store.grant(&workspace_for_trust)?;
+        eprintln!(
+            "Trusted workspace executable fingerprint {} for {}",
+            &fingerprint.digest[..12],
+            fingerprint.root.display()
+        );
+    } else if cli.untrust_workspace {
+        let removed = trust_store.revoke(&workspace_for_trust)?;
+        eprintln!(
+            "{} workspace trust for {}",
+            if removed { "Removed" } else { "No stored" },
+            workspace_for_trust.display()
+        );
+    }
+
     let cli_args = CliArgs {
         provider: cli.provider,
         api_key: cli.api_key,
@@ -1384,9 +1885,10 @@ async fn run() -> anyhow::Result<ExitCode> {
     // call Config::resolve directly with a temp project_dir. Idempotent.
     wcore_config::config::migrate_legacy_yaml_if_needed();
 
-    let mut config = match Config::resolve(&cli_args) {
-        Ok(c) => c,
-        Err(e) => {
+    let resolved_config = match Config::resolve_with_provenance(&cli_args) {
+        Ok(resolved) => resolved,
+        Err(resolution_error) => {
+            let e = resolution_error.source;
             // T0-1: On a true first run (no global config yet) where the user
             // just typed `wayland-core` to open the interactive TUI, a missing
             // API key must route into the Onboarding surface — not crash to
@@ -1437,7 +1939,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             let missing_credentials = e
                 .downcast_ref::<wcore_config::config::MissingApiKey>()
                 .is_some();
-            if would_open_tui && (missing_credentials || (first_run && !project_config_exists())) {
+            if would_open_tui
+                && !dangerous_launch
+                && (missing_credentials || (first_run && !project_config_exists()))
+            {
                 let cwd = std::env::current_dir()?.to_string_lossy().to_string();
                 // B8-1: install the process-global egress policy BEFORE the
                 // onboarding session runs. The normal install site (below, after
@@ -1450,13 +1955,21 @@ async fn run() -> anyhow::Result<ExitCode> {
                 // onboarding session sees and a later call is a guarded no-op.
                 let onboarding_config = Config::default();
                 wcore_agent::egress::install_egress_policy(&onboarding_config);
+                let execution = resolve_local_execution(
+                    &onboarding_config,
+                    approval_bypass,
+                    false,
+                    dangerous_ttl_secs,
+                    false,
+                )?;
                 run_tui_mode(
                     onboarding_config,
                     &cwd,
                     None,
                     cli.session_id.clone(),
+                    cli.assistant.clone(),
                     true,
-                    cli.force,
+                    execution,
                     cli.search,
                 )
                 .await?;
@@ -1465,10 +1978,12 @@ async fn run() -> anyhow::Result<ExitCode> {
                 }
                 return Ok(ExitCode::SUCCESS);
             }
-            if cli.json_stream {
+            if cli.json_stream && wcore_cli::startup_error::claim_startup_error_emission() {
                 // #186: a json-stream host (desktop app) otherwise sees only a bare exit
                 // code and shows a generic "wcore exited with code 1 during init". Emit a
                 // structured error event so the real, actionable reason reaches the host UI.
+                // The claim above keeps this more specific message and stands the
+                // process-exit chokepoint down, so the host is told exactly once.
                 let w = wcore_protocol::writer::ProtocolWriter::new();
                 let _ = w.emit(&wcore_protocol::events::ProtocolEvent::Error {
                     msg_id: None,
@@ -1482,6 +1997,8 @@ async fn run() -> anyhow::Result<ExitCode> {
             return Err(e);
         }
     };
+    let mut config = resolved_config.value;
+    let config_provenance = resolved_config.provenance;
 
     if let Some(ref level_str) = cli.compaction {
         match level_str.parse::<wcore_compact::CompactionLevel>() {
@@ -1521,18 +2038,33 @@ async fn run() -> anyhow::Result<ExitCode> {
     // path as an explicit `--resume <id>`; `clap`'s `conflicts_with_all`
     // already guarantees only one of `--resume` / `--continue` is set.
     let resume = resolve_resume(cli.resume.clone(), cli.continue_latest, &config)?;
+    let execution = resolve_local_execution(
+        &config,
+        approval_bypass,
+        dangerous_launch,
+        dangerous_ttl_secs,
+        cli.json_stream,
+    )?;
 
     // Branch to JSON stream mode
     if cli.json_stream {
-        run_json_stream_mode(
+        let run_result = run_json_stream_mode(
             config,
+            config_provenance,
             &cwd,
             resume,
             cli.session_id,
-            cli.force,
+            execution,
             cli.assistant.clone(),
+            cli.allow_host_workspace_grants,
+            cli.allow_host_budget_grants,
+            runtime_engine_mode(cli.runtime_engine_mode),
+            runtime_workspace_kind(cli.runtime_workspace_kind),
         )
-        .await?;
+        .await;
+        let evidence_result = wcore_agent::egress::finalize_eval_egress_observer();
+        run_result?;
+        evidence_result?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -1554,16 +2086,17 @@ async fn run() -> anyhow::Result<ExitCode> {
             &cwd,
             resume,
             cli.session_id,
+            cli.assistant,
             false,
-            cli.force,
+            execution,
             cli.search,
         )
         .await?;
         // B3: disarm the crash sentinel at the earliest known-clean point.
         // The Drop impl on `_sentinel_guard` also fires when `main` returns,
         // but an explicit early disarm closes the window between TUI exit
-        // and any post-TUI cleanup (MCP shutdown etc.) where a signal-based
-        // `process::exit` could bypass Drop.
+        // and any post-TUI cleanup (MCP shutdown etc.) before the outer signal
+        // race has a chance to cancel the root future.
         if let Some(ref mut g) = _sentinel_guard {
             let _ = g.disarm();
         }
@@ -1578,10 +2111,9 @@ async fn run() -> anyhow::Result<ExitCode> {
     // explicitly opted into the line-REPL (they know what they're doing).
     // `--json-stream` is handled before this point and never hits here.
     if prompt.is_empty() && !cli.no_tui && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        eprintln!(
-            "wayland-core: stdin is not a terminal and no prompt was given.\n\
-             Use --json-stream for headless/piped use, or pass a prompt with -p."
-        );
+        // Any flag this advice names is checked against the real clap
+        // definition by `non_tty_advice_names_only_flags_that_do_what_it_says`.
+        eprintln!("{NON_TTY_NO_PROMPT_ADVICE}");
         return Ok(ExitCode::FAILURE);
     }
 
@@ -1592,7 +2124,8 @@ async fn run() -> anyhow::Result<ExitCode> {
     // headless one-shot `-p` path; opt into inbound channel dispatch so the
     // primary interactive session listens to configured channels (the
     // short-lived one-shot simply aborts the subscriber on exit).
-    let mut bootstrap = AgentBootstrap::new(config, &cwd, output.clone())
+    let mut bootstrap = execution
+        .apply(AgentBootstrap::new(config, &cwd, output.clone()))
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
 
@@ -1602,12 +2135,12 @@ async fn run() -> anyhow::Result<ExitCode> {
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load(resume_id)?;
+        let session = session_mgr.load_for_run(resume_id)?;
         terminal.formatter().session_info(&format!(
             "Resumed session {} ({} messages, {} model)",
-            session.id,
-            session.messages.len(),
-            session.model
+            session.session.id,
+            session.session.messages.len(),
+            session.session.model
         ));
         bootstrap = bootstrap.resume(session);
     }
@@ -1648,6 +2181,67 @@ async fn run() -> anyhow::Result<ExitCode> {
     // anyhow's default `Debug` print on `main`'s `Result::Err`. The REPL
     // path already routes errors through `output.emit_error` so this brings
     // the one-shot path to parity.
+    // ── F22C (Phase 22 Success Criterion 3): Direct's canonical transition ──
+    //
+    // The fifth loop owner. Attachment is by environment
+    // (`WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL`) rather than by flag,
+    // deliberately: this file is the shared multi-lane fence, and a flag pair
+    // would mean a second, non-contiguous edit to add it to `Cli`. The env
+    // route is already how this codebase hands a Goal's identity to a child
+    // process (`goal_cmd::ENV_GOAL`), so it is the existing mechanism.
+    //
+    // Opt-in and headless-only: with no Goal in the environment, or in the
+    // REPL, nothing below changes. `engine.run` here is THE production Direct
+    // invocation — the closure wraps it, and its return type is
+    // `StrategyTermination`, so there is no path out that terminates the Goal
+    // any other way and none that terminates it zero times.
+    if !prompt.is_empty()
+        && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
+    {
+        use wcore_agent::goal::{DirectOutcome, StrategyTermination};
+        let cursor = driver
+            .run_direct(&goal_id, |owner| async {
+                match engine.run(&prompt, "").await {
+                    Ok(run_result) => {
+                        output.emit_stream_end(
+                            "",
+                            run_result.turns,
+                            run_result.usage.input_tokens,
+                            run_result.usage.output_tokens,
+                            run_result.usage.cache_creation_tokens,
+                            run_result.usage.cache_read_tokens,
+                            run_result.finish_reason,
+                        );
+                        // A completed Direct run is UNCHECKED — Direct has no
+                        // verification owner — so the adapter maps it to
+                        // `NeedsEscalation`, not to a success category.
+                        if run_result.stop_reason == wcore_types::message::StopReason::MaxTurns {
+                            StrategyTermination::from_direct(
+                                owner,
+                                DirectOutcome::TurnLimitReached {
+                                    turns: run_result.turns as u64,
+                                },
+                            )
+                        } else {
+                            StrategyTermination::from_direct(owner, DirectOutcome::Completed)
+                        }
+                    }
+                    Err(error) => {
+                        output.emit_error(&format!("{error:#}"), false);
+                        StrategyTermination::from_direct(owner, DirectOutcome::Failed(&error))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
+        wcore_cli::goal_cmd::print_canonical_transition(&driver, &goal_id, "direct", &cursor);
+        engine.run_stop_hooks().await;
+        for mgr in &result.mcp_managers {
+            mgr.shutdown().await;
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let exit_code = if prompt.is_empty() {
         repl_loop(&mut engine, &terminal, &output, &slash_dispatcher).await?;
         ExitCode::SUCCESS
@@ -1807,37 +2401,44 @@ fn resolve_resume(
 /// when a config already exists (the `wayland-core setup` re-entry
 /// point). When `false` the first-run gate decides: Onboarding on a true
 /// first run, Workspace otherwise.
-/// Map the persisted config approval posture to the engine's runtime
-/// `SessionMode`. Keeps `wcore-config` decoupled from `wcore-protocol`.
-fn approval_mode_to_session(
-    mode: wcore_config::config::ApprovalMode,
-) -> wcore_protocol::commands::SessionMode {
+fn approval_policy_to_session(policy: ApprovalPolicy) -> wcore_protocol::commands::SessionMode {
     use wcore_protocol::commands::SessionMode;
-    match mode {
-        wcore_config::config::ApprovalMode::Default => SessionMode::Default,
-        wcore_config::config::ApprovalMode::AutoEdit => SessionMode::AutoEdit,
-        wcore_config::config::ApprovalMode::Force => SessionMode::Force,
+    match policy {
+        ApprovalPolicy::Prompt => SessionMode::Default,
+        ApprovalPolicy::AutoEdit => SessionMode::AutoEdit,
+        ApprovalPolicy::Bypass => SessionMode::Force,
     }
 }
 
-/// Boot-time approval posture from local trust sources: the config's
-/// `[default] approval_mode`, with `--force` (or `WAYLAND_ALLOW_WIRE_FORCE`,
-/// surfaced by the caller as `force`) overriding to `Force`. This is the
-/// LOCAL operator's posture — distinct from a wire-originated mode change,
-/// which goes through the GHSA-8r7g-gated `set_mode_from_wire`.
-///
-/// wayland#241: both the TUI (`run_tui_mode`) and json-stream
-/// (`run_json_stream_mode`) paths seed through this one helper so they can't
-/// drift — the json-stream path previously skipped the config seed entirely,
-/// silently ignoring a user's `approval_mode = "auto-edit"` / `"force"`.
-fn initial_session_mode(
-    config_mode: wcore_config::config::ApprovalMode,
-    force: bool,
-) -> wcore_protocol::commands::SessionMode {
-    if force {
-        wcore_protocol::commands::SessionMode::Force
-    } else {
-        approval_mode_to_session(config_mode)
+enum WireModeChange {
+    Rejected,
+    Unchanged,
+    Changed(ExecutionPolicySnapshot),
+}
+
+/// Apply one untrusted wire mode request through the live authority gate and
+/// advance the output-only producer sequence only when effective approvals
+/// actually changed.
+fn apply_wire_mode_change(
+    approval_manager: &ToolApprovalManager,
+    sequence: &mut ExecutionPolicySequence,
+    mode: wcore_protocol::commands::SessionMode,
+    effective_at_unix_ms: u64,
+) -> Result<WireModeChange, ExecutionPolicySequenceError> {
+    if !approval_manager.set_mode_from_wire(mode) {
+        return Ok(WireModeChange::Rejected);
+    }
+    let policy = sequence
+        .current()
+        .policy
+        .with_runtime_approvals(approval_manager.current_approval_policy());
+    match sequence.advance_if_changed(
+        policy,
+        ExecutionPolicyChangeReason::ModeChange,
+        effective_at_unix_ms,
+    )? {
+        Some(snapshot) => Ok(WireModeChange::Changed(snapshot.clone())),
+        None => Ok(WireModeChange::Unchanged),
     }
 }
 
@@ -1850,13 +2451,15 @@ fn wire_force_opt_in_env() -> bool {
         .unwrap_or(false)
 }
 
+#[allow(clippy::too_many_arguments)] // One explicit argument per host-controlled launch input.
 async fn run_tui_mode(
     config: Config,
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
+    active_assistant: Option<String>,
     force_onboarding: bool,
-    force: bool,
+    execution: LocalExecutionSelection,
     web_search: bool,
 ) -> anyhow::Result<()> {
     use wcore_cli::tui;
@@ -1886,10 +2489,12 @@ async fn run_tui_mode(
     }
 
     // The status-bar snapshot is taken from the resolved config before
-    // it is moved into the bootstrap. `--force` is reflected on the view
-    // so the status bar can paint the `· FORCE` badge.
+    // it is moved into the bootstrap. Keep approval-bypass launch authority
+    // for rebinds; the status bar renders active posture from `App::mode`.
+    let approval_policy = execution.approvals();
+    let approval_bypass = matches!(approval_policy, ApprovalPolicy::Bypass);
     let mut config_view = tui::config_view_from(&config);
-    config_view.force = force;
+    config_view.force = approval_bypass;
     let context_view = tui::context_view_from(&config);
     let provider_name = config.provider_label.clone();
 
@@ -1919,10 +2524,13 @@ async fn run_tui_mode(
     let session_store_dir: std::path::PathBuf = config.session.directory.clone().into();
     let session_store_max = config.session.max_sessions;
 
-    // First-run gate: a true first run has no global config file yet, so
-    // the TUI opens on the Onboarding surface. A returning user lands on
-    // the Workspace.
-    let first_run = !config::global_config_path().exists();
+    // First-run gate — see `tui::is_first_run` for why the config file alone is
+    // not enough to answer this (UAT-TUI-UNIX F1).
+    let first_run = tui::is_first_run(
+        config::global_config_path().exists(),
+        &config.api_key,
+        &config.model,
+    );
 
     // The single engine→TUI event channel. Three producers forward onto
     // it — the `ChannelSink` (streaming events), the `ChannelEmitter`
@@ -1935,17 +2543,20 @@ async fn run_tui_mode(
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
-    approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
+    approval_manager.set_allow_wire_force(approval_bypass || wire_force_opt_in_env());
     // Seed the initial approval posture from config (`[default] approval_mode`,
     // editable via /config); `--force` overrides to Force. When Force, the
     // TUI's approval modal never opens (no `ApprovalRequired` event) and the
-    // status bar renders the FORCE badge so the mode is visible.
-    approval_manager.set_mode(initial_session_mode(config.approval_mode, force));
+    // status bar renders the live mode so later de-escalation is visible.
+    approval_manager.set_mode(approval_policy_to_session(approval_policy));
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
     // channel messages into agent turns for the lifetime of this session).
-    let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
+    let mut bootstrap = execution
+        .apply(AgentBootstrap::new(config, cwd, output.clone()))
+        .active_assistant(active_assistant.clone())
+        .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
 
@@ -1955,7 +2566,7 @@ async fn run_tui_mode(
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load(resume_id)?;
+        let session = session_mgr.load_for_run(resume_id)?;
         bootstrap = bootstrap.resume(session);
     }
 
@@ -1969,6 +2580,14 @@ async fn run_tui_mode(
     let mcp_count = bootstrap.config().mcp.servers.len();
     let (mut boot_terminal, boot_guard) = tui::enter()?;
     let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
+    let startup_capability_activations = result.capability_activations.clone();
+    let effective_execution_policy = result.effective_execution_policy.clone();
+    let execution_policy_sequence = if resume.is_some() {
+        ExecutionPolicySequence::resume(effective_execution_policy, audit_unix_time_millis()?)
+    } else {
+        ExecutionPolicySequence::launch(effective_execution_policy, audit_unix_time_millis()?)
+    };
+    let workspace_policy_receipt = result.workspace_policy_receipt.clone();
     let mut engine = result.engine;
 
     // FluxRouter web_search grounding (contract §5): honour `--search`. A no-op
@@ -2024,7 +2643,6 @@ async fn run_tui_mode(
     // The engine REQUIRES a protocol writer once an approval manager is
     // set (the per-turn `ApprovalChannel` emits `ToolRequest` /
     // `ApprovalRequired` through it) — so both must be wired together.
-    engine.set_approval_manager(approval_manager.clone());
     // Wave 6 #24 — use the dedupe variant so a self-gating engine site (the
     // live-workflow gate emits `ToolRequest` + its own `ApprovalRequired`)
     // yields exactly ONE gate frame, not the synthesized + explicit pair (which
@@ -2034,6 +2652,15 @@ async fn run_tui_mode(
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         Some(engine.approval_bridge().clone()),
     )));
+    for activation in startup_capability_activations {
+        let _ = tx.send(wcore_protocol::events::ProtocolEvent::CapabilityActivation { activation });
+    }
+    let _ = tx.send(wcore_protocol::events::ProtocolEvent::ExecutionPolicy {
+        snapshot: execution_policy_sequence.current().clone(),
+    });
+    let _ = tx.send(wcore_protocol::events::ProtocolEvent::WorkspacePolicy {
+        policy: workspace_policy_receipt,
+    });
 
     // Snapshot the loaded skills + MCP servers for the `/skills` and `/mcp`
     // listings. Taken here while `engine` and `result.mcp_managers` are still
@@ -2078,6 +2705,7 @@ async fn run_tui_mode(
     // The `TuiEngine` controller keeps the last `tx` clone so it can
     // synthesize the `StreamEnd` the engine never emits itself.
     let mut tui_engine = tui::TuiEngine::new(engine, approval_manager, tx);
+    tui_engine.set_active_assistant(active_assistant);
     tui_engine.set_inventory(tui::EngineInventory {
         skills: skills_snapshot,
         mcp_servers: mcp_snapshot,
@@ -2094,6 +2722,7 @@ async fn run_tui_mode(
         engine: tui_engine,
         events: rx,
         config: config_view,
+        initial_mode: approval_policy_to_session(approval_policy),
         context: context_view,
         first_run,
         force_onboarding,
@@ -2138,89 +2767,11 @@ async fn run_skills_audit(stale_after_days: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// W9.1 T4 (T11): promote a Staged or Pinned procedure to Active. Opens
-/// the project's `.wayland-core/memory/memory.db` rooted at CWD, looks
-/// up the procedure by id at `Tier::Project`, validates the transition
-/// against the state-machine, and writes the new status via
-/// `upsert_procedure` (same row, same id, same artifact — only `status`
-/// changes).
-///
-/// F-069: after the DB transition, also attempts to copy the on-disk auto-
-/// draft from `<config_dir>/wayland-core/skills/<name>/` (where
-/// `SkillDrafter` writes it) to `<config_dir>/wayland-core/skills/<name>/`
-/// (already there — the draft IS at the loader-visible path post F-038).
-/// For backwards-compat with old drafts written to WAYLAND_HOME, we also
-/// check `<WAYLAND_HOME>/skills/auto/<name>/SKILL.md` and copy it to the
-/// loader-visible path if the config-dir copy is missing.
+/// 23A-C1: governed promotion. Delegates to `wcore_cli::skill_govern`, which binds one
+/// reviewed artifact to one content digest, refuses revoked artifacts, and journals the
+/// outcome — the transaction whose absence is why this function used to be a `bail!`.
 async fn run_skills_promote(id: &str) -> anyhow::Result<()> {
-    transition_procedure(
-        id,
-        wcore_memory::v2_types::ProcedureStatus::Active,
-        "promote",
-    )
-    .await?;
-
-    // F-069: best-effort migration of old WAYLAND_HOME-format drafts into
-    // the loader-visible config-dir path. Runs after the DB transition so
-    // a DB failure does not trigger a misleading disk move.
-    try_migrate_draft_to_loader_path(id).await;
-    Ok(())
-}
-
-/// F-069: if a draft exists at the legacy `$WAYLAND_HOME/skills/auto/<name>/SKILL.md`
-/// location but not at `<config_dir>/wayland-core/skills/<name>/SKILL.md`,
-/// copy it to the loader-visible path. Best-effort — failure is logged, not
-/// returned.
-async fn try_migrate_draft_to_loader_path(_procedure_id: &str) {
-    // Derive candidate skill name from procedure id (heuristic: auto-<sig>).
-    // We check both patterns in case the operator passed a UUID vs. a name.
-    let Some(config_dir) = wcore_config::config::app_config_dir() else {
-        return;
-    };
-    let wayland_home = std::env::var("WAYLAND_HOME")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".wayland")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".wayland"));
-
-    let legacy_auto_dir = wayland_home.join("skills").join("auto");
-    if !legacy_auto_dir.is_dir() {
-        return;
-    }
-
-    // Walk legacy auto dir looking for a directory whose name contains the
-    // procedure_id suffix (or starts with "auto-").
-    let read_dir = match std::fs::read_dir(&legacy_auto_dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry in read_dir.flatten() {
-        let skill_name = entry.file_name().to_string_lossy().into_owned();
-        let src_skill_md = entry.path().join("SKILL.md");
-        if !src_skill_md.exists() {
-            continue;
-        }
-        let dst_skill_dir = config_dir.join("skills").join(&skill_name);
-        let dst_skill_md = dst_skill_dir.join("SKILL.md");
-        if dst_skill_md.exists() {
-            // Already at loader-visible path — nothing to migrate.
-            continue;
-        }
-        if let Err(e) = std::fs::create_dir_all(&dst_skill_dir)
-            .and_then(|_| std::fs::copy(&src_skill_md, &dst_skill_md).map(|_| ()))
-        {
-            tracing::warn!(
-                "F-069: failed to migrate draft {} to loader path: {}",
-                skill_name,
-                e
-            );
-        } else {
-            println!(
-                "info: migrated draft '{skill_name}' to loader-visible path at {}",
-                dst_skill_dir.display()
-            );
-        }
-    }
+    wcore_cli::skill_govern::run_promote(id).await
 }
 
 /// W9.1 T4 (T11): archive a Staged or Active procedure. The state-
@@ -2449,20 +3000,32 @@ fn print_skills_paths() {
 /// harness. Server iteration order is sorted by name so the event
 /// sequence is deterministic for fixture-based tests and golden
 /// streams.
-fn mcp_ready_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
+fn registered_mcp_tool_names(
+    registry: &wcore_tools::registry::ToolRegistry,
+    server_name: &str,
+) -> Vec<String> {
+    let mut names: Vec<String> = registry
+        .to_tool_defs()
+        .into_iter()
+        .filter(|tool| tool.server.as_deref() == Some(server_name))
+        .map(|tool| tool.name)
+        .collect();
+    names.sort();
+    names
+}
+
+fn mcp_ready_events_for(
+    mgr: &McpManager,
+    registry: &wcore_tools::registry::ToolRegistry,
+) -> Vec<ProtocolEvent> {
     let mut per_server: HashMap<String, Vec<String>> = HashMap::new();
-    // Seed the map with every connected server so tool-less servers
-    // still produce an empty-tools `McpReady`, matching the dynamic
-    // `AddMcpServer` path (which always emits one event per
-    // successfully-connected server regardless of tool count).
-    for name in mgr.server_names() {
-        per_server.entry(name).or_default();
-    }
-    for (server_name, tool) in mgr.all_tools() {
-        per_server
-            .entry(server_name.to_string())
-            .or_default()
-            .push(tool.name.clone());
+    // Include every connected server so tool-less servers still produce an
+    // empty-tools `McpReady`, matching the dynamic AddMcpServer path.
+    for server_name in mgr.server_names() {
+        per_server.insert(
+            server_name.clone(),
+            registered_mcp_tool_names(registry, &server_name),
+        );
     }
     let mut names: Vec<String> = per_server.keys().cloned().collect();
     names.sort();
@@ -2481,26 +3044,342 @@ fn mcp_ready_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
 /// server's tools never appeared (parity with the dynamic `AddMcpServer`
 /// path's failure emit). Pure and name-sorted for deterministic tests.
 fn mcp_failed_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
-    use wcore_mcp::manager::McpServerHealth;
     let mut entries: Vec<(&String, &McpServerHealth)> = mgr.health().iter().collect();
     entries.sort_by_key(|(name, _)| name.as_str());
     entries
         .into_iter()
         .filter_map(|(name, health)| {
-            let reason = match health {
-                McpServerHealth::Failed { reason } => reason.clone(),
-                McpServerHealth::TimedOut { after } => {
-                    format!("connect timed out after {}s", after.as_secs())
-                }
-                McpServerHealth::Skipped { reason } => reason.clone(),
-                McpServerHealth::Ready { .. } => return None,
-            };
+            let reason = mcp_server_failure_reason(health)?;
             Some(ProtocolEvent::McpFailed {
                 name: name.clone(),
                 reason,
             })
         })
         .collect()
+}
+
+fn mcp_server_failure_reason(health: &McpServerHealth) -> Option<String> {
+    match health {
+        McpServerHealth::Failed { reason } | McpServerHealth::Skipped { reason } => {
+            Some(reason.clone())
+        }
+        McpServerHealth::TimedOut {
+            after,
+            cleanup_error,
+        } => {
+            let cleanup = cleanup_error
+                .as_ref()
+                .map(|error| format!("; cleanup unverified: {error}"))
+                .unwrap_or_default();
+            Some(format!(
+                "connect timed out after {}s{cleanup}",
+                after.as_secs()
+            ))
+        }
+        McpServerHealth::Ready { .. } => None,
+    }
+}
+
+fn emit_runtime_diagnostics(
+    command: &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand,
+    state: &RuntimeDiagnosticsState,
+    lifecycle: &McpLifecycleCatalog,
+    boot_managers: &[Arc<McpManager>],
+    dynamic_managers: &[Arc<McpManager>],
+    registry: &wcore_tools::registry::ToolRegistry,
+    writer: &dyn ProtocolEmitter,
+) {
+    if let Some(event) = runtime_diagnostics_admission_rejection(command) {
+        let _ = writer.emit(&event);
+        return;
+    }
+    let managers: Vec<_> = boot_managers
+        .iter()
+        .chain(dynamic_managers)
+        .cloned()
+        .collect();
+    let snapshot = state.snapshot(lifecycle, &managers, registry);
+    let _ = writer.emit(&ProtocolEvent::RuntimeDiagnosticsSnapshot {
+        diagnostics_version: command.diagnostics_version,
+        request_id: command.request_id.clone(),
+        snapshot,
+    });
+}
+
+fn runtime_diagnostics_admission_rejection(
+    command: &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand,
+) -> Option<ProtocolEvent> {
+    let reason = if wcore_protocol::diagnostics::validate_runtime_diagnostics_version(
+        command.diagnostics_version,
+    )
+    .is_err()
+    {
+        Some(wcore_protocol::diagnostics::RuntimeDiagnosticsUnavailableReason::UnsupportedVersion)
+    } else if wcore_protocol::diagnostics::validate_runtime_diagnostics_request_id(
+        &command.request_id,
+    )
+    .is_err()
+    {
+        Some(wcore_protocol::diagnostics::RuntimeDiagnosticsUnavailableReason::InvalidRequest)
+    } else {
+        None
+    };
+    reason.map(|reason| ProtocolEvent::RuntimeDiagnosticsUnavailable {
+        diagnostics_version: command.diagnostics_version,
+        supported_version: wcore_protocol::diagnostics::RUNTIME_DIAGNOSTICS_VERSION,
+        request_id: command.request_id.clone(),
+        reason,
+    })
+}
+
+fn mcp_removal_receipt(
+    command: &RemoveMcpServerCommand,
+    outcome: McpRemovalOutcome,
+    removed_tools: Vec<String>,
+) -> ProtocolEvent {
+    ProtocolEvent::McpRemovalResult {
+        lifecycle_version: command.lifecycle_version,
+        request_id: bounded_mcp_receipt_field(&command.request_id, MAX_MCP_REQUEST_ID_LEN),
+        name: bounded_mcp_receipt_field(&command.name, MAX_MCP_SERVER_NAME_LEN),
+        outcome,
+        removed_tools,
+    }
+}
+
+fn bounded_mcp_receipt_field(value: &str, max_bytes: usize) -> String {
+    if !value.trim().is_empty() && value.len() <= max_bytes {
+        value.to_string()
+    } else {
+        "<invalid>".to_string()
+    }
+}
+
+fn mcp_removal_request_rejection(command: &RemoveMcpServerCommand) -> Option<McpRemovalOutcome> {
+    if command.lifecycle_version != MCP_LIFECYCLE_VERSION {
+        Some(McpRemovalOutcome::UnsupportedVersion)
+    } else if mcp_removal_request_id_invalid(command)
+        || command.name.trim().is_empty()
+        || command.name.len() > MAX_MCP_SERVER_NAME_LEN
+    {
+        Some(McpRemovalOutcome::InvalidRequest)
+    } else {
+        None
+    }
+}
+
+fn mcp_removal_request_id_invalid(command: &RemoveMcpServerCommand) -> bool {
+    command.request_id.trim().is_empty() || command.request_id.len() > MAX_MCP_REQUEST_ID_LEN
+}
+
+#[derive(Default)]
+struct McpRemovalLedger {
+    receipts: std::collections::HashMap<String, (RemoveMcpServerCommand, ProtocolEvent)>,
+}
+
+const MAX_MCP_REMOVAL_RECEIPTS: usize = 4096;
+const MAX_MCP_REQUEST_ID_LEN: usize = 256;
+const MAX_MCP_SERVER_NAME_LEN: usize = 256;
+const MAX_MCP_CONFIG_VALUE_LEN: usize = 8 * 1024;
+const MAX_MCP_CONFIG_ENTRIES: usize = 256;
+
+#[allow(clippy::too_many_arguments)]
+fn mcp_add_request_rejection(
+    name: &str,
+    transport: &str,
+    command: Option<&str>,
+    args: Option<&[String]>,
+    env: Option<&HashMap<String, String>>,
+    url: Option<&str>,
+    headers: Option<&HashMap<String, String>>,
+) -> Option<&'static str> {
+    if name.trim().is_empty() || name.len() > MAX_MCP_SERVER_NAME_LEN {
+        return Some("server name is empty or too long");
+    }
+    if transport.trim().is_empty() || transport.len() > 32 {
+        return Some("transport is empty or too long");
+    }
+    if command.is_some_and(|value| value.len() > MAX_MCP_CONFIG_VALUE_LEN)
+        || url.is_some_and(|value| value.len() > MAX_MCP_CONFIG_VALUE_LEN)
+    {
+        return Some("command or URL is too long");
+    }
+    if args.is_some_and(|values| {
+        values.len() > MAX_MCP_CONFIG_ENTRIES
+            || values
+                .iter()
+                .any(|value| value.len() > MAX_MCP_CONFIG_VALUE_LEN)
+    }) {
+        return Some("argument list exceeds the MCP request limit");
+    }
+    if [env, headers].into_iter().flatten().any(|values| {
+        values.len() > MAX_MCP_CONFIG_ENTRIES
+            || values.iter().any(|(key, value)| {
+                key.len() > MAX_MCP_SERVER_NAME_LEN || value.len() > MAX_MCP_CONFIG_VALUE_LEN
+            })
+    }) {
+        return Some("environment or header map exceeds the MCP request limit");
+    }
+    None
+}
+
+impl McpRemovalLedger {
+    fn is_full_for_new(&self, request_id: &str) -> bool {
+        !self.receipts.contains_key(request_id) && self.receipts.len() >= MAX_MCP_REMOVAL_RECEIPTS
+    }
+
+    fn replay_or_conflict(&self, command: &RemoveMcpServerCommand) -> Option<ProtocolEvent> {
+        let (bound_command, receipt) = self.receipts.get(&command.request_id)?;
+        if bound_command == command {
+            Some(receipt.clone())
+        } else {
+            Some(mcp_removal_receipt(
+                command,
+                McpRemovalOutcome::RequestIdConflict,
+                Vec::new(),
+            ))
+        }
+    }
+
+    fn record(&mut self, command: &RemoveMcpServerCommand, receipt: &ProtocolEvent) {
+        if !command.request_id.trim().is_empty()
+            && !command.name.trim().is_empty()
+            && command.request_id.len() <= MAX_MCP_REQUEST_ID_LEN
+            && command.name.len() <= MAX_MCP_SERVER_NAME_LEN
+        {
+            self.receipts
+                .entry(command.request_id.clone())
+                .or_insert_with(|| (command.clone(), receipt.clone()));
+        }
+    }
+}
+
+fn emit_mcp_removal_receipt(
+    command: &RemoveMcpServerCommand,
+    outcome: McpRemovalOutcome,
+    removed_tools: Vec<String>,
+    ledger: &mut McpRemovalLedger,
+    writer: &dyn ProtocolEmitter,
+) {
+    let receipt = mcp_removal_receipt(command, outcome, removed_tools);
+    ledger.record(command, &receipt);
+    let _ = writer.emit(&receipt);
+}
+
+fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome {
+    if cleanup_failures.is_empty() {
+        McpRemovalOutcome::Removed
+    } else {
+        McpRemovalOutcome::CleanupUnverified
+    }
+}
+
+/// Remove only a server introduced through the current process's host command.
+/// Config/plugin declarations and profile-scoped OAuth state are outside this
+/// authority and are never touched.
+async fn remove_runtime_mcp_server(
+    command: RemoveMcpServerCommand,
+    removal_ledger: &mut McpRemovalLedger,
+    runtime_diagnostics: &mut RuntimeDiagnosticsState,
+    lifecycle: &McpLifecycleCatalog,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    writer: &dyn ProtocolEmitter,
+) {
+    if mcp_removal_request_id_invalid(&command) {
+        let _ = writer.emit(&mcp_removal_receipt(
+            &command,
+            McpRemovalOutcome::InvalidRequest,
+            Vec::new(),
+        ));
+        return;
+    }
+    if let Some(receipt) = removal_ledger.replay_or_conflict(&command) {
+        let _ = writer.emit(&receipt);
+        return;
+    }
+    if removal_ledger.is_full_for_new(&command.request_id) {
+        let _ = writer.emit(&mcp_removal_receipt(
+            &command,
+            McpRemovalOutcome::CapacityExceeded,
+            Vec::new(),
+        ));
+        return;
+    }
+    if let Some(outcome) = mcp_removal_request_rejection(&command) {
+        emit_mcp_removal_receipt(&command, outcome, Vec::new(), removal_ledger, writer);
+        return;
+    }
+
+    let admission = if runtime_diagnostics.has_non_runtime_declaration(&command.name) {
+        Some(McpRemovalOutcome::NotRuntimeManaged)
+    } else if !runtime_diagnostics.has_runtime_declaration(&command.name) {
+        Some(McpRemovalOutcome::AlreadyAbsent)
+    } else {
+        None
+    };
+    if let Some(outcome) = admission {
+        emit_mcp_removal_receipt(&command, outcome, Vec::new(), removal_ledger, writer);
+        return;
+    }
+
+    let defer_cold = engine.defer_cold_config();
+    let Some(registry) = engine.registry_mut() else {
+        emit_mcp_removal_receipt(
+            &command,
+            McpRemovalOutcome::RegistryBusy,
+            Vec::new(),
+            removal_ledger,
+            writer,
+        );
+        return;
+    };
+
+    let _ = lifecycle.mark_stopping(&command.name);
+    let removed_tools = registry.remove_mcp_server(&command.name);
+    registry.refresh_tool_search_catalog(&defer_cold);
+
+    let matching: Vec<_> = dynamic_managers
+        .iter()
+        .filter(|manager| {
+            manager.hosts_server(&command.name) || manager.health().contains_key(&command.name)
+        })
+        .cloned()
+        .collect();
+    let mut cleanup_failures = Vec::new();
+    for manager in &matching {
+        if let Err(error) = manager.close_server(&command.name).await {
+            cleanup_failures.push(error.to_string());
+        }
+    }
+    let cleanup_outcome = mcp_removal_cleanup_outcome(&cleanup_failures);
+    if cleanup_outcome != McpRemovalOutcome::Removed {
+        let reason = format!(
+            "MCP transport cleanup could not be verified: {}",
+            cleanup_failures.join("; ")
+        );
+        let _ = lifecycle.mark_cleanup_unverified(&command.name, reason);
+        emit_mcp_removal_receipt(
+            &command,
+            cleanup_outcome,
+            removed_tools,
+            removal_ledger,
+            writer,
+        );
+        return;
+    }
+    dynamic_managers.retain(|manager| {
+        !(manager.hosts_server(&command.name) || manager.health().contains_key(&command.name))
+    });
+    runtime_diagnostics.remove_runtime_declaration(&command.name);
+    let _ = lifecycle.complete_stopping(&command.name);
+
+    emit_mcp_removal_receipt(
+        &command,
+        McpRemovalOutcome::Removed,
+        removed_tools,
+        removal_ledger,
+        writer,
+    );
 }
 
 /// wayland#551 — integrate a background-connected config-MCP manager into
@@ -2515,24 +3394,53 @@ fn mcp_failed_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
 /// turns); on failure, surface the error with bootstrap's inline-connect
 /// wording. Shared by the loop-top non-blocking poll and the select arm.
 fn note_deferred_mcp_connect(
-    outcome: Result<McpManager, wcore_mcp::transport::McpError>,
-    resolved: HashMap<String, McpServerConfig>,
+    result: DeferredMcpConnectResult,
+    runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
-) -> Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> {
+) -> Option<PendingDeferredMcp> {
+    let DeferredMcpConnectResult {
+        outcome,
+        resolved,
+        mut reservations,
+    } = result;
     match outcome {
         Ok(mgr) => {
+            if let Some(state) = runtime_diagnostics {
+                for (name, evidence) in mgr.executable_readiness() {
+                    state.record_executable_readiness(
+                        wcore_protocol::diagnostics::McpDeclarationOrigin::EffectiveConfig,
+                        name,
+                        *evidence,
+                    );
+                }
+            }
             let mgr = Arc::new(mgr);
-            if integrate_deferred_mcp(engine, mgr.clone(), &resolved, writer, dynamic_managers) {
+            if integrate_deferred_mcp(
+                engine,
+                mgr.clone(),
+                &resolved,
+                &mut reservations,
+                writer,
+                dynamic_managers,
+            ) {
                 None
             } else {
-                Some((mgr, resolved))
+                Some(PendingDeferredMcp {
+                    manager: mgr,
+                    resolved,
+                    reservations,
+                })
             }
         }
         Err(e) => {
-            output.emit_error(&format!("MCP initialization error: {e}"), false);
+            let reason = format!("MCP initialization error: {e}");
+            for (_, reservation) in reservations {
+                reservation.complete_failed(reason.clone());
+            }
+            output.emit_error(&reason, false);
             None
         }
     }
@@ -2545,15 +3453,37 @@ fn integrate_deferred_mcp(
     engine: &mut wcore_agent::engine::AgentEngine,
     mgr: Arc<McpManager>,
     resolved_servers: &HashMap<String, McpServerConfig>,
+    reservations: &mut HashMap<String, McpConnectionReservation>,
     writer: &ProtocolWriter,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
 ) -> bool {
     let builtin_names = engine.tool_names();
+    let defer_cold = engine.defer_cold_config();
     let Some(reg) = engine.registry_mut() else {
         return false;
     };
-    wcore_mcp::tool_proxy::register_mcp_tools(reg, &mgr, &builtin_names, resolved_servers);
-    for event in mcp_ready_events_for(&mgr) {
+    wcore_mcp::tool_proxy::register_mcp_tools(
+        reg,
+        &mgr,
+        &builtin_names,
+        resolved_servers,
+        &defer_cold,
+    );
+    reg.refresh_tool_search_catalog(&defer_cold);
+    for (name, reservation) in reservations.drain() {
+        match mgr.health().get(&name).and_then(mcp_server_failure_reason) {
+            Some(reason) => {
+                reservation.complete_failed(reason);
+            }
+            None if mgr.health().contains_key(&name) => {
+                reservation.complete_ready();
+            }
+            None => {
+                reservation.complete_failed("connect outcome missing from MCP health report");
+            }
+        }
+    }
+    for event in mcp_ready_events_for(&mgr, reg) {
         let _ = writer.emit(&event);
     }
     for event in mcp_failed_events_for(&mgr) {
@@ -2563,6 +3493,79 @@ fn integrate_deferred_mcp(
     true
 }
 
+struct DeferredMcpConnectResult {
+    outcome: Result<McpManager, wcore_mcp::transport::McpError>,
+    resolved: HashMap<String, McpServerConfig>,
+    reservations: HashMap<String, McpConnectionReservation>,
+}
+
+struct PendingDeferredMcp {
+    manager: Arc<McpManager>,
+    resolved: HashMap<String, McpServerConfig>,
+    reservations: HashMap<String, McpConnectionReservation>,
+}
+
+type DeferredMcpReceiver = tokio::sync::oneshot::Receiver<DeferredMcpConnectResult>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionCommandReadiness {
+    Immediate,
+    SettleDeferredMcp,
+}
+
+/// Classify the between-turn readiness boundary for a protocol command.
+/// Setup and control commands remain immediate; only a provider-bound Message
+/// must wait for the already-running configured-MCP handshake.
+fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadiness {
+    if matches!(command, ProtocolCommand::Message { .. }) {
+        SessionCommandReadiness::SettleDeferredMcp
+    } else {
+        SessionCommandReadiness::Immediate
+    }
+}
+
+/// Settle the configured-MCP connect task at the actual provider-turn
+/// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
+/// before their first `Message`; those commands must not let the message race
+/// ahead of the already-running MCP handshake.
+async fn settle_deferred_mcp_before_message(
+    deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
+    pending_deferred_mcp: &mut Option<PendingDeferredMcp>,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &ProtocolWriter,
+    output: &Arc<dyn OutputSink>,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
+) -> bool {
+    if let Some(rx) = deferred_mcp_rx.take()
+        && let Ok(result) = rx.await
+    {
+        *pending_deferred_mcp = note_deferred_mcp_connect(
+            result,
+            runtime_diagnostics,
+            engine,
+            writer,
+            output,
+            dynamic_managers,
+        );
+    }
+
+    if let Some(mut pending) = pending_deferred_mcp.take()
+        && !integrate_deferred_mcp(
+            engine,
+            pending.manager.clone(),
+            &pending.resolved,
+            &mut pending.reservations,
+            writer,
+            dynamic_managers,
+        )
+    {
+        *pending_deferred_mcp = Some(pending);
+    }
+
+    pending_deferred_mcp.is_none()
+}
+
 fn to_mcp_server_config(
     transport: &str,
     command: Option<String>,
@@ -2570,6 +3573,7 @@ fn to_mcp_server_config(
     env: Option<HashMap<String, String>>,
     url: Option<String>,
     headers: Option<HashMap<String, String>>,
+    allow_local: bool,
 ) -> Result<McpServerConfig, String> {
     let transport_type = match transport {
         "stdio" => TransportType::Stdio,
@@ -2585,9 +3589,32 @@ fn to_mcp_server_config(
         url,
         headers,
         deferred: Some(false),
-        allow_local: false,
+        allow_local,
         only_for_assistant: None,
     })
+}
+
+fn scope_host_runtime_mcp(
+    config: McpServerConfig,
+    active_assistant: Option<&str>,
+) -> Result<McpServerConfig, &'static str> {
+    let active_assistant = active_assistant
+        .filter(|assistant| !assistant.trim().is_empty())
+        .ok_or("active assistant identity is required for a runtime MCP declaration")?;
+    Ok(config.scoped_to_assistant(Some(active_assistant)))
+}
+
+fn resolve_live_mcp_credential_references(config: &mut McpServerConfig) -> Result<(), String> {
+    if !wcore_config::mcp_cred_refs::server_has_credential_references(config) {
+        return Ok(());
+    }
+    let resolved = Config::resolve(&CliArgs::default())
+        .map_err(|error| format!("credentials config unavailable: {error}"))?;
+    let store = resolved
+        .open_credentials_store()
+        .map_err(|error| format!("credentials store unavailable: {error}"))?;
+    wcore_config::mcp_cred_refs::resolve_server_headers(config, &*store)
+        .map_err(|error| error.to_string())
 }
 
 /// Pending config fields: (model, thinking, thinking_budget, effort)
@@ -2605,7 +3632,7 @@ type PendingConfig = (
 ///
 /// The engine's orchestration approval path
 /// (`execute_tool_calls_with_approval`) emits a `ToolRequest` ONLY when a tool
-/// actually needs human approval — auto-approved categories and allow-listed
+/// actually needs human approval — auto-approved tools/grants and allow-listed
 /// read-only tools skip the request entirely, and under a Force posture no
 /// `ToolRequest` is emitted at all. So a `ToolRequest` reaching this writer
 /// unambiguously means "the engine is parked on
@@ -2626,10 +3653,10 @@ type PendingConfig = (
 /// recorded so the engine's own subsequent `ApprovalRequired` for the same
 /// call_id is suppressed, leaving exactly one gate frame per call.
 struct GatingProtocolWriter {
-    inner: Arc<ProtocolWriter>,
+    inner: Arc<dyn ProtocolEmitter>,
     /// The live approval posture. The gate frame is synthesized ONLY when the
     /// tool will actually be parked (`!is_auto_approved`); under Force (or for
-    /// an auto-approved category) the engine auto-runs the tool, so emitting an
+    /// an auto-approved tool/grant) the engine auto-runs the tool, so emitting an
     /// `ApprovalRequired` would be a false gate the host would wait on forever.
     approval: Arc<ToolApprovalManager>,
     /// call_ids for which this writer already synthesized an
@@ -2644,7 +3671,7 @@ struct GatingProtocolWriter {
 
 impl GatingProtocolWriter {
     fn new(
-        inner: Arc<ProtocolWriter>,
+        inner: Arc<dyn ProtocolEmitter>,
         approval: Arc<ToolApprovalManager>,
         approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
     ) -> Self {
@@ -2687,9 +3714,13 @@ impl ProtocolEmitter for GatingProtocolWriter {
                 wcore_protocol::events::ToolCategory::Info => "info",
             };
             // Only synthesize the gate when the tool will actually be parked.
-            // Under Force (or an auto-approved category) the engine auto-runs
+            // Under Force (or an auto-approved tool/grant) the engine auto-runs
             // the tool, so a gate frame here would be a false gate.
-            if !self.approval.is_auto_approved(reason) {
+            if !self.approval.is_auto_approved_tool_cmd(
+                reason,
+                Some(&tool.name),
+                tool.args.get("command").and_then(|value| value.as_str()),
+            ) {
                 if let Ok(mut seen) = self.synthesized.lock() {
                     seen.insert(call_id.clone());
                 }
@@ -2723,15 +3754,697 @@ impl ProtocolEmitter for GatingProtocolWriter {
     }
 }
 
+fn emit_workspace_capability_grant(
+    launch_authorized: bool,
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    executable: &str,
+    writer: &ProtocolWriter,
+) {
+    if !launch_authorized {
+        let _ = writer.emit(&ProtocolEvent::Info {
+            msg_id: String::new(),
+            message: "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
+        });
+        return;
+    }
+    match policy.grant_session_capability(executable) {
+        Ok(capability) => {
+            receipt.readable_roots = policy
+                .readable_roots()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            receipt.capabilities = policy.developer_capabilities();
+            let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
+                policy: receipt.clone(),
+            });
+            let _ = writer.emit(&ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!(
+                    "workspace capability granted for this session: {} (read-only; sandbox remains active)",
+                    capability.executable
+                ),
+            });
+        }
+        Err(error) => {
+            let _ = writer.emit(&ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!("workspace capability grant refused: {error}"),
+            });
+        }
+    }
+}
+
+const RECOVERY_PROTOCOL_VERSION: u16 = 1;
+
+fn emit_recovery_unavailable(
+    writer: &dyn ProtocolEmitter,
+    request_id: String,
+    session_id: String,
+    reason: RecoveryUnavailableReason,
+) {
+    let _ = writer.emit(&ProtocolEvent::SessionRecoveryUnavailable {
+        recovery_version: RECOVERY_PROTOCOL_VERSION,
+        request_id,
+        session_id,
+        reason,
+    });
+}
+
+fn handle_session_resync(
+    engine: &wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    recovery_version: u16,
+    request_id: String,
+    session_id: String,
+    after: Option<wcore_protocol::events::RecoveryCursor>,
+) {
+    if recovery_version != RECOVERY_PROTOCOL_VERSION {
+        emit_recovery_unavailable(
+            writer,
+            request_id,
+            session_id,
+            RecoveryUnavailableReason::UnsupportedVersion,
+        );
+        return;
+    }
+    if engine.current_session_id().as_deref() != Some(session_id.as_str()) {
+        emit_recovery_unavailable(
+            writer,
+            request_id,
+            session_id,
+            RecoveryUnavailableReason::SessionNotFound,
+        );
+        return;
+    }
+    let (plan, replay) = match after.as_ref() {
+        Some(cursor) => {
+            let plan = match engine.recovery_plan_at(cursor) {
+                Ok(plan) => plan,
+                Err(reason) => {
+                    emit_recovery_unavailable(writer, request_id, session_id, reason);
+                    return;
+                }
+            };
+            let items = match engine.recovery_replay_after(cursor) {
+                Ok(items) => items,
+                Err(reason) => {
+                    emit_recovery_unavailable(writer, request_id, session_id, reason);
+                    return;
+                }
+            };
+            (plan, Some(items))
+        }
+        None => match engine.recovery_plan() {
+            Ok(plan) => (plan, None),
+            Err(_) => {
+                emit_recovery_unavailable(
+                    writer,
+                    request_id,
+                    session_id,
+                    RecoveryUnavailableReason::JournalCorrupt,
+                );
+                return;
+            }
+        },
+    };
+    let (lifecycle, pending_turn) = plan.protocol_projection();
+    let cursor = plan.cursor();
+    let _ = writer.emit(&ProtocolEvent::SessionRecoverySnapshot {
+        recovery_version: RECOVERY_PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        session_id: session_id.clone(),
+        cursor: cursor.clone(),
+        state_digest: plan.state_digest,
+        lifecycle,
+        pending_turn,
+        budget: plan.budget,
+    });
+    if let Some(items) = replay {
+        let through = items
+            .last()
+            .map(|item| item.cursor.clone())
+            .or_else(|| after.clone())
+            .unwrap_or_else(|| cursor.clone());
+        let _ = writer.emit(&ProtocolEvent::SessionRecoveryReplay {
+            recovery_version: RECOVERY_PROTOCOL_VERSION,
+            request_id,
+            session_id,
+            from: after,
+            through,
+            items,
+        });
+    }
+}
+
+enum ActiveRecoveryOutcome<T> {
+    Finished(T),
+    Stopped(T),
+}
+
+/// Drive a recovered turn while preserving the same host approval boundary as
+/// an ordinary active turn. Recovery can encounter more than one gated tool;
+/// parking only on the engine future would strand later approval commands in
+/// `cmd_rx` and deadlock the turn.
+async fn drive_active_recovery<F, T, C>(
+    future: F,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    approval_manager: &ToolApprovalManager,
+    writer: &dyn ProtocolEmitter,
+    cancel_active_turn: &C,
+) -> ActiveRecoveryOutcome<T>
+where
+    F: Future<Output = T>,
+    C: Fn(),
+{
+    tokio::pin!(future);
+    let mut commands_open = true;
+    let mut stop_requested = false;
+    loop {
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv(), if commands_open => match command {
+                Some(ProtocolCommand::ToolApprove { call_id, scope, answer }) if !stop_requested => {
+                    approval_manager.approve(&call_id, scope, answer);
+                }
+                Some(ProtocolCommand::ToolDeny { call_id, reason }) if !stop_requested => {
+                    approval_manager.resolve(
+                        &call_id,
+                        ToolApprovalResult::Denied { reason },
+                    );
+                }
+                Some(ProtocolCommand::Stop) if !stop_requested => {
+                    cancel_active_turn();
+                    stop_requested = true;
+                }
+                Some(ProtocolCommand::Ping) => {
+                    let _ = writer.emit(&ProtocolEvent::Pong);
+                }
+                Some(ProtocolCommand::SessionResync(command)) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        command.request_id,
+                        command.session_id,
+                        RecoveryUnavailableReason::SnapshotUnavailable,
+                    );
+                }
+                Some(ProtocolCommand::ResumeTurn(command)) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        command.request_id,
+                        command.session_id,
+                        RecoveryUnavailableReason::UnknownCriticalState,
+                    );
+                }
+                Some(ProtocolCommand::ResolveInterruptedApproval(command)) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        command.request_id,
+                        command.session_id,
+                        RecoveryUnavailableReason::UnknownCriticalState,
+                    );
+                }
+                Some(ProtocolCommand::ResolveUnknownToolEffect(resolution)) => {
+                    let _ = writer.emit(&ProtocolEvent::Error {
+                        msg_id: Some(resolution.tool_execution_id),
+                        error: wcore_protocol::events::ErrorInfo {
+                            code: "recovery_busy".to_string(),
+                            message: "resolve_unknown_tool_effect refused while another recovery action is active; resync and retry".to_string(),
+                            retryable: true,
+                        },
+                    });
+                }
+                Some(_) => {
+                    eprintln!("[protocol] Ignoring uncorrelated command during active recovery");
+                }
+                None => commands_open = false,
+            },
+            result = &mut future => {
+                return if stop_requested {
+                    ActiveRecoveryOutcome::Stopped(result)
+                } else {
+                    ActiveRecoveryOutcome::Finished(result)
+                };
+            }
+        }
+    }
+}
+
+fn emit_recovered_terminal(output: &dyn OutputSink, request_id: &str, finish_reason: FinishReason) {
+    output.emit_stream_end(request_id, 0, 0, 0, 0, 0, finish_reason);
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit wire fields remain visible at the authority gate.
+async fn handle_resume_turn<C>(
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    output: &dyn OutputSink,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    approval_manager: &ToolApprovalManager,
+    cancel_active_turn: &C,
+    recovery_version: u16,
+    request_id: String,
+    session_id: String,
+    turn_id: String,
+    cursor: wcore_protocol::events::RecoveryCursor,
+    action: ResumeTurnAction,
+) where
+    C: Fn(),
+{
+    if recovery_version != RECOVERY_PROTOCOL_VERSION {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::UnsupportedVersion,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    if engine.current_session_id().as_deref() != Some(session_id.as_str()) {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::SessionNotFound,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    let plan = match engine.recovery_plan() {
+        Ok(plan) => plan,
+        Err(_) => {
+            emit_recovery_unavailable(
+                writer,
+                request_id.clone(),
+                session_id,
+                RecoveryUnavailableReason::JournalCorrupt,
+            );
+            emit_recovered_terminal(output, &request_id, FinishReason::Error);
+            return;
+        }
+    };
+    if plan.cursor() != cursor {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::CursorDigestMismatch,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+
+    let result =
+        match action {
+            ResumeTurnAction::Continue => {
+                let future = engine.resume_interrupted_turn(&turn_id, &cursor, &request_id);
+                match drive_active_recovery(
+                    future,
+                    cmd_rx,
+                    approval_manager,
+                    writer,
+                    cancel_active_turn,
+                )
+                .await
+                {
+                    ActiveRecoveryOutcome::Finished(result) => result.map(|result| {
+                        emit_recovered_stream_end(output, &request_id, &result);
+                        RecoveryLifecycle::Completed
+                    }),
+                    ActiveRecoveryOutcome::Stopped(result) => {
+                        let terminal_if_ready = match result {
+                            Ok(_) => RecoveryLifecycle::Completed,
+                            Err(wcore_agent::engine::AgentError::UserAborted) => {
+                                RecoveryLifecycle::Cancelled
+                            }
+                            Err(error) => {
+                                output.emit_error(&format!("resume_turn refused: {error}"), false);
+                                emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                                emit_recovery_unavailable(
+                                    writer,
+                                    request_id,
+                                    session_id,
+                                    RecoveryUnavailableReason::UnknownCriticalState,
+                                );
+                                return;
+                            }
+                        };
+                        emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                        let next = match engine.recovery_plan() {
+                            Ok(plan) => plan,
+                            Err(_) => {
+                                emit_recovery_unavailable(
+                                    writer,
+                                    request_id,
+                                    session_id,
+                                    RecoveryUnavailableReason::JournalCorrupt,
+                                );
+                                return;
+                            }
+                        };
+                        let (lifecycle, reconcile_reason) =
+                            interrupted_action_lifecycle(&next, terminal_if_ready);
+                        let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                            recovery_version: RECOVERY_PROTOCOL_VERSION,
+                            session_id,
+                            turn_id,
+                            cursor: next.cursor(),
+                            lifecycle,
+                            reconcile_reason,
+                        });
+                        return;
+                    }
+                }
+            }
+            ResumeTurnAction::Reconcile => engine
+                .reconcile_interrupted_turn(&turn_id, &cursor)
+                .await
+                .map(|_| {
+                    emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                    RecoveryLifecycle::Failed
+                }),
+            ResumeTurnAction::Cancel => engine
+                .cancel_interrupted_turn(&turn_id, &cursor)
+                .await
+                .map(|_| {
+                    emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                    RecoveryLifecycle::Cancelled
+                }),
+        };
+    match result {
+        Ok(lifecycle) => {
+            let next = match engine.recovery_plan() {
+                Ok(plan) => plan,
+                Err(_) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        request_id,
+                        session_id,
+                        RecoveryUnavailableReason::JournalCorrupt,
+                    );
+                    return;
+                }
+            };
+            let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id,
+                turn_id,
+                cursor: next.cursor(),
+                lifecycle,
+                reconcile_reason: None,
+            });
+        }
+        Err(error) => {
+            output.emit_error(&format!("resume_turn refused: {error}"), false);
+            let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                FinishReason::Stop
+            } else {
+                FinishReason::Error
+            };
+            emit_recovered_terminal(output, &request_id, finish_reason);
+            if matches!(action, ResumeTurnAction::Continue)
+                && let Ok(next) = engine.recovery_plan()
+                && next.cursor() != cursor
+                && matches!(
+                    next.disposition,
+                    wcore_agent::recovery::RecoveryDisposition::Ready
+                )
+            {
+                let lifecycle = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                    RecoveryLifecycle::Cancelled
+                } else {
+                    RecoveryLifecycle::Failed
+                };
+                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                    recovery_version: RECOVERY_PROTOCOL_VERSION,
+                    session_id,
+                    turn_id,
+                    cursor: next.cursor(),
+                    lifecycle,
+                    reconcile_reason: None,
+                });
+                return;
+            }
+            emit_recovery_unavailable(
+                writer,
+                request_id,
+                session_id,
+                RecoveryUnavailableReason::UnknownCriticalState,
+            );
+        }
+    }
+}
+
+fn emit_recovered_stream_end(
+    output: &dyn OutputSink,
+    request_id: &str,
+    result: &wcore_agent::engine::AgentResult,
+) {
+    output.emit_stream_end_full(
+        request_id,
+        result.turns,
+        result.usage.input_tokens,
+        result.usage.output_tokens,
+        result.usage.cache_creation_tokens,
+        result.usage.cache_read_tokens,
+        result.finish_reason,
+        result.active_window_percent,
+        result.agent_run_id.as_deref(),
+        Some(&result.usage_delta),
+    );
+}
+
+fn interrupted_action_lifecycle(
+    plan: &wcore_agent::recovery::RecoveryPlan,
+    terminal_if_ready: RecoveryLifecycle,
+) -> (RecoveryLifecycle, Option<RecoveryReconcileReason>) {
+    let (durable_lifecycle, pending_turn) = plan.protocol_projection();
+    if matches!(
+        plan.disposition,
+        wcore_agent::recovery::RecoveryDisposition::Ready
+    ) {
+        (terminal_if_ready, None)
+    } else {
+        (
+            durable_lifecycle,
+            pending_turn.and_then(|turn| turn.reconcile_reason),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_recovered_approval<C>(
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    output: &dyn OutputSink,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    approval_manager: &ToolApprovalManager,
+    cancel_active_turn: &C,
+    recovery_version: u16,
+    request_id: String,
+    session_id: String,
+    turn_id: String,
+    cursor: wcore_protocol::events::RecoveryCursor,
+    approval_id: String,
+    decision: wcore_protocol::commands::RecoveredApprovalDecision,
+    answer: Option<String>,
+) where
+    C: Fn(),
+{
+    if recovery_version != wcore_protocol::commands::RECOVERED_APPROVAL_VERSION {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::UnsupportedVersion,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    if engine.current_session_id().as_deref() != Some(session_id.as_str()) {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::SessionNotFound,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    let future = engine.resolve_interrupted_approval(
+        &turn_id,
+        &cursor,
+        &approval_id,
+        decision,
+        answer.as_deref(),
+        &request_id,
+    );
+    let result =
+        match drive_active_recovery(future, cmd_rx, approval_manager, writer, cancel_active_turn)
+            .await
+        {
+            ActiveRecoveryOutcome::Finished(result) => result,
+            ActiveRecoveryOutcome::Stopped(result) => {
+                let terminal_if_ready = match result {
+                    Ok(_) => RecoveryLifecycle::Completed,
+                    Err(wcore_agent::engine::AgentError::UserAborted) => {
+                        RecoveryLifecycle::Cancelled
+                    }
+                    Err(error) => {
+                        output.emit_error(
+                            &format!("resolve_interrupted_approval refused: {error}"),
+                            false,
+                        );
+                        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                        emit_recovery_unavailable(
+                            writer,
+                            request_id,
+                            session_id,
+                            RecoveryUnavailableReason::UnknownCriticalState,
+                        );
+                        return;
+                    }
+                };
+                emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                let next = match engine.recovery_plan() {
+                    Ok(plan) => plan,
+                    Err(_) => {
+                        emit_recovery_unavailable(
+                            writer,
+                            request_id,
+                            session_id,
+                            RecoveryUnavailableReason::JournalCorrupt,
+                        );
+                        return;
+                    }
+                };
+                let (lifecycle, reconcile_reason) =
+                    interrupted_action_lifecycle(&next, terminal_if_ready);
+                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                    recovery_version: RECOVERY_PROTOCOL_VERSION,
+                    session_id,
+                    turn_id,
+                    cursor: next.cursor(),
+                    lifecycle,
+                    reconcile_reason,
+                });
+                return;
+            }
+        };
+    match result {
+        Ok(result) => {
+            emit_recovered_stream_end(output, &request_id, &result);
+            let next = match engine.recovery_plan() {
+                Ok(plan) => plan,
+                Err(_) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        request_id,
+                        session_id,
+                        RecoveryUnavailableReason::JournalCorrupt,
+                    );
+                    return;
+                }
+            };
+            let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id,
+                turn_id,
+                cursor: next.cursor(),
+                lifecycle: RecoveryLifecycle::Completed,
+                reconcile_reason: None,
+            });
+        }
+        Err(error) => {
+            if matches!(
+                decision,
+                wcore_protocol::commands::RecoveredApprovalDecision::Deny
+            ) && matches!(error, wcore_agent::engine::AgentError::UserAborted)
+                && let Ok(next) = engine.recovery_plan()
+                && next.cursor() != cursor
+                && matches!(
+                    next.disposition,
+                    wcore_agent::recovery::RecoveryDisposition::Ready
+                )
+            {
+                emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                    recovery_version: RECOVERY_PROTOCOL_VERSION,
+                    session_id,
+                    turn_id,
+                    cursor: next.cursor(),
+                    lifecycle: RecoveryLifecycle::Cancelled,
+                    reconcile_reason: None,
+                });
+                return;
+            }
+            output.emit_error(
+                &format!("resolve_interrupted_approval refused: {error}"),
+                false,
+            );
+            let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                FinishReason::Stop
+            } else {
+                FinishReason::Error
+            };
+            emit_recovered_terminal(output, &request_id, finish_reason);
+            emit_recovery_unavailable(
+                writer,
+                request_id,
+                session_id,
+                RecoveryUnavailableReason::UnknownCriticalState,
+            );
+        }
+    }
+}
+
+fn handle_operator_tool_effect_resolution(
+    engine: &wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    output: &dyn OutputSink,
+    command: ProtocolCommand,
+) {
+    let ProtocolCommand::ResolveUnknownToolEffect(_) = &command else {
+        output.emit_error(
+            "resolve_unknown_tool_effect refused: wrong command at dispatcher boundary",
+            false,
+        );
+        return;
+    };
+
+    let ProtocolCommand::ResolveUnknownToolEffect(resolution) = command else {
+        unreachable!("operator-resolution command was checked above");
+    };
+    if let Err(error) = engine.resolve_operator_tool_effect(&resolution) {
+        output.emit_error(
+            &format!("resolve_unknown_tool_effect refused: {error}"),
+            false,
+        );
+        return;
+    }
+
+    let _ = writer.emit(&ProtocolEvent::UnknownToolEffectResolved { resolution });
+}
+
+#[allow(clippy::too_many_arguments)] // One explicit boundary argument per host-controlled posture.
 async fn run_json_stream_mode(
     config: Config,
+    config_provenance: wcore_config::resolution_provenance::ConfigResolutionProvenance,
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
-    force: bool,
+    execution: LocalExecutionSelection,
     assistant: Option<String>,
+    allow_host_workspace_grants: bool,
+    allow_host_budget_grants: bool,
+    runtime_engine_mode: wcore_protocol::diagnostics::RuntimeEngineMode,
+    runtime_workspace_kind: wcore_protocol::diagnostics::RuntimeWorkspaceKind,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
+    let approval_policy = execution.approvals();
+    let approval_bypass = matches!(approval_policy, ApprovalPolicy::Bypass);
 
     // F-009: pre-compute cost_attribution from the config compat rows BEFORE
     // config is moved into AgentBootstrap. Bootstrap applies the same gate
@@ -2770,7 +4483,7 @@ async fn run_json_stream_mode(
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
-    approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
+    approval_manager.set_allow_wire_force(approval_bypass || wire_force_opt_in_env());
     // wayland#241: seed the initial approval posture from config
     // (`[default] approval_mode`) via the shared `initial_session_mode`
     // helper, exactly like `run_tui_mode`. The json-stream path previously
@@ -2778,10 +4491,17 @@ async fn run_json_stream_mode(
     // `"force"` was silently ignored for the desktop host — every mutating
     // tool then waited on an approval the host never sent. `--force` still
     // overrides to Force (F-002).
-    approval_manager.set_mode(initial_session_mode(config.approval_mode, force));
+    approval_manager.set_mode(approval_policy_to_session(approval_policy));
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
+    let mut runtime_diagnostics = RuntimeDiagnosticsState::from_launch(
+        &config,
+        &config_provenance,
+        assistant.as_deref(),
+        runtime_engine_mode,
+        runtime_workspace_kind,
+    );
 
     // wayland#551 — config-declared MCP connects must NOT gate the `ready`
     // frame: a slow/hung server eats up to the full 30s per-server connect
@@ -2796,23 +4516,35 @@ async fn run_json_stream_mode(
     // server marked `only_for_assistant` must not be background-connected for a
     // non-matching assistant. Fail-closed when `assistant` is None.
     let scoped_config_servers = config.mcp.servers_for_assistant(assistant.as_deref());
-    let deferred_mcp_servers = if scoped_config_servers.is_empty() {
-        None
+    let (deferred_mcp_servers, credential_skips) = if scoped_config_servers.is_empty() {
+        (None, Vec::new())
     } else {
-        Some(match config.open_credentials_store() {
-            Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
+        let resolution = match config.open_credentials_store() {
+            Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect_with_report(
                 &scoped_config_servers,
                 &*store,
             ),
-            Err(_) => scoped_config_servers,
-        })
+            Err(_) => wcore_config::mcp_cred_refs::without_credential_references_with_report(
+                &scoped_config_servers,
+            ),
+        };
+        (Some(resolution.connectable), resolution.skipped)
     };
+    for (name, _) in &credential_skips {
+        runtime_diagnostics.record_preconnect_failure(
+            wcore_protocol::diagnostics::McpDeclarationOrigin::EffectiveConfig,
+            name,
+            wcore_protocol::diagnostics::McpFailureCode::AuthenticationRequired,
+        );
+    }
 
     // Bootstrap engine with full feature initialization. Phase 1B-2 —
     // json-stream is a primary long-running host session (e.g. the Wayland
     // desktop app), so
     // opt into inbound channel dispatch.
-    let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
+    let mut bootstrap = execution
+        .apply(AgentBootstrap::new(config, cwd, output.clone()))
+        .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true)
         .active_assistant(assistant.clone())
@@ -2824,7 +4556,7 @@ async fn run_json_stream_mode(
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load(resume_id)?;
+        let session = session_mgr.load_for_run(resume_id)?;
         bootstrap = bootstrap.resume(session);
     }
 
@@ -2832,14 +4564,41 @@ async fn run_json_stream_mode(
         Ok(r) => r,
         Err(e) => {
             // #186: surface init failure to the json-stream host instead of a bare exit.
-            output.emit_error(&init_failure_message(&e, &provider_name), false);
+            // The claim keeps this specific message and stands the process-exit
+            // chokepoint down, so the host receives exactly one error frame.
+            if wcore_cli::startup_error::claim_startup_error_emission() {
+                output.emit_error(&init_failure_message(&e, &provider_name), false);
+            }
             return Err(e);
         }
     };
+    let startup_capability_activations = result.capability_activations.clone();
+    let mut execution_policy_sequence = if resume.is_some() {
+        ExecutionPolicySequence::resume(
+            result.effective_execution_policy.clone(),
+            audit_unix_time_millis()?,
+        )
+    } else {
+        ExecutionPolicySequence::launch(
+            result.effective_execution_policy.clone(),
+            audit_unix_time_millis()?,
+        )
+    };
+    let session_control = result.cancel_root.clone();
+    runtime_diagnostics.record_plugin_declarations(&result.plugin_mcp_declarations);
     let mut engine = result.engine;
+    let session_egress_policy = engine.egress_policy();
+    let workspace_policy = engine
+        .tools()
+        .workspace_policy()
+        .expect("bootstrap installs a workspace policy");
+    let mut workspace_policy_receipt = result.workspace_policy_receipt.clone();
     // wayland#551 — declared-but-still-connecting servers count as MCP
     // capability on the ready frame; their tools register shortly after.
-    let initial_has_mcp = result.has_mcp || deferred_mcp_servers.is_some();
+    let initial_has_mcp = result.has_mcp
+        || deferred_mcp_servers
+            .as_ref()
+            .is_some_and(|servers| !servers.is_empty());
     let initial_has_plugins = result.has_plugins;
     // W8c.3 H.2: snapshot the plugin-derived capability set so the
     // protocol sink advertises `browser_suite` / `computer_use` flags
@@ -2868,7 +4627,7 @@ async fn run_json_stream_mode(
         protocol_sink.set_user_model_backend(backend.backend_tag());
     }
     let sid = engine.current_session_id();
-    protocol_sink.emit_ready_with_plugins(
+    protocol_sink.emit_ready_with_plugins_and_policy(
         engine.compat(),
         initial_has_mcp,
         sid,
@@ -2876,7 +4635,27 @@ async fn run_json_stream_mode(
         initial_has_plugins,
         &initial_plugin_caps,
         engine.advertised_capabilities(),
+        Some(execution_policy_sequence.current().clone()),
     );
+    // Startup succeeded and the host has its `ready`. Everything after this
+    // belongs to the live session, whose errors the protocol sink reports, so
+    // the startup-refusal chokepoint stands down here.
+    wcore_cli::startup_error::mark_ready_emitted();
+    for (name, reason) in &credential_skips {
+        let _ = writer.emit(&ProtocolEvent::McpFailed {
+            name: name.clone(),
+            reason: reason.message().to_string(),
+        });
+    }
+    let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
+        snapshot: execution_policy_sequence.current().clone(),
+    });
+    let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
+        policy: workspace_policy_receipt.clone(),
+    });
+    for activation in startup_capability_activations {
+        output.emit_capability_activation(&activation);
+    }
 
     // W6 B.7: emit McpReady for each boot-time MCP server. Previously
     // only the dynamic `AddMcpServer` command path (below) emitted this
@@ -2888,8 +4667,21 @@ async fn run_json_stream_mode(
     // and showed up most visibly on Gemini because Gemini hosts rely on
     // the boot path more heavily.
     for mgr in &result.mcp_managers {
-        for event in mcp_ready_events_for(mgr) {
+        for event in mcp_ready_events_for(mgr, &engine.tools()) {
             let _ = writer.emit(&event);
+        }
+    }
+
+    let mcp_lifecycle = McpLifecycleCatalog::new();
+    for mgr in &result.mcp_managers {
+        for name in mgr.server_names() {
+            if !mcp_lifecycle.seed_ready(name.clone(), McpConfigIdentity::UNKNOWN) {
+                let _ = writer.emit(&ProtocolEvent::McpFailed {
+                    name,
+                    reason: "MCP lifecycle capacity exceeded; runtime management unavailable"
+                        .to_string(),
+                });
+            }
         }
     }
 
@@ -2897,19 +4689,38 @@ async fn run_json_stream_mode(
     // AFTER ready is on the wire. The command loop integrates the manager
     // into the live engine between turns (see the select below) and emits
     // McpReady / McpFailed per server, exactly like the dynamic
-    // `AddMcpServer` path. A turn that starts before the connects settle
-    // simply runs without the MCP tools — the old behavior was a chat that
-    // never opened at all.
-    let mut deferred_mcp_rx = deferred_mcp_servers.map(|resolved| {
+    // `AddMcpServer` path. The host can open immediately; the first real
+    // message queues behind this already-running handshake so its provider
+    // request cannot race ahead with an incomplete configured-tool set.
+    let mut deferred_mcp_rx = deferred_mcp_servers.and_then(|resolved| {
+        let mut reserved_configs = HashMap::new();
+        let mut reservations = HashMap::new();
+        for (name, config) in resolved {
+            let identity = McpConfigIdentity::for_server(&config);
+            if let McpReservationOutcome::Acquired(reservation) =
+                mcp_lifecycle.reserve(name.clone(), identity)
+            {
+                reserved_configs.insert(name.clone(), config);
+                reservations.insert(name, reservation);
+            }
+        }
+        if reserved_configs.is_empty() {
+            return None;
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let egress_policy = session_egress_policy.clone();
         tokio::spawn(async move {
-            let outcome = McpManager::connect_all(&resolved).await;
-            let _ = tx.send((outcome, resolved));
+            let outcome =
+                McpManager::connect_all_with_policy(&reserved_configs, egress_policy).await;
+            let _ = tx.send(DeferredMcpConnectResult {
+                outcome,
+                resolved: reserved_configs,
+                reservations,
+            });
         });
-        rx
+        Some(rx)
     });
 
-    engine.set_approval_manager(approval_manager.clone());
     // D012 (P0 security): install the gating writer as the engine's
     // tool-lifecycle emitter so a gated mutating tool emits a host-visible
     // `ApprovalRequired` frame before it runs (the engine's orchestration gate
@@ -2948,12 +4759,13 @@ async fn run_json_stream_mode(
 
     // --- Pre-message phase: accept AddMcpServer commands ---
     let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
+    let mut mcp_removal_ledger = McpRemovalLedger::default();
     let mut first_cmd: Option<ProtocolCommand> = None;
 
     // wayland#551 — a deferred-MCP manager whose integration found the
     // registry borrowed; retried at the next between-turns boundary.
-    let mut pending_deferred_mcp: Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> =
-        None;
+    let mut pending_deferred_mcp: Option<PendingDeferredMcp> = None;
+    let mut budget_grants = BudgetGrantLedger::default();
 
     loop {
         // wayland#551 — the pre-message phase can park in recv() forever on
@@ -2970,10 +4782,10 @@ async fn run_json_stream_mode(
             {
                 deferred_mcp_rx = None;
                 // Err = connect task dropped without sending (panic).
-                if let Ok((outcome, resolved)) = res {
+                if let Ok(result) = res {
                     pending_deferred_mcp = note_deferred_mcp_connect(
-                        outcome,
-                        resolved,
+                        result,
+                        Some(&mut runtime_diagnostics),
                         &mut engine,
                         &writer,
                         &output,
@@ -2984,6 +4796,17 @@ async fn run_json_stream_mode(
             }
         };
         match cmd {
+            ProtocolCommand::GetRuntimeDiagnostics(command) => {
+                emit_runtime_diagnostics(
+                    &command,
+                    &runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &result.mcp_managers,
+                    &dynamic_managers,
+                    &engine.tools(),
+                    writer.as_ref(),
+                );
+            }
             ProtocolCommand::AddMcpServer {
                 name,
                 transport,
@@ -2992,56 +4815,181 @@ async fn run_json_stream_mode(
                 env,
                 url,
                 headers,
+                allow_local,
             } => {
-                eprintln!(
-                    "[mcp] AddMcpServer received: name={name}, transport={transport}, command={command:?}"
-                );
-                // #135: idempotency — re-adding an already-connected server (boot
-                // set or a prior dynamic add) does not spawn a duplicate. Re-emit
-                // the existing tools so the host's view stays consistent, then skip
-                // the reconnect. NOTE: a re-add with changed config is ignored (the
-                // existing connection is kept) — remove then add to reconfigure.
-                if engine.mcp_server_connected(&name) {
-                    let existing: Vec<String> = engine
-                        .tools()
-                        .to_tool_defs()
-                        .iter()
-                        .filter(|t| t.server.as_deref() == Some(name.as_str()))
-                        .map(|t| t.name.clone())
-                        .collect();
-                    eprintln!(
-                        "[mcp] '{name}' already connected ({} tools); keeping existing \
-                         connection, ignoring re-add (remove then add to change config)",
-                        existing.len()
+                if let Some(reason) = mcp_add_request_rejection(
+                    &name,
+                    &transport,
+                    command.as_deref(),
+                    args.as_deref(),
+                    env.as_ref(),
+                    url.as_deref(),
+                    headers.as_ref(),
+                ) {
+                    output.emit_error(
+                        &format!("AddMcpServer rejected: invalid request ({reason})"),
+                        false,
                     );
-                    let _ = writer.emit(&ProtocolEvent::McpReady {
-                        name,
-                        tools: existing,
+                    let safe_name = if name.len() <= MAX_MCP_SERVER_NAME_LEN {
+                        name
+                    } else {
+                        "<invalid>".to_string()
+                    };
+                    let _ = writer.emit(&ProtocolEvent::McpFailed {
+                        name: safe_name,
+                        reason: format!("invalid request: {reason}"),
                     });
                     continue;
                 }
-                let config =
-                    match to_mcp_server_config(&transport, command, args, env, url, headers) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            output.emit_error(&format!("AddMcpServer '{name}': {e}"), false);
+                eprintln!(
+                    "[mcp] AddMcpServer received: name={name}, transport={transport}, command_present={}",
+                    command.is_some()
+                );
+                let mut config = match to_mcp_server_config(
+                    &transport,
+                    command,
+                    args,
+                    env,
+                    url,
+                    headers,
+                    allow_local,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        output.emit_error(&format!("AddMcpServer '{name}': {e}"), false);
+                        continue;
+                    }
+                };
+                config = match scope_host_runtime_mcp(config, assistant.as_deref()) {
+                    Ok(config) => config,
+                    Err(reason) => {
+                        output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                        let _ = writer.emit(&ProtocolEvent::McpFailed {
+                            name: name.clone(),
+                            reason: reason.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if let Err(error) = resolve_live_mcp_credential_references(&mut config) {
+                    let reason = format!("credential resolution failed: {error}");
+                    output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                    let _ = writer.emit(&ProtocolEvent::McpFailed {
+                        name: name.clone(),
+                        reason,
+                    });
+                    continue;
+                }
+                if runtime_diagnostics.has_non_runtime_declaration(&name) {
+                    output.emit_error(
+                        &format!(
+                            "AddMcpServer '{name}': name collides with an effective config declaration"
+                        ),
+                        false,
+                    );
+                    let _ = writer.emit(&ProtocolEvent::McpFailed {
+                        name,
+                        reason: "name collides with an effective config declaration".to_string(),
+                    });
+                    continue;
+                }
+
+                let config_identity = McpConfigIdentity::for_server(&config);
+                let reservation = match mcp_lifecycle.reserve(name.clone(), config_identity) {
+                    McpReservationOutcome::Acquired(reservation) => reservation,
+                    McpReservationOutcome::Existing(snapshot) => {
+                        if snapshot.config_identity != config_identity {
+                            let reason = "same-name MCP server is already owned by a different configuration; remove it before re-adding".to_string();
+                            output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                            let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
                             continue;
                         }
-                    };
+                        match snapshot.state {
+                            McpLifecycleState::Ready => {
+                                let tools = registered_mcp_tool_names(&engine.tools(), &name);
+                                let _ = writer.emit(&ProtocolEvent::McpReady { name, tools });
+                            }
+                            McpLifecycleState::Connecting => {
+                                eprintln!(
+                                    "[mcp] '{name}' is already connecting; ignoring duplicate add"
+                                );
+                            }
+                            McpLifecycleState::Stopping => {
+                                output.emit_error(
+                                    &format!("AddMcpServer '{name}': server is stopping"),
+                                    true,
+                                );
+                            }
+                            McpLifecycleState::CleanupUnverified { .. } => {
+                                output.emit_error(
+                                    &format!(
+                                        "AddMcpServer '{name}': prior transport cleanup is unverified; retry remove first"
+                                    ),
+                                    false,
+                                );
+                            }
+                            McpLifecycleState::Failed { .. } => {
+                                unreachable!("failed lifecycle entries are retryable")
+                            }
+                        }
+                        continue;
+                    }
+                    McpReservationOutcome::CapacityExceeded => {
+                        output.emit_error(
+                            "AddMcpServer refused: session MCP lifecycle capacity exceeded",
+                            false,
+                        );
+                        continue;
+                    }
+                };
+                let declaration_recorded =
+                    runtime_diagnostics.record_runtime_declaration(&name, &config);
+                debug_assert!(declaration_recorded);
 
                 let mut single_configs = HashMap::new();
                 single_configs.insert(name.clone(), config.clone());
                 eprintln!("[mcp] Connecting to '{name}'...");
-                match McpManager::connect_all(&single_configs).await {
+                let connect_outcome = McpManager::connect_all_with_policy(
+                    &single_configs,
+                    session_egress_policy.clone(),
+                )
+                .await;
+                match connect_outcome {
                     Ok(mgr) => {
-                        let tool_names: Vec<String> = mgr
-                            .all_tools()
-                            .iter()
-                            .map(|(_, t)| t.name.clone())
-                            .collect();
-                        eprintln!("[mcp] Connected to '{name}': {} tools", tool_names.len());
+                        if let Some(evidence) = mgr.executable_readiness().get(&name).copied() {
+                            runtime_diagnostics.record_executable_readiness(
+                                wcore_protocol::diagnostics::McpDeclarationOrigin::RuntimeCommand,
+                                &name,
+                                evidence,
+                            );
+                        }
                         let mgr_arc = Arc::new(mgr);
+                        let failure_reason = match mgr_arc.health().get(&name) {
+                            Some(health) => mcp_server_failure_reason(health),
+                            None => {
+                                Some("connect outcome missing from MCP health report".to_string())
+                            }
+                        };
+                        if let Some(reason) = failure_reason {
+                            reservation.complete_failed(reason.clone());
+                            // Retain the typed health outcome for local runtime
+                            // diagnostics even though no live tools exist.
+                            dynamic_managers.push(mgr_arc);
+                            eprintln!("[mcp] connect failed for '{name}': {reason}");
+                            output.emit_error(
+                                &format!("AddMcpServer '{name}' failed: {reason}"),
+                                false,
+                            );
+                            let _ = writer.emit(&ProtocolEvent::McpFailed {
+                                name: name.clone(),
+                                reason,
+                            });
+                            continue;
+                        }
+                        let discovered_tool_count = mgr_arc.all_tools().len();
+                        eprintln!("[mcp] Connected to '{name}': {discovered_tool_count} tools");
                         let builtin_names = engine.tool_names();
+                        let defer_cold = engine.defer_cold_config();
                         // Wave OR: `registry_mut` returns `Option` because
                         // the registry is now Arc-shared. At this CLI boot
                         // site the engine is not running so the refcount
@@ -3049,14 +4997,18 @@ async fn run_json_stream_mode(
                         // (not panic) keeps the dynamic-MCP add-path
                         // resilient if a future change leaks a clone.
                         match engine.registry_mut() {
-                            Some(reg) => register_single_server_tools(
-                                reg,
-                                &mgr_arc,
-                                &name,
-                                &builtin_names,
-                                config.deferred.unwrap_or(true),
-                            ),
+                            Some(reg) => {
+                                register_single_server_tools(
+                                    reg,
+                                    &mgr_arc,
+                                    &name,
+                                    &builtin_names,
+                                    config.deferred.unwrap_or(true),
+                                    &defer_cold,
+                                );
+                            }
                             None => {
+                                reservation.complete_failed("tool registry is busy");
                                 eprintln!(
                                     "[mcp] cannot register tools for '{name}': registry is currently borrowed"
                                 );
@@ -3069,7 +5021,9 @@ async fn run_json_stream_mode(
                                 continue;
                             }
                         }
+                        let tool_names = registered_mcp_tool_names(&engine.tools(), &name);
                         dynamic_managers.push(mgr_arc);
+                        reservation.complete_ready();
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
                             tools: tool_names,
@@ -3078,6 +5032,7 @@ async fn run_json_stream_mode(
                     Err(e) => {
                         eprintln!("[mcp] connect_one failed for '{name}': {e:#}");
                         let reason = format!("{e:#}");
+                        reservation.complete_failed(reason.clone());
                         output
                             .emit_error(&format!("AddMcpServer '{name}' failed: {reason}"), false);
                         // Companion to the McpReady success emit: tell the host /
@@ -3090,8 +5045,39 @@ async fn run_json_stream_mode(
                     }
                 }
             }
+            ProtocolCommand::RemoveMcpServer(command) => {
+                remove_runtime_mcp_server(
+                    command,
+                    &mut mcp_removal_ledger,
+                    &mut runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &mut engine,
+                    &mut dynamic_managers,
+                    writer.as_ref(),
+                )
+                .await;
+            }
             ProtocolCommand::Stop => return Ok(()),
             other => {
+                // Configured MCP is connected after `ready` so desktop boot is
+                // never gated by a slow server. A user message is a stronger
+                // boundary: processing it before the connect task settles
+                // gives the provider an incomplete tool registry for the
+                // entire first turn. Await only the task already in flight;
+                // `McpManager` bounds every server handshake independently.
+                if matches!(&other, ProtocolCommand::Message { .. })
+                    && let Some(rx) = deferred_mcp_rx.take()
+                    && let Ok(result) = rx.await
+                {
+                    pending_deferred_mcp = note_deferred_mcp_connect(
+                        result,
+                        Some(&mut runtime_diagnostics),
+                        &mut engine,
+                        &writer,
+                        &output,
+                        &mut dynamic_managers,
+                    );
+                }
                 first_cmd = Some(other);
                 break;
             }
@@ -3109,28 +5095,29 @@ async fn run_json_stream_mode(
         // in the select below) and a parked integration whose earlier
         // attempt found the registry borrowed.
         if let Some(rx) = deferred_mcp_rx.as_mut()
-            && let Ok((outcome, resolved)) = rx.try_recv()
+            && let Ok(result) = rx.try_recv()
         {
             deferred_mcp_rx = None;
             pending_deferred_mcp = note_deferred_mcp_connect(
-                outcome,
-                resolved,
+                result,
+                Some(&mut runtime_diagnostics),
                 &mut engine,
                 &writer,
                 &output,
                 &mut dynamic_managers,
             );
         }
-        if let Some((mgr, resolved)) = pending_deferred_mcp.take()
+        if let Some(mut pending) = pending_deferred_mcp.take()
             && !integrate_deferred_mcp(
                 &mut engine,
-                mgr.clone(),
-                &resolved,
+                pending.manager.clone(),
+                &pending.resolved,
+                &mut pending.reservations,
                 &writer,
                 &mut dynamic_managers,
             )
         {
-            pending_deferred_mcp = Some((mgr, resolved));
+            pending_deferred_mcp = Some(pending);
         }
 
         let cmd = if let Some(c) = pending_cmd.take() {
@@ -3152,10 +5139,10 @@ async fn run_json_stream_mode(
                         deferred_mcp_rx = None;
                         // Err = connect task dropped without sending (panic);
                         // nothing to integrate.
-                        if let Ok((outcome, resolved)) = res {
+                        if let Ok(result) = res {
                             pending_deferred_mcp = note_deferred_mcp_connect(
-                                outcome,
-                                resolved,
+                                result,
+                                Some(&mut runtime_diagnostics),
                                 &mut engine,
                                 &writer,
                                 &output,
@@ -3167,11 +5154,38 @@ async fn run_json_stream_mode(
             }
         };
 
+        if session_command_readiness(&cmd) == SessionCommandReadiness::SettleDeferredMcp {
+            // Configured MCP is connected after `ready` so desktop boot is
+            // never gated by a slow server. The first actual provider turn
+            // is the stronger boundary: await the already-running,
+            // per-server-bounded handshake here even when setup commands
+            // caused the pre-message loop to exit earlier.
+            let ready = settle_deferred_mcp_before_message(
+                &mut deferred_mcp_rx,
+                &mut pending_deferred_mcp,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+                Some(&mut runtime_diagnostics),
+            )
+            .await;
+            if !ready {
+                // A per-turn registry reader has not released its Arc yet.
+                // Keep the exact Message parked and retry after yielding;
+                // executing it now would give the provider an incomplete
+                // tool manifest for the whole turn.
+                pending_cmd = Some(cmd);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+        }
+
         match cmd {
             ProtocolCommand::Message {
                 msg_id,
                 content,
-                files: _,
+                files,
             } => {
                 // F-079: thread the active turn id into the protocol sink so
                 // any emit_info calls during this turn carry the right msg_id
@@ -3230,6 +5244,20 @@ async fn run_json_stream_mode(
                     }
                 }
 
+                let attachment_content = match wcore_cli::attachments::load_composer_images(&files)
+                {
+                    Ok(content) => content,
+                    Err(error) => {
+                        protocol_sink.emit_correlated_error(
+                            &msg_id,
+                            &format!("composer attachment rejected: {error}"),
+                            false,
+                        );
+                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
+                        continue;
+                    }
+                };
+
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
                 let mut mode_changed = false;
@@ -3242,7 +5270,7 @@ async fn run_json_stream_mode(
                 let mut run_failed = false;
 
                 {
-                    let engine_fut = engine.run(&content, &msg_id);
+                    let engine_fut = engine.run_with_content(&content, attachment_content, &msg_id);
                     tokio::pin!(engine_fut);
 
                     loop {
@@ -3299,8 +5327,8 @@ async fn run_json_stream_mode(
                                     }
                                     ProtocolCommand::Stop => {
                                         // wayland#403 fix-3: Stop CANCELS THE ACTIVE TURN — it must
-                                        // NOT end the session. Dropping `engine_fut` (via the inner
-                                        // `break` below) cancels the turn; we emit `stream_end`
+                                        // NOT end the session. Fire the engine-owned active-turn
+                                        // token before dropping `engine_fut`; we emit `stream_end`
                                         // (FinishReason::Stop) for this msg_id so the host's turn-loop
                                         // gets its terminator and doesn't hang. `stopped` then makes
                                         // the outer loop `continue` (keep reading commands) instead of
@@ -3308,6 +5336,7 @@ async fn run_json_stream_mode(
                                         // ("new chat required") after any mid-turn Stop. Only EOF and
                                         // `/exit` end a json-stream session, matching the TUI (Esc
                                         // cancels the turn, never closes the session).
+                                        session_control.cancel_active_turn();
                                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Stop);
                                         stopped = true;
                                         break;
@@ -3319,22 +5348,153 @@ async fn run_json_stream_mode(
                                             message: "set_config: queued, will apply after current response".to_string(),
                                         });
                                     }
+                                    ProtocolCommand::ContinueWithBudget(command) => {
+                                        let refusal = if allow_host_budget_grants {
+                                            BudgetGrantRefusalReason::TurnInProgress
+                                        } else {
+                                            BudgetGrantRefusalReason::HostNotAuthorized
+                                        };
+                                        let emission = budget_grants.complete(command, |_| Err(refusal));
+                                        let _ = writer.emit(&ProtocolEvent::BudgetGrantResult {
+                                            result: emission.into_result(),
+                                        });
+                                    }
                                     ProtocolCommand::SetMode { mode } => {
                                         // GHSA-8r7g: a wire peer may not escalate to
                                         // an auto-approving mode (Force or AutoEdit)
                                         // without a local-operator opt-in.
                                         let mode_str = format!("{mode:?}").to_lowercase();
-                                        if approval_manager.set_mode_from_wire(mode) {
-                                            mode_changed = true;
-                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                                msg_id: String::new(),
-                                                message: format!("mode updated: {}", approval_manager.current_mode()),
-                                            });
+                                        match apply_wire_mode_change(
+                                            &approval_manager,
+                                            &mut execution_policy_sequence,
+                                            mode,
+                                            audit_unix_time_millis()?,
+                                        )? {
+                                            WireModeChange::Changed(snapshot) => {
+                                                mode_changed = true;
+                                                let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
+                                                    snapshot,
+                                                });
+                                                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                    msg_id: String::new(),
+                                                    message: format!("mode updated: {}", approval_manager.current_mode()),
+                                                });
+                                            }
+                                            WireModeChange::Unchanged => {
+                                                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                    msg_id: String::new(),
+                                                    message: format!("mode unchanged: {}", approval_manager.current_mode()),
+                                                });
+                                            }
+                                            WireModeChange::Rejected => {
+                                                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                    msg_id: String::new(),
+                                                    message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
+                                                });
+                                            }
+                                        }
+                                    }
+                                    ProtocolCommand::GrantWorkspaceCapability { executable } => {
+                                        emit_workspace_capability_grant(
+                                            allow_host_workspace_grants,
+                                            &workspace_policy,
+                                            &mut workspace_policy_receipt,
+                                            &executable,
+                                            &writer,
+                                        );
+                                    }
+                                    ProtocolCommand::SessionResync(command) => {
+                                        let reason = if command.recovery_version
+                                            != RECOVERY_PROTOCOL_VERSION
+                                        {
+                                            RecoveryUnavailableReason::UnsupportedVersion
                                         } else {
-                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                                msg_id: String::new(),
-                                                message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
-                                            });
+                                            RecoveryUnavailableReason::SnapshotUnavailable
+                                        };
+                                        emit_recovery_unavailable(
+                                            writer.as_ref(),
+                                            command.request_id,
+                                            command.session_id,
+                                            reason,
+                                        );
+                                    }
+                                    ProtocolCommand::ResumeTurn(command) => {
+                                        let reason = if command.recovery_version
+                                            != RECOVERY_PROTOCOL_VERSION
+                                        {
+                                            RecoveryUnavailableReason::UnsupportedVersion
+                                        } else {
+                                            RecoveryUnavailableReason::UnknownCriticalState
+                                        };
+                                        emit_recovery_unavailable(
+                                            writer.as_ref(),
+                                            command.request_id,
+                                            command.session_id,
+                                            reason,
+                                        );
+                                    }
+                                    ProtocolCommand::ResolveInterruptedApproval(command) => {
+                                        let reason = if command.recovery_version
+                                            != wcore_protocol::commands::RECOVERED_APPROVAL_VERSION
+                                        {
+                                            RecoveryUnavailableReason::UnsupportedVersion
+                                        } else {
+                                            RecoveryUnavailableReason::UnknownCriticalState
+                                        };
+                                        emit_recovery_unavailable(
+                                            writer.as_ref(),
+                                            command.request_id,
+                                            command.session_id,
+                                            reason,
+                                        );
+                                    }
+                                    ProtocolCommand::ResolveUnknownToolEffect(_) => {
+                                        // The live engine is mutably borrowed by `engine_fut` and
+                                        // its durable cursor may still advance. Never queue or
+                                        // apply an operator claim against that moving authority;
+                                        // the host must resync and reissue it between turns.
+                                        output.emit_error(
+                                            "resolve_unknown_tool_effect refused during active turn; resync and retry after the turn stops",
+                                            false,
+                                        );
+                                    }
+                                    ProtocolCommand::RemoveMcpServer(command) => {
+                                        if mcp_removal_request_id_invalid(&command) {
+                                            let _ = writer.emit(&mcp_removal_receipt(
+                                                &command,
+                                                McpRemovalOutcome::InvalidRequest,
+                                                Vec::new(),
+                                            ));
+                                        } else if let Some(receipt) = mcp_removal_ledger
+                                            .replay_or_conflict(&command)
+                                        {
+                                            let _ = writer.emit(&receipt);
+                                        } else if mcp_removal_ledger
+                                            .is_full_for_new(&command.request_id)
+                                        {
+                                            let _ = writer.emit(&mcp_removal_receipt(
+                                                &command,
+                                                McpRemovalOutcome::CapacityExceeded,
+                                                Vec::new(),
+                                            ));
+                                        } else if let Some(outcome) =
+                                            mcp_removal_request_rejection(&command)
+                                        {
+                                            emit_mcp_removal_receipt(
+                                                &command,
+                                                outcome,
+                                                Vec::new(),
+                                                &mut mcp_removal_ledger,
+                                                writer.as_ref(),
+                                            );
+                                        } else {
+                                            emit_mcp_removal_receipt(
+                                                &command,
+                                                McpRemovalOutcome::TurnInProgress,
+                                                Vec::new(),
+                                                &mut mcp_removal_ledger,
+                                                writer.as_ref(),
+                                            );
                                         }
                                     }
                                     ProtocolCommand::Ping => {
@@ -3481,6 +5641,90 @@ async fn run_json_stream_mode(
                     continue;
                 }
             }
+            // F22-C1 — host CONTROL of a durable Goal. One arm for all five
+            // commands; the decision logic lives in
+            // `wcore_agent::goal::control` so this fenced file gains a single
+            // contiguous block rather than five handlers.
+            //
+            // `handle_goal_control` NEVER returns an empty vec for a Goal
+            // command: an accepted one answers with `goal_snapshot`, a refused
+            // one with `goal_control_refused`. That is what keeps this arm from
+            // being a surface that accepts and silently does nothing — the
+            // failure mode the catch-all arm below would otherwise produce.
+            goal_command @ (ProtocolCommand::GoalOpen(_)
+            | ProtocolCommand::GoalDeclareTask(_)
+            | ProtocolCommand::GoalAdvance(_)
+            | ProtocolCommand::GoalCancel(_)
+            | ProtocolCommand::GoalResync(_)) => {
+                let live_session_id = engine.current_session_id();
+                let goal_events = wcore_agent::goal::handle_goal_control(
+                    engine.session_journal(),
+                    live_session_id.as_deref(),
+                    &wcore_agent::goal::GoalParentEnvelope::local_session_default(),
+                    audit_unix_time_millis()?,
+                    &goal_command,
+                )
+                .unwrap_or_default();
+                for event in &goal_events {
+                    let _ = writer.emit(event);
+                }
+            }
+            ProtocolCommand::SessionResync(command) => {
+                handle_session_resync(
+                    &engine,
+                    writer.as_ref(),
+                    command.recovery_version,
+                    command.request_id,
+                    command.session_id,
+                    command.after,
+                );
+            }
+            ProtocolCommand::ResumeTurn(command) => {
+                protocol_sink.set_current_msg_id(&command.request_id);
+                handle_resume_turn(
+                    &mut engine,
+                    writer.as_ref(),
+                    output.as_ref(),
+                    &mut cmd_rx,
+                    approval_manager.as_ref(),
+                    &|| session_control.cancel_active_turn(),
+                    command.recovery_version,
+                    command.request_id,
+                    command.session_id,
+                    command.turn_id,
+                    command.cursor,
+                    command.action,
+                )
+                .await;
+            }
+            ProtocolCommand::ResolveInterruptedApproval(command) => {
+                protocol_sink.set_current_msg_id(&command.request_id);
+                handle_recovered_approval(
+                    &mut engine,
+                    writer.as_ref(),
+                    output.as_ref(),
+                    &mut cmd_rx,
+                    approval_manager.as_ref(),
+                    &|| session_control.cancel_active_turn(),
+                    command.recovery_version,
+                    command.request_id,
+                    command.session_id,
+                    command.turn_id,
+                    command.cursor,
+                    command.approval_id,
+                    command.decision,
+                    command.answer,
+                )
+                .await;
+            }
+            command @ ProtocolCommand::ResolveUnknownToolEffect(_) => {
+                handle_operator_tool_effect_resolution(
+                    &engine,
+                    writer.as_ref(),
+                    output.as_ref(),
+                    command,
+                );
+            }
             ProtocolCommand::Stop => {
                 // wayland#403 fix-3: a Stop that arrives with no active turn (or
                 // just as one finishes) is a no-op — it must not close the
@@ -3517,26 +5761,41 @@ async fn run_json_stream_mode(
                 let mode_str = format!("{mode:?}").to_lowercase();
                 // GHSA-8r7g: a wire peer may not escalate to an auto-approving
                 // mode (Force or AutoEdit) without a local-operator opt-in.
-                if !approval_manager.set_mode_from_wire(mode) {
-                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                        msg_id: String::new(),
-                        message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
-                    });
-                    eprintln!("[protocol] SetMode refused ({mode_str}, no local opt-in)");
-                } else {
-                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                        msg_id: String::new(),
-                        message: format!("mode updated: {}", approval_manager.current_mode()),
-                    });
-                    protocol_sink.emit_config_changed_with_plugins(
-                        engine.compat(),
-                        has_mcp,
-                        &approval_manager.current_mode(),
-                        initial_has_plugins,
-                        &initial_plugin_caps,
-                        engine.advertised_capabilities(),
-                    );
-                    eprintln!("[protocol] SetMode applied: {mode_str}");
+                match apply_wire_mode_change(
+                    &approval_manager,
+                    &mut execution_policy_sequence,
+                    mode,
+                    audit_unix_time_millis()?,
+                )? {
+                    WireModeChange::Rejected => {
+                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                            msg_id: String::new(),
+                            message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
+                        });
+                        eprintln!("[protocol] SetMode refused ({mode_str}, no local opt-in)");
+                    }
+                    WireModeChange::Unchanged => {
+                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                            msg_id: String::new(),
+                            message: format!("mode unchanged: {}", approval_manager.current_mode()),
+                        });
+                    }
+                    WireModeChange::Changed(snapshot) => {
+                        let _ = writer.emit(&ProtocolEvent::ExecutionPolicy { snapshot });
+                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                            msg_id: String::new(),
+                            message: format!("mode updated: {}", approval_manager.current_mode()),
+                        });
+                        protocol_sink.emit_config_changed_with_plugins(
+                            engine.compat(),
+                            has_mcp,
+                            &approval_manager.current_mode(),
+                            initial_has_plugins,
+                            &initial_plugin_caps,
+                            engine.advertised_capabilities(),
+                        );
+                        eprintln!("[protocol] SetMode applied: {mode_str}");
+                    }
                 }
             }
             ProtocolCommand::SetConfig {
@@ -3577,10 +5836,60 @@ async fn run_json_stream_mode(
                     );
                 }
             }
+            ProtocolCommand::ContinueWithBudget(command) => {
+                let emission = if allow_host_budget_grants {
+                    budget_grants.complete(command, |command| {
+                        engine.continue_with_additional_budget(
+                            &command.request_id,
+                            command.additional_tokens,
+                            command.additional_cost_usd,
+                        )
+                    })
+                } else {
+                    budget_grants.complete(command, |_| {
+                        Err(BudgetGrantRefusalReason::HostNotAuthorized)
+                    })
+                };
+                let _ = writer.emit(&ProtocolEvent::BudgetGrantResult {
+                    result: emission.into_result(),
+                });
+            }
+            ProtocolCommand::GetRuntimeDiagnostics(command) => {
+                emit_runtime_diagnostics(
+                    &command,
+                    &runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &result.mcp_managers,
+                    &dynamic_managers,
+                    &engine.tools(),
+                    writer.as_ref(),
+                );
+            }
             ProtocolCommand::AddMcpServer { name, .. } => {
                 output.emit_error(
                     &format!("AddMcpServer '{name}': rejected — only allowed before first Message"),
                     false,
+                );
+            }
+            ProtocolCommand::RemoveMcpServer(command) => {
+                remove_runtime_mcp_server(
+                    command,
+                    &mut mcp_removal_ledger,
+                    &mut runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &mut engine,
+                    &mut dynamic_managers,
+                    writer.as_ref(),
+                )
+                .await;
+            }
+            ProtocolCommand::GrantWorkspaceCapability { executable } => {
+                emit_workspace_capability_grant(
+                    allow_host_workspace_grants,
+                    &workspace_policy,
+                    &mut workspace_policy_receipt,
+                    &executable,
+                    &writer,
                 );
             }
             ProtocolCommand::Ping => {
@@ -3667,7 +5976,1153 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::{Value, json};
+    use std::time::Duration;
     use wcore_mcp::manager::McpManager;
+    use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    /// UAT-W1 — the product's own error advised the wrong flag.
+    ///
+    /// The non-TTY message told the user to `pass a prompt with -p`. `-p` is
+    /// the short form of `--provider`, so obeying it yields
+    /// `Unknown provider: 'Reply'`. The prompt is a trailing positional.
+    ///
+    /// This fails if the advice names ANY flag that does not do what the
+    /// advice says. It resolves each flag token against the REAL clap
+    /// definition (`Cli::command()`), never against a copy of the message, so
+    /// it cannot drift and cannot pass tautologically.
+    #[test]
+    fn non_tty_advice_names_only_flags_that_do_what_it_says() {
+        use clap::CommandFactory;
+
+        /// Resolve a `--long` / `-s` token to the clap argument id it
+        /// actually binds to, or `None` if no such argument exists.
+        fn resolve(cmd: &clap::Command, token: &str) -> Option<String> {
+            let name = token.trim_start_matches('-');
+            cmd.get_arguments()
+                .find(|a| {
+                    if token.starts_with("--") {
+                        a.get_long() == Some(name)
+                            || a.get_all_aliases().is_some_and(|v| v.contains(&name))
+                    } else {
+                        name.chars().count() == 1 && a.get_short() == name.chars().next()
+                    }
+                })
+                .map(|a| a.get_id().to_string())
+        }
+
+        let cmd = Cli::command();
+
+        // ── Controls, BOTH directions, so the resolver is proven alive ──
+        // Known-positive: a flag that exists resolves to its id.
+        assert_eq!(
+            resolve(&cmd, "--json-stream").as_deref(),
+            Some("json_stream"),
+            "resolver is dead: it cannot even find --json-stream"
+        );
+        // The exact token that carried the bug. This documents the trap: if
+        // `-p` is ever put back in the advice, the loop below reports it as
+        // `provider`, not as a way to pass a prompt.
+        assert_eq!(
+            resolve(&cmd, "-p").as_deref(),
+            Some("provider"),
+            "`-p` is expected to be --provider; the advice must not offer it \
+             as a way to pass a prompt"
+        );
+        // Known-negative: a flag that does not exist resolves to nothing.
+        assert_eq!(
+            resolve(&cmd, "--definitely-not-a-real-flag"),
+            None,
+            "resolver is not discriminating: it matched a nonexistent flag"
+        );
+        // The prompt really is a positional, so no flag can ever be the right
+        // answer. If this changes, the advice should change with it.
+        assert!(
+            cmd.get_arguments().any(|a| a.get_id() == "prompt"
+                && a.get_long().is_none()
+                && a.get_short().is_none()),
+            "`prompt` is no longer a bare positional — revisit the advice"
+        );
+
+        // ── The assertion itself ──
+        let tokens: Vec<&str> = NON_TTY_NO_PROMPT_ADVICE
+            .split(|c: char| c.is_whitespace() || c == '"' || c == ',')
+            .map(|t| t.trim_end_matches('.'))
+            .filter(|t| t.starts_with('-') && t.len() > 1)
+            .collect();
+
+        // Vacuity guard: a message naming no flags at all would pass the loop
+        // below without checking anything.
+        assert!(
+            !tokens.is_empty(),
+            "no flag tokens extracted from the advice — the extractor is dead, \
+             or the advice stopped naming any flag"
+        );
+
+        for token in tokens {
+            let id = resolve(&cmd, token).unwrap_or_else(|| {
+                panic!("the advice names `{token}`, which is not an argument at all")
+            });
+            assert_eq!(
+                id, "json_stream",
+                "the advice names `{token}`, which is clap argument `{id}` — \
+                 that is not a way to pass a prompt. The prompt is a trailing \
+                 positional: wayland-core \"your prompt\"."
+            );
+        }
+    }
+
+    #[test]
+    fn host_runtime_mcp_requires_an_immutable_assistant_scope() {
+        let config = to_mcp_server_config(
+            "stdio",
+            Some("example-mcp".into()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("valid MCP config");
+
+        assert!(scope_host_runtime_mcp(config.clone(), None).is_err());
+        assert!(scope_host_runtime_mcp(config.clone(), Some(" ")).is_err());
+
+        let scoped = scope_host_runtime_mcp(config, Some("research"))
+            .expect("identified host session must be scoped");
+        assert!(scoped.is_visible_to_assistant(Some("research")));
+        assert!(!scoped.is_visible_to_assistant(Some("operations")));
+        assert!(!scoped.is_visible_to_assistant(None));
+    }
+
+    #[test]
+    fn cleanup_failure_cannot_produce_removed_receipt() {
+        assert_eq!(mcp_removal_cleanup_outcome(&[]), McpRemovalOutcome::Removed);
+        assert_eq!(
+            mcp_removal_cleanup_outcome(&["injected close failure".into()]),
+            McpRemovalOutcome::CleanupUnverified
+        );
+    }
+
+    #[test]
+    fn removal_admission_is_versioned_bounded_and_replay_safe_during_turns() {
+        let unsupported = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION + 1,
+            request_id: String::new(),
+            name: String::new(),
+        };
+        assert_eq!(
+            mcp_removal_request_rejection(&unsupported),
+            Some(McpRemovalOutcome::UnsupportedVersion)
+        );
+
+        let blank = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: " ".into(),
+            name: "server".into(),
+        };
+        assert_eq!(
+            mcp_removal_request_rejection(&blank),
+            Some(McpRemovalOutcome::InvalidRequest)
+        );
+
+        let command = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: "active-turn-1".into(),
+            name: "server".into(),
+        };
+        let receipt = mcp_removal_receipt(&command, McpRemovalOutcome::TurnInProgress, Vec::new());
+        let mut ledger = McpRemovalLedger::default();
+        ledger.record(&command, &receipt);
+        assert_eq!(
+            serde_json::to_value(
+                ledger
+                    .replay_or_conflict(&command)
+                    .expect("same request must replay its terminal receipt")
+            )
+            .unwrap(),
+            serde_json::to_value(receipt).unwrap()
+        );
+
+        let conflict = RemoveMcpServerCommand {
+            name: "different-server".into(),
+            ..command
+        };
+        let conflict = ledger
+            .replay_or_conflict(&conflict)
+            .expect("same request id with a different name must terminate as conflict");
+        assert_eq!(
+            serde_json::to_value(conflict).unwrap()["outcome"],
+            "request_id_conflict"
+        );
+    }
+
+    #[test]
+    fn removal_ledger_and_add_request_are_hard_bounded() {
+        let receipt = ProtocolEvent::Pong;
+        let mut ledger = McpRemovalLedger::default();
+        for index in 0..MAX_MCP_REMOVAL_RECEIPTS {
+            let request_id = format!("request-{index}");
+            ledger.receipts.insert(
+                request_id.clone(),
+                (
+                    RemoveMcpServerCommand {
+                        lifecycle_version: MCP_LIFECYCLE_VERSION,
+                        request_id,
+                        name: "server".into(),
+                    },
+                    receipt.clone(),
+                ),
+            );
+        }
+        assert!(ledger.is_full_for_new("new-request"));
+        assert!(!ledger.is_full_for_new("request-0"));
+
+        let oversized_name = "n".repeat(MAX_MCP_SERVER_NAME_LEN + 1);
+        assert_eq!(
+            mcp_add_request_rejection(&oversized_name, "stdio", None, None, None, None, None),
+            Some("server name is empty or too long")
+        );
+        let oversized_value = "v".repeat(MAX_MCP_CONFIG_VALUE_LEN + 1);
+        assert_eq!(
+            mcp_add_request_rejection(
+                "server",
+                "stdio",
+                Some(&oversized_value),
+                None,
+                None,
+                None,
+                None,
+            ),
+            Some("command or URL is too long")
+        );
+        let too_many_args = vec![String::new(); MAX_MCP_CONFIG_ENTRIES + 1];
+        assert_eq!(
+            mcp_add_request_rejection(
+                "server",
+                "stdio",
+                None,
+                Some(&too_many_args),
+                None,
+                None,
+                None,
+            ),
+            Some("argument list exceeds the MCP request limit")
+        );
+
+        let mut invalid_ledger = McpRemovalLedger::default();
+        for command in [
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "r".repeat(MAX_MCP_REQUEST_ID_LEN + 1),
+                name: "server".into(),
+            },
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "bounded-id".into(),
+                name: "n".repeat(MAX_MCP_SERVER_NAME_LEN + 1),
+            },
+        ] {
+            invalid_ledger.record(&command, &receipt);
+        }
+        assert!(invalid_ledger.receipts.is_empty());
+
+        let oversized = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: "r".repeat(MAX_MCP_REQUEST_ID_LEN + 1),
+            name: "n".repeat(MAX_MCP_SERVER_NAME_LEN + 1),
+        };
+        let value = serde_json::to_value(mcp_removal_receipt(
+            &oversized,
+            McpRemovalOutcome::InvalidRequest,
+            Vec::new(),
+        ))
+        .unwrap();
+        assert_eq!(value["request_id"], "<invalid>");
+        assert_eq!(value["name"], "<invalid>");
+    }
+
+    #[test]
+    fn removal_ledger_binds_full_command_and_never_overwrites() {
+        let original = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: "stable-request".into(),
+            name: "server".into(),
+        };
+        let original_receipt = mcp_removal_receipt(
+            &original,
+            McpRemovalOutcome::Removed,
+            vec!["server_tool".into()],
+        );
+        let mut ledger = McpRemovalLedger::default();
+        ledger.record(&original, &original_receipt);
+
+        for conflicting in [
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION + 1,
+                ..original.clone()
+            },
+            RemoveMcpServerCommand {
+                name: "different-server".into(),
+                ..original.clone()
+            },
+            RemoveMcpServerCommand {
+                name: String::new(),
+                ..original.clone()
+            },
+        ] {
+            let conflict = ledger
+                .replay_or_conflict(&conflicting)
+                .expect("a reused request id must terminate");
+            assert_eq!(
+                serde_json::to_value(&conflict).unwrap()["outcome"],
+                "request_id_conflict"
+            );
+            ledger.record(&conflicting, &conflict);
+        }
+
+        assert_eq!(
+            serde_json::to_value(
+                ledger
+                    .replay_or_conflict(&original)
+                    .expect("original exact command must remain replayable")
+            )
+            .unwrap(),
+            serde_json::to_value(original_receipt).unwrap()
+        );
+    }
+
+    #[test]
+    fn unsupported_runtime_diagnostics_request_gets_correlated_terminal_event() {
+        let event = runtime_diagnostics_admission_rejection(
+            &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand {
+                diagnostics_version: 2,
+                request_id: "diagnostics-request-2".into(),
+            },
+        )
+        .expect("unsupported version must be rejected");
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "runtime_diagnostics_unavailable");
+        assert_eq!(value["diagnostics_version"], 2);
+        assert_eq!(value["supported_version"], 1);
+        assert_eq!(value["request_id"], "diagnostics-request-2");
+        assert_eq!(value["reason"], "unsupported_version");
+    }
+
+    fn lifecycle_reservations(
+        configs: &HashMap<String, McpServerConfig>,
+    ) -> HashMap<String, McpConnectionReservation> {
+        let catalog = McpLifecycleCatalog::new();
+        configs
+            .iter()
+            .map(|(name, config)| {
+                let reservation =
+                    match catalog.reserve(name.clone(), McpConfigIdentity::for_server(config)) {
+                        McpReservationOutcome::Acquired(reservation) => reservation,
+                        McpReservationOutcome::Existing(_) => {
+                            panic!("each fixture server name must reserve once")
+                        }
+                        McpReservationOutcome::CapacityExceeded => {
+                            panic!("fixture must stay below lifecycle capacity")
+                        }
+                    };
+                (name.clone(), reservation)
+            })
+            .collect()
+    }
+
+    fn lifecycle_test_plan(
+        disposition: wcore_agent::recovery::RecoveryDisposition,
+    ) -> wcore_agent::recovery::RecoveryPlan {
+        wcore_agent::recovery::RecoveryPlan {
+            session_id: "f14-lifecycle".into(),
+            journal_sequence: Some(7),
+            journal_digest: "a".repeat(64),
+            state_digest: "b".repeat(64),
+            budget: wcore_protocol::events::RecoveryBudgetSnapshot {
+                tokens_used: 0,
+                token_limit: None,
+                cost_used_usd: 0.0,
+                cost_limit_usd: None,
+            },
+            disposition,
+        }
+    }
+
+    #[test]
+    fn interrupted_action_lifecycle_reports_durable_post_stop_state_f14() {
+        use wcore_agent::recovery::{RecoveryBlocker, RecoveryDisposition};
+
+        assert_eq!(
+            interrupted_action_lifecycle(
+                &lifecycle_test_plan(RecoveryDisposition::Ready),
+                RecoveryLifecycle::Cancelled,
+            ),
+            (RecoveryLifecycle::Cancelled, None)
+        );
+        assert_eq!(
+            interrupted_action_lifecycle(
+                &lifecycle_test_plan(RecoveryDisposition::Blocked {
+                    turn_id: "turn-provider".into(),
+                    reason: RecoveryBlocker::ProviderOutcomeUnknown,
+                }),
+                RecoveryLifecycle::Cancelled,
+            ),
+            (
+                RecoveryLifecycle::Suspended,
+                Some(RecoveryReconcileReason::ProviderOutcomeUnknown),
+            )
+        );
+        assert_eq!(
+            interrupted_action_lifecycle(
+                &lifecycle_test_plan(RecoveryDisposition::ReconciliationRequired {
+                    turn_id: "turn-tool".into(),
+                    tool_execution_ids: vec!["tool-1".into()],
+                }),
+                RecoveryLifecycle::Cancelled,
+            ),
+            (
+                RecoveryLifecycle::ReconciliationRequired,
+                Some(RecoveryReconcileReason::ToolOutcomeUnknown),
+            )
+        );
+    }
+
+    #[derive(Default)]
+    struct CapturingProtocolEmitter {
+        events: std::sync::Mutex<Vec<ProtocolEvent>>,
+    }
+
+    impl ProtocolEmitter for CapturingProtocolEmitter {
+        fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingOutputSink {
+        errors: std::sync::Mutex<Vec<String>>,
+        stream_ends: std::sync::Mutex<Vec<(String, FinishReason)>>,
+    }
+
+    impl OutputSink for CapturingOutputSink {
+        fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+        fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+        fn emit_tool_call(&self, _name: &str, _input: &str) {}
+        fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+        fn emit_stream_start(&self, _msg_id: &str) {}
+        fn emit_stream_end(
+            &self,
+            msg_id: &str,
+            _turns: usize,
+            _input_tokens: u64,
+            _output_tokens: u64,
+            _cache_creation_tokens: u64,
+            _cache_read_tokens: u64,
+            finish_reason: wcore_types::message::FinishReason,
+        ) {
+            self.stream_ends
+                .lock()
+                .unwrap()
+                .push((msg_id.to_owned(), finish_reason));
+        }
+        fn emit_error(&self, msg: &str, _retryable: bool) {
+            self.errors.lock().unwrap().push(msg.to_owned());
+        }
+        fn emit_info(&self, _msg: &str) {}
+    }
+
+    fn recovery_engine(
+        session_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        wcore_agent::engine::AgentEngine,
+        wcore_agent::session_journal::SessionJournal,
+        wcore_protocol::events::RecoveryCursor,
+    ) {
+        let directory = tempfile::tempdir().expect("recovery tempdir");
+        let manager = wcore_agent::session::SessionManager::new(directory.path().into(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some(session_id))
+            .expect("create recovery session");
+        active
+            .journal
+            .append(wcore_agent::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-recovery".into(),
+                user_message: "content must stay out of recovery frames".into(),
+            })
+            .expect("append interrupted turn");
+        let cursor = wcore_agent::recovery::RecoveryPlan::from_journal(&active.journal)
+            .expect("plan recovery")
+            .cursor();
+        let journal = active.journal.clone();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = directory.path().to_string_lossy().into_owned();
+        let engine = wcore_agent::engine::AgentEngine::resume_active(
+            config,
+            wcore_tools::registry::ToolRegistry::new(),
+            Arc::new(wcore_agent::output::null_sink::NullSink),
+            active,
+        );
+        (directory, engine, journal, cursor)
+    }
+
+    fn unknown_tool_recovery_engine(
+        session_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        wcore_agent::engine::AgentEngine,
+        wcore_agent::session_journal::SessionJournal,
+        wcore_protocol::events::RecoveryCursor,
+        String,
+    ) {
+        let directory = tempfile::tempdir().expect("operator recovery tempdir");
+        let manager = wcore_agent::session::SessionManager::new(directory.path().into(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some(session_id))
+            .expect("create operator recovery session");
+        active
+            .journal
+            .append(wcore_agent::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-operator-recovery".into(),
+                user_message: "interrupted".into(),
+            })
+            .expect("append interrupted turn");
+        let unknown =
+            wcore_agent::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+                .for_turn("turn-operator-recovery")
+                .prepare_tool(
+                    "provider-tool-call",
+                    0,
+                    "OpaqueRemote",
+                    json!({}),
+                    json!({}),
+                )
+                .expect("prepare unknown tool")
+                .start()
+                .expect("start unknown tool")
+                .unknown(
+                    wcore_agent::session_journal::ToolUnknownReason::AmbiguousFailure {
+                        error: "remote outcome unavailable".into(),
+                    },
+                    json!({"adapter": "opaque"}),
+                )
+                .expect("record unknown tool effect");
+        let tool_execution_id = unknown.id().to_owned();
+        drop(unknown);
+        let cursor = wcore_agent::recovery::RecoveryPlan::from_journal(&active.journal)
+            .expect("plan operator recovery")
+            .cursor();
+        let journal = active.journal.clone();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = directory.path().to_string_lossy().into_owned();
+        let engine = wcore_agent::engine::AgentEngine::resume_active(
+            config,
+            wcore_tools::registry::ToolRegistry::new(),
+            Arc::new(wcore_agent::output::null_sink::NullSink),
+            active,
+        );
+        (directory, engine, journal, cursor, tool_execution_id)
+    }
+
+    fn operator_resolution_command(
+        session_id: &str,
+        cursor: wcore_protocol::events::RecoveryCursor,
+        tool_execution_id: &str,
+    ) -> ProtocolCommand {
+        ProtocolCommand::ResolveUnknownToolEffect(
+            wcore_protocol::events::OperatorToolEffectResolution {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id: session_id.into(),
+                turn_id: "turn-operator-recovery".into(),
+                cursor,
+                tool_execution_id: tool_execution_id.into(),
+                outcome: wcore_protocol::events::OperatorToolEffectOutcome::Succeeded,
+                operator_id: "operator-7".into(),
+                evidence: wcore_protocol::events::OperatorResolutionEvidence {
+                    source:
+                        wcore_protocol::events::OperatorResolutionEvidenceSource::ExternalSystemRecord,
+                    reference_id: "record-11".into(),
+                    observed_at_unix_ms: 1_721_000_003_000,
+                    digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn json_recovery_resync_emits_contract_reducible_non_empty_replay() {
+        let (_directory, engine, journal, cursor) = recovery_engine("f14a0001");
+        journal
+            .append(wcore_agent::session_journal::SessionEvent::TurnCancelled {
+                turn_id: "turn-recovery".into(),
+            })
+            .expect("advance recovery journal beyond host cursor");
+        let writer = CapturingProtocolEmitter::default();
+
+        handle_session_resync(
+            &engine,
+            &writer,
+            RECOVERY_PROTOCOL_VERSION,
+            "request-snapshot".into(),
+            "f14a0001".into(),
+            Some(cursor),
+        );
+
+        let events = writer.events.lock().unwrap();
+        let [
+            ProtocolEvent::SessionRecoverySnapshot {
+                cursor: snapshot_cursor,
+                state_digest,
+                lifecycle: RecoveryLifecycle::Suspended,
+                pending_turn: Some(_),
+                ..
+            },
+            ProtocolEvent::SessionRecoveryReplay {
+                from: Some(replay_from),
+                through,
+                items,
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected one snapshot followed by one non-empty replay");
+        };
+        assert_eq!(snapshot_cursor, replay_from);
+        let is_raw_digest = |digest: &str| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        };
+        assert!(is_raw_digest(&snapshot_cursor.journal_digest));
+        assert!(is_raw_digest(state_digest));
+        assert_eq!(items.len(), 1);
+        assert_eq!(&items[0].cursor, through);
+        assert!(items[0].cursor.journal_sequence > replay_from.journal_sequence);
+
+        let wire = serde_json::to_value(&*events).unwrap();
+        assert_eq!(wire[0]["cursor"], wire[1]["from"]);
+        let round_trip: wcore_protocol::events::RecoveryCursor =
+            serde_json::from_value(wire[0]["cursor"].clone()).unwrap();
+        assert_eq!(&round_trip, snapshot_cursor);
+        assert_eq!(wire[1]["through"], wire[1]["items"][0]["cursor"]);
+        assert_eq!(wire[1]["items"][0]["kind"], "turn_cancelled");
+        let encoded = serde_json::to_string(&wire).unwrap();
+        assert!(!encoded.contains("content must stay out of recovery frames"));
+    }
+
+    #[test]
+    fn json_recovery_resync_rejects_stale_digest_without_snapshot() {
+        let (_directory, engine, _journal, mut cursor) = recovery_engine("f14a0002");
+        cursor.journal_digest = "stale".into();
+        let writer = CapturingProtocolEmitter::default();
+
+        handle_session_resync(
+            &engine,
+            &writer,
+            RECOVERY_PROTOCOL_VERSION,
+            "request-stale".into(),
+            "f14a0002".into(),
+            Some(cursor),
+        );
+
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::SessionRecoveryUnavailable {
+                reason: RecoveryUnavailableReason::CursorDigestMismatch,
+                ..
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn json_recovery_cancel_is_durable_and_cursor_bound() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0003");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let approval_manager = ToolApprovalManager::new();
+        let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+        handle_resume_turn(
+            &mut engine,
+            &writer,
+            &output,
+            &mut cmd_rx,
+            &approval_manager,
+            &|| {},
+            RECOVERY_PROTOCOL_VERSION,
+            "request-cancel".into(),
+            "f14a0003".into(),
+            "turn-recovery".into(),
+            cursor,
+            ResumeTurnAction::Cancel,
+        )
+        .await;
+
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::TurnRecoveryLifecycle {
+                lifecycle: RecoveryLifecycle::Cancelled,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            wcore_agent::recovery::RecoveryDisposition::Ready
+        ));
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("request-cancel".into(), FinishReason::Stop)]
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_driver_resolves_multiple_approval_commands() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let future_manager = approval_manager.clone();
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel();
+        let future = async move {
+            let first =
+                future_manager.request_approval("recovery-call-1", &ToolCategory::Exec, "Bash");
+            ready_tx.send("recovery-call-1").unwrap();
+            let first = first.await.unwrap();
+            let second =
+                future_manager.request_approval("recovery-call-2", &ToolCategory::Exec, "Write");
+            ready_tx.send("recovery-call-2").unwrap();
+            let second = second.await.unwrap();
+            (first, second)
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(2);
+        let host = tokio::spawn(async move {
+            assert_eq!(ready_rx.recv().await, Some("recovery-call-1"));
+            cmd_tx
+                .send(ProtocolCommand::ToolApprove {
+                    call_id: "recovery-call-1".into(),
+                    scope: ApprovalScope::Once,
+                    answer: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(ready_rx.recv().await, Some("recovery-call-2"));
+            cmd_tx
+                .send(ProtocolCommand::ToolDeny {
+                    call_id: "recovery-call-2".into(),
+                    reason: "operator denied second recovered tool".into(),
+                })
+                .await
+                .unwrap();
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect("multiple recovered approvals must not deadlock");
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished((first, second)) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        assert!(matches!(
+            first,
+            ToolApprovalResult::Approved { answer: None }
+        ));
+        assert!(matches!(
+            second,
+            ToolApprovalResult::Denied { reason }
+                if reason == "operator denied second recovered tool"
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_stop_waits_until_engine_future_observes_cancellation() {
+        let cancellation = wcore_agent::cancel::CancellationToken::new();
+        let observed = cancellation.clone();
+        let provider_dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let future_dispatches = provider_dispatches.clone();
+        let future = async move {
+            if !observed.is_cancelled() {
+                future_dispatches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            observed.cancelled().await;
+            "engine-observed-cancellation"
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        cmd_tx.send(ProtocolCommand::Stop).await.unwrap();
+        let writer = CapturingProtocolEmitter::default();
+        let approval_manager = ToolApprovalManager::new();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive_active_recovery(future, &mut cmd_rx, &approval_manager, &writer, &|| {
+                cancellation.cancel()
+            }),
+        )
+        .await
+        .expect("Stop must be observed by the recovery future before it is dropped");
+
+        assert!(matches!(
+            outcome,
+            ActiveRecoveryOutcome::Stopped("engine-observed-cancellation")
+        ));
+        assert_eq!(
+            provider_dispatches.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a queued Stop must be applied before the recovered future's first poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_recovery_answers_every_correlated_command_once() {
+        let cancellation = wcore_agent::cancel::CancellationToken::new();
+        let observed = cancellation.clone();
+        let future = async move {
+            observed.cancelled().await;
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(5);
+        for command in [
+            r#"{"type":"session_resync","recovery_version":1,"request_id":"r1","session_id":"s1"}"#,
+            r#"{"type":"resume_turn","recovery_version":1,"request_id":"r2","session_id":"s1","turn_id":"t1","cursor":{"journal_sequence":1,"journal_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"action":"continue"}"#,
+            r#"{"type":"resolve_interrupted_approval","recovery_version":1,"request_id":"r3","session_id":"s1","turn_id":"t1","cursor":{"journal_sequence":1,"journal_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"approval_id":"a1","decision":"deny"}"#,
+            r#"{"type":"resolve_unknown_tool_effect","recovery_version":1,"session_id":"s1","turn_id":"t1","cursor":{"journal_sequence":1,"journal_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"tool_execution_id":"tool-1","outcome":"not_started","operator_id":"operator-1","evidence":{"source":"external_system_record","reference_id":"ref-1","observed_at_unix_ms":1,"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#,
+        ] {
+            cmd_tx
+                .send(serde_json::from_str(command).unwrap())
+                .await
+                .unwrap();
+        }
+        cmd_tx.send(ProtocolCommand::Stop).await.unwrap();
+        let writer = CapturingProtocolEmitter::default();
+        let approval_manager = ToolApprovalManager::new();
+
+        let outcome =
+            drive_active_recovery(future, &mut cmd_rx, &approval_manager, &writer, &|| {
+                cancellation.cancel()
+            })
+            .await;
+
+        assert!(matches!(outcome, ActiveRecoveryOutcome::Stopped(())));
+        let events = writer.events.lock().unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            ProtocolEvent::SessionRecoveryUnavailable { request_id, .. } if request_id == "r1"
+        ));
+        assert!(matches!(
+            &events[1],
+            ProtocolEvent::SessionRecoveryUnavailable { request_id, .. } if request_id == "r2"
+        ));
+        assert!(matches!(
+            &events[2],
+            ProtocolEvent::SessionRecoveryUnavailable { request_id, .. } if request_id == "r3"
+        ));
+        assert!(matches!(
+            &events[3],
+            ProtocolEvent::Error { msg_id: Some(msg_id), error }
+                if msg_id == "tool-1" && error.code == "recovery_busy"
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovered_approval_error_emits_exactly_one_terminal_stream_end() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0005");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let approval_manager = ToolApprovalManager::new();
+        let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+        handle_recovered_approval(
+            &mut engine,
+            &writer,
+            &output,
+            &mut cmd_rx,
+            &approval_manager,
+            &|| {},
+            wcore_protocol::commands::RECOVERED_APPROVAL_VERSION,
+            "request-approval-error".into(),
+            "f14a0005".into(),
+            "turn-recovery".into(),
+            cursor,
+            "absent-approval".into(),
+            wcore_protocol::commands::RecoveredApprovalDecision::Approve,
+            None,
+        )
+        .await;
+
+        assert_eq!(output.errors.lock().unwrap().len(), 1);
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("request-approval-error".into(), FinishReason::Error)]
+        );
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::SessionRecoveryUnavailable { .. }]
+        ));
+    }
+
+    #[test]
+    fn json_operator_resolution_persists_exact_authority_and_emits_receipt() {
+        let (_directory, engine, journal, cursor, tool_execution_id) =
+            unknown_tool_recovery_engine("f14a0004");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let command = operator_resolution_command("f14a0004", cursor.clone(), &tool_execution_id);
+
+        handle_operator_tool_effect_resolution(&engine, &writer, &output, command);
+
+        assert_eq!(*output.errors.lock().unwrap(), Vec::<String>::new());
+        assert!(
+            engine
+                .tool_effects_requiring_reconciliation()
+                .unwrap()
+                .is_empty()
+        );
+        let state = journal.state().unwrap();
+        let tool = &state.tools[&tool_execution_id];
+        assert_eq!(
+            tool.result
+                .as_ref()
+                .and_then(|result| result["content"].as_str()),
+            Some("Operator evidence confirms the interrupted tool effect succeeded")
+        );
+        assert_eq!(
+            tool.result
+                .as_ref()
+                .and_then(|result| result["is_error"].as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            tool.resolution_source,
+            Some(
+                wcore_agent::session_journal::ToolResolutionSource::Operator {
+                    operator_id: "operator-7".into(),
+                }
+            )
+        );
+        assert_eq!(
+            tool.resolution_evidence,
+            Some(json!({
+                "source": "external_system_record",
+                "reference_id": "record-11",
+                "observed_at_unix_ms": 1_721_000_003_000_u64,
+                "digest": format!("sha256:{}", "b".repeat(64)),
+            }))
+        );
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::UnknownToolEffectResolved { resolution }]
+                if resolution.session_id == "f14a0004"
+                    && resolution.turn_id == "turn-operator-recovery"
+                    && resolution.cursor == cursor
+                    && resolution.tool_execution_id == tool_execution_id
+        ));
+    }
+
+    #[test]
+    fn json_failed_operator_resolution_persists_canonical_error_result() {
+        let (_directory, engine, journal, cursor, tool_execution_id) =
+            unknown_tool_recovery_engine("f14a0006");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let mut command = operator_resolution_command("f14a0006", cursor, &tool_execution_id);
+        let ProtocolCommand::ResolveUnknownToolEffect(resolution) = &mut command else {
+            unreachable!()
+        };
+        resolution.outcome = wcore_protocol::events::OperatorToolEffectOutcome::Failed;
+
+        handle_operator_tool_effect_resolution(&engine, &writer, &output, command);
+
+        let state = journal.state().unwrap();
+        let result = state.tools[&tool_execution_id]
+            .result
+            .as_ref()
+            .expect("failed operator evidence must preserve a provider-visible result");
+        assert_eq!(
+            result["content"],
+            "Operator evidence confirms the interrupted tool effect failed"
+        );
+        assert_eq!(result["is_error"], true);
+        assert!(result.get("operator_resolution_evidence").is_some());
+    }
+
+    #[test]
+    fn json_operator_resolution_rejects_stale_cursor_without_mutation_or_receipt() {
+        let (_directory, engine, journal, mut cursor, tool_execution_id) =
+            unknown_tool_recovery_engine("f14a0005");
+        cursor.journal_digest = format!("sha256:{}", "c".repeat(64));
+        let writer = CapturingProtocolEmitter::default();
+        let output = wcore_agent::output::null_sink::NullSink;
+        let command = operator_resolution_command("f14a0005", cursor, &tool_execution_id);
+
+        handle_operator_tool_effect_resolution(&engine, &writer, &output, command);
+
+        assert_eq!(
+            engine.tool_effects_requiring_reconciliation().unwrap(),
+            vec![tool_execution_id.clone()]
+        );
+        assert!(matches!(
+            journal.state().unwrap().tools[&tool_execution_id].effect,
+            wcore_agent::session_journal::ToolEffectState::Unknown { .. }
+        ));
+        assert!(writer.events.lock().unwrap().is_empty());
+    }
+
+    async fn pending_bundled_reference_session(
+        extracted_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) -> anyhow::Result<ExitCode> {
+        use wcore_skills::bundled::{BundledSkillCatalog, BundledSkillEntry};
+
+        let mut catalog = BundledSkillCatalog::new();
+        catalog.register(BundledSkillEntry {
+            name: "signal-cleanup".into(),
+            description: "signal cleanup fixture".into(),
+            when_to_use: None,
+            argument_hint: None,
+            allowed_tools: Vec::new(),
+            model: None,
+            disable_model_invocation: false,
+            user_invocable: false,
+            context: None,
+            agent: None,
+            files: vec![("reference.txt".into(), "exact reference bytes".into())],
+            content: "fixture".into(),
+        });
+        let skills = catalog.prepare_bundled_skills().await;
+        let skill_root = PathBuf::from(
+            skills[0]
+                .skill_root
+                .as_deref()
+                .expect("reference extraction must succeed"),
+        );
+        let process_root = skill_root
+            .parent()
+            .and_then(Path::parent)
+            .expect("skill root must be nested under catalog and process roots")
+            .to_owned();
+        assert_eq!(
+            std::fs::read(skill_root.join("reference.txt")).expect("read reference bytes"),
+            b"exact reference bytes"
+        );
+        *extracted_root.lock().expect("record extraction root") = Some(process_root);
+        ready.send(()).expect("signal trigger must be waiting");
+        std::future::pending().await
+    }
+
+    #[cfg(unix)]
+    fn raise_native_shutdown_signal(kind: &str) {
+        let signal = match kind {
+            "sigint" => libc::SIGINT,
+            "sigterm" => libc::SIGTERM,
+            "sighup" => libc::SIGHUP,
+            other => panic!("unsupported native test signal: {other}"),
+        };
+        // SAFETY: raise delivers a known signal constant to this subprocess;
+        // shutdown_signal installed the matching Tokio handler before the
+        // extraction future sends its ready notification.
+        assert_eq!(unsafe { libc::raise(signal) }, 0);
+    }
+
+    #[cfg(windows)]
+    fn raise_native_shutdown_signal(kind: &str) {
+        use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+
+        assert_eq!(kind, "ctrl-c");
+        // SAFETY: the parent launches this helper with CREATE_NEW_CONSOLE, so
+        // group zero targets only this subprocess's console. Tokio's Ctrl+C
+        // handler is installed before the extraction future signals ready.
+        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "native signal subprocess helper"]
+    async fn signal_shutdown_native_subprocess() {
+        let kind = std::env::var("WCORE_TEST_SHUTDOWN_SIGNAL")
+            .expect("native signal kind supplied by parent test");
+        let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
+        let trigger = tokio::spawn(async move {
+            ready_rx
+                .await
+                .expect("reference extraction reaches signal point");
+            tokio::task::yield_now().await;
+            raise_native_shutdown_signal(&kind);
+        });
+
+        let cleanup = BundledSkillTmpCleanup;
+        let status = run_until_shutdown(session, shutdown_signal())
+            .await
+            .expect("native signal shutdown must complete cleanly");
+        trigger.await.expect("native signal trigger task");
+        assert_eq!(status, ExitCode::SUCCESS);
+        let process_root = extracted_root
+            .lock()
+            .expect("read extraction root")
+            .clone()
+            .expect("subprocess records extraction root");
+        assert!(process_root.exists());
+        drop(cleanup);
+        assert!(
+            !process_root.exists(),
+            "native signal shutdown must remove the exact UUID root"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_shutdown_signals_remove_exact_bundled_root() {
+        #[cfg(unix)]
+        let signals = ["sigint", "sigterm", "sighup"];
+        #[cfg(windows)]
+        let signals = ["ctrl-c"];
+
+        let current_exe = std::env::current_exe().expect("current test executable");
+        let current_exe = current_exe.to_string_lossy().into_owned();
+        for signal in signals {
+            let mut child = wcore_config::shell::shell_command_argv(
+                &current_exe,
+                &[
+                    "--exact",
+                    "tests::signal_shutdown_native_subprocess",
+                    "--ignored",
+                    "--nocapture",
+                ],
+            );
+            child.kill_on_drop(true);
+            child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt as _;
+                use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+                child.as_std_mut().creation_flags(CREATE_NEW_CONSOLE);
+            }
+            let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
+                .await
+                .unwrap_or_else(|_| panic!("native {signal} cleanup subprocess timed out"))
+                .expect("run native signal subprocess");
+            assert!(
+                output.status.success(),
+                "native {signal} cleanup subprocess failed; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 
     #[test]
     fn json_stream_guard_blocks_profile_intent_without_home() {
@@ -3741,7 +7196,7 @@ mod tests {
     /// health, breaking the MCP-server status UI for that path.
     #[test]
     fn test_mcp_ready_events_for_emits_one_per_server_with_tools() {
-        let mgr = McpManager::new_for_test_with_tools(vec![
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![
             (
                 "fs",
                 false,
@@ -3754,9 +7209,17 @@ mod tests {
                 Box::new(NoopTransport) as Box<dyn McpTransport>,
                 vec![tool("grep")],
             ),
-        ]);
+        ]));
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        wcore_mcp::tool_proxy::register_mcp_tools(
+            &mut registry,
+            &mgr,
+            &[],
+            &HashMap::new(),
+            &wcore_config::tools::DeferColdConfig::default(),
+        );
 
-        let events = mcp_ready_events_for(&mgr);
+        let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 2, "expected one McpReady per server");
 
         // Helper sorts servers by name, so order is deterministic: fs, search.
@@ -3783,7 +7246,8 @@ mod tests {
     #[test]
     fn test_mcp_ready_events_for_empty_manager_emits_nothing() {
         let mgr = McpManager::new_for_test_with_tools(vec![]);
-        let events = mcp_ready_events_for(&mgr);
+        let registry = wcore_tools::registry::ToolRegistry::new();
+        let events = mcp_ready_events_for(&mgr, &registry);
         assert!(events.is_empty(), "no MCP servers => no McpReady events");
     }
 
@@ -3801,7 +7265,8 @@ mod tests {
             Box::new(NoopTransport) as Box<dyn McpTransport>,
             vec![],
         )]);
-        let events = mcp_ready_events_for(&mgr);
+        let registry = wcore_tools::registry::ToolRegistry::new();
+        let events = mcp_ready_events_for(&mgr, &registry);
         assert_eq!(events.len(), 1, "tool-less servers must still emit");
         match &events[0] {
             ProtocolEvent::McpReady { name, tools } => {
@@ -3824,6 +7289,7 @@ mod tests {
                 "slow",
                 McpServerHealth::TimedOut {
                     after: std::time::Duration::from_secs(30),
+                    cleanup_error: None,
                 },
             ),
             ("okay", McpServerHealth::Ready { tool_count: 3 }),
@@ -3852,17 +7318,24 @@ mod tests {
         }
     }
 
-    /// wayland#551: deferred-MCP integration must register the manager's
-    /// tools into a LIVE engine (post-boot), emit per-server events, and
-    /// park the manager alive in `dynamic_managers`. Pins the integration
-    /// half of the deferral wiring — removing `register_mcp_tools` from
-    /// `integrate_deferred_mcp` fails this.
+    /// wayland#551/#562: deferred-MCP integration must register the manager's
+    /// tools into a LIVE engine (post-boot), refresh the real registered
+    /// ToolSearch catalog, emit per-server events, and park the manager alive
+    /// in `dynamic_managers`. Merely adding the proxy to the registry is not
+    /// enough: ToolSearch snapshots the catalog during bootstrap, so a late
+    /// proxy is otherwise callable by name but undiscoverable to the model.
     #[tokio::test]
     async fn integrate_deferred_mcp_registers_tools_into_live_engine() {
-        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
-            wcore_config::config::Config::default(),
-            vec![],
-        );
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        // `build_for_test` deliberately omits ToolSearch; seed it through the
+        // same live-registry helper production bootstrap uses.
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
         let before = engine.tool_names().len();
         let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
             "quick",
@@ -3872,13 +7345,30 @@ mod tests {
         )]));
         let writer = ProtocolWriter::new();
         let mut dynamic_managers = Vec::new();
+        // Mark the server itself non-deferred to prove the refresh reapplies
+        // the global cold policy before ToolSearch snapshots the live tools.
+        let resolved = HashMap::from([(
+            "quick".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let mut reservations = lifecycle_reservations(&resolved);
         assert!(
             integrate_deferred_mcp(
                 &mut engine,
                 mgr,
-                &HashMap::new(),
+                &resolved,
+                &mut reservations,
                 &writer,
-                &mut dynamic_managers
+                &mut dynamic_managers,
             ),
             "integration must succeed on an idle engine"
         );
@@ -3888,7 +7378,287 @@ mod tests {
             "deferred server's tools must be registered; got {:?}",
             engine.tool_names()
         );
+        let registry = engine.tools();
+        let search = registry
+            .get("ToolSearch")
+            .expect("bootstrap must register the real ToolSearch tool");
+        let result = search.execute(json!({"query": "quick_echo"})).await;
+        assert!(
+            result.content.contains("\"name\": \"quick_echo\"")
+                && result.content.contains("\"parameters\""),
+            "late MCP tool must be discoverable through the registered ToolSearch; got {}",
+            result.content
+        );
+        drop(registry);
+
+        // A second live refresh replaces rather than duplicates ToolSearch,
+        // and the catalog snapshot must never index ToolSearch itself.
+        engine
+            .registry_mut()
+            .expect("registry must be mutable after dropping the read handle")
+            .refresh_tool_search_catalog(&defer_cold);
+        assert_eq!(
+            engine
+                .tool_names()
+                .iter()
+                .filter(|name| name.as_str() == "ToolSearch")
+                .count(),
+            1,
+            "repeated refresh must leave exactly one registered ToolSearch"
+        );
+        let registry = engine.tools();
+        let self_search = registry
+            .get("ToolSearch")
+            .expect("ToolSearch must survive repeated refresh")
+            .execute(json!({"query": "ToolSearch"}))
+            .await;
+        assert!(
+            !self_search.content.contains("\"name\": \"ToolSearch\""),
+            "ToolSearch must not index or hydrate itself; got {}",
+            self_search.content
+        );
         assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
+    }
+
+    /// #562: `ToolSearch` is a reserved built-in name before boot MCP proxy
+    /// delivery and is refreshed after live additions. A server exporting that
+    /// literal name must remain callable under the deterministic MCP namespace,
+    /// while host health reports the same display name the catalog exposes.
+    #[tokio::test]
+    async fn literal_tool_search_mcp_is_namespaced_preserved_and_health_aligned() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "collision",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("ToolSearch")],
+        )]));
+        let resolved = HashMap::from([(
+            "collision".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
+
+        assert!(integrate_deferred_mcp(
+            &mut engine,
+            manager.clone(),
+            &resolved,
+            &mut reservations,
+            &writer,
+            &mut dynamic_managers,
+        ));
+
+        let registry = engine.tools();
+        let names = registry.tool_names();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "ToolSearch")
+                .count(),
+            1,
+            "the built-in ToolSearch must remain singular"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "mcp__collision__ToolSearch"),
+            "the colliding MCP proxy must be preserved under its namespace: {names:?}"
+        );
+        let catalog_result = registry
+            .get("ToolSearch")
+            .expect("built-in ToolSearch must remain installed")
+            .execute(json!({"query": "mcp__collision__ToolSearch"}))
+            .await;
+        assert!(
+            catalog_result
+                .content
+                .contains("\"name\": \"mcp__collision__ToolSearch\""),
+            "built-in catalog must expose the preserved proxy: {}",
+            catalog_result.content
+        );
+
+        let events = mcp_ready_events_for(&manager, &registry);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ProtocolEvent::McpReady { name, tools } => {
+                assert_eq!(name, "collision");
+                assert_eq!(tools, &["mcp__collision__ToolSearch".to_string()]);
+            }
+            other => panic!("expected McpReady, got {other:?}"),
+        }
+        assert_eq!(dynamic_managers.len(), 1, "manager must remain alive");
+    }
+
+    /// #562 structural ordering regression: execute the same readiness seam
+    /// used by the session loop across `InitHistory -> Message`. Setup remains
+    /// immediate; the delayed manager becomes provider-visible exactly at the
+    /// Message boundary.
+    #[tokio::test]
+    async fn session_readiness_preserves_init_history_then_settles_mcp_for_message() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let resolved = HashMap::from([(
+            "delayed".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let reservations = lifecycle_reservations(&resolved);
+        let manager = McpManager::new_for_test_with_tools(vec![(
+            "delayed",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("late_after_init")],
+        )]);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let _ = tx.send(DeferredMcpConnectResult {
+                outcome: Ok(manager),
+                resolved,
+                reservations,
+            });
+        });
+
+        let writer = ProtocolWriter::new();
+        let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
+        let mut deferred_mcp_rx = Some(rx);
+        let mut pending_deferred_mcp = None;
+        let mut dynamic_managers = Vec::new();
+
+        let commands = [
+            ProtocolCommand::InitHistory {
+                text: "desktop init-history sentinel".to_string(),
+            },
+            ProtocolCommand::Message {
+                msg_id: "first-message".to_string(),
+                content: "use the delayed tool".to_string(),
+                files: Vec::new(),
+            },
+        ];
+        let mut readiness_trace = Vec::new();
+        let mut init_history_applied = false;
+
+        for command in commands {
+            let readiness = session_command_readiness(&command);
+            readiness_trace.push(readiness);
+            if readiness == SessionCommandReadiness::SettleDeferredMcp {
+                let ready = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    settle_deferred_mcp_before_message(
+                        &mut deferred_mcp_rx,
+                        &mut pending_deferred_mcp,
+                        &mut engine,
+                        &writer,
+                        &output,
+                        &mut dynamic_managers,
+                        None,
+                    ),
+                )
+                .await
+                .expect("the message readiness boundary must remain bounded");
+                assert!(ready, "an idle registry must be ready before Message");
+            }
+
+            match command {
+                ProtocolCommand::InitHistory { text } => {
+                    engine.inject_history(text);
+                    init_history_applied = true;
+                    assert!(
+                        deferred_mcp_rx.is_some(),
+                        "setup commands must not wait for configured MCP"
+                    );
+                    assert!(
+                        !engine
+                            .tools()
+                            .to_tool_defs()
+                            .iter()
+                            .any(|def| def.name == "late_after_init"),
+                        "delayed tool must remain absent before the Message boundary"
+                    );
+                }
+                ProtocolCommand::Message { .. } => {
+                    assert!(
+                        init_history_applied,
+                        "InitHistory must execute before the immediate Message"
+                    );
+                    assert!(
+                        engine
+                            .tools()
+                            .to_tool_defs()
+                            .iter()
+                            .any(|def| def.name == "late_after_init"),
+                        "provider-visible registry must be ready before Message processing"
+                    );
+                }
+                _ => unreachable!("fixture contains only InitHistory and Message"),
+            }
+        }
+
+        assert_eq!(
+            readiness_trace,
+            [
+                SessionCommandReadiness::Immediate,
+                SessionCommandReadiness::SettleDeferredMcp,
+            ],
+            "only Message may cross the configured-MCP readiness boundary"
+        );
+
+        assert!(deferred_mcp_rx.is_none());
+        assert!(pending_deferred_mcp.is_none());
+        assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
+        assert!(
+            engine
+                .tools()
+                .to_tool_defs()
+                .iter()
+                .any(|def| def.name == "late_after_init"),
+            "provider-visible tool registry must include the delayed MCP tool"
+        );
+        let registry = engine.tools();
+        let result = registry
+            .get("ToolSearch")
+            .expect("ToolSearch must remain registered")
+            .execute(json!({"query": "late_after_init"}))
+            .await;
+        assert!(
+            result.content.contains("\"name\": \"late_after_init\""),
+            "the delayed tool must be discoverable before the provider turn; got {}",
+            result.content
+        );
     }
 
     /// wayland#551: while the registry Arc is borrowed (as during a turn),
@@ -3909,11 +7679,13 @@ mod tests {
         )]));
         let writer = ProtocolWriter::new();
         let mut dynamic_managers = Vec::new();
+        let mut reservations = HashMap::new();
         assert!(
             !integrate_deferred_mcp(
                 &mut engine,
                 mgr,
                 &HashMap::new(),
+                &mut reservations,
                 &writer,
                 &mut dynamic_managers
             ),
@@ -3925,6 +7697,70 @@ mod tests {
             "no tools may be registered on a declined integration"
         );
         drop(hold);
+    }
+
+    /// F17 review regression: the Message boundary must report that it is not
+    /// ready while a registry reader is retained. The session loop uses this
+    /// result to park and retry the exact command instead of running a turn
+    /// with a partial tool manifest.
+    #[tokio::test]
+    async fn message_readiness_fails_closed_while_registry_is_borrowed() {
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        let hold = engine.tools();
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "held",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("held_echo")],
+        )]));
+        let mut deferred_mcp_rx = None;
+        let mut pending_deferred_mcp = Some(PendingDeferredMcp {
+            manager,
+            resolved: HashMap::new(),
+            reservations: HashMap::new(),
+        });
+        let writer = ProtocolWriter::new();
+        let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
+        let mut dynamic_managers = Vec::new();
+
+        assert!(
+            !settle_deferred_mcp_before_message(
+                &mut deferred_mcp_rx,
+                &mut pending_deferred_mcp,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+                None,
+            )
+            .await,
+            "a retained registry reader must block the provider boundary"
+        );
+        assert!(
+            pending_deferred_mcp.is_some(),
+            "integration must stay parked"
+        );
+        assert!(dynamic_managers.is_empty());
+
+        drop(hold);
+        assert!(
+            settle_deferred_mcp_before_message(
+                &mut deferred_mcp_rx,
+                &mut pending_deferred_mcp,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+                None,
+            )
+            .await,
+            "the parked manager must integrate after the reader is released"
+        );
+        assert!(pending_deferred_mcp.is_none());
+        assert_eq!(dynamic_managers.len(), 1);
     }
 
     /// Rank 47 regression: `--no-memory` must parse and flip
@@ -3942,20 +7778,31 @@ mod tests {
         use wcore_protocol::commands::SessionMode;
 
         // Config posture is honored when --force is absent.
-        assert_eq!(
-            initial_session_mode(ApprovalMode::Default, false),
-            SessionMode::Default
-        );
-        assert_eq!(
-            initial_session_mode(ApprovalMode::AutoEdit, false),
-            SessionMode::AutoEdit,
-            "config auto-edit must reach the session (the #241 regression)"
-        );
-        assert_eq!(
-            initial_session_mode(ApprovalMode::Force, false),
-            SessionMode::Force,
-            "config force must reach the session without --force"
-        );
+        for (mode, expected) in [
+            (ApprovalMode::Default, SessionMode::Default),
+            (ApprovalMode::AutoEdit, SessionMode::AutoEdit),
+            (ApprovalMode::Force, SessionMode::Force),
+        ] {
+            let config = Config {
+                approval_mode: mode,
+                ..Default::default()
+            };
+            assert_eq!(
+                approval_policy_to_session(
+                    resolve_local_execution(
+                        &config,
+                        false,
+                        false,
+                        DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                        false,
+                    )
+                    .unwrap()
+                    .approvals(),
+                ),
+                expected,
+                "config {mode:?} must reach the session"
+            );
+        }
 
         // --force overrides every config posture to Force.
         for m in [
@@ -3963,12 +7810,461 @@ mod tests {
             ApprovalMode::AutoEdit,
             ApprovalMode::Force,
         ] {
+            let config = Config {
+                approval_mode: m,
+                ..Default::default()
+            };
             assert_eq!(
-                initial_session_mode(m, true),
+                approval_policy_to_session(
+                    resolve_local_execution(
+                        &config,
+                        true,
+                        false,
+                        DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                        false,
+                    )
+                    .unwrap()
+                    .approvals(),
+                ),
                 SessionMode::Force,
                 "--force must override config {m:?} to Force"
             );
         }
+
+        let legacy = Config {
+            tools: wcore_config::config::ToolsConfig {
+                auto_approve: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            approval_policy_to_session(
+                resolve_local_execution(
+                    &legacy,
+                    false,
+                    false,
+                    DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                    false,
+                )
+                .unwrap()
+                .approvals(),
+            ),
+            SessionMode::Force,
+            "legacy auto-approve must converge with the typed policy"
+        );
+        let view = wcore_cli::tui::config_view_from(&legacy);
+        assert_eq!(view.approval, "force");
+        assert!(view.tools_auto_approve);
+    }
+
+    /// RETAINED FROM BEFORE THE RENAME, deliberately unmodified.
+    ///
+    /// This is the pre-rename guard. It is kept for two reasons: deleting a
+    /// passing test to install a replacement is not a trade this lane is
+    /// allowed to make, and it serves as the live demonstration of WHY the
+    /// replacement below was needed. It hardcodes the two tier arguments
+    /// (`resolve_local_execution(&cfg, /*approval_bypass*/ true,
+    /// /*dangerous*/ false, ..)`) instead of deriving them from the parsed
+    /// `Cli`, so it stays GREEN through a rewiring that moves `--force` into
+    /// tier 2 — the exact privilege escalation this lane exists to prevent.
+    /// Measured, not asserted: see the lane summary's known-negative run.
+    #[test]
+    fn foreign_dangerous_alias_is_approval_only() {
+        use clap::Parser as _;
+        use wcore_types::execution_policy::SandboxPolicy;
+
+        let cli = Cli::try_parse_from(["wayland-core", "--dangerously-skip-permissions"])
+            .expect("compatibility alias must remain accepted");
+        assert!(cli.dangerously_skip_permissions);
+        assert!(!cli.dangerous);
+
+        let selection = resolve_local_execution(
+            &Config::default(),
+            true,
+            false,
+            DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.approvals(), ApprovalPolicy::Bypass);
+        assert_eq!(selection.baseline().sandbox(), SandboxPolicy::Required);
+        assert!(selection.dangerous_grant().is_none());
+    }
+
+    /// TIER REGRESSION GUARD — the artifact that makes the danger-flag rename
+    /// safe forever.
+    ///
+    /// For every accepted danger spelling, assert WHICH TIER it lands in, and
+    /// in particular that the OS sandbox is still required for every tier-1
+    /// spelling. If a future edit makes `--force` or `--yolo` an alias of the
+    /// tier-2 flag, every existing script and CI job using them silently loses
+    /// its OS sandbox on upgrade — a privilege escalation delivered by a
+    /// rename, invisible in the caller's own diff.
+    ///
+    /// This derives BOTH tier arguments from the parsed `Cli` through
+    /// `danger_tiers` — the same wiring `run()` uses. The test it replaces
+    /// (`foreign_dangerous_alias_is_approval_only`) hardcoded
+    /// `resolve_local_execution(&cfg, /*approval_bypass*/ true,
+    /// /*dangerous*/ false, ..)`, so rewiring a tier-1 alias into tier 2 would
+    /// have left it green.
+    #[test]
+    fn danger_spellings_never_change_tier() {
+        use clap::Parser as _;
+        use wcore_types::execution_policy::{
+            EffectiveExecutionPolicy, MAX_DANGEROUS_SESSION_TTL_SECS, SandboxPolicy,
+        };
+
+        // (argv spelling, does this spelling bypass the OS sandbox?)
+        let cases: [(&str, bool); 5] = [
+            ("--force", false),
+            ("--yolo", false),
+            ("--dangerously-skip-permissions", false),
+            ("--dangerously-skip-permissions-and-sandbox", true),
+            ("--dangerous", true),
+        ];
+
+        for (spelling, expect_sandbox_bypass) in cases {
+            let cli = Cli::try_parse_from(["wayland-core", spelling])
+                .unwrap_or_else(|e| panic!("{spelling} must remain accepted: {e}"));
+            let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
+
+            let selection = resolve_local_execution(
+                &Config::default(),
+                approval_bypass,
+                dangerous_launch,
+                DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                false,
+            )
+            .unwrap_or_else(|e| panic!("{spelling} must resolve an execution selection: {e}"));
+
+            // The half both tiers share.
+            assert_eq!(
+                selection.approvals(),
+                ApprovalPolicy::Bypass,
+                "{spelling} must bypass approval prompts"
+            );
+
+            // The half that must NEVER move for a tier-1 spelling.
+            let sandbox_bypassed = selection.dangerous_grant().is_some();
+            assert_eq!(
+                sandbox_bypassed, expect_sandbox_bypass,
+                "{spelling} CHANGED TIER: sandbox_bypassed={sandbox_bypassed}, expected \
+                 {expect_sandbox_bypass}. A tier-1 spelling that gains a dangerous grant \
+                 strips the OS sandbox from every existing script that uses it."
+            );
+
+            // The baseline is Required for BOTH tiers; only a resolver-minted
+            // lease may override it. This catches a change that weakened the
+            // baseline itself rather than the tier wiring.
+            //
+            // NOTE this assertion ALONE would be a permanently-green gate:
+            // `BaselineExecutionPolicy::smart()` hardcodes `Required`, so it
+            // can never redden for a tier change. The authoritative assertion
+            // is the EFFECTIVE posture below — the same projection the protocol
+            // emits to hosts, and the one that actually moves between tiers.
+            assert_eq!(
+                selection.baseline().sandbox(),
+                SandboxPolicy::Required,
+                "{spelling}: the baseline sandbox must stay Required"
+            );
+
+            let effective = match selection.dangerous_grant() {
+                Some(grant) => EffectiveExecutionPolicy::dangerous(grant),
+                None => EffectiveExecutionPolicy::baseline(selection.baseline()),
+            };
+            let expected_sandbox = if expect_sandbox_bypass {
+                SandboxPolicy::Bypass
+            } else {
+                SandboxPolicy::Required
+            };
+            assert_eq!(
+                effective.sandbox(),
+                expected_sandbox,
+                "{spelling}: TIER CHANGE. The EFFECTIVE OS-sandbox posture for this \
+                 spelling moved. If deliberate, every existing caller of {spelling} \
+                 just gained or lost containment — that is a privilege change, not \
+                 a rename."
+            );
+
+            match selection.dangerous_grant() {
+                Some(grant) => {
+                    assert!(
+                        expect_sandbox_bypass,
+                        "{spelling}: a tier-1 spelling must not mint a lease"
+                    );
+                    assert!(
+                        grant.ttl_millis() > 0
+                            && grant.ttl_millis() <= MAX_DANGEROUS_SESSION_TTL_SECS * 1_000,
+                        "{spelling}: lease must be bounded within the one-hour cap, got {}ms",
+                        grant.ttl_millis()
+                    );
+                }
+                None => assert!(
+                    !expect_sandbox_bypass,
+                    "{spelling}: a tier-2 spelling must mint a bounded lease"
+                ),
+            }
+        }
+    }
+
+    /// The two tiers are a superset relationship, not a stack: asking for both
+    /// at once is a parse error in every spelling combination.
+    #[test]
+    fn the_two_tiers_refuse_to_stack_in_every_spelling() {
+        use clap::Parser as _;
+
+        for tier1 in ["--force", "--yolo", "--dangerously-skip-permissions"] {
+            for tier2 in ["--dangerously-skip-permissions-and-sandbox", "--dangerous"] {
+                assert!(
+                    Cli::try_parse_from(["wayland-core", tier1, tier2]).is_err(),
+                    "{tier1} {tier2} must be refused: the tiers do not stack"
+                );
+                // Both orders — a one-sided `conflicts_with` that only fired
+                // in one direction would pass the check above.
+                assert!(
+                    Cli::try_parse_from(["wayland-core", tier2, tier1]).is_err(),
+                    "{tier2} {tier1} must be refused too (reversed order)"
+                );
+            }
+            // CONTROL IN THE PASS DIRECTION. Without this, every assertion
+            // above would also be satisfied by a spelling that simply does not
+            // parse at all — a gate that cannot pass proves as little as one
+            // that cannot fail.
+            assert!(
+                Cli::try_parse_from(["wayland-core", tier1]).is_ok(),
+                "{tier1} alone must still parse"
+            );
+        }
+        for tier2 in ["--dangerously-skip-permissions-and-sandbox", "--dangerous"] {
+            assert!(
+                Cli::try_parse_from(["wayland-core", tier2]).is_ok(),
+                "{tier2} alone must still parse"
+            );
+        }
+    }
+
+    /// `--auto-approve` is deliberately NOT a tier-1 alias, and this locks the
+    /// measured reason in: it is the CLI face of the `[tools] auto_approve`
+    /// config key, it has no conflict relationship with the danger flags, and
+    /// `--dangerous --auto-approve` parses today. Aliasing it would start
+    /// rejecting an invocation that works, which is the same class of silent
+    /// behaviour change this module's tier guard exists to prevent.
+    #[test]
+    fn auto_approve_is_not_a_danger_tier_alias() {
+        use clap::Parser as _;
+
+        let cli = Cli::try_parse_from([
+            "wayland-core",
+            "--dangerously-skip-permissions-and-sandbox",
+            "--auto-approve",
+        ])
+        .expect("--auto-approve must keep composing with the tier-2 flag");
+        assert!(cli.auto_approve);
+        let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
+        assert!(
+            !approval_bypass,
+            "--auto-approve must not feed the tier-1 approval-bypass wiring"
+        );
+        assert!(dangerous_launch);
+
+        // And on its own it selects NEITHER tier.
+        let alone =
+            Cli::try_parse_from(["wayland-core", "--auto-approve"]).expect("parses standalone");
+        assert_eq!(danger_tiers(&alone), (false, false));
+    }
+
+    /// The lease lifetime attaches to tier 2 under BOTH spellings, and still
+    /// cannot imply the authority on its own.
+    #[test]
+    fn dangerous_ttl_requires_an_explicit_dangerous_launch() {
+        use clap::Parser as _;
+
+        assert!(
+            Cli::try_parse_from(["wayland-core", "--dangerous-ttl-secs", "30"]).is_err(),
+            "a lease lifetime cannot imply Dangerous authority"
+        );
+        for spelling in ["--dangerously-skip-permissions-and-sandbox", "--dangerous"] {
+            let cli = Cli::try_parse_from(["wayland-core", spelling, "--dangerous-ttl-secs", "30"])
+                .unwrap_or_else(|e| panic!("{spelling} must accept a lease lifetime: {e}"));
+            assert_eq!(cli.dangerous_ttl_secs, Some(30));
+        }
+    }
+
+    #[test]
+    fn managed_deny_refuses_local_dangerous_launch() {
+        use wcore_types::execution_policy::ManagedDangerousPolicy;
+
+        let config = Config {
+            execution_policy: BaselineExecutionPolicy::managed(
+                ApprovalPolicy::Prompt,
+                ManagedDangerousPolicy::Deny,
+            ),
+            ..Default::default()
+        };
+        let error = resolve_local_execution(&config, false, true, 30, false)
+            .err()
+            .expect("Managed deny must reject even a local launch");
+        assert!(error.to_string().contains("disabled by managed policy"));
+    }
+
+    #[test]
+    fn desktop_dangerous_launch_is_source_bound() {
+        let selection = resolve_local_execution(&Config::default(), false, true, 30, true)
+            .expect("Desktop process launch is an allowed local source");
+        let grant = selection
+            .dangerous_grant()
+            .expect("Dangerous must produce a resolver-owned lease");
+        assert_eq!(grant.source(), PolicySource::DesktopLocalLaunch);
+        assert_eq!(grant.ttl_millis(), 30_000);
+    }
+
+    #[test]
+    fn wire_mode_changes_advance_only_for_accepted_effective_changes() {
+        use wcore_protocol::commands::SessionMode;
+        use wcore_types::execution_policy::EffectiveExecutionPolicy;
+
+        let manager = ToolApprovalManager::new();
+        manager.set_allow_wire_force(true);
+        let policy = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+            ApprovalPolicy::Prompt,
+            PolicySource::DesktopLocalLaunch,
+        ));
+        let mut sequence = ExecutionPolicySequence::launch(policy, 10);
+
+        assert!(matches!(
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::Default, 11).unwrap(),
+            WireModeChange::Unchanged
+        ));
+        assert_eq!(sequence.current().revision, 0);
+
+        let changed =
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::AutoEdit, 12).unwrap();
+        assert!(matches!(changed, WireModeChange::Changed(_)));
+        assert_eq!(sequence.current().revision, 1);
+        assert_eq!(
+            sequence.current().policy.approvals(),
+            ApprovalPolicy::AutoEdit
+        );
+
+        assert!(matches!(
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::AutoEdit, 13).unwrap(),
+            WireModeChange::Unchanged
+        ));
+        assert_eq!(sequence.current().revision, 1);
+    }
+
+    #[test]
+    fn rejected_wire_mode_does_not_advance_or_mutate_policy() {
+        use wcore_protocol::commands::SessionMode;
+        use wcore_types::execution_policy::EffectiveExecutionPolicy;
+
+        let manager = ToolApprovalManager::new();
+        let policy = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+            ApprovalPolicy::Prompt,
+            PolicySource::DesktopLocalLaunch,
+        ));
+        let mut sequence = ExecutionPolicySequence::launch(policy, 10);
+
+        assert!(matches!(
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::Force, 11).unwrap(),
+            WireModeChange::Rejected
+        ));
+        assert_eq!(sequence.current().revision, 0);
+        assert_eq!(
+            sequence.current().policy.approvals(),
+            ApprovalPolicy::Prompt
+        );
+        assert_eq!(manager.session_mode(), SessionMode::Default);
+    }
+
+    #[test]
+    fn auto_edit_gate_visibility_is_tool_name_aware() {
+        use wcore_protocol::commands::SessionMode;
+        use wcore_protocol::events::{ToolCategory, ToolInfo};
+
+        let manager = Arc::new(ToolApprovalManager::new());
+        manager.set_mode(SessionMode::AutoEdit);
+        let capture = Arc::new(CapturingProtocolEmitter::default());
+        let inner: Arc<dyn ProtocolEmitter> = capture.clone();
+        let writer = GatingProtocolWriter::new(inner, manager, None);
+
+        for (call_id, name) in [("remote-edit", "Notion"), ("local-write", "Write")] {
+            writer
+                .emit(&ProtocolEvent::ToolRequest {
+                    msg_id: "m".into(),
+                    call_id: call_id.into(),
+                    tool: ToolInfo {
+                        name: name.into(),
+                        category: ToolCategory::Edit,
+                        args: json!({}),
+                        description: String::new(),
+                    },
+                })
+                .unwrap();
+        }
+
+        let events = capture.events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProtocolEvent::ApprovalRequired { call_id, .. } if call_id == "remote-edit"
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ProtocolEvent::ApprovalRequired { call_id, .. } if call_id == "local-write"
+        )));
+    }
+
+    #[test]
+    fn one_use_api_key_is_consumed_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("credential");
+        std::fs::write(&path, b"secret-canary").expect("write credential");
+
+        let secret = read_one_use_api_key(&path).expect("consume credential");
+
+        assert_eq!(secret, "secret-canary");
+        assert!(
+            !path.exists(),
+            "credential file must be removed before boot"
+        );
+    }
+
+    #[test]
+    fn oversized_one_use_api_key_is_rejected_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("credential");
+        std::fs::write(&path, vec![b'x'; 16 * 1024 + 1]).expect("write credential");
+
+        let error = read_one_use_api_key(&path).expect_err("oversized credential must fail");
+
+        assert!(error.to_string().contains("1..=16384 bytes"));
+        assert!(!path.exists(), "rejected credential file must be removed");
+    }
+
+    #[test]
+    fn one_use_eval_egress_key_is_consumed_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("egress-signing-key");
+        let seed = [7_u8; 32];
+        std::fs::write(&path, seed).expect("write signing key");
+
+        let key = read_one_use_eval_egress_key(&path).expect("consume signing key");
+
+        assert_eq!(key.to_bytes(), seed);
+        assert!(!path.exists(), "signing key must be removed before boot");
+    }
+
+    #[test]
+    fn invalid_one_use_eval_egress_key_is_rejected_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("egress-signing-key");
+        std::fs::write(&path, [7_u8; 31]).expect("write invalid signing key");
+
+        let error = read_one_use_eval_egress_key(&path).expect_err("short key must fail");
+
+        assert!(error.to_string().contains("exactly 32 bytes"));
+        assert!(!path.exists(), "rejected signing key must be removed");
     }
 
     #[test]

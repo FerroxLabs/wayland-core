@@ -5,7 +5,7 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use wcore_types::tool::ToolDef;
+use wcore_types::{message::TokenUsage, tool::ToolDef};
 
 /// Snapshot of prompt state taken before each API call.
 #[derive(Debug, Clone)]
@@ -17,6 +17,7 @@ struct PromptSnapshot {
 /// Cache token statistics from a single API response.
 #[derive(Debug, Clone)]
 pub struct CacheStats {
+    /// Uncached input tokens (cache misses).
     pub input_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_creation_tokens: u64,
@@ -47,7 +48,7 @@ pub enum CacheBreakCause {
 }
 
 /// Layer E1 — warm-session cache-health warn threshold: a warm round-trip
-/// whose `cache_read / input` ratio falls below this fires a
+/// whose `cache_read / total_input` ratio falls below this fires a
 /// `cache_health_warn` telemetry event.
 pub const CACHE_HEALTH_WARN_RATIO: f64 = 0.3;
 
@@ -65,9 +66,11 @@ pub const CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS: u64 = 2;
 pub struct CacheHealthAlert {
     /// 1-based round-trip index within the conversation.
     pub round_trip: u64,
+    /// Total input processed across uncached, cache-read, and cache-write
+    /// categories.
     pub input_tokens: u64,
     pub cache_read_tokens: u64,
-    /// `cache_read_tokens / input_tokens`.
+    /// `cache_read_tokens / total_input_tokens`.
     pub ratio: f64,
 }
 
@@ -146,7 +149,7 @@ impl CacheBreakDetector {
     /// turn being probed). Returns `Some` when the session is warm (more
     /// than [`CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS`] round-trips), the
     /// provider has demonstrated prompt-cache support at least once, and
-    /// this turn's `cache_read / input` ratio fell below
+    /// this turn's `cache_read / total_input` ratio fell below
     /// [`CACHE_HEALTH_WARN_RATIO`]. Warning-only telemetry — callers must
     /// never alter the request based on it.
     pub fn check_cache_health(&self, stats: &CacheStats) -> Option<CacheHealthAlert> {
@@ -156,16 +159,17 @@ impl CacheBreakDetector {
         if !self.seen_cache_tokens {
             return None;
         }
-        if stats.input_tokens == 0 {
+        let total_input_tokens = stats.total_input_tokens();
+        if total_input_tokens == 0 {
             return None;
         }
-        let ratio = stats.cache_read_tokens as f64 / stats.input_tokens as f64;
+        let ratio = stats.cache_read_tokens as f64 / total_input_tokens as f64;
         if ratio >= CACHE_HEALTH_WARN_RATIO {
             return None;
         }
         Some(CacheHealthAlert {
             round_trip: self.round_trips,
-            input_tokens: stats.input_tokens,
+            input_tokens: total_input_tokens,
             cache_read_tokens: stats.cache_read_tokens,
             ratio,
         })
@@ -196,8 +200,9 @@ impl CacheBreakDetector {
         }
 
         // Calculate hit rate
-        let hit_rate = if stats.input_tokens > 0 {
-            stats.cache_read_tokens as f64 / stats.input_tokens as f64
+        let total_input_tokens = stats.total_input_tokens();
+        let hit_rate = if total_input_tokens > 0 {
+            stats.cache_read_tokens as f64 / total_input_tokens as f64
         } else {
             0.0
         };
@@ -229,6 +234,16 @@ impl CacheBreakDetector {
 
         // Hashes match but cache was lost — server-side TTL expiry
         CacheBreakCause::TtlExpiry
+    }
+}
+
+impl CacheStats {
+    fn total_input_tokens(&self) -> u64 {
+        TokenUsage::total_input_from(
+            self.input_tokens,
+            self.cache_read_tokens,
+            self.cache_creation_tokens,
+        )
     }
 }
 
@@ -290,6 +305,33 @@ mod tests {
             .unwrap();
 
         assert!(matches!(diag, CacheDiagnostic::Healthy { .. }));
+    }
+
+    #[test]
+    fn hit_rate_uses_all_disjoint_input_categories() {
+        let mut detector = CacheBreakDetector::new();
+        detector.record_request("prompt", &make_tools());
+        detector.check_response(CacheStats {
+            input_tokens: 20,
+            cache_read_tokens: 80,
+            cache_creation_tokens: 0,
+        });
+
+        detector.record_request("prompt", &make_tools());
+        let diag = detector
+            .check_response(CacheStats {
+                input_tokens: 20,
+                cache_read_tokens: 80,
+                cache_creation_tokens: 0,
+            })
+            .unwrap();
+
+        match diag {
+            CacheDiagnostic::Healthy { hit_rate } => {
+                assert!((hit_rate - 0.8).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Healthy, got {other:?}"),
+        }
     }
 
     #[test]
@@ -521,7 +563,7 @@ mod tests {
         )
         .expect("warm turn with dead cache must fire cache_health_warn");
         assert_eq!(alert.round_trip, 3);
-        assert_eq!(alert.input_tokens, 15_000);
+        assert_eq!(alert.input_tokens, 15_128);
         assert_eq!(alert.cache_read_tokens, 128);
         assert!(alert.ratio < CACHE_HEALTH_WARN_RATIO);
     }
@@ -539,12 +581,12 @@ mod tests {
                 },
             );
         }
-        // Turn 3: ratio 0.8 >= 0.3 — healthy, no warn.
+        // Turn 3: 8k cache reads / 10k total input = 0.8 — healthy, no warn.
         assert!(
             round_trip(
                 &mut detector,
                 CacheStats {
-                    input_tokens: 10_000,
+                    input_tokens: 2_000,
                     cache_read_tokens: 8_000,
                     cache_creation_tokens: 0,
                 }

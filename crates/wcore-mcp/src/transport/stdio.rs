@@ -9,61 +9,10 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, warn};
-use wcore_config::shell::mcp_stdio_command_builder;
+use wcore_config::shell::{McpStdioLaunchContext, mcp_stdio_command_builder};
 
 use super::{McpError, McpTransport};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
-
-/// Env vars forwarded to MCP stdio children after `env_clear()`.
-///
-/// Everything else — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-/// `WAYLAND_VAULT_PASSPHRASE`, `AWS_SECRET_ACCESS_KEY`, etc. — is withheld.
-/// Per-server `env` entries from `mcp-servers.toml` are layered on top by
-/// `spawn_with_timeout` after this allowlist, so operators can explicitly
-/// forward additional variables when required. Mirrors the pattern in
-/// `wcore-plugin-subprocess/src/mcp_bridge.rs:107`. (F-016)
-const FORWARDED_ENV_VARS: &[&str] = &[
-    // Unix essentials
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "TZ",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    "LC_MONETARY",
-    "LC_NUMERIC",
-    "LC_TIME",
-    "TMPDIR", // macOS: per-user temp dir used by many npm CLIs
-    // C3: the isolated-profile home. A wayland-aware MCP child (e.g. the IJFW
-    // memory server) must resolve the SAME profile as the parent — without this
-    // it falls back to the default ~/.wayland (cross-profile leak). Non-secret
-    // path; the vault passphrase (WAYLAND_VAULT_*) is never forwarded. This is
-    // distinct from the WAYLAND_PROFILE_HOME contract below (a resolved path for
-    // plugins that read it); WAYLAND_HOME drives the child's own
-    // wayland_config_dir() resolution.
-    "WAYLAND_HOME",
-    // Windows essentials. Without these, cmd.exe / powershell.exe / .NET-based
-    // MCP servers fail to initialise on Windows and the spawned child dies in
-    // ~15ms before the first JSON-RPC request reaches it — diagnosed via
-    // `ERROR_ENVVAR_NOT_FOUND (0xcb)` from CreateProcessAsUserW in CI run
-    // 26422952732 (round 17) plus "MCP stdio server exited before responding"
-    // in rounds 15/16. v0.8.6 fix.
-    "SYSTEMROOT",             // Windows kernel + system32 tooling
-    "WINDIR",                 // %WINDIR% — many libs probe this
-    "COMSPEC",                // cmd.exe absolute path; cmd.exe itself checks this
-    "PATHEXT",                // .exe/.cmd/.bat/.ps1 resolution under cmd.exe
-    "PROCESSOR_ARCHITECTURE", // DLL load-path resolution
-    "USERPROFILE",            // user home dir; .NET + powershell need this
-    "APPDATA",                // roaming app data
-    "LOCALAPPDATA",           // local app data
-    "PROGRAMFILES",           // 64-bit installs
-    "PROGRAMFILES(X86)",      // 32-bit installs
-    "PSMODULEPATH",           // PowerShell module resolution
-    "TEMP",                   // Windows temp dir
-    "TMP",                    // Windows temp dir alt
-];
 
 /// Per-request timeout for stdio JSON-RPC calls (audit C1).
 ///
@@ -98,6 +47,17 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 pub struct StdioTransport {
     stdin: Mutex<BufWriter<ChildStdin>>,
     child: Mutex<Child>,
+    /// Stable process-group identity captured at spawn. `Child::id()` becomes
+    /// `None` after the direct wrapper exits, while grandchildren can still
+    /// be alive, so cleanup must not depend on consulting it later.
+    ///
+    /// Unix-only, matching its three readers and the `cfg(unix)`
+    /// `cmd.process_group(0)` that gives it meaning. Windows has no process
+    /// group to signal — descendant cleanup there is `kill_on_drop` plus the
+    /// Job Object — so on Windows this field was written at spawn and never
+    /// read again.
+    #[cfg(unix)]
+    process_group_id: Option<u32>,
     next_id: AtomicU64,
     /// Pending request→response channels, keyed by JSON-RPC id.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
@@ -236,17 +196,89 @@ fn windows_program_token(command: &str) -> String {
 ///
 /// `Child::id()` returns `None` once the child has been reaped (e.g. a prior
 /// `kill().await`); in that case there is nothing to signal and we no-op.
-/// `ESRCH` (group already gone) is benign and ignored.
+/// `ESRCH` (group already gone) is benign and ignored; `EPERM` is delegated to
+/// [`classify_group_kill_failure`], which is where the Darwin corpse case is
+/// separated from a genuine containment failure.
 #[cfg(unix)]
-fn kill_process_group(child: &Child) {
-    if let Some(pid) = child.id() {
-        // SAFETY: `kill` is async-signal-safe and we only pass a process-group
-        // target (negated PID) plus a constant signal. The PID was assigned by
-        // a successful spawn and is the leader of its own group via
-        // `process_group(0)`; signalling a stale group merely returns ESRCH.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
+fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
+    // SAFETY: `kill` is async-signal-safe and we only pass a process-group
+    // target (negated PID) plus a constant signal. The PID was assigned by
+    // a successful spawn and is the leader of its own group via
+    // `process_group(0)`; signalling a stale group merely fails, and the
+    // failure is graded by `classify_group_kill_failure`.
+    let result = unsafe { libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    classify_group_kill_failure(process_group_id, std::io::Error::last_os_error())
+}
+
+/// Decide whether a failed `kill(-pgid, SIGKILL)` is a completed teardown or a
+/// containment failure.
+///
+/// Split out from [`kill_process_group`] so the decision can be tested against
+/// **real** process groups without having to manufacture a real `EPERM` (which
+/// needs a process the test user is not permitted to signal). The census below
+/// is the real one; only the errno is supplied by the caller.
+///
+/// # Why `EPERM` is not simply tolerated
+///
+/// `close()` signals the group *before* reaping the direct child, so at the
+/// moment of the `kill` the group leader is normally an unreaped corpse. On
+/// **Darwin** a group whose only remaining member is that corpse answers
+/// `EPERM`, not `ESRCH` — measured on Darwin 25.3.0 arm64, and pinned by
+/// `wcore-eval-scenarios`'
+/// `a_group_holding_only_the_anchor_corpse_is_cleaned_not_failed`. Linux
+/// (measured, 6.8.0 x86_64) does not fail that call at all: it returns 0,
+/// because a zombie still counts as a signalable group member there. That is
+/// why only macOS ever saw this, and why every normal MCP server shutdown on
+/// macOS returned `failed to kill MCP process group: Operation not permitted`.
+/// Linux only produces `ESRCH` once the group is genuinely empty.
+///
+/// But `EPERM` also covers the genuinely dangerous case — a live descendant
+/// this process is not permitted to signal, i.e. containment has failed. A
+/// blanket tolerance would make the two indistinguishable. `kill(-pgid, 0)`
+/// cannot tell them apart either (it returns `EPERM` in both states), so the
+/// group is **enumerated**, reusing `wcore_types::process_liveness`'s census
+/// rather than reimplementing it here. An unreadable group is never read as
+/// an empty one: undercounting is the direction that fakes success.
+///
+/// # Why the child is still not reaped first
+///
+/// Reaping the direct child before signalling would avoid the corpse state
+/// altogether — and would replace it with a worse one. The PGID *is* the
+/// leader's PID; once the leader is reaped and the group is empty that number
+/// is free for the kernel to recycle, and a `kill(-pgid, SIGKILL)` issued
+/// afterwards can land on an unrelated process. Holding the unreaped child as
+/// a PID anchor across the group signal is the same discipline
+/// `wcore-eval-scenarios` uses deliberately (`WNOWAIT`), so the ordering
+/// stays as it is and the corpse case is discriminated instead.
+#[cfg(unix)]
+fn classify_group_kill_failure(
+    process_group_id: u32,
+    error: std::io::Error,
+) -> std::io::Result<()> {
+    use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
+
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(()),
+        Some(libc::EPERM) => match process_group_census(process_group_id) {
+            // Nothing left that can execute — the corpse leader is not a
+            // member that survived. Teardown completed.
+            ProcessGroupCensus::Live(0) => Ok(()),
+            ProcessGroupCensus::Live(live) => Err(std::io::Error::other(format!(
+                "SIGKILL to MCP process group {process_group_id} was refused with EPERM and \
+                 the group still holds {live} LIVE member(s); containment has failed, not \
+                 completed"
+            ))),
+            // Cannot see, so cannot excuse.
+            ProcessGroupCensus::Indeterminate(why) => Err(std::io::Error::other(format!(
+                "SIGKILL to MCP process group {process_group_id} was refused with EPERM and \
+                 the group could not be enumerated to establish whether anything survived: \
+                 {why}"
+            ))),
+        },
+        _ => Err(error),
     }
 }
 
@@ -400,6 +432,33 @@ impl StdioTransport {
         env: &HashMap<String, String>,
         rpc_timeout: Duration,
     ) -> Result<Self, McpError> {
+        let launch_context = McpStdioLaunchContext::capture(env).map_err(|error| {
+            McpError::Transport(format!(
+                "Failed to construct sanitized launch environment for '{}': {error}",
+                command
+            ))
+        })?;
+        Self::spawn_with_context_and_timeout(command, args, launch_context, rpc_timeout).await
+    }
+
+    /// Spawn with a context already captured and inspected by the manager.
+    /// Keeping capture outside this method lets diagnostics and process launch
+    /// share one immutable cwd/environment snapshot.
+    pub(crate) async fn spawn_with_context(
+        command: &str,
+        args: &[String],
+        launch_context: McpStdioLaunchContext,
+    ) -> Result<Self, McpError> {
+        Self::spawn_with_context_and_timeout(command, args, launch_context, DEFAULT_RPC_TIMEOUT)
+            .await
+    }
+
+    async fn spawn_with_context_and_timeout(
+        command: &str,
+        args: &[String],
+        launch_context: McpStdioLaunchContext,
+        rpc_timeout: Duration,
+    ) -> Result<Self, McpError> {
         // Windows: bypass shell_command_builder when the command is already
         // cmd[.exe]. shell_command_builder wraps everything in `cmd /C ...`
         // for PATHEXT shim resolution (npx.cmd, node.cmd) — but when the
@@ -456,26 +515,8 @@ impl StdioTransport {
         // explicitly forward additional variables for servers that need them.
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .env_clear();
-        for var in FORWARDED_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
-        }
-        // Profile-home handshake: expose the canonical `~/.wayland` profile root
-        // (honouring `WAYLAND_HOME`) so plugin MCP servers route their state to
-        // the same directory the host and the plugin installer agree on. The host
-        // contract is the vendor-neutral `WAYLAND_PROFILE_HOME`; a plugin whose
-        // server reads a differently-named var maps it on its own side (the host
-        // must not bake in any one plugin's variable name). Set after the
-        // allowlist but before per-server `env`, so an explicit operator override
-        // in mcp-servers.toml still wins.
-        if let Some(home) = wcore_config::config::profile_home().to_str() {
-            cmd.env("WAYLAND_PROFILE_HOME", home);
-        }
-        // Per-server env entries from mcp-servers.toml layered last.
-        cmd.envs(env);
+            .stderr(std::process::Stdio::piped());
+        launch_context.apply_to(&mut cmd);
 
         // Rank 24 (unix) — put the child in its own process group so a
         // `killpg` on close reaps the WHOLE subtree, not just the shell
@@ -493,6 +534,8 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Transport(format!("Failed to spawn '{}': {}", command, e)))?;
+        #[cfg(unix)]
+        let process_group_id = child.id();
 
         let stdin = child
             .stdin
@@ -522,6 +565,8 @@ impl StdioTransport {
         Ok(Self {
             stdin: Mutex::new(BufWriter::new(stdin)),
             child: Mutex::new(child),
+            #[cfg(unix)]
+            process_group_id,
             next_id: AtomicU64::new(1),
             pending,
             reader_task: Mutex::new(Some(reader_task)),
@@ -677,7 +722,9 @@ impl StdioTransport {
         // wrapper grandchildren are reaped, then `start_kill` the tracked
         // child so tokio still reaps the direct PID and updates its state.
         #[cfg(unix)]
-        kill_process_group(&child);
+        if let Some(process_group_id) = self.process_group_id {
+            let _ = kill_process_group(process_group_id);
+        }
         let _ = child.start_kill();
     }
 
@@ -800,9 +847,22 @@ impl McpTransport for StdioTransport {
             // grandchildren (npx→node, uvx→python) are reaped, not orphaned.
             // `kill().await` below additionally reaps the direct child PID.
             #[cfg(unix)]
-            kill_process_group(&child);
-            if let Err(e) = child.kill().await {
-                warn!(error = %e, "[mcp] stdio close: kill failed");
+            let group_cleanup_error = self
+                .process_group_id
+                .and_then(|process_group_id| kill_process_group(process_group_id).err());
+            if child.try_wait()?.is_none() {
+                child.start_kill().map_err(|error| {
+                    McpError::Transport(format!("failed to kill MCP child: {error}"))
+                })?;
+                child.wait().await.map_err(|error| {
+                    McpError::Transport(format!("failed to reap MCP child: {error}"))
+                })?;
+            }
+            #[cfg(unix)]
+            if let Some(error) = group_cleanup_error {
+                return Err(McpError::Transport(format!(
+                    "failed to kill MCP process group: {error}"
+                )));
             }
         }
 
@@ -843,6 +903,10 @@ impl Drop for StdioTransport {
             && let Some(handle) = guard.take()
         {
             handle.abort();
+        }
+        #[cfg(unix)]
+        if let Some(process_group_id) = self.process_group_id {
+            let _ = kill_process_group(process_group_id);
         }
     }
 }
@@ -1100,31 +1164,14 @@ mod tests {
         // returns 0. A zombie proves the rank-24 fix worked; only a still-RUNNING
         // orphan is a failure. Poll briefly because group teardown isn't instant.
         //
-        // Liveness probe that treats a zombie as reaped. SAFETY: signal 0 sends
-        // no signal; -1/ESRCH means the pid is gone.
-        let killed_or_zombie = |pid: i32| -> bool {
-            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
-                return true; // ESRCH — fully gone.
-            }
-            #[cfg(target_os = "linux")]
-            {
-                // /proc/<pid>/stat: "pid (comm) STATE ...". The state char sits
-                // just after the final ')' of the (possibly paren-containing)
-                // comm field. 'Z' == zombie == killed-but-unreaped.
-                match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                    Ok(stat) => stat
-                        .rsplit_once(')')
-                        .map(|(_, rest)| rest.trim_start().starts_with('Z'))
-                        .unwrap_or(false),
-                    // Entry vanished between the kill probe and the read — gone.
-                    Err(_) => true,
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                false // Non-Linux runners have a reaper; ESRCH is the real signal.
-            }
-        };
+        // Fourth of the four hand-rolled zombie checks, and the one whose
+        // `#[cfg(not(target_os = "linux"))] { false }` arm assumed "non-Linux
+        // runners have a reaper" — true of a normal macOS host, not true of a
+        // macOS runner inside a container, and the assumption was never
+        // measured. The centralised probe handles macOS and Windows for real.
+        // See `.planning/ZOMBIE-PROBE.md`.
+        let killed_or_zombie =
+            |pid: i32| -> bool { !wcore_types::process_liveness::process_is_alive(pid as u32) };
 
         let mut reaped = false;
         for _ in 0..100 {
@@ -1162,106 +1209,208 @@ mod tests {
         );
     }
 
-    /// F-016 (security) — the FORWARDED_ENV_VARS allowlist covers PATH/HOME/USER/LANG.
-    ///
-    /// We verify the allowlist is non-empty and contains the minimum
-    /// required vars, without spawning a process that reads host env vars
-    /// (which is inherently racy in multi-threaded test harnesses).
-    /// The actual spawn-and-verify path is covered by the integration test
-    /// `mcp_bridge_env_clear_blocks_secret_vars` in wcore-plugin-subprocess,
-    /// which already has an established pattern and `serial_test` guard.
-    #[test]
-    fn f016_forwarded_env_vars_allowlist_sanity() {
-        // The allowlist must contain the minimum set required for CLI tools.
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"PATH"),
-            "PATH must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"HOME"),
-            "HOME must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"USER"),
-            "USER must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"LANG"),
-            "LANG must be in the allowlist"
-        );
-        assert!(
-            FORWARDED_ENV_VARS.contains(&"WAYLAND_HOME"),
-            "WAYLAND_HOME must be forwarded for C3 profile propagation"
-        );
+    // -----------------------------------------------------------------
+    // Process-group teardown: EPERM discrimination.
+    //
+    // `close()` signals the group BEFORE reaping the direct child, so the
+    // leader is normally an unreaped corpse at that moment. On Darwin
+    // `kill(-pgid, SIGKILL)` answers EPERM for a corpse-only group (measured
+    // on Darwin 25.3.0 arm64); Linux answers ESRCH. The old ESRCH-only
+    // tolerance therefore failed every normal MCP shutdown on macOS.
+    //
+    // These tests drive `classify_group_kill_failure` against REAL process
+    // groups. Only the errno is injected — manufacturing a genuine EPERM
+    // needs a process the test user may not signal, which is not something a
+    // unit test can arrange portably. The census is the real one, so the
+    // tolerance is proved against real group state on every unix platform,
+    // including Linux where the natural errno would be ESRCH.
+    // -----------------------------------------------------------------
 
-        // Sensitive vars must NOT appear in the allowlist.
-        let sensitive = [
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "WAYLAND_VAULT_PASSPHRASE",
-            "AWS_SECRET_ACCESS_KEY",
-        ];
-        for var in sensitive {
+    /// Spawn `sh -c <script>` as the leader of its own process group.
+    /// The returned `Child` is deliberately NOT waited on, so the leader
+    /// stays an unreaped corpse after it exits and its PID/PGID cannot be
+    /// recycled — the same anchor discipline the product path relies on.
+    fn spawn_group_leader(script: &str) -> std::process::Child {
+        use std::os::unix::process::CommandExt as _;
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
+        command.spawn().expect("spawn group leader")
+    }
+
+    /// Poll the real census until it satisfies `want`, or fail loudly.
+    ///
+    /// The live count is not asserted exactly for the non-empty case: whether
+    /// `sh -c 'sleep 30'` execs `sleep` in place or forks it is shell-specific
+    /// (measured: dash on the Linux runner forks, so the group holds 2), and
+    /// the property under test is "something is still alive", not how many.
+    fn await_census(pgid: u32, description: &str, want: impl Fn(usize) -> bool) {
+        use wcore_types::process_liveness::{ProcessGroupCensus, process_group_census};
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let census = process_group_census(pgid);
+            if let ProcessGroupCensus::Live(live) = census
+                && want(live)
+            {
+                return;
+            }
             assert!(
-                !FORWARDED_ENV_VARS.contains(&var),
-                "sensitive var {var} must NOT be in the allowlist"
+                std::time::Instant::now() < deadline,
+                "group {pgid} never became {description}; last census: {census:?}"
             );
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
-    /// F-016 (process-level) — spawn a child via the same env_clear+allowlist
-    /// pattern that `spawn_with_timeout` now uses, and verify the canary is absent.
-    ///
-    /// This test uses a direct tokio::process::Command (not the transport) so it
-    /// can capture stdout and assert the child environment. The transport's
-    /// `spawn_with_timeout` applies the same env_clear logic.
+    fn reap(mut child: std::process::Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// The shipped defect. A group whose only remaining member is the
+    /// unreaped leader corpse has been torn down, so EPERM over it is a
+    /// completed teardown — not an error handed back to the caller.
+    #[test]
+    fn eperm_on_a_corpse_only_group_is_a_completed_teardown() {
+        let child = spawn_group_leader("exit 0");
+        let pgid = child.id();
+        // The leader exits; the corpse is not counted as a live member.
+        await_census(pgid, "empty of live members", |live| live == 0);
+
+        classify_group_kill_failure(pgid, std::io::Error::from_raw_os_error(libc::EPERM))
+            .expect("a group holding only the unreaped leader corpse must count as torn down");
+
+        reap(child);
+    }
+
+    /// Non-vacuity. The tolerance above must not extend to a group that
+    /// genuinely still holds something that can execute — that is a real
+    /// containment failure and must stay an error. Without this the fix
+    /// would be strictly worse than the bug it closes.
+    #[test]
+    fn eperm_with_a_live_group_member_is_a_containment_failure() {
+        let child = spawn_group_leader("sleep 30");
+        let pgid = child.id();
+        await_census(pgid, "occupied by a live member", |live| live >= 1);
+
+        let error =
+            classify_group_kill_failure(pgid, std::io::Error::from_raw_os_error(libc::EPERM))
+                .expect_err(
+                    "EPERM over a group that still holds a LIVE member must not be tolerated",
+                );
+        let message = error.to_string();
+        assert!(
+            message.contains("LIVE member(s)") && message.contains("containment has failed"),
+            "the error must name the surviving member, got: {message}"
+        );
+
+        reap(child);
+    }
+
+    /// A census that cannot see is not a census of zero. Process group 0
+    /// means "the caller's own group", so the census refuses to answer for
+    /// it — and an unanswerable census must not excuse EPERM.
+    #[test]
+    fn eperm_over_an_unenumerable_group_is_not_excused() {
+        let error = classify_group_kill_failure(0, std::io::Error::from_raw_os_error(libc::EPERM))
+            .expect_err("EPERM must not be tolerated when the group cannot be enumerated");
+        assert!(
+            error.to_string().contains("could not be enumerated"),
+            "got: {error}"
+        );
+    }
+
+    /// ESRCH keeps its existing meaning: the group is entirely gone.
+    #[test]
+    fn esrch_remains_a_completed_teardown() {
+        classify_group_kill_failure(0, std::io::Error::from_raw_os_error(libc::ESRCH))
+            .expect("ESRCH means the group is gone");
+    }
+
+    /// Every other errno still propagates unchanged — the census is only
+    /// consulted for EPERM.
+    #[test]
+    fn an_unrelated_errno_propagates_unchanged() {
+        let error = classify_group_kill_failure(0, std::io::Error::from_raw_os_error(libc::EINVAL))
+            .expect_err("EINVAL is not a teardown");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EINVAL),
+            "the original error must reach the caller intact"
+        );
+    }
+
+    /// End-to-end counterpart of the unit tests above, and the paired
+    /// discriminator for `c9_close_kills_child_and_marks_dead`: c9's server
+    /// (`cat >/dev/null`) is still alive at `close()`, this one has already
+    /// exited, and only the exited case ever hit the Darwin EPERM path. Every
+    /// well-behaved MCP server that shuts itself down is this case.
     #[tokio::test]
-    async fn f016_env_clear_blocks_secret_vars_process_check() {
-        use tokio::io::AsyncReadExt;
+    async fn close_after_the_server_exits_on_its_own_is_not_an_error() {
+        let transport = StdioTransport::spawn(
+            "sh",
+            &[
+                "-c".to_string(),
+                r#"read line; printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'"#.to_string(),
+            ],
+            &no_env(),
+        )
+        .await
+        .expect("spawn self-exiting fixture");
 
-        // Spawn a child with the same env logic the transport applies:
-        // env_clear() + allowlist + per-server extras (but NO host secrets).
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg("env")
-            .env_clear()
-            .stdout(std::process::Stdio::piped());
-
-        // Forward the allowlist vars from the CURRENT test process env.
-        for var in FORWARDED_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                cmd.env(var, val);
-            }
-        }
-        // Simulate per-server env entry.
-        cmd.env("MCP_EXPLICIT_VAR", "explicit_value");
-        // Do NOT forward "WAYLAND_TEST_SECRET_CANARY" — it must not appear.
-        // (We don't set it in the parent process env here to avoid the
-        //  multi-thread set_var unsafety; we simply assert the child doesn't
-        //  have an entry we never added.)
-
-        let mut child = cmd.spawn().expect("spawn env-dump");
-        let stdout = child.stdout.take().expect("stdout");
-        let _ = child.wait().await;
-        let mut buf = String::new();
-        let mut reader = tokio::io::BufReader::new(stdout);
-        reader
-            .read_to_string(&mut buf)
+        transport
+            .request(&JsonRpcRequest::new(1, "ping", None))
             .await
-            .expect("read child stdout");
+            .expect("fixture response");
 
-        // Per-server entry MUST be present.
-        assert!(
-            buf.contains("MCP_EXPLICIT_VAR=explicit_value"),
-            "per-server env var missing: {buf}"
-        );
-        // PATH must be present (from the allowlist).
-        assert!(buf.contains("PATH="), "PATH missing from child env: {buf}");
-        // Secret canary must NOT be present — we never added it.
-        assert!(
-            !buf.contains("WAYLAND_TEST_SECRET_CANARY"),
-            "canary appeared unexpectedly: {buf}"
-        );
+        // The server exits after that one line; wait until its group holds
+        // nothing that can execute, so `close()` runs against the corpse.
+        let pgid = transport
+            .process_group_id
+            .expect("unix spawn must record a process group");
+        await_census(pgid, "empty of live members", |live| live == 0);
+
+        transport
+            .close()
+            .await
+            .expect("closing a server that already exited must not report a teardown failure");
+    }
+
+    /// F-016 — the real transport applies the canonical sanitized context:
+    /// ambient secrets are absent, curated PATH survives, and explicit
+    /// per-server values are applied last.
+    #[tokio::test]
+    #[serial_test::serial(mcp_stdio_environment)]
+    async fn f016_real_spawn_uses_sanitized_launch_context() {
+        let previous = std::env::var_os("WAYLAND_TEST_SECRET_CANARY");
+        unsafe {
+            std::env::set_var("WAYLAND_TEST_SECRET_CANARY", "ambient-secret");
+        }
+        let script = r#"read line; printf '{"jsonrpc":"2.0","id":1,"result":{"secret":"%s","explicit":"%s","path":"%s"}}\n' "${WAYLAND_TEST_SECRET_CANARY-unset}" "$MCP_EXPLICIT_VAR" "${PATH:+present}""#;
+        let environment =
+            HashMap::from([("MCP_EXPLICIT_VAR".to_owned(), "explicit-value".to_owned())]);
+        let spawned =
+            StdioTransport::spawn("sh", &["-c".to_owned(), script.to_owned()], &environment).await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var("WAYLAND_TEST_SECRET_CANARY", value) },
+            None => unsafe { std::env::remove_var("WAYLAND_TEST_SECRET_CANARY") },
+        }
+        let transport = spawned.expect("spawn environment fixture");
+
+        let response = transport
+            .request(&JsonRpcRequest::new(1, "ping", None))
+            .await
+            .expect("environment fixture response");
+        let result = response.result.expect("environment result");
+        assert_eq!(result["secret"], "unset");
+        assert_eq!(result["explicit"], "explicit-value");
+        assert_eq!(result["path"], "present");
+        transport.close().await.expect("close environment fixture");
     }
 
     /// B1 — the profile-home handshake reaches the spawned MCP child.

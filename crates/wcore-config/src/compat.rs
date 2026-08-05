@@ -61,6 +61,12 @@ pub struct ProviderCompat {
     /// Default: "max_tokens" for all providers.
     pub max_tokens_field: Option<String>,
 
+    /// Between-bytes timeout for streaming provider responses, in milliseconds.
+    /// `None` uses the hardened global default. This is a generic transport
+    /// policy override for endpoints whose expected silent gaps differ from
+    /// that default; it must never be selected by inspecting a provider URL.
+    pub read_timeout_ms: Option<std::num::NonZeroU64>,
+
     /// Merge consecutive assistant messages (text concat + tool_calls merge).
     /// Default: true for openai.
     pub merge_assistant_messages: Option<bool>,
@@ -129,7 +135,7 @@ pub struct ProviderCompat {
     pub provider_type: Option<String>,
 
     /// W6 F7 — USD per input token. Multiply by token count for per-turn cost.
-    /// Set in each provider preset; `None` → 0.0 (free / local provider).
+    /// Set in each provider preset; `None` means no compatibility fallback rate.
     /// Per-provider list price (NOT per-model); per-model pricing is W6.1.
     pub cost_per_input_token: Option<f64>,
 
@@ -141,6 +147,11 @@ pub struct ProviderCompat {
 
     /// W6 F7 — USD per cached input token written (cache creation).
     pub cost_per_cache_write_token: Option<f64>,
+
+    /// Declare an all-zero compatibility rate as known-free rather than
+    /// unpriced. Catalog pricing still wins when an exact model row exists.
+    /// Leave unset for zero-valued sentinels whose real price is unknown.
+    pub cost_is_known_free: Option<bool>,
 
     /// Whether the destination endpoint optimizes request *input* server-side.
     ///
@@ -330,6 +341,44 @@ pub struct ProviderCompat {
     /// fireworks, nvidia, xai, qwen, groq, flux-router, mistral).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_vision: Option<bool>,
+
+    /// Whether this provider/model contract accepts tool definitions and can
+    /// return tool calls. `None` is unknown and therefore fail-closed for a
+    /// fallback carrying tools; provider presets set this only where the wire
+    /// path is implemented and exercised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+
+    /// Whether this provider/model contract supports caller-constrained
+    /// structured output (for example JSON Schema response formats). Unknown
+    /// support is fail-closed whenever a request explicitly requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_structured_output: Option<bool>,
+
+    /// F-27C3-04 — the model id to send to this provider's OpenAI-wire
+    /// `/images/generations` endpoint.
+    ///
+    /// The image endpoint's model namespace is **per provider** and does not
+    /// follow the chat model id: native OpenAI serves `gpt-image-1`, our
+    /// FluxRouter serves `flux-image`, and a key issued for one is not
+    /// entitled to the other. Before this field existed there was a single
+    /// global default (`gpt-image-1`) plus an undocumented `OPENAI_IMAGE_MODEL`
+    /// env escape hatch, so the built-in `image_generate` tool **failed by
+    /// default for every FluxRouter user** — #310 fixed the endpoint and the
+    /// key but not the model (measured live by lane `27-c3-media`: default arm
+    /// `outcome: failed`, `OPENAI_IMAGE_MODEL=flux-image` arm succeeded).
+    ///
+    /// Per AGENTS.md's first rule this is a `ProviderCompat` question, never a
+    /// `base_url.contains("flux")` conditional. Presets set it for the two
+    /// providers that actually serve the endpoint (`openai_defaults`,
+    /// `flux_router_defaults`); every other provider leaves it `None` and the
+    /// image resolver falls back to its own global default.
+    ///
+    /// Override per account with `[compat] image_model = "dall-e-3"`. The
+    /// `OPENAI_IMAGE_MODEL` env var still wins over this field, preserving the
+    /// #265 escape hatch for anyone already relying on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<String>,
 }
 
 impl ProviderCompat {
@@ -356,6 +405,9 @@ impl ProviderCompat {
             cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
             // Crucible #3: Anthropic chat models accept an explicit temperature.
             supports_temperature: Some(true),
+            // Native Anthropic messages carry inline base64 image blocks.
+            supports_vision: Some(true),
+            supports_tools: Some(true),
             ..Default::default()
         }
     }
@@ -378,6 +430,7 @@ impl ProviderCompat {
             cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
             // Crucible #3: Anthropic-on-Bedrock chat models accept temperature.
             supports_temperature: Some(true),
+            supports_tools: Some(true),
             ..Default::default()
         }
     }
@@ -471,6 +524,8 @@ impl ProviderCompat {
             // the served model's own ceiling when the field is absent, so an
             // unknown Gemini model with no explicit user cap may omit it.
             omit_max_tokens_when_unsized: Some(true),
+            supports_vision: Some(true),
+            supports_tools: Some(true),
             ..Default::default()
         }
     }
@@ -503,6 +558,13 @@ impl ProviderCompat {
             supports_temperature: Some(true),
             // #648: native OpenAI hosts vision models (gpt-4o family).
             supports_vision: Some(true),
+            supports_tools: Some(true),
+            supports_structured_output: Some(true),
+            // F-27C3-04: native OpenAI's `/v1/images/generations` model.
+            // `dall-e-3` is region/tier-gated (#265); `gpt-image-1` is the
+            // broadly-available one. Accounts that only have dall-e-3 override
+            // with `[compat] image_model` or `OPENAI_IMAGE_MODEL`.
+            image_model: Some("gpt-image-1".into()),
             ..Default::default()
         }
     }
@@ -560,6 +622,16 @@ impl ProviderCompat {
             // #344/#359: OpenAI-wire routers/providers (ChatGPT, Azure,
             // flux-router, …) inherit the 128 tool-array hard cap.
             max_tools: Some(128),
+            // F-27C3-04 — clear the inherited image model for the same reason
+            // the cost rows are cleared: `openai_defaults()` declares OpenAI's
+            // `gpt-image-1`, and an openai-compat provider is NOT OpenAI. Most
+            // of this family is LLM-completion-only (Groq, Together, Deepseek,
+            // …) and `openai_wire_media_base` already refuses to route media to
+            // them, so the value would be unreachable — but inheriting another
+            // vendor's model id is exactly the hardcoded-quirk shape this field
+            // exists to remove. Providers that DO serve the endpoint declare it
+            // explicitly (see `flux_router_defaults`).
+            image_model: None,
             ..Self::openai_defaults()
         }
     }
@@ -682,6 +754,12 @@ impl ProviderCompat {
             omit_max_tokens_when_unsized: Some(true),
             // #648: Flux routes to vision-capable models across providers.
             supports_vision: Some(true),
+            // F-27C3-04 — Flux serves `/v1/images/generations` under its OWN
+            // model namespace. A Flux key is not entitled to `gpt-image-1`, so
+            // before this the built-in `image_generate` tool failed for every
+            // Flux user unless they knew about `OPENAI_IMAGE_MODEL=flux-image`.
+            // Measured live by lane `27-c3-media`, one variable moved.
+            image_model: Some("flux-image".into()),
             ..Self::openai_compat_provider("flux-router")
         }
     }
@@ -803,6 +881,7 @@ impl ProviderCompat {
             cost_per_output_token: Some(0.0),
             cost_per_cache_read_token: Some(0.0),
             cost_per_cache_write_token: Some(0.0),
+            cost_is_known_free: Some(true),
             ..Default::default()
         }
     }
@@ -811,6 +890,7 @@ impl ProviderCompat {
     pub fn merge(defaults: Self, user: Self) -> Self {
         Self {
             max_tokens_field: user.max_tokens_field.or(defaults.max_tokens_field),
+            read_timeout_ms: user.read_timeout_ms.or(defaults.read_timeout_ms),
             merge_assistant_messages: user
                 .merge_assistant_messages
                 .or(defaults.merge_assistant_messages),
@@ -841,6 +921,7 @@ impl ProviderCompat {
             cost_per_cache_write_token: user
                 .cost_per_cache_write_token
                 .or(defaults.cost_per_cache_write_token),
+            cost_is_known_free: user.cost_is_known_free.or(defaults.cost_is_known_free),
             input_optimization: user.input_optimization.or(defaults.input_optimization),
             compact_bash: user.compact_bash.or(defaults.compact_bash),
             include_usage_in_stream: user
@@ -871,6 +952,14 @@ impl ProviderCompat {
                 .omit_max_tokens_when_unsized
                 .or(defaults.omit_max_tokens_when_unsized),
             supports_vision: user.supports_vision.or(defaults.supports_vision),
+            supports_tools: user.supports_tools.or(defaults.supports_tools),
+            supports_structured_output: user
+                .supports_structured_output
+                .or(defaults.supports_structured_output),
+            // F-27C3-04 — see the Crucible #3 note above: threading a new field
+            // here is not optional. Without this arm `[compat] image_model` in
+            // wcore.toml is silently discarded and the preset always wins.
+            image_model: user.image_model.or(defaults.image_model),
         }
     }
 
@@ -948,6 +1037,14 @@ impl ProviderCompat {
     /// fireworks, nvidia, xai, qwen, groq, flux-router, mistral) set `true`.
     pub fn supports_vision(&self) -> bool {
         self.supports_vision.unwrap_or(false)
+    }
+
+    pub fn supports_tools(&self) -> bool {
+        self.supports_tools.unwrap_or(false)
+    }
+
+    pub fn supports_structured_output(&self) -> bool {
+        self.supports_structured_output.unwrap_or(false)
     }
 
     /// Whether to replay historical assistant `reasoning_content` on the Chat
@@ -1240,6 +1337,33 @@ mod tests {
         assert!(merged.ensure_alternation());
         assert!(merged.merge_same_role());
         assert!(merged.auto_tool_id());
+    }
+
+    #[test]
+    fn test_merge_user_read_timeout_overrides_default() {
+        let defaults = ProviderCompat {
+            read_timeout_ms: std::num::NonZeroU64::new(300_000),
+            ..ProviderCompat::openai_defaults()
+        };
+        let user = ProviderCompat {
+            read_timeout_ms: std::num::NonZeroU64::new(75),
+            ..ProviderCompat::default()
+        };
+
+        assert_eq!(
+            ProviderCompat::merge(defaults, user)
+                .read_timeout_ms
+                .map(std::num::NonZeroU64::get),
+            Some(75)
+        );
+    }
+
+    #[test]
+    fn read_timeout_rejects_zero() {
+        let parsed = serde_json::from_value::<ProviderCompat>(serde_json::json!({
+            "read_timeout_ms": 0
+        }));
+        assert!(parsed.is_err(), "a zero read timeout must fail closed");
     }
 
     #[test]
@@ -1960,5 +2084,101 @@ mod input_optimization_tests {
             ProviderCompat::default(),
         );
         assert_eq!(merged_empty.omit_max_tokens_when_unsized, Some(true));
+    }
+
+    #[test]
+    fn failover_capability_presets_match_native_wire_support() {
+        let anthropic = ProviderCompat::anthropic_defaults();
+        assert!(anthropic.supports_tools());
+        assert!(anthropic.supports_vision());
+        assert!(!anthropic.supports_structured_output());
+
+        let gemini = ProviderCompat::gemini_defaults();
+        assert!(gemini.supports_tools());
+        assert!(gemini.supports_vision());
+
+        let openai = ProviderCompat::openai_defaults();
+        assert!(openai.supports_tools());
+        assert!(openai.supports_vision());
+        assert!(openai.supports_structured_output());
+
+        let unknown = ProviderCompat::default();
+        assert!(!unknown.supports_tools());
+        assert!(!unknown.supports_vision());
+        assert!(!unknown.supports_structured_output());
+    }
+
+    // -- F-27C3-04: per-provider image model ---------------------------
+
+    /// The two providers that actually serve `/v1/images/generations` must
+    /// declare DIFFERENT model ids. Asserting each value alone would still
+    /// pass if both were the same constant, which is precisely the defect:
+    /// one global `gpt-image-1` sent to a FluxRouter key that is not entitled
+    /// to it, so the built-in `image_generate` tool failed by default for
+    /// every FluxRouter user (measured live by lane `27-c3-media`).
+    #[test]
+    fn image_model_differs_between_openai_and_flux_router() {
+        let openai = ProviderCompat::openai_defaults().image_model;
+        let flux = ProviderCompat::flux_router_defaults().image_model;
+        assert_eq!(openai.as_deref(), Some("gpt-image-1"));
+        assert_eq!(flux.as_deref(), Some("flux-image"));
+        assert_ne!(
+            openai, flux,
+            "the image model must be provider-specific; equal values mean the \
+             hardcoded global default is back"
+        );
+    }
+
+    /// An openai-compat secondary is NOT OpenAI, so it must not inherit
+    /// OpenAI's image model — the same reason the cost rows are cleared.
+    #[test]
+    fn openai_compat_secondaries_do_not_inherit_openai_image_model() {
+        assert_eq!(ProviderCompat::together_defaults().image_model, None);
+        assert_eq!(ProviderCompat::groq_defaults().image_model, None);
+        assert_eq!(ProviderCompat::azure_openai_defaults().image_model, None);
+        // Control: the inheritance path IS live — these same presets DO pick
+        // up an OpenAI behavioural flag. Without this the assertions above
+        // would pass equally on a preset chain that inherited nothing at all.
+        assert_eq!(
+            ProviderCompat::together_defaults()
+                .max_tokens_field
+                .as_deref(),
+            Some("max_tokens"),
+            "control: together must still inherit openai_defaults' wire shape"
+        );
+        // And a provider outside the OpenAI-wire family never had one.
+        assert_eq!(ProviderCompat::anthropic_defaults().image_model, None);
+    }
+
+    /// The `merge()` ripple. A field that is not threaded through `merge()`
+    /// compiles fine and silently discards every user override — the gotcha
+    /// the Crucible #3 comment in `merge()` records. This proves both
+    /// directions: the user wins when set, the preset survives when not.
+    #[test]
+    fn merge_user_image_model_overrides_preset() {
+        let user = ProviderCompat {
+            image_model: Some("dall-e-3".into()),
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(ProviderCompat::flux_router_defaults(), user);
+        assert_eq!(merged.image_model.as_deref(), Some("dall-e-3"));
+
+        let merged_empty = ProviderCompat::merge(
+            ProviderCompat::flux_router_defaults(),
+            ProviderCompat::default(),
+        );
+        assert_eq!(merged_empty.image_model.as_deref(), Some("flux-image"));
+    }
+
+    /// `[compat] image_model = "..."` must survive TOML deserialization —
+    /// the field is useless as an operator override otherwise.
+    #[test]
+    fn image_model_round_trips_through_toml() {
+        let parsed: ProviderCompat =
+            toml::from_str(r#"image_model = "gpt-image-1-mini""#).expect("compat toml parses");
+        assert_eq!(parsed.image_model.as_deref(), Some("gpt-image-1-mini"));
+        // Control: an absent key stays None rather than defaulting to a value.
+        let empty: ProviderCompat = toml::from_str("").expect("empty compat toml parses");
+        assert_eq!(empty.image_model, None);
     }
 }

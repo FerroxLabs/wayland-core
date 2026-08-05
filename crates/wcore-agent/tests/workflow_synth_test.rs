@@ -118,7 +118,8 @@ const VALID_RON: &str = r#"Workflow(
 async fn valid_ron_first_turn_returns_runnable_plan() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(SequencedProvider::new(vec![VALID_RON], Arc::clone(&seen)));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = synthesize_workflow("review every file in the repo", &spawner)
         .await
@@ -159,7 +160,8 @@ async fn prose_then_valid_recovers_with_missing_block_correction() {
         ],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = synthesize_workflow("review every file", &spawner)
         .await
@@ -189,7 +191,8 @@ async fn prose_twice_then_valid_uses_full_budget() {
         ],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = synthesize_workflow("review every file", &spawner)
         .await
@@ -210,7 +213,8 @@ async fn prose_on_all_attempts_returns_no_ron_block() {
         vec!["I cannot find any files to review, so here is my reasoning instead."],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     match synthesize_workflow("review every file", &spawner).await {
         Ok(_) => panic!("persistent prose must abort, got a plan"),
@@ -236,7 +240,8 @@ async fn invalid_then_valid_succeeds_via_parse_retry() {
         vec![r#"Workflow(meta: (name: "x"), phases: [])"#, VALID_RON],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = synthesize_workflow("review every file", &spawner)
         .await
@@ -270,7 +275,8 @@ async fn invalid_all_attempts_returns_synth_error() {
         vec![r#"Workflow(meta: (name: "x"), phases: [])"#],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     // `WorkflowPlan` does not derive `Debug`, so `expect_err` (which formats the
     // Ok side) can't be used; match the result directly instead.
@@ -298,7 +304,8 @@ async fn ron_wrapped_in_prose_and_fences_is_extracted() {
         vec![wrapped.as_str()],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _journal, _session_root) =
+        common::bind_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = synthesize_workflow("review every file", &spawner)
         .await

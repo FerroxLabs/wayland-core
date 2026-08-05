@@ -1,0 +1,20 @@
+{
+  "source_inputs_count": 40,
+  "source_inputs_missing": [],
+  "schema_digest_computed": "sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54",
+  "schema_digest_recorded": "sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54",
+  "schema_digest_match": true,
+  "source_inputs_digest_computed": "sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562",
+  "source_inputs_digest_recorded": "sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336",
+  "source_inputs_digest_match": false,
+  "event_spec_count_recorded": 49,
+  "command_spec_count_recorded": 18
+}
+
+last corpus regeneration: 5f74d55963349cd41b83b4a9f338ad5fecd9f384
+SOURCE_INPUTS drifted since then: 3 of 40
+   crates/wcore-agent/src/bootstrap.rs
+   crates/wcore-agent/src/output/protocol_sink.rs
+   crates/wcore-cli/src/main.rs
+
+VERDICT: CORPUS DRIFT — a `wcore-contract generate` is owed. This lane does not run it (LANE-BRIEF §0).

@@ -1,0 +1,35 @@
+LIVE KILL/RESTART EXERCISE — 22-03 Task 4
+Instrument: crates/wcore-agent/examples/p22_ledger_live.rs
+Commit under test: f21e232cd0262173ce9c5b5916d1b6bb247326b4
+
+RESTART-LEG: linux RAN kill=kill-9-pgid:1713112 tasks_expected=10 evidence=22-03-EVIDENCE/live/linux
+RESTART-LEG: windows RAN kill=taskkill-/T-/F-pid:6240 tasks_expected=10 evidence=22-03-EVIDENCE/live/windows
+REASSIGN: linux REFUSED-LATE-WRITE evidence=22-03-EVIDENCE/live/linux/reassign.log
+REASSIGN: windows REFUSED-LATE-WRITE evidence=22-03-EVIDENCE/live/windows/live-run.log
+
+LINUX  kill at 2026-07-27T02:58:46Z on hetzner-dsm, descendants 3 -> 0
+WINDOWS kill at 2026-07-27T02:53:57Z on SeanD@seandesktop, instrument processes 3 -> 0
+
+Four-part outcome, identical on both platforms:
+  restarted process exit                 0
+  effect lines / distinct / expected     10 / 10 / 10
+  pre-kill completions delivered after   6 drained (incl. the one the parent never observed)
+  dependency releases                    10, one per task
+  attempts                               12 (10 tasks + 2 reassignments)
+  unresolved                             0
+
+The reassignment leg refused the superseded owner's late write on BOTH
+platforms, live, in a real process:
+  "transition presents a superseded claim epoch"
+
+FALSIFIED, not asserted: neutralising the instrument's idempotency key at the
+effect boundary reproduced duplicate execution on Linux — 11 effect lines
+against 10 distinct, the duplicate being t05, the task whose worker produced
+its effect before the kill without recording a completion. The assertion test
+goal_fleet_restart_live_test went RED against that capture and green against
+the clean one.
+
+CAVEAT, carried forward rather than dropped: this exercises the real ledger in
+a real killed-and-restarted process, but NOT the shipped `wayland-core`
+binary, because no user-reachable Goal surface exists yet. That surface is
+plan 22-04.

@@ -269,6 +269,43 @@ impl ShellHooks {
         Ok(())
     }
 
+    /// Fail-closed pre-tool execution for a crash-durable hook phase. A
+    /// semantic block is an authoritative completion and therefore returned
+    /// as data; timeout/spawn/transport failures carry the exact number of
+    /// earlier slots that completed.
+    pub async fn run_pre_tool_use_strict(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> Result<StrictHookRun<Option<HookBlock>>, StrictHookFailure> {
+        let matching = self
+            .config
+            .pre_tool_use
+            .iter()
+            .filter(|hook| matches_tool(hook, tool_name, tool_input));
+        let mut completed = 0;
+        for hook in matching {
+            let env = build_env_vars(tool_name, tool_input);
+            let result = run_hook_command(&hook.command, &env, hook.timeout_ms)
+                .await
+                .map_err(|error| StrictHookFailure { completed, error })?;
+            completed += 1;
+            if !result.success {
+                return Ok(StrictHookRun {
+                    completed,
+                    output: Some(HookBlock {
+                        hook_name: hook.name.clone(),
+                        output: result.output,
+                    }),
+                });
+            }
+        }
+        Ok(StrictHookRun {
+            completed,
+            output: None,
+        })
+    }
+
     /// Run post-tool-use hooks. Errors are logged but don't block.
     pub async fn run_post_tool_use(
         &self,
@@ -302,6 +339,39 @@ impl ShellHooks {
         messages
     }
 
+    /// Durable tool rounds must distinguish a completed hook from a timeout,
+    /// spawn failure, or lost child transport. The legacy entry point above
+    /// preserves its best-effort behavior for non-journaled callers.
+    pub async fn run_post_tool_use_strict(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        tool_output: &str,
+    ) -> Result<StrictHookRun<Vec<String>>, StrictHookFailure> {
+        let matching = self
+            .config
+            .post_tool_use
+            .iter()
+            .filter(|hook| matches_tool(hook, tool_name, tool_input));
+        let mut messages = Vec::new();
+        let mut completed = 0;
+        for hook in matching {
+            let mut env = build_env_vars(tool_name, tool_input);
+            env.insert("TOOL_OUTPUT".to_string(), tool_output.to_string());
+            let result = run_hook_command(&hook.command, &env, hook.timeout_ms)
+                .await
+                .map_err(|error| StrictHookFailure { completed, error })?;
+            completed += 1;
+            if !result.output.is_empty() {
+                messages.push(format!("[hook:{}] {}", hook.name, result.output.trim()));
+            }
+        }
+        Ok(StrictHookRun {
+            completed,
+            output: messages,
+        })
+    }
+
     /// Run stop hooks when agent session ends.
     pub async fn run_stop(&self) -> Vec<String> {
         let mut messages = Vec::new();
@@ -325,6 +395,46 @@ impl ShellHooks {
         !self.config.pre_tool_use.is_empty()
             || !self.config.post_tool_use.is_empty()
             || !self.config.stop.is_empty()
+    }
+
+    /// Canonical executable tool-hook inventory used to bind durable recovery
+    /// checkpoints to the exact shell hooks that governed the original turn.
+    #[must_use]
+    pub fn tool_hook_authority(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pre_tool_use": &self.config.pre_tool_use,
+            "post_tool_use": &self.config.post_tool_use,
+        })
+    }
+
+    /// Ordered executable definitions that match one exact tool phase. The
+    /// caller hashes this value; it must never be written to the journal
+    /// because it includes operator shell commands.
+    #[must_use]
+    pub fn matching_tool_hook_authority(
+        &self,
+        phase: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        let hooks = match phase {
+            "pre_tool_use" => &self.config.pre_tool_use,
+            "post_tool_use" => &self.config.post_tool_use,
+            _ => return Vec::new(),
+        };
+        hooks
+            .iter()
+            .filter(|hook| matches_tool(hook, tool_name, tool_input))
+            .map(|hook| {
+                serde_json::json!({
+                    "name": hook.name,
+                    "tool_match": hook.tool_match,
+                    "file_match": hook.file_match,
+                    "command": hook.command,
+                    "timeout_ms": hook.timeout_ms,
+                })
+            })
+            .collect()
     }
 
     /// Merge additional hooks into the engine's config, skipping duplicates by name.
@@ -477,6 +587,24 @@ pub enum HookError {
     Timeout(u64),
 }
 
+#[derive(Debug)]
+pub struct StrictHookRun<T> {
+    pub completed: usize,
+    pub output: T,
+}
+
+#[derive(Debug)]
+pub struct StrictHookFailure {
+    pub completed: usize,
+    pub error: HookError,
+}
+
+#[derive(Debug)]
+pub struct HookBlock {
+    pub hook_name: String,
+    pub output: String,
+}
+
 // ---------------------------------------------------------------------------
 // Rust-native hook API (lifted from wcore-agent in W9 to break the
 // wcore-agent → wcore-skills → wcore-agent cycle).
@@ -551,6 +679,13 @@ pub struct SessionEndSummary {
 #[async_trait::async_trait]
 pub trait Hook: Send + Sync {
     fn name(&self) -> &str;
+
+    /// Stable implementation identity used by crash-recovery authority. Hook
+    /// authors should override this with a versioned identifier when behavior
+    /// can change independently of the concrete Rust type.
+    fn recovery_identity(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 
     async fn pre_tool_use(&self, _tool: &str, _input: &JsonValue) -> HookAction {
         HookAction::Continue
@@ -704,6 +839,57 @@ mod tests {
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), HookError::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn strict_pre_reports_completed_prefix_and_semantic_block() {
+        let config = HooksConfig {
+            pre_tool_use: vec![
+                make_hook("allow", vec!["Read"], "echo ok"),
+                make_hook("block", vec!["Read"], "exit 1"),
+                make_hook("never", vec!["Read"], "echo never"),
+            ],
+            ..Default::default()
+        };
+        let result = ShellHooks::new(config)
+            .run_pre_tool_use_strict("Read", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result.completed, 2);
+        assert_eq!(result.output.unwrap().hook_name, "block");
+    }
+
+    #[tokio::test]
+    async fn strict_post_reports_all_completed_slots() {
+        let config = HooksConfig {
+            post_tool_use: vec![
+                make_hook("one", vec!["Read"], "echo one"),
+                make_hook("two", vec!["Read"], "echo two"),
+            ],
+            ..Default::default()
+        };
+        let result = ShellHooks::new(config)
+            .run_post_tool_use_strict("Read", &json!({}), "output")
+            .await
+            .unwrap();
+        assert_eq!(result.completed, 2);
+        assert_eq!(result.output.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn strict_pre_timeout_preserves_completed_prefix() {
+        let mut slow = make_hook("slow", vec!["Read"], "sleep 10");
+        slow.timeout_ms = 10;
+        let config = HooksConfig {
+            pre_tool_use: vec![make_hook("one", vec!["Read"], "echo one"), slow],
+            ..Default::default()
+        };
+        let failure = ShellHooks::new(config)
+            .run_pre_tool_use_strict("Read", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(failure.completed, 1);
+        assert!(matches!(failure.error, HookError::Timeout(_)));
     }
 }
 

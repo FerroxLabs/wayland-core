@@ -2,7 +2,22 @@
 
 ## Sub-Agent Spawning
 
-The LLM can use the Spawn tool to create independent sub-agents that run tasks in parallel. Each sub-agent has its own conversation context and full tool set, but shares the parent agent's LLM provider (connection pool reuse).
+The LLM can use the Spawn tool to create independent sub-agents that run tasks in parallel. Each sub-agent has its own conversation context and shares the parent agent's LLM provider (connection pool reuse).
+
+**A sub-agent does not get your tool set.** Spawn children are read-only. Every
+Spawn dispatch builds the child registry with an empty request, which falls to the
+read-only floor — **`Read`, `Grep` and `Glob`, and nothing else**
+(`SHARED_READ_ONLY_CHILD_TOOLS`, `crates/wcore-types/src/spawner.rs:159`). `Write`,
+`Edit` and `Bash` are never registered on a Spawn child, whatever the parent holds.
+
+That floor is then **intersected with the parent's own authority**, so a child can
+only ever be a subset of the session that spawned it — a parent that has had `Grep`
+and `Glob` dropped by its posture cannot recover them by spawning
+(`crates/wcore-agent/src/spawner.rs:2818`). The intersection is unconditional: there
+is no "no authority supplied" arm to fall through.
+
+The child's filesystem access is also jailed to a contained workspace, with the
+parent's read/write deny list applied on top.
 
 ### Use Cases
 
@@ -15,14 +30,20 @@ The LLM can use the Spawn tool to create independent sub-agents that run tasks i
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Max parallel sub-agents | 5 | Prevents resource exhaustion |
-| Sub-agent max turns | 10 | Per sub-agent conversation turn limit |
+| Sub-agent max turns | 200 | Per sub-agent conversation turn limit |
 | Sub-agent max tokens | 4096 | Per sub-agent response token limit |
 
 ### Behavior
 
-- Sub-agents auto-approve all tool calls (no confirmation prompts)
+- Sub-agents **inherit the parent's approval posture** — they do not auto-approve.
+  A session that prompts you before Bash/Write/Edit keeps prompting inside any
+  sub-agent it spawns (`crates/wcore-agent/src/spawner.rs:2434`). A parent already
+  running with `auto_approve` on is the only case in which a child auto-approves.
 - Sub-agents do not save sessions
-- Sub-agents run silently (no stdout output)
+- By default a sub-agent's streaming output is discarded and only the parent writes
+  to stdout. When the host wires the relay (the JSON-stream protocol path), the
+  child's events are forwarded to the parent sink as `sub_agent_event` frames
+  instead of being dropped.
 - All results are merged and returned to the parent agent
 
 ---
@@ -131,8 +152,35 @@ managed entirely by the engine:
 
 ### Token Storage & Security
 
-- Tokens are stored encrypted at `~/.wayland/oauth/{provider}.json`, with
-  directory mode `0700` and file mode `0600` on Unix.
+- Tokens are stored through the same credential ladder as API keys: the OS
+  keyring first, then the encrypted vault
+  (`WAYLAND_VAULT_PASSPHRASE_FD` / `WAYLAND_VAULT_PASSPHRASE`), and a refusal if
+  neither is available. There is no cleartext rung — on a host with no keyring
+  and a locked vault, `auth login` fails with the remedy rather than writing
+  your refresh token to disk in the clear. `backend = "plaintext"` does not
+  apply to OAuth tokens.
+- A token file written by a build before v0.12.26
+  (`~/.wayland/oauth/{provider}.json`, directory mode `0700` and file mode
+  `0600` on Unix) still works. The first time the engine reads it, the token is
+  written into the ladder, verified by reading it back, and only then is the
+  cleartext file removed. If no secure tier is available the file is left alone
+  and you stay signed in.
+- Migration is **one-way**, so the engine refuses rather than lying about it.
+  Every verified store drops a non-secret marker at
+  `~/.wayland/oauth/{provider}.stored`. If a later run finds that marker but
+  neither tier can produce the token — a locked vault, a keyring that is not
+  running — the load fails with a message naming all three ways out, instead of
+  reporting "not signed in" to a user who is signed in. `/config` shows the same
+  state as `⚠ signed in — credential store locked`.
+- On Windows a token set is larger than one Credential Manager entry can hold
+  (`CRED_MAX_CREDENTIAL_BLOB_SIZE` is 2560 bytes, and values are stored as
+  UTF-16). The keyring backend spans an oversized value across sibling entries
+  under a manifest, so the cap is not a limit on what can be stored. Nothing
+  changes for values that fit.
+- `wayland-core auth logout chatgpt` clears all of it — the ladder entry, any
+  leftover file, and the marker. It works even when the credential store cannot
+  be opened, which is what makes it a usable escape hatch from the refusal
+  above.
 - PKCE (S256) and a CSRF `state` token are mandatory on the login flow; the
   callback compares `state` in constant time.
 - Refresh is engine-managed: concurrent refreshes coalesce into a single
@@ -471,7 +519,7 @@ compact_bash = false   # default: true
 
 ## Skills lifecycle (W9)
 
-When `observability.skills_lifecycle = true` in `wcore.toml`, three subsystems become available to the engine:
+The skills lifecycle is enabled by default. When enabled, three subsystems become available to the engine:
 
 - **F10 autonomous skill creation.** A `PatternDetector` over recent `TurnTrace` history flags repeated tool-call sequences (length ≥ 5, repeats ≥ 3, stable input-key shape). Matches are written via `DraftWriter::stage` as P4 procedures with `status = Staged`. Staged skills are visible to `wcore skills audit` and operator promotion paths but never auto-load into the model's context. When `structured_traces` is also on, a `TraceEvent` with payload `{ "kind": "skill_drafted", "name": ..., ... }` is emitted on each stage.
 - **F11 curator.** Runs on `on_session_end`. Reads active P4 procedures, scores them as `success_ratio · ln(1 + use_count)`, dedupes overlapping descriptions (Levenshtein ≤ 5 keeps the higher-scored entry), and archives entries with `use_count ≥ 5` and `success_ratio < 0.20`. `Pinned` procedures are never touched.
@@ -485,14 +533,23 @@ When `observability.skills_lifecycle = true` in `wcore.toml`, three subsystems b
 
 ### Enabling
 
-The `skills_lifecycle` flag is **default-off**. Turn it on per project in `.wayland-core.toml`:
+The `skills_lifecycle` flag is **default-on**. An operator can disable it globally or per project:
 
 ```toml
 [observability]
-skills_lifecycle = true
+skills_lifecycle = false
 ```
 
-The flag is also valid in the global config file under the same `[observability]` section; the project value ORs with the global value, mirroring `structured_traces`.
+The flag is also valid in the global config file under the same `[observability]` section. An explicit `false` in either source wins; an absent value keeps the smart default enabled. Disabling the lifecycle does not disable memory itself.
+
+The converse does hold, and it is asymmetric on purpose: `[memory] enabled = false` switches this flag off too, whatever it is set to. Everything the lifecycle produces is a durable artifact derived from the user's session, so a memory opt-out is an opt-out of all of it — see [memory.md](memory.md).
+
+Generated drafts are written once to the canonical skills directory with an
+`auto_drafted` manifest. They remain inspectable but hidden from model listings,
+routers, guessed-name execution, and cross-project resolution. Review metadata
+does not grant activation authority. `--skills-promote` is temporarily
+unavailable until F23 provides a governed one-procedure-to-one-artifact
+promotion transaction; `--skills-archive` remains available.
 
 ### Status in this release
 

@@ -80,7 +80,7 @@ use std::time::Duration;
 
 use crate::assertions::Assertion;
 use crate::providers::ProviderChoice;
-use crate::scenario::{Category, Scenario, Turn};
+use crate::scenario::{Category, Platform, Scenario, Turn};
 
 /// Relative path (under the scenario cwd) of the config file tempenv seeds and
 /// that the engine reads via its cwd-walk. `setup()` appends hook blocks here.
@@ -134,6 +134,7 @@ fn write_script(cwd: &std::path::Path, name: &str, body: &str) -> anyhow::Result
 /// tool result → no filesystem effect.
 pub fn pre_hook_blocks_write() -> Scenario {
     Scenario::new("hook_pre_blocks_write", Category::Hardening)
+        .platforms([Platform::Linux, Platform::Macos])
         .provider(ProviderChoice::ForceDeepSeek)
         .max_total_time(Duration::from_secs(120))
         .max_total_cost_usd(0.05)
@@ -176,6 +177,7 @@ pub fn pre_hook_blocks_write() -> Scenario {
 /// chose to call.
 pub fn stop_hook_leaves_artifact() -> Scenario {
     Scenario::new("hook_stop_leaves_artifact", Category::Hardening)
+        .platforms([Platform::Linux, Platform::Macos])
         .provider(ProviderChoice::ForceDeepSeek)
         .max_total_time(Duration::from_secs(90))
         .max_total_cost_usd(0.03)

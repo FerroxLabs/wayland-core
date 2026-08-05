@@ -1,0 +1,26 @@
+{
+  "vocabulary_version": "F30-DIALECT-VOCAB-V1",
+  "dimension": "correctness",
+  "canonical_script_sha256": "7db3c3ee6e2d3d85894b3abba2308f819519989189b7d3629d402956a1e02f69",
+  "corpus_sha256": "10c85fbd29ba89bdd08539c63d73744efb5616f584ed84c7f96e4c4a9e8f1323",
+  "steps": [
+    {
+      "kind": "tool_call",
+      "id": "call_1",
+      "tool_name": "Write",
+      "arguments": {
+        "content": "frontier-trial-oracle-v1\n",
+        "file_path": "TRIAL-ARTIFACT.txt"
+      },
+      "slot_bindings": {
+        "path": "file_path",
+        "content": "content"
+      }
+    },
+    {
+      "kind": "text",
+      "text": "Wrote TRIAL-ARTIFACT.txt."
+    }
+  ],
+  "translation_sha256": "3ad52c367219ff4278abe86d66401be1983a0b145b83ddc657c1e463a778b4dd"
+}

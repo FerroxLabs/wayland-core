@@ -1,0 +1,70 @@
+=== crates/wcore-tools/src/registry.rs lines=1305 ===
+  pub fn new() -> Self
+  pub fn set_tool_vfs(&mut self, vfs: Arc<dyn crate::vfs::VirtualFs>)
+  pub fn tool_vfs(&self) -> Option<Arc<dyn crate::vfs::VirtualFs>>
+  pub fn set_workspace_policy(&mut self, policy: Arc<crate::workspace_policy::WorkspacePolicy>)
+  pub fn workspace_policy(&self) -> Option<Arc<crate::workspace_policy::WorkspacePolicy>>
+  pub fn set_sandbox_runtime(&mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>)
+  pub fn sandbox_runtime(&self) -> Arc<wcore_sandbox::SandboxRegistry>
+  pub fn retain<F>(&mut self, keep: F)
+    where
+        F: Fn(&dyn Tool) -> bool,
+  pub fn register(&mut self, tool: Box<dyn Tool>)
+  pub fn replace_by_name(&mut self, tool: Box<dyn Tool>)
+  pub fn refresh_tool_search_catalog(
+        &mut self,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    )
+  pub fn get(&self, name: &str) -> Option<&dyn Tool>
+  pub fn breaker_is_open(&self, name: &str) -> bool
+  pub fn record_breaker_outcome(&self, name: &str, is_error: bool)
+  pub fn reset_all_breakers(&self)
+  pub fn breakers_requiring_conservative_restore(&self) -> Vec<String>
+  pub fn restore_breakers_conservatively(
+        &self,
+        tool_names: &[String],
+    ) -> Result<(), BreakerRestoreError>
+  pub fn tool_names(&self) -> Vec<String>
+  pub fn mcp_tool_counts(&self) -> HashMap<String, u32>
+  pub fn remove_mcp_server(&mut self, server: &str) -> Vec<String>
+  pub fn to_tool_defs(&self) -> Vec<ToolDef>
+  pub fn to_tool_defs_filtered<F>(&self, filter: F) -> Vec<ToolDef>
+    where
+        F: Fn(&dyn Tool) -> bool,
+  pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String])
+  pub fn fold_deferred_into_catalog(
+    mut defs: Vec<ToolDef>,
+    catalog_max_chars: usize,
+) -> Vec<ToolDef>
+
+=== orchestration mod tests head ===
+  #[cfg(test)]
+  mod tests {
+      use super::*;
+      use serde_json::json;
+  
+      // -- truncate_display -----------------------------------------------------
+  
+      #[test]
+      fn truncate_display_ascii_short_unchanged() {
+          assert_eq!(truncate_display("hello", 10), "hello");
+      }
+  
+      #[test]
+      fn truncate_display_ascii_truncated() {
+          let result = truncate_display("hello world", 5);
+          assert!(result.ends_with("..."));
+          assert!(result.len() <= 20);
+      }
+  
+      #[test]
+      fn truncate_display_cjk_does_not_panic() {
+          // 200 CJK chars: each is 3 bytes, so byte index 200 falls mid-character
+          let cjk: String = "你好世界测试".chars().cycle().take(200).collect();
+          let result = truncate_display(&cjk, 50);
+          assert!(result.ends_with("..."));
+      }
+  
+      #[test]
+      fn truncate_display_mixed_cjk_ascii_does_not_panic() {
+          let mixed = "abc你好def世界ghi测试".r

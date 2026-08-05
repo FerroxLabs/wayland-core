@@ -1,0 +1,541 @@
+You are an independent, adversarial security/code cross-auditor. You did NOT author this change. Prosecute it to REFUTE (default-refuted-if-uncertain). Review ONLY the sealed candidate and its delta described below. Do NOT fetch anything else.
+
+=== SEALED CANDIDATE (the exact object under audit) ===
+source_sha: 3f839309574d6741eed416cd3820f56447f74eba
+source_tree: 3092475bb4102d010b6ff5f6c9d8080cb4f51928
+repo: wayland-core (Rust workspace). branch plan/f20-unified-audit-repair.
+
+=== WHAT THIS DELTA IS (the 20-43 repair over sealed-but-RED base daf27337) ===
+Two PRODUCTION Windows-hardening fixes + one test-counting-scope fix + lib-test compile-debt imports + a belt-and-braces nextest serialization group. macOS cargo check GREEN; Hetzner Linux clippy -D warnings GREEN; Hetzner aggregate nextest --profile ci = 11509 passed / 0 failed / 48 skipped (locked build exit 0). All Windows compile+behavior is #[cfg(windows)] and is proven ONLY at the later 20-46 native msvc re-dispatch (native_macos/native_windows are the ONLY deferred checks).
+
+#A (wcore-swarm, Linux-compiled path): worktree_manager.rs wraps BOTH std::fs::canonicalize sites with dunce::simplified (strips \?\ verbatim prefix for real drive-letter paths; no-op on unix + genuine UNC/device). The Windows capacity probe now transports the swarm root via an env var WCORE_SWARM_PROBE_ROOT ($env:WCORE_SWARM_PROBE_ROOT in the PowerShell -Command script) instead of a trailing -Command arg that PowerShell re-parsed as script text. dunce promoted to a direct dep of wcore-swarm (already resolved 1.0.5 in Cargo.lock; no new crate).
+
+#B (wcore-sandbox AppContainer, #[cfg(windows)]): command.rs adds quote_cmd_payload (single outer quote pair, inner quotes verbatim) + resolved_program_is_cmd; process.rs applies quote_cmd_payload ONLY to the argv entry immediately following the first /c or /k WHEN the resolved lpApplicationName ends_with cmd.exe, leaving quote_arg (MSVC CRT escaping) for every other argv. Rationale: cmd /s /c re-reads the RAW command line and strips only the outer quote pair, so quote_arg's \" escaping leaked backslash-escaped quotes (type \"path\" -> ERROR_INVALID_NAME).
+
+r7 (test): hard_process_containment_windows.rs replaces host-wide image_count(choice.exe) with tagged_choice_descendant_count(tag) scoped by ParentProcessId of the test's own rem {tag}-carrying sandbox cmd, so a concurrent choice-spawning target cannot pollute the count. Every containment assertion preserved verbatim.
+
+r3 (test): windows_impl/tests.rs + directory_authority_windows_tests.rs restore imports; FILE_ID_BOTH_DIR_INFORMATION corrected to windows_sys::Wdk::Storage::FileSystem (matches production). Imports only.
+
+nextest.toml: cfg(windows)-gated test-group native-windows-live={max-threads=1} serializing the two choice-spawning native targets. Does NOT apply on Linux (--profile ci) since those files compile empty there.
+
+=== TWO ISOLATION GUARDRAILS YOU MUST ADVERSARIALLY PROSECUTE ===
+GUARDRAIL A: Did #A silently defeat the DispatchAdmission budget? Look for any catch-to-unlimited / u64::MAX / unwrap_or on the probe. (Probe returns Result<u64>; workspace_capacity does available_workspace_bytes().await? then required = MAX_TRANSACTION_WORKSPACE_BYTES.min(...).checked_add(WORKSPACE_SAFETY_MARGIN_BYTES). On probe failure/parse-fail it returns SwarmError::DispatchAdmission — fail-closed.)
+GUARDRAIL B: Is #B a quoting-layer change ONLY? Confirm argv discipline kept (payload is still one caller-supplied argv entry, NOT a format!-interpolated shell string); is_unc_or_device_path, the Low-IL restricted token, the Job-Object limits, and the AppContainer ACL lease are UNTOUCHED by the delta; and the 20-36 'exit /b 0' normalization is NOT reverted.
+Also: are the Kimi K3 watch-items (git ops with de-verbatimized swarm_root; tagged_cmd_count CIM visibility under NetworkService; the bash worker under AppContainer + no-Windows-Docker-fallback; worker test-exe DLL-load under Low-IL) carried forward as explicit 20-46 re-dispatch checks rather than silently dropped?
+
+=== THE VERBATIM DELTA (git diff daf27337..3f839309) ===
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+index a8bf94b6..c6d16aea 100644
+--- a/.config/nextest.toml
++++ b/.config/nextest.toml
+@@ -113,3 +113,22 @@ test-threads = 1
+ 
+ [profile.eval.junit]
+ path = "target/nextest/eval/junit.xml"
++
++# ── Native Windows live-containment serialization (F20-43, belt-and-braces) ──
++# The `#![cfg(windows)]` `#[ignore]`d native containment / ACL acceptance
++# targets both spawn `choice.exe` idlers on the self-hosted msvc runner. The
++# containment count is already scoped to each test's own tagged process tree
++# (by ParentProcessId), so correctness does not depend on this group — it is a
++# defense-in-depth measure that serializes the two `choice`-spawning targets so
++# they never overlap on one runner. `platform = 'cfg(windows)'` restricts the
++# override to Windows targets: on Linux (the Hetzner aggregate, `--profile ci`)
++# these files compile to empty binaries and the override does not apply, so the
++# 11509/0/48 aggregate is untouched. Concurrency only — no test or selector is
++# added or removed.
++[test-groups]
++native-windows-live = { max-threads = 1 }
++
++[[profile.default.overrides]]
++platform = 'cfg(windows)'
++filter = 'binary(/hard_process_containment_windows/) or binary(/live_fs_acl/)'
++test-group = 'native-windows-live'
+diff --git a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs
+index c5719a2e..afb9e356 100644
+--- a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs
++++ b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs
+@@ -110,6 +110,47 @@ pub(super) fn quote_arg(arg: &str) -> String {
+     out
+ }
+ 
++/// Quote the `/c`/`/k` payload of a `cmd.exe` invocation for the RAW command
++/// line `cmd.exe` re-reads.
++///
++/// `cmd.exe /s /c` (and the bare `/c` the availability probe uses) does NOT
++/// consume the MSVC-CRT-parsed argv for its payload: with `/s` it strips only
++/// the FIRST and LAST quote of the raw remainder after `/c` and executes the
++/// rest VERBATIM. So [`quote_arg`]'s CRT escaping (`"` -> `\"`) leaks the
++/// backslash-escaped quotes into the executed text — `type "path"` becomes
++/// `type \"path\"` and fails `ERROR_INVALID_NAME`, and every `start "" /b …`
++/// containment payload mangles identically. The correct spelling wraps the
++/// payload in a single outer double-quote pair and passes its inner quotes
++/// through untouched: `/s` strips exactly the outer pair, leaving the script's
++/// embedded quotes intact. This is a quoting-layer fix only — argv discipline
++/// is preserved (the payload is still one argv entry the caller supplied, not a
++/// `format!`-interpolated shell string), and the sandbox token / Job Object /
++/// AppContainer ACL boundary is untouched.
++pub(super) fn quote_cmd_payload(payload: &str) -> String {
++    let mut out = String::with_capacity(payload.len() + 2);
++    out.push('"');
++    out.push_str(payload);
++    out.push('"');
++    out
++}
++
++/// True when a resolved `lpApplicationName` (NUL-terminated UTF-16, as
++/// returned by [`resolve_program`]) names `cmd.exe`. Used to decide whether the
++/// `/c`/`/k` payload needs the cmd-aware quoting above rather than the general
++/// CRT [`quote_arg`] rules. Matching the RESOLVED program (not the raw
++/// `argv[0]`) is deliberate: bare `cmd`/`cmd.exe` is pinned to
++/// `System32\cmd.exe` and an absolute path is validated as-is, so this reflects
++/// the actual image that will parse the command line.
++pub(super) fn resolved_program_is_cmd(app_name_w: &[u16]) -> bool {
++    let end = app_name_w
++        .iter()
++        .position(|&c| c == 0)
++        .unwrap_or(app_name_w.len());
++    String::from_utf16_lossy(&app_name_w[..end])
++        .to_ascii_lowercase()
++        .ends_with("cmd.exe")
++}
++
+ /// Classification of a bare (non-absolute) `argv[0]`. Only `cmd` is
+ /// runnable under the Low-integrity restricted-token AppContainer; every
+ /// other shell is recognized solely so the resolver can return a clear,
+diff --git a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs
+index 1518ef9d..118e6908 100644
+--- a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs
++++ b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/process.rs
+@@ -610,10 +610,35 @@ pub(super) fn execute_blocking(
+             sinfo.lpAttributeList = attr_list;
+ 
+             // ---- 8. Command line + env block ----
++            // When the resolved program is cmd.exe, its `/c`/`/k` payload must be
++            // quoted for cmd's RAW-command-line re-read (single outer pair, inner
++            // quotes verbatim), NOT with the MSVC CRT `\"` escaping quote_arg
++            // emits — cmd /s strips only the outer pair and would otherwise run
++            // the backslash-escaped quotes literally (`type \"path\"` ->
++            // ERROR_INVALID_NAME). Every other argv entry keeps the CRT quoting.
++            // Quoting-layer only: the token / Job / ACL boundary is unchanged.
++            let cmd_payload_idx = if resolved_program_is_cmd(&app_name_w) {
++                cmd.argv
++                    .iter()
++                    .position(|a| {
++                        let flag = a.to_ascii_lowercase();
++                        flag == "/c" || flag == "/k"
++                    })
++                    .map(|flag_idx| flag_idx + 1)
++            } else {
++                None
++            };
+             let cmdline: String = cmd
+                 .argv
+                 .iter()
+-                .map(|a| quote_arg(a))
++                .enumerate()
++                .map(|(idx, a)| {
++                    if Some(idx) == cmd_payload_idx {
++                        quote_cmd_payload(a)
++                    } else {
++                        quote_arg(a)
++                    }
++                })
+                 .collect::<Vec<_>>()
+                 .join(" ");
+             let mut cmdline_w: Vec<u16> = widen(&cmdline);
+diff --git a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/tests.rs b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/tests.rs
+index ea9a1dc8..2325e617 100644
+--- a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/tests.rs
++++ b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/tests.rs
+@@ -8,6 +8,16 @@ use super::*;
+ 
+ use super::*;
+ 
++// Compile-debt restore: the `#[cfg(test)]` bodies below reference these types
++// by name but the glob imports above do not re-export them (a `use` is private
++// to its module). Import them from their real crate module paths so this module
++// builds on msvc. `#![allow(unused_imports)]` above tolerates any that a given
++// case does not touch.
++use crate::SandboxCommand;
++use crate::error::SandboxError;
++use crate::manifest::{NetworkPolicy, SandboxManifest};
++use std::sync::Arc;
++
+ #[test]
+ fn cancellation_guard_is_sticky_unless_disarmed() {
+     let cancelled = Arc::new(JobControl::default());
+diff --git a/crates/wcore-sandbox/src/directory_authority_windows_tests.rs b/crates/wcore-sandbox/src/directory_authority_windows_tests.rs
+index 4fa0a683..cac535d8 100644
+--- a/crates/wcore-sandbox/src/directory_authority_windows_tests.rs
++++ b/crates/wcore-sandbox/src/directory_authority_windows_tests.rs
+@@ -9,9 +9,14 @@
+ 
+ use super::windows::*;
+ use super::*;
++use crate::error::SandboxError;
+ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+ use std::sync::{Arc, Barrier};
+-use windows_sys::Win32::Storage::FileSystem::{FILE_ID_BOTH_DIR_INFORMATION, FILE_RENAME_INFO};
++// `FILE_ID_BOTH_DIR_INFORMATION` lives in the Wdk namespace in windows-sys 0.59
++// (feature `Wdk_Storage_FileSystem`), matching production `directory_authority_
++// windows.rs`; only `FILE_RENAME_INFO` is a Win32 Storage::FileSystem type.
++use windows_sys::Wdk::Storage::FileSystem::FILE_ID_BOTH_DIR_INFORMATION;
++use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
+ 
+ fn inject_create_failure(stage: Option<CreateValidationStage>) {
+     CREATE_VALIDATION_FAILURE.with(|failure| failure.set(stage));
+diff --git a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+index 2888c39d..c8a59997 100644
+--- a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
++++ b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+@@ -125,23 +125,38 @@ fn tagged_cmd_count(tag: &str) -> usize {
+         .unwrap_or(0)
+ }
+ 
+-/// Count host processes with the given image name (UNSANDBOXED host query).
+-/// Used by the active-process-cap test, whose detached descendants are bare
+-/// `choice.exe` idlers (choice rejects an injected tag argument), so they are
+-/// counted by image with a baseline subtracted by the caller.
+-fn image_count(image: &str) -> usize {
+-    let out = Command::new("tasklist")
+-        .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH", "/FO", "CSV"])
++/// Count the `choice.exe` idlers spawned by THIS test's fan-out, scoped to the
++/// test's own tagged process tree rather than host-wide by image name.
++///
++/// A bare `choice.exe` idler cannot carry an injected tag on its own command
++/// line (choice rejects the extra argument), but the top-level sandbox `cmd`
++/// that runs the fan-out script DOES carry a unique `rem {tag}` — and every
++/// `start "" /b choice` idler is a direct child of that cmd, so its
++/// `ParentProcessId` is the tagged cmd's `ProcessId`. Counting only choice
++/// processes whose parent is this test's tagged cmd means a concurrent
++/// `choice`-spawning target on the same runner (e.g. `live_fs_acl`) cannot
++/// pollute the count — closing the host-wide-image-count flake (watch-item d2)
++/// without weakening any containment assertion.
++fn tagged_choice_descendant_count(tag: &str) -> usize {
++    let out = Command::new("powershell")
++        .args([
++            "-NoProfile",
++            "-NonInteractive",
++            "-Command",
++            &format!(
++                "$parents=@(Get-CimInstance Win32_Process -Filter \"Name='cmd.exe'\" | \
++                 Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
++                 Select-Object -ExpandProperty ProcessId); \
++                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
++                 Where-Object {{ $parents -contains $_.ParentProcessId }}).Count"
++            ),
++        ])
+         .output()
+-        .expect("enumerate host processes via tasklist");
+-    let text = String::from_utf8_lossy(&out.stdout);
+-    if text.contains("No tasks") {
+-        return 0;
+-    }
+-    let needle = image.to_ascii_lowercase();
+-    text.lines()
+-        .filter(|line| line.to_ascii_lowercase().contains(&needle))
+-        .count()
++        .expect("query this test's tagged choice descendants via CIM");
++    String::from_utf8_lossy(&out.stdout)
++        .trim()
++        .parse()
++        .unwrap_or(0)
+ }
+ 
+ /// Poll `predicate` up to `deadline_secs`, panicking with `message` on timeout.
+@@ -285,12 +300,17 @@ async fn job_close_reaps_detached_descendant_with_no_residue() {
+ async fn active_process_cap_is_enforced() {
+     require_live_windows();
+     reap_stray_choice();
+-    let baseline = image_count("choice.exe");
++    let tag = unique_tag("cap");
+     let attempts = SANDBOX_ACTIVE_PROCESS_LIMIT + 32;
++    // Prefix the script with a `rem {tag}` so the top-level sandbox cmd — the
++    // direct parent of every `start "" /b` choice idler — carries this test's
++    // unique tag on its command line. The host-side count is then scoped to
++    // choice.exe whose ParentProcessId is THIS test's tagged cmd (no host-wide
++    // image baseline), so a concurrent choice-spawning target cannot pollute it.
+     // Fan out `attempts` detached long idlers, then hold the parent ~25s so the
+     // admitted set is concurrently alive and observable, then exit 0 (`exit /b 0`).
+     let script = format!(
+-        "for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
++        "rem {tag} & for /L %i in (1,1,{attempts}) do @start \"\" /b {} & {} & exit /b 0",
+         choice_hold(90),
+         choice_hold(25),
+     );
+@@ -301,17 +321,18 @@ async fn active_process_cap_is_enforced() {
+             .await
+     });
+ 
+-    // Sample the live delta while the fan-out is held, tracking its peak.
++    // Sample the live count (already scoped to this test's tagged tree) while
++    // the fan-out is held, tracking its peak.
+     let mut peak = 0usize;
+     let watch_deadline = Instant::now() + Duration::from_secs(30);
+     while Instant::now() < watch_deadline {
+-        let delta = image_count("choice.exe").saturating_sub(baseline);
++        let delta = tagged_choice_descendant_count(&tag);
+         peak = peak.max(delta);
+         // Once we have clearly observed a large admitted set we can stop early.
+         if delta >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
+             // keep sampling briefly to catch any overshoot past the cap
+             std::thread::sleep(Duration::from_millis(500));
+-            peak = peak.max(image_count("choice.exe").saturating_sub(baseline));
++            peak = peak.max(tagged_choice_descendant_count(&tag));
+             break;
+         }
+         std::thread::sleep(Duration::from_millis(250));
+@@ -341,11 +362,12 @@ async fn active_process_cap_is_enforced() {
+          admitted every spawn"
+     );
+ 
+-    // Everything is reaped back to baseline once the job closes.
++    // Everything this test spawned is reaped once the job closes (the count is
++    // already scoped to this test's tagged tree, so "back to baseline" is zero).
+     wait_until(
+-        || image_count("choice.exe") <= baseline,
++        || tagged_choice_descendant_count(&tag) == 0,
+         30,
+-        "fan-out descendants reaped back to baseline after job close",
++        "fan-out descendants reaped after job close",
+     );
+     reap_stray_choice();
+ }
+diff --git a/crates/wcore-swarm/Cargo.toml b/crates/wcore-swarm/Cargo.toml
+index 1a53e4ec..e6ad5d7c 100644
+--- a/crates/wcore-swarm/Cargo.toml
++++ b/crates/wcore-swarm/Cargo.toml
+@@ -35,6 +35,10 @@ tempfile             = { workspace = true }
+ fd-lock              = { workspace = true }
+ # CandidateSeal source-manifest digest — SHA-256, not a 64-bit DefaultHasher.
+ sha2                 = { workspace = true }
++# De-verbatimize canonicalized Windows roots (`\\?\C:\...` -> `C:\...`) so the
++# capacity probe and downstream git invocations receive a plain drive-letter
++# path. No-op on unix. Already resolved in Cargo.lock (transitive) — no new crate.
++dunce                = "1"
+ 
+ [target.'cfg(unix)'.dependencies]
+ libc.workspace = true
+diff --git a/crates/wcore-swarm/src/worktree_manager.rs b/crates/wcore-swarm/src/worktree_manager.rs
+index 60aded44..1c35613a 100644
+--- a/crates/wcore-swarm/src/worktree_manager.rs
++++ b/crates/wcore-swarm/src/worktree_manager.rs
+@@ -6,11 +6,18 @@ impl WorktreeManager {
+     /// Construct a new manager for `repo_root`. Creates the
+     /// `.swarm-worktrees/` directory if it does not exist.
+     pub fn new(repo_root: &Path) -> Result<Self> {
++        // De-verbatimize the canonicalized roots: on Windows `std::fs::canonicalize`
++        // returns a `\\?\C:\...` verbatim path, which the PowerShell capacity probe
++        // (and downstream git invocations that inherit the root) cannot consume.
++        // `dunce::simplified` strips the `\\?\` prefix for real drive-letter paths and
++        // is a no-op on unix and for genuine UNC/device paths, so Linux is unaffected.
+         let repo_root = std::fs::canonicalize(repo_root)?;
++        let repo_root = dunce::simplified(&repo_root).to_path_buf();
+         let repo_authority = DirectoryAuthority::open(&repo_root)?;
+         let swarm_root = repo_root.join(".swarm-worktrees");
+         ensure_real_directory(&swarm_root)?;
+         let swarm_root = std::fs::canonicalize(&swarm_root)?;
++        let swarm_root = dunce::simplified(&swarm_root).to_path_buf();
+         let swarm_authority = DirectoryAuthority::open(&swarm_root)?;
+         if swarm_root.parent() != Some(repo_root.as_path()) {
+             return Err(SwarmError::WorktreeIo(format!(
+@@ -416,24 +423,23 @@ impl WorktreeManager {
+ 
+     #[cfg(windows)]
+     async fn available_workspace_bytes(&self) -> Result<u64> {
+-        const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($args[0]); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
++        // Transport the probe root out-of-band via an environment variable rather
++        // than as a trailing `-Command` argument. PowerShell re-parses trailing
++        // args after `-Command` as script text, so any weird path character (a
++        // `\\?\` verbatim prefix, `&`, `(`, spaces) breaks the probe with a
++        // ParserError. Reading `$env:WCORE_SWARM_PROBE_ROOT` removes that reparse
++        // class entirely. `swarm_root` is already de-verbatimized at the
++        // canonicalize site, so `[IO.DriveInfo]::new` receives a plain drive root.
++        const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($env:WCORE_SWARM_PROBE_ROOT); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
+         let root = self.swarm_root.to_string_lossy().into_owned();
+-        let output = capture_bounded_process(
+-            shell::shell_command_argv(
+-                "powershell.exe",
+-                &[
+-                    "-NoProfile",
+-                    "-NonInteractive",
+-                    "-Command",
+-                    SCRIPT,
+-                    root.as_str(),
+-                ],
+-            ),
+-            self.capture_limits,
+-            None,
+-        )
+-        .await
+-        .map_err(|error| capture_error("workspace capacity probe", error))?;
++        let mut command = shell::shell_command_argv(
++            "powershell.exe",
++            &["-NoProfile", "-NonInteractive", "-Command", SCRIPT],
++        );
++        command.env("WCORE_SWARM_PROBE_ROOT", root.as_str());
++        let output = capture_bounded_process(command, self.capture_limits, None)
++            .await
++            .map_err(|error| capture_error("workspace capacity probe", error))?;
+         if !output.status.success() {
+             return Err(SwarmError::DispatchAdmission(format!(
+                 "workspace capacity probe failed: {}",
+
+=== FULL SEALED available_workspace_bytes + workspace_capacity (context for GUARDRAIL A) ===
+
+    /// Prove usable storage and return the bounded workspace authority used by
+    /// every transaction in one admitted dispatch.
+    pub async fn workspace_capacity(&self, active_workers: usize) -> Result<WorkspaceCapacity> {
+        self.validate_repo_authority()?;
+        self.validate_swarm_root()?;
+        let active_workers = u64::try_from(active_workers.max(1)).map_err(|_| {
+            SwarmError::DispatchAdmission("active worker count exceeds u64".to_owned())
+        })?;
+        let available_bytes = self.available_workspace_bytes().await?;
+        let max_transaction_bytes =
+            MAX_TRANSACTION_WORKSPACE_BYTES.min(MAX_AGGREGATE_WORKSPACE_BYTES / active_workers);
+        let existing_reservation = self.reserved_workspace_bytes()?;
+        let active_reservation = max_transaction_bytes
+            .checked_mul(active_workers)
+            .and_then(|bytes| bytes.checked_add(existing_reservation))
+            .and_then(|bytes| bytes.checked_add(WORKSPACE_SAFETY_MARGIN_BYTES))
+            .ok_or_else(|| {
+                SwarmError::DispatchAdmission("dispatch workspace capacity overflowed".to_owned())
+            })?;
+        if active_reservation > available_bytes {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "dispatch requires {active_reservation} bytes for {active_workers} active workers, {existing_reservation} bytes already reserved, and its safety margin, but only {available_bytes} bytes are available"
+            )));
+        }
+        if existing_reservation
+            .checked_add(max_transaction_bytes.saturating_mul(active_workers))
+            .is_none_or(|total| total > MAX_AGGREGATE_WORKSPACE_BYTES)
+        {
+            return Err(SwarmError::DispatchAdmission(
+                "dispatch aggregate workspace budget is already committed".to_owned(),
+            ));
+        }
+        Ok(WorkspaceCapacity {
+            available_bytes,
+            safety_margin_bytes: WORKSPACE_SAFETY_MARGIN_BYTES,
+            max_transaction_bytes,
+            max_aggregate_bytes: MAX_AGGREGATE_WORKSPACE_BYTES,
+        })
+    }
+
+    /// Reject an entire dispatch before any transaction is created when the
+    /// pinned repository cannot fit the per-active-worker budget.
+    pub(crate) async fn assert_dispatch_checkout_fits(
+        &self,
+        pinned_head: &str,
+        capacity: WorkspaceCapacity,
+    ) -> Result<()> {
+        let closure_bytes = self.transfer_closure_bytes(pinned_head).await?;
+        let checkout_bytes = self.checkout_logical_bytes(pinned_head).await?;
+        let initial_bytes = closure_bytes.checked_add(checkout_bytes).ok_or_else(|| {
+            SwarmError::WorktreeIo("initial workspace size overflowed".to_owned())
+        })?;
+        if initial_bytes > capacity.max_transaction_bytes {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "dispatch checkout requires {initial_bytes} initial bytes ({closure_bytes} Git object bytes plus {checkout_bytes} logical checkout bytes), exceeding the {}-byte per-worker budget before any worker was created",
+                capacity.max_transaction_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    async fn available_workspace_bytes(&self) -> Result<u64> {
+        let root = self.swarm_root.to_string_lossy().into_owned();
+        let output = capture_bounded_process(
+            shell::shell_command_argv("df", &["-Pk", root.as_str()]),
+            self.capture_limits,
+            None,
+        )
+        .await
+        .map_err(|error| capture_error("workspace capacity probe", error))?;
+        if !output.status.success() {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "workspace capacity probe failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let line = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .last()
+            .ok_or_else(|| {
+                SwarmError::DispatchAdmission("workspace capacity probe returned no data".into())
+            })?
+            .to_owned();
+        let blocks = line
+            .split_whitespace()
+            .nth(3)
+            .ok_or_else(|| {
+                SwarmError::DispatchAdmission(
+                    "workspace capacity probe omitted available blocks".into(),
+                )
+            })?
+            .parse::<u64>()
+            .map_err(|_| {
+                SwarmError::DispatchAdmission(
+                    "workspace capacity probe returned invalid available blocks".into(),
+                )
+            })?;
+        blocks.checked_mul(1024).ok_or_else(|| {
+            SwarmError::DispatchAdmission("workspace capacity probe overflowed".into())
+        })
+    }
+
+    #[cfg(windows)]
+    async fn available_workspace_bytes(&self) -> Result<u64> {
+        // Transport the probe root out-of-band via an environment variable rather
+        // than as a trailing `-Command` argument. PowerShell re-parses trailing
+        // args after `-Command` as script text, so any weird path character (a
+        // `\\?\` verbatim prefix, `&`, `(`, spaces) breaks the probe with a
+        // ParserError. Reading `$env:WCORE_SWARM_PROBE_ROOT` removes that reparse
+        // class entirely. `swarm_root` is already de-verbatimized at the
+        // canonicalize site, so `[IO.DriveInfo]::new` receives a plain drive root.
+        const SCRIPT: &str = "$root=[IO.Path]::GetPathRoot($env:WCORE_SWARM_PROBE_ROOT); $drive=[IO.DriveInfo]::new($root); [Console]::Out.Write($drive.AvailableFreeSpace)";
+        let root = self.swarm_root.to_string_lossy().into_owned();
+        let mut command = shell::shell_command_argv(
+            "powershell.exe",
+            &["-NoProfile", "-NonInteractive", "-Command", SCRIPT],
+        );
+        command.env("WCORE_SWARM_PROBE_ROOT", root.as_str());
+        let output = capture_bounded_process(command, self.capture_limits, None)
+            .await
+            .map_err(|error| capture_error("workspace capacity probe", error))?;
+        if !output.status.success() {
+            return Err(SwarmError::DispatchAdmission(format!(
+                "workspace capacity probe failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| {
+                SwarmError::DispatchAdmission(
+                    "workspace capacity probe returned invalid available bytes".into(),
+                )
+            })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    async fn available_workspace_bytes(&self) -> Result<u64> {
+        Err(SwarmError::DispatchAdmission(
+            "workspace capacity cannot be proven on this platform".into(),
+        ))
+    }
+
+    async fn read_pinned_head(&self) -> Result<String> {
+        self.validate_repo_authority()?;
+        let cmd = self.git_command(&["rev-parse", "--verify", "HEAD^{commit}"]);
+        let out = capture_bounded_process(cmd, self.capture_limits, None)
+            .await
+
+=== YOUR TASK ===
+Prosecute at EVERY severity (blocker/critical/high/medium/low) EXCEPT native_macos/native_windows which are deferred to 20-46. Judge three checks: all_severity, evidence_integrity, integration_authority. If you find ANY defect at ANY non-deferred severity, say so explicitly with file:line and severity. If you find NOTHING, say PASS with zero findings.
+END WITH A STRICT JSON OBJECT ONLY (no prose after it) of this exact shape:
+{"checks":{"all_severity":"PASS|FAIL","evidence_integrity":"PASS|FAIL","integration_authority":"PASS|FAIL"},"deferred":["native_macos","native_windows"],"findings":{"blocker":0,"critical":0,"high":0,"medium":0,"low":0},"guardrail_A_admission_budget":"PASS|FAIL","guardrail_B_quoting_layer_only":"PASS|FAIL","kimi_watchitems_carried":"PASS|FAIL","disposition":"PASS|BLOCK"}

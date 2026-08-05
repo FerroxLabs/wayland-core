@@ -1,0 +1,16 @@
+HOST_ARCH=AMD64
+HOST_CPU=13th Gen Intel(R) Core(TM) i9-13900KF
+OS=Microsoft Windows 11 Pro
+SHA256_aarch64=282cd3f309e17a62e712a97caab7b95050bc2fca9158b6b4a2b28a3f7d546c85
+SHA256_x86_64=e9cf6650a47a8f3340a25d720ab6ed032e1fa41da0d1171ccb87337fd542947a
+PE_MACHINE_aarch64=0xAA64
+SIZE_aarch64=60491776
+LAUNCH_EXCEPTION_aarch64=This command cannot be run due to the error: This version of %1 is not compatible with the version of Windows you're running. Check your computer's system information and then contact the software publisher.
+EXITCODE_aarch64=NOLAUNCH
+OUTPUT_aarch64=
+PE_MACHINE_x86_64=0x8664
+SIZE_x86_64=73028096
+EXITCODE_x86_64=0
+OUTPUT_x86_64=wayland-core 0.12.25 |
+WLDONE
+readback_rc=0

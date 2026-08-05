@@ -4,7 +4,51 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches:
+      - main
+      # 20A-01 Wiring A. Before this line, `ci.yml` fired ONLY on
+      # `pull_request → main` / `push → main`, so a long-lived working branch
+      # with no open PR went through CI zero times:
+      # `gh run list -R FerroxLabs/wayland-core --branch plan/f20-unified-audit-repair`
+      # returned `[]`, and the last ci.yml run of ANY kind was 2026-07-13.
+      # The macOS leg and the self-hosted Windows leg had therefore never
+      # COMPILED this tree — which is how a Windows-fatal E0433 in
+      # crates/wcore-tools/tests/bash_sandbox_routing_test.rs (20A-01 F-01)
+      # sat on the branch undetected behind an 11,519-test Linux-only green.
+      #
+      # `workflow_dispatch` was considered first and rejected: GitHub only
+      # exposes that trigger for workflows already present on the DEFAULT
+      # branch, and ci.yml on `main` has no such trigger, so a dispatch
+      # against this ref cannot fire. Naming the branch in `push` is the only
+      # route that actually runs, and it needs no change to `main`.
+      #
+      # Transient: drop this entry when the branch merges. The job matrix,
+      # runner labels, concurrency group and test commands are untouched.
+      #
+      # REMOVED 2026-08-04 — it had become a DOUBLE-RUN, not coverage. The
+      # premise above ("no open PR, so CI fires zero times") stopped holding
+      # when PR #257 opened on 2026-08-03: from then on every push to this
+      # branch fired BOTH `push` and `pull_request`, and the concurrency group
+      # (`workflow-github.ref`) differs between them — `refs/heads/plan/...`
+      # vs `refs/pull/257/merge` — so neither cancels the other. Measured: two
+      # full matrices per commit, each 91-146 minutes, on every push all day.
+      # The open PR provides exactly the coverage this entry was added for.
+      # Restore this line only if the PR closes while the branch stays alive.
+      # - plan/f20-unified-audit-repair
+      # 2026-07-27. Lane branches, so a lane can obtain a CI-built binary for
+      # its OWN changes. Without this, `gh run download` only ever yields
+      # artifacts from the integration branch, and a lane needing macOS or
+      # Windows evidence for work it has not merged yet has no route to a
+      # binary at all — which read as "macOS is not obtainable" and was
+      # escalated twice as a platform impossibility. It is a CI-trigger gap
+      # with a one-line fix. A wildcard rather than one entry per lane,
+      # because lanes are created and retired continuously and an
+      # enumeration goes stale the moment it is written.
+      #
+      # Same reasoning as above applies: `workflow_dispatch` is not available,
+      # because GitHub exposes it only for workflows present on the DEFAULT
+      # branch and ci.yml on `main` has no such trigger.
+      - 'lane/**'
 
 permissions:
   contents: read
@@ -12,12 +56,97 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs (cheap, and only the latest push matters there),
+  # but NEVER cancel a branch push. Phases 24-27 execute in bounded parallel
+  # worktrees, each pushing its own branch; with unconditional cancellation
+  # those runs terminate each other and the fan-out silently loses CI coverage.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ── macOS runner admission control (2026-07-29, lane/ci-macos-budget) ──
+  # Measured, not inferred. Raw evidence: .planning/CI-MACOS-BUDGET.md.
+  #
+  #   * The GitHub-hosted macOS pool has a concurrency ceiling of FIVE on this
+  #     account (peak concurrent EXECUTED macOS jobs over a 10.84 h / 303-run
+  #     window = 5; a live census later showed exactly 5 in_progress against 36
+  #     queued). Throughput 11.25 macOS jobs/hour, median job 19.6 min.
+  #   * Demand over the same window was 22.4 macOS jobs/hour — ~2x capacity,
+  #     permanently. The queue grew ~11 jobs/hour and could never drain.
+  #     Observed macOS waits: 4h06m, 5h03m, 5h31m.
+  #   * 96.3% of macOS demand (234 of 243 jobs) came from `lane/**`. The
+  #     integration branch got NINE macOS jobs in 10.8 h and produced ZERO CI
+  #     verdicts in 9 h.
+  #   * macOS is the constrained pool specifically: within one run, dispatched
+  #     at a single instant, ubuntu-latest started in 1-8s and windows-latest in
+  #     2-5s while the macOS jobs were still queued 80+ minutes later.
+  #
+  # The `lane/**` push trigger (line 41) is deliberately NOT removed — it exists
+  # so a lane that cannot compile for Darwin or Windows locally can obtain a
+  # CI-built binary for its own unmerged changes. Windows is unconstrained, so
+  # the Windows half of that capability is untouched and stays unconditional.
+  # Only the three macOS jobs are rationed on lane pushes, behind an opt-in
+  # token `[ci-darwin]` (alias `[ci-macos]`) in a pushed commit message.
+  # `main`, the integration branch and every pull_request keep the full matrix.
+  #
+  # WHY AN INLINE EXPRESSION AND NOT A `needs:` SETUP JOB. The first cut of this
+  # change computed the matrices in a small `budget` job that `ci` and `build`
+  # depended on. That was measured and REVERTED: it puts a new serialisation
+  # point in front of all compute, and ubuntu-latest is itself congested (live
+  # census: 32 queued / 13 running). The budget job sat queued 14+ minutes on
+  # run 30426418225 before `ci` and `build` were even created — a self-inflicted
+  # regression on the critical path of every run, on the exact metric this
+  # change exists to improve. Evaluating the condition inline costs zero jobs
+  # and zero hops.
+  #
+  # A job-level `if:` cannot do this either: `jobs.<id>.if` cannot read the
+  # `matrix` context, so it can only skip an ENTIRE job — which would also drop
+  # the self-hosted Windows CI leg and all four non-Darwin build targets.
+  # Splitting the macOS legs into their own jobs would duplicate ~140 lines of
+  # steps, and this file already documents a real defect caused by exactly that
+  # drift (the `--no-fail-fast` divergence at the `ci-linux` test step, which
+  # made every historical CI failure count a lower bound rather than a total).
+  #
+  # INJECTION SAFETY. `head_commit.message` and `commits.*.message` are
+  # attacker-controllable, but here they are only ever operands of `contains()`
+  # inside the expression evaluator — they never reach a shell, and the
+  # expression can only select between two JSON literals written above. Attacker
+  # input can toggle WHICH literal is chosen; it cannot alter either literal.
+  #
+  # The condition below appears THREE times (both matrices + the reporting step
+  # in `ci-linux`) because GitHub Actions supports neither YAML anchors nor the
+  # `env` context inside `strategy`. Those three copies MUST stay byte-identical;
+  # .planning/evidence/ci-macos-budget/gate.py asserts byte-identity, evaluates the
+  # condition against a 9-case truth table, and proves it can fail via four
+  # mutation arms (`gate.py --self-test`).
+  #
+  # ── ADDENDUM 2026-07-29 (lane/ci-selfhosted-mac): supply side ────────────
+  # The rationing above is UNCHANGED — it is still correct for everything that
+  # goes to the hosted pool. What changed is that a self-hosted Apple-silicon
+  # runner now exists, so part of the traded-away lane coverage can be bought
+  # back from a different supply rather than by re-loading the hosted queue.
+  # A token-less `lane/**` push now gets its native arm64 compile and its arm64
+  # artifact from `build-darwin-selfhosted` (see that job, at the bottom of this
+  # file, for the serialisation arithmetic that says why only ONE of the three
+  # macOS jobs moved, and for the hermeticity limits that say why it runs no
+  # tests). `CI (macos-latest)` and `Build (x86_64-apple-darwin)` stay hosted and
+  # stay opt-in on lanes. `main`, the integration branch and every PR are
+  # completely untouched by that job and keep the full hermetic hosted matrix.
+
   ci:
     name: CI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # 2026-08-02. Skip this job entirely on a `lane/**` push that opted into
+    # neither platform. See the matrix note below for why the self-hosted
+    # Windows entry stopped being unconditional. Lanes keep `Lint`, the
+    # containerized Linux job, the `Build (…)` artifacts that the `lane/**`
+    # trigger exists to provide, and their own lane-scoped proof workflows.
+    if: >-
+      github.event_name == 'pull_request'
+      || github.ref_name == 'main'
+      || github.ref_name == 'plan/f20-unified-audit-repair'
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
     # Shrink debug info + disable incremental compile across the matrix.
     # The Windows runner has ~14GB free disk and the default Rust dev
     # profile + full PDB debug info blew past it on CI run 26396718138
@@ -32,17 +161,69 @@ jobs:
       CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
+      # Selects between three literals (see the admission-control note at the top
+      # of `jobs:`). Full value is
+      #   ["macos-latest",["self-hosted","Windows","X64","msvc"]]
+      # — byte-identical to the literal list this replaced, so the job names
+      # `CI (macos-latest)` and `CI (Array)` are unchanged. `main`, every PR and
+      # the integration branch always get both entries.
+      #
+      # On a `lane/**` push, EACH platform is now opt-in:
+      #   `[ci-darwin]` / `[ci-macos]` in a commit message → `macos-latest`
+      #   `[ci-windows]`                                    → self-hosted Windows
+      # and with neither marker the whole `ci` job is skipped by the `if:` above,
+      # so the vector is never empty.
+      #
+      # 2026-08-02. The self-hosted Windows entry used to be UNCONDITIONAL on
+      # lane pushes. There is exactly ONE self-hosted Windows runner and it
+      # executes one job at a time, so a repair wave of six concurrent lanes —
+      # each pushing several times — kept it saturated for hours and the
+      # INTEGRATION branch's own `CI (Array)` queued behind all of them. Measured
+      # during the v0.12.26-rc.1 wave: 25 runs pending, integration CI still
+      # `queued` after ninety minutes, and a lane resorted to standing up its own
+      # hosted-`windows-latest` workflow because direct ssh to the box returned
+      # nothing in fifty minutes. That is the mechanism behind "91 of 100
+      # integration runs cancelled before starting a single job".
+      #
+      # This does NOT remove Windows coverage from anything that gates a release:
+      # `main`, PRs and the integration branch are unchanged. A lane that needs
+      # real Windows evidence asks for it with `[ci-windows]`, and lane-scoped
+      # hosted-`windows-latest` workflows remain the cheaper route for a
+      # narrow proof.
       matrix:
-        os:
-          - macos-latest
-          # Windows runs on a self-hosted runner (Sean's box, labels:
-          # self-hosted,Windows,X64,msvc). Switched off windows-latest
-          # during v0.8.6 round 18 — GHA's hosted Windows runner has
-          # cold cache every run (~70 min per cycle), and we needed
-          # tight iteration to chase down the env_clear production-bug
-          # cascade. The self-hosted runner keeps the cargo target/
-          # dir warm between runs (~5-15 min per cycle).
-          - [self-hosted, Windows, X64, msvc]
+        os: ${{ fromJSON(((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]'))) && '["macos-latest",["self-hosted","Windows","X64","msvc"]]' || ((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '["macos-latest"]' || '[["self-hosted","Windows","X64","msvc"]]')) }}
+        # 2026-08-04 — an `appcontainer` label requirement was added here and
+        # then REVERTED the same day. Recording why, so it is not re-attempted.
+        #
+        # The claim was that `ferrox-win-msvc` probes the AppContainer sandbox
+        # `available` while `SEANDESKTOP` does not, making the two runners
+        # non-interchangeable. That is FALSE. `ferrox-win-msvc` fails the same
+        # probe — seven `sandbox UNAVAILABLE` refusals in its own run
+        # 30887202242. The "probed available" lines the pin was built on came
+        # from the `CI (windows-latest, hosted)` leg, not from either
+        # self-hosted box. Both runners also execute as the SAME account
+        # (`NT AUTHORITY\NetworkService`), so "one sick machine" is dead too.
+        #
+        # AppContainer is therefore common-mode across our Windows fleet:
+        # environment, policy, that service account, or a real product defect.
+        # Pinning sorted jobs onto one runner, fixed nothing, and halved the
+        # pool. Do not re-add a capability label until a probe has actually
+        # MEASURED a difference between the two boxes.
+        #
+        # Related but NOT explained by the above: the failure set does churn
+        # between runs on the same tree. Which box served a job is still a real
+        # variable worth checking before calling a Windows test flaky — the
+        # runners are not guaranteed equivalent. But AppContainer is not the
+        # difference, because there is no such difference. Still open.
+        #
+        # Windows runs on a self-hosted runner (Sean's box, labels:
+        # self-hosted,Windows,X64,msvc). Switched off windows-latest
+        # during v0.8.6 round 18 — GHA's hosted Windows runner has
+        # cold cache every run (~70 min per cycle), and we needed
+        # tight iteration to chase down the env_clear production-bug
+        # cascade. The self-hosted runner keeps the cargo target/
+        # dir warm between runs (~5-15 min per cycle).
+        #
         # Linux coverage runs in the dedicated `ci-linux` job below
         # (containerized rust:1.95-slim-bookworm). The matrix used to
         # include ubuntu-latest but GHA's direct-shell execution
@@ -59,6 +240,110 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      # ── Python, for the account CI actually runs as ───────────────────────
+      # `wcore-cli::portability_hostile_corpus` shells to `python` to mint its
+      # corpus. All 23 tests in that binary failed on Windows with
+      # `NotFound { message: "program not found" }` — the ENTIRE binary, and no
+      # wayland-core code ran in any of them.
+      #
+      # The box is not missing Python. MEASURED on SEANDESKTOP 2026-08-01:
+      #   as user `seand`:  python -> C:\Users\seand\AppData\Local\Programs\Python\Python312\python.exe
+      #   MACHINE PATH python entries: NONE
+      #   USER PATH python entries:    5, all under C:\Users\seand\...
+      #   all three runner services:   StartName = NT AUTHORITY\NetworkService
+      # Python 3.12/3.13 are installed PER-USER in Sean's profile and are on his
+      # USER path only, so the NetworkService account the runner runs as cannot
+      # see them. Same root fact as the `.install-action` cleanup below, which
+      # already reaches into `/c/WINDOWS/ServiceProfiles/NetworkService`.
+      #
+      # setup-python provisions into the runner's own tool cache, so it works
+      # for whatever account the service uses and needs no admin and no service
+      # reconfiguration. Deliberately UNCONDITIONAL: a `runner.os == 'Windows'`
+      # guard would be correct today, but a dead `runner.os == 'Linux'` guard in
+      # this exact job is what kept the anti-vacuity gate from ever running, so
+      # this job gets no new platform conditionals. macOS already ships python3;
+      # pinning it here just makes the version explicit on both legs.
+      # `actions/setup-python@v5` was tried FIRST and FAILED on the self-hosted
+      # Windows runner, measured in run 30688970084:
+      #   ./setup.ps1 cannot be loaded because running scripts is disabled on
+      #   this system
+      # It downloads Python fine, then runs a .ps1 to install it, and the
+      # NetworkService account's PowerShell ExecutionPolicy is Restricted.
+      # Fixing that would mean loosening the execution policy on the owner's
+      # machine, so we provision without running any script instead — nothing
+      # on the host changes.
+      #
+      # `scripts/portability-hostile-gen.py` imports only stdlib (argparse,
+      # hashlib, json, os, platform, sys, unicodedata — verified), so the
+      # official embeddable zip is sufficient; no pip, no packages.
+      #
+      # Self-selecting rather than platform-conditional: it looks for an
+      # interpreter and provisions only if there is none. macOS already ships
+      # python3 and no-ops here. A dead `runner.os ==` guard in this exact job
+      # is what kept the anti-vacuity gate from ever running, so this job still
+      # gets no new workflow conditionals — the check is at runtime and cannot
+      # silently evaporate.
+      - name: Ensure a Python interpreter (corpus generators shell to it)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then
+            echo "gate-count:python_provisioned=0 (already present: $(command -v python3))"
+            python3 --version
+            exit 0
+          fi
+          if command -v python >/dev/null 2>&1; then
+            echo "gate-count:python_provisioned=0 (already present: $(command -v python))"
+            python --version
+            exit 0
+          fi
+          case "${OSTYPE:-}${OS:-}" in
+            *[Ww]indows*|msys*|cygwin*) ;;
+            *)
+              echo "::error title=No Python::No python3/python on PATH and this is not Windows, so the embeddable-zip path does not apply. Install Python on this runner."
+              exit 1
+              ;;
+          esac
+          ver=3.12.10
+          dest="$RUNNER_TEMP/py-embed"
+          mkdir -p "$dest"
+          curl -fsSL -o "$dest/py.zip" \
+            "https://www.python.org/ftp/python/${ver}/python-${ver}-embed-amd64.zip"
+          # `unzip` is not guaranteed on the runner, and the `tar` a bash step
+          # gets on Windows is git-bash's GNU tar 1.35, which CANNOT read a zip
+          # at all. Two separate failures proved this, in order:
+          #   1. run 30689934972 -- `tar -xf "$dest/py.zip"` with the absolute
+          #      Windows path: GNU tar read the drive letter as a remote host,
+          #      `tar: Cannot connect to C: resolve failed`.
+          #   2. run 30694433664 -- same command with a relative name from
+          #      inside $dest: the drive-letter trap was gone, and the real
+          #      defect surfaced underneath it,
+          #      `tar: This does not look like a tar archive`.
+          # An earlier revision of this comment asserted git-bash's tar reads
+          # zips. It does not; (2) is what that wrong assumption cost.
+          #
+          # Windows ships bsdtar (libarchive) at a fixed System32 path, and
+          # THAT reads zip. Measured on the ferrox-win-msvc box (= SeanDesktop),
+          # same git-bash, same archive:
+          #   GNU tar 1.35      -> rc=2, 0 files extracted, 3 lines on stderr
+          #   bsdtar 3.8.4      -> rc=0, empty stderr, working python.exe
+          # Call it by absolute path: `tar` on PATH is GNU tar, so the name
+          # alone would silently pick the one that cannot do the job.
+          bsdtar=/c/Windows/System32/tar.exe
+          if [ ! -x "$bsdtar" ]; then
+            echo "::error title=No bsdtar::$bsdtar is missing, so this runner has no zip reader (PATH tar is GNU tar, which cannot read zip). Install Python machine-wide on this runner instead."
+            exit 1
+          fi
+          ( cd "$dest" && "$bsdtar" -xf py.zip )
+          test -x "$dest/python.exe" || test -f "$dest/python.exe"
+          echo "$dest" >> "$GITHUB_PATH"
+          echo "gate-count:python_provisioned=1 ($dest)"
+          "$dest/python.exe" --version
+          # Prove the interpreter can actually run THIS generator's imports --
+          # an interpreter that exists but cannot import unicodedata would
+          # otherwise fail 23 tests later with a much worse message.
+          "$dest/python.exe" -c "import argparse,hashlib,json,os,platform,sys,unicodedata; print('stdlib-ok')"
 
       - name: Setup vx (installs Rust + just from vx.toml)
         uses: loonghao/vx@v0.9.17
@@ -119,11 +404,111 @@ jobs:
       - name: Check formatting
         run: vx just fmt-check
 
+      # An instrument that cannot fail is not evidence. `cargo nextest` fails
+      # closed on a zero-test run (`no-tests = "fail"`); `cargo test` does not
+      # and never has. This gate fails the build if a new bare `cargo test`
+      # appears in the justfile, a workflow, or a script without either
+      # `--no-run` or an explicit executed-count assertion. Pure text scan,
+      # ~50ms, so it runs on Linux only. Self-test:
+      # `python3 scripts/check-no-vacuous-cargo-test.py --self-test`.
+
       - name: Clippy (warnings = errors)
         run: vx just lint
 
+      # macOS half of the live-docker lint gap; see the twin step in `ci-linux`
+      # for why `--workspace` misses this entirely. This leg exists to reach the
+      # `#[cfg(target_os = "macos")]` Docker-socket branch in
+      # `backends/docker.rs`, which no Linux run can compile.
+      #
+      # On the `runner.os == 'macOS'` guard: an identical-looking
+      # `runner.os == 'Linux'` guard in THIS SAME matrix job is what kept the
+      # anti-vacuity gate dead for its entire life — the matrix has no Linux
+      # entry, so it never fired. This guard is different and was checked
+      # against the matrix literal before being written: on `main`, on a PR, and
+      # on the integration branch the matrix is
+      # `["macos-latest", [self-hosted Windows]]`, so `macOS` is genuinely
+      # present and this step genuinely runs. On a `lane/**` push without
+      # `[ci-darwin]` the macOS entry is dropped on purpose — the step is then
+      # absent because the whole leg is, not because the condition is dead.
+      - name: Clippy the live-docker feature graph (macOS cfg branch)
+        if: runner.os == 'macOS'
+        run: |
+          vx cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
+          vx cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
+
       - name: Run tests (nextest CI profile)
         run: vx just test-ci
+
+      # PER-LEG test-signal gate. The `report` job at the bottom of this file
+      # already refuses a run where NO leg produced JUnit, but it cannot see a
+      # single leg going dark: macOS uploads a report, `COUNT` is non-zero, and
+      # the Windows hole is invisible.
+      #
+      # That hole is not hypothetical. On run 30652437749 (2026-07-31) the
+      # Windows leg finally cleared clippy, entered "Run tests (nextest CI
+      # profile)", and failed 0.4s later because `just test-ci` shelled out to
+      # `scripts/fd-budget.sh` under pwsh, which cannot execute a `.sh` file.
+      # Zero tests ran. In the checks list that is indistinguishable from a leg
+      # whose tests ran and failed, and it was in fact read as "Windows reports
+      # real failures now" by the next lane. The recipe is fixed (justfile
+      # `[windows] test-ci`); this step is what makes the failure mode NAMED
+      # rather than inferred, on every leg, forever.
+      #
+      # Two separate assertions, because they fail for different reasons:
+      #   1. the JUnit file exists at all  — the recipe reached nextest;
+      #   2. it declares tests > 0         — nextest collected something.
+      # `if: !cancelled()` and not `always()`: a cancelled run was never going
+      # to produce evidence and must not be re-reported as a defect.
+      #
+      # `shell: bash` on purpose — Git bash is present on all three legs (other
+      # steps in this same job already use it) and one script beats three.
+      - name: Assert this leg produced test signal (zero tests is not a pass)
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          # `runner.os` (Windows/macOS/Linux), not `matrix.os` — the Windows
+          # entry is a label LIST, which renders as the literal string "Array"
+          # and names nothing.
+          LEG: ${{ runner.os }}
+        run: |
+          set -uo pipefail
+          report=target/nextest/ci/junit.xml
+          leg="$LEG"
+          if [ ! -f "$report" ]; then
+            echo "::error title=NO TEST SIGNAL ($leg)::The test step produced no $report, so cargo-nextest never ran on this leg. This is NOT a test failure — it is the absence of a test result, and it must not be read as one. Check whether 'just test-ci' died in the recipe itself (a shell/interpreter mismatch on Windows does exactly this)."
+            exit 1
+          fi
+          # -E, not BRE `\+`: the macOS leg runs BSD grep, where `\+` is not a
+          # portable quantifier. The FIRST `tests="N"` in a nextest JUnit is the
+          # `<testsuites>` roll-up, which is the number this gate is about.
+          tests=$(grep -oE 'tests="[0-9]+"' "$report" | head -1 | grep -oE '[0-9]+' || true)
+          echo "leg: $leg   junit: $report   tests declared: ${tests:-<unparsed>}"
+          if [ -z "${tests:-}" ] || [ "$tests" -eq 0 ]; then
+            echo "::error title=ZERO TESTS ($leg)::$report exists but declares ${tests:-no} tests. A suite that collected nothing certifies nothing."
+            exit 1
+          fi
+
+      # 2026-07-27: MOVED to after the test step. It used to run before it, so a
+      # contract digest drift failed the job at that step and macOS and
+      # self-hosted Windows never reached the tests at all — three separate
+      # lanes reported "CI is red on two of three platforms" when what was
+      # actually lost was test VISIBILITY on those platforms.
+      #
+      # Deliberately still a hard failure, and deliberately NOT fixed by
+      # regenerating: a 4-way cross-audit went 3-0 against re-stamping the
+      # digests on a working branch, on the grounds that an agent who
+      # regenerates whenever CI goes red destroys the only guard that would
+      # catch a genuine wire change. The drift here is bookkeeping only —
+      # measured field-by-field, exactly `fixture_digest` and
+      # `source_inputs_digest` moved while `schema_digest` did NOT, so the wire
+      # shape is unchanged — but the coordinated Core+Desktop re-pin is still
+      # owed and the red is the honest signal that it is owed. See
+      # .planning/SEAM-REQUESTS/CONTRACT-DIGEST-RESTAMP.md.
+      #
+      # Ordering only. The command, its strictness and its exit status are
+      # untouched: the job still fails on drift, it just reports the tests first.
+      - name: Check Desktop protocol contract corpus drift
+        run: vx cargo run -p wcore-protocol --bin wcore-contract -- check
 
       # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
       # of regression where `inventory::submit!` items get dead-code-stripped
@@ -137,6 +522,23 @@ jobs:
         run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
         env:
           WCORE_SMOKE_REQUIRE_PREBUILT: "1"
+
+      # F01 E3 runs on every supported native OS. Bind discovery to the exact
+      # pre-built release artifact so a stale debug binary cannot satisfy it.
+      #
+      # nextest, NOT `cargo test`: `packaged_driver_gate.rs` is
+      # `#![cfg(feature = "packaged-driver-gate")]`, so if that feature is ever
+      # renamed, dropped, or fails to activate, the binary compiles EMPTY and
+      # `cargo test` prints `test result: ok. 0 passed` and exits 0 — a
+      # release-integrity gate certifying nothing. Measured on this checkout:
+      # `cargo test --test packaged_driver_gate` without the feature exits 0;
+      # `cargo nextest run` on the identical binary exits 4 ("no tests to run")
+      # via `no-tests = "fail"` in .config/nextest.toml.
+      - name: F01 packaged wayland-eval driver gate
+        run: vx cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        env:
+          WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
+          WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
 
       # Z0 STABILITY MAJOR #4 — eval-gate runs on every PR/main commit so
       # the W10A LOCKED acceptance gate (precision/recall >= 0.80) is enforced
@@ -169,6 +571,297 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nextest-junit-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # ── SECOND WINDOWS SUPPLIER (2026-08-02, lane/ci-windows-fallback) ────────
+  #
+  # THE PROBLEM IS THE ARCHITECTURE, NOT THE OUTAGE. Until this job, Windows
+  # had exactly ONE supplier — the self-hosted `CI (Array)` leg above — and no
+  # fallback. When that supplier stops serving, the platform produces no verdict
+  # at all, and a release would be tagged blind on Windows.
+  #
+  # It is not hypothetical and it is not transient. MEASURED 2026-08-02T01:58Z:
+  # `gh api repos/FerroxLabs/wayland-core/actions/runners` reported BOTH
+  # `ferrox-win-msvc` and `SEANDESKTOP` as `online, busy=true`, yet enumerating
+  # every in-progress job across the 40 most recent runs found NOT ONE assigned
+  # to either. They advertise busy and serve nothing. Consequences, both on the
+  # release-candidate critical path:
+  #   * `mutation-lock proof (self-hosted Windows client)` queued 01:18:00Z,
+  #     still `queued` forty minutes later;
+  #   * integration run 30727391782's `CI (Array)` — the ONLY Windows test leg
+  #     and a release gate — never started, while its macOS and Linux legs ran
+  #     normally.
+  # A previously-closed issue, recurring, now on BOTH Windows runners, and a
+  # lane reported the same night that direct ssh to the box "returned not one
+  # byte in fifty minutes".
+  #
+  # WHY HOSTED WINDOWS IS VIABLE NOW, when v0.8.6 round 18 abandoned it (see the
+  # `matrix.os` note above): the two reasons recorded there were ~70-minute
+  # cold-cache cycles and `LNK1318: Unexpected PDB error; LIMIT (12)` with
+  # "Free space left: 4 MB" on run 26396718138. Both were addressed since:
+  #   * `CARGO_PROFILE_DEV_DEBUG: line-tables-only` + `CARGO_INCREMENTAL: 0` are
+  #     now set across the matrix specifically for that disk pressure (~80%
+  #     smaller PDBs, ~30-40% less target/), and are set here too;
+  #   * this job additionally drops ~15-20 GB of preinstalled toolchains the
+  #     build never touches, the same trick the Linux jobs already use;
+  #   * cold-cache latency is no longer the binding constraint. A supplier that
+  #     answers in 90 minutes beats a faster one that answers never.
+  # And hosted Windows demonstrably runs THIS workspace today: run 30727017681
+  # executed `wcore-agent --lib` on `windows-latest` from a cold cache in 8m52s
+  # and reported `2246 passed; 5 failed`.
+  #
+  # WHEN IT RUNS, AND WHY NOT "ON FAILURE".
+  #
+  # An automatic fallback is the shape everyone reaches for first —
+  # `needs: ci` + `if: failure()` — and it CANNOT WORK HERE. A job that never
+  # STARTS never fails; it sits `queued`, `needs:` never resolves, and the
+  # fallback never becomes eligible. It would inherit the exact failure mode it
+  # exists to survive. GitHub Actions has no "start B if A has not started
+  # within N minutes" primitive. So this job takes NO `needs:` on `ci` at all:
+  # it is scheduled at dispatch, independently, and its verdict does not depend
+  # on the self-hosted leg reaching any state whatsoever.
+  #
+  # The self-hosted box stays the PREFERRED supplier and is untouched: warm
+  # `target/` makes it far faster (measured on run 30699019736: 41 min for the
+  # whole leg, of which test-ci was 19m14s). This job is the second supplier,
+  # not a replacement, and both run on every ref where Windows gates a release.
+  #
+  # `lane/**` BEHAVIOUR IS PRESERVED (b8d51309). A token-less lane push still
+  # gets NO heavy Windows work: the condition below is byte-compatible with the
+  # `ci` job's — pull_request, `main`, the integration branch, or an explicit
+  # `[ci-windows]` marker. What changes for a lane that DOES ask for Windows is
+  # that its request is served by the idle hosted pool as well as by the single
+  # contended box.
+  #
+  # FAILURE MODES COVERED:
+  #   * self-hosted runner offline, wedged, busy-but-serving-nothing, or queued
+  #     behind other lanes — this leg is on a different pool and still answers;
+  #   * self-hosted runner's accumulated state corrupting a result (the locked
+  #     `.install-action/tmp` class) — this leg is an ephemeral clean VM;
+  #   * a Windows-only compile break or test regression — caught here as well.
+  # FAILURE MODES **NOT** COVERED, stated plainly:
+  #   * the aggregate `ci` job and therefore the `report` job still wait on
+  #     `CI (Array)`. If the self-hosted leg hangs, `report` hangs with it. What
+  #     this job buys is that the Windows PASS/FAIL is OBSERVABLE as its own
+  #     check without waiting on that supplier — not that the run completes.
+  #   * a GitHub-wide hosted-Windows outage takes both this leg and the
+  #     `Build (*-pc-windows-msvc)` jobs down. Two suppliers, one vendor.
+  #   * this leg does NOT run fmt (platform-independent and enforced on
+  #     Linux/macOS; `just fmt-check` is a documented no-op on Windows anyway),
+  #     the contract-drift check, the F01 packaged-driver gate, the eval gate,
+  #     or `cargo audit` — all platform-independent and already gated on Linux.
+  #     Note that on the last COMPLETED self-hosted leg (run 30699019736) every
+  #     one of those steps was SKIPPED because the test step failed first, so in
+  #     practice this leg reproduces what the self-hosted leg actually reaches.
+  #
+  # STEP ORDER IS DELIBERATELY NOT THE MATRIX'S. There, clippy runs BEFORE the
+  # tests, so a clippy red skips the test step and the platform yields no test
+  # signal — the same ordering defect that was already fixed once for the
+  # contract-drift check (see its comment above). A leg whose entire purpose is
+  # "a Windows test verdict is always obtainable" must not let a lint failure
+  # suppress it, so tests run first and clippy runs after under `!cancelled()`.
+  # Both still gate: neither is `continue-on-error`.
+  #
+  # ANTI-DRIFT. The test command is `vx just test-ci` — the SAME justfile recipe
+  # the self-hosted leg invokes, not an inline nextest line. This file already
+  # records what inline duplication costs: the `ci-linux` job's hand-written
+  # nextest command silently lost `--no-fail-fast`, which made every historical
+  # CI failure count a lower bound rather than a total.
+  ci-windows-hosted:
+    name: CI (windows-latest, hosted)
+    runs-on: windows-latest
+    # OPT-IN ONLY as of 2026-08-04. This used to mirror the `ci` job's `if:`,
+    # so it ran on every PR, every push to main and every push to the
+    # integration branch — i.e. a SECOND full Windows compile+test on top of
+    # the self-hosted one, on every commit.
+    #
+    # It was added under #164 on the premise that self-hosted Windows was down.
+    # That premise is false and was never re-checked. Measured 2026-08-04
+    # against the live API: `ferrox-win-msvc` and `SEANDESKTOP` are both online
+    # and both serve jobs, load-balancing across runs.
+    #
+    # The duplication is not symmetric. Same run, same commit:
+    #   CI (Array)                  self-hosted   32.1 min   FINISHED
+    #   CI (windows-latest, hosted) GHA pool      39+ min    still running
+    # The self-hosted box keeps `target/` warm between runs; the hosted image
+    # is cold every time. The hosted leg was the slowest Windows path AND the
+    # redundant one, and is a first-order cause of 91-146 minute CI runs.
+    #
+    # Coverage is unaffected: `CI (Array)` is a REQUIRED status check on `main`
+    # (branch protection lists it; this job is deliberately NOT listed), so
+    # Windows remains gated by the runner that is actually fast. If both
+    # self-hosted boxes ever die, Windows work QUEUES rather than passing
+    # vacuously — visible as a pending required check, never a false green —
+    # and this leg is one `[ci-windows]` commit tag away from covering it.
+    if: >-
+      contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-windows]')
+    # Bounded on purpose. The matrix job is unbounded (GHA default 6h), which is
+    # tolerable on a box whose target/ is warm; a cold hosted compile that wedges
+    # would otherwise burn six hours of hosted minutes per run. Sized from the
+    # measured parts: ~30 min for the release pre-build (Build
+    # (x86_64-pc-windows-msvc) measures 32 min cold on this same image), plus a
+    # debug workspace compile, plus the 12.8k-test run.
+    timeout-minutes: 180
+    env:
+      # Identical to the matrix job's. These two are the reason the v0.8.6
+      # LNK1318/"Free space left: 4 MB" verdict no longer applies.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      # The Linux jobs already do this (see "Free disk space" in `ci-linux`);
+      # Windows never had it, and Windows is the leg that actually ran out.
+      # Deliberately conservative about WHAT is removed:
+      #   * Visual Studio, the Windows SDK ("Windows Kits") and Git are the
+      #     toolchain this job needs and are NOT touched.
+      #   * `C:\hostedtoolcache` is NOT removed wholesale — `python` lives there
+      #     on this image and `wcore-cli::portability_hostile_corpus` shells out
+      #     to it (23 tests died of its absence on the self-hosted box; see the
+      #     "Ensure a Python interpreter" step above). Only three
+      #     unambiguously-unused language caches inside it are dropped.
+      # Every removal is failure-tolerant: a missing or locked path must never
+      # be able to fail this job, whose entire point is producing an answer.
+      - name: Free disk space (drop preinstalled toolchains this build never uses)
+        shell: pwsh
+        run: |
+          $before = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
+          Write-Host "C: free BEFORE = $before GB"
+          $paths = @(
+            'C:\Android',
+            'C:\Program Files (x86)\Android',
+            'C:\ghcup',
+            'C:\Miniconda',
+            'C:\Program Files\PostgreSQL',
+            'C:\Program Files\MongoDB',
+            'C:\Program Files\MySQL',
+            'C:\Program Files\Microsoft SDKs\Azure',
+            'C:\Program Files\Azure Cosmos DB Emulator',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\hostedtoolcache\windows\go',
+            'C:\hostedtoolcache\windows\PyPy'
+          )
+          foreach ($p in $paths) {
+            if (Test-Path -LiteralPath $p) {
+              try {
+                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+                Write-Host "removed $p"
+              } catch {
+                Write-Host "skipped $p ($($_.Exception.Message))"
+              }
+            }
+          }
+          $after = [math]::Round((Get-PSDrive C).Free / 1GB, 2)
+          Write-Host "C: free AFTER  = $after GB (reclaimed $([math]::Round($after - $before, 2)) GB)"
+
+      # The matrix job provisions Python from the embeddable zip because the
+      # SELF-HOSTED box has it installed per-user, invisible to the
+      # NetworkService account the runner service uses. That is a property of
+      # that machine, not of Windows: the hosted image ships Python on PATH for
+      # whatever account runs the job. So this leg asserts rather than
+      # provisions — and it ASSERTS rather than assuming, because a silent
+      # absence here would fail 23 tests later with a far worse message.
+      - name: Assert a Python interpreter is present (corpus generators shell to it)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then py=python3
+          elif command -v python >/dev/null 2>&1; then py=python
+          else
+            echo "::error title=No Python::The hosted Windows image is expected to ship Python on PATH, and this job found none. crates/wcore-cli/tests/portability_hostile_corpus.rs shells out to it and .expect()s, so 23 tests would fail with 'program not found'. Check whether the disk-cleanup step above removed a hostedtoolcache path it should not have."
+            exit 1
+          fi
+          echo "python: $(command -v $py)"
+          "$py" --version
+          "$py" -c "import argparse,hashlib,json,os,platform,sys,unicodedata; print('stdlib-ok')"
+
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      # Same two pre-builds as the matrix leg, for the same two reasons recorded
+      # there: `scripted_run_writes_expected_markdown` shells to
+      # `cargo run --bin tool_token_bench`, and
+      # `release_binary_ready_event_advertises_plugin_capabilities` shells to
+      # `cargo build --release -p wcore-cli` — which on Windows deadlocks against
+      # parallel tests holding NTFS mandatory file locks on target/.
+      - name: Pre-build tool_token_bench
+        run: vx cargo build -p wcore-agent --bin tool_token_bench --features test-utils
+
+      - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
+        run: vx cargo build --release -p wcore-cli
+
+      - name: Disk after the release pre-build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          Write-Host "C: free = $([math]::Round((Get-PSDrive C).Free / 1GB, 2)) GB"
+
+      # FIRST, not after clippy — see the step-order note in this job's header.
+      - name: Run tests (nextest CI profile)
+        run: vx just test-ci
+
+      # Byte-identical intent to the matrix job's per-leg gate: a leg that ran
+      # zero tests must be reported as an ABSENCE of signal, never as a pass.
+      # This job exists to supply a Windows verdict, so a vacuous run here is
+      # strictly worse than a red one.
+      - name: Assert this leg produced test signal (zero tests is not a pass)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          report=target/nextest/ci/junit.xml
+          if [ ! -f "$report" ]; then
+            echo "::error title=NO TEST SIGNAL (hosted Windows)::The test step produced no $report, so cargo-nextest never ran on this leg. This is NOT a test failure — it is the absence of a test result, and it must not be read as one."
+            exit 1
+          fi
+          tests=$(grep -oE 'tests="[0-9]+"' "$report" | head -1 | grep -oE '[0-9]+' || true)
+          echo "leg: hosted-windows   junit: $report   tests declared: ${tests:-<unparsed>}"
+          if [ -z "${tests:-}" ] || [ "$tests" -eq 0 ]; then
+            echo "::error title=ZERO TESTS (hosted Windows)::$report exists but declares ${tests:-no} tests. A suite that collected nothing certifies nothing."
+            exit 1
+          fi
+
+      # Windows has no other clippy supplier: `ci-linux` and the macOS leg
+      # cannot compile the `#[cfg(windows)]` branches at all. Runs AFTER the
+      # tests (and under `!cancelled()`) so a lint red cannot suppress the test
+      # verdict this job exists to produce — it still gates, it just no longer
+      # gates the wrong thing first.
+      - name: Clippy (warnings = errors)
+        if: ${{ !cancelled() }}
+        run: vx just lint
+
+      # Cheap here (nextest already compiled this binary) and genuinely
+      # Windows-specific: it catches `inventory::submit!` items being dead-code
+      # stripped under `profile.release`, on the `.exe` this platform ships.
+      # WCORE_SMOKE_REQUIRE_PREBUILT=1 makes a missing artifact a hard failure
+      # rather than a silent skip (#190).
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        if: ${{ !cancelled() }}
+        run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
+        env:
+          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
+
+      # The v0.8.6 abandonment verdict was a DISK verdict. Measure it on every
+      # run rather than re-deriving it from a link error two years later.
+      - name: Report disk (the constraint that closed this route in v0.8.6)
+        if: always()
+        shell: pwsh
+        run: Get-PSDrive C, D -ErrorAction SilentlyContinue | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,2)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,2)}}
+
+      - name: Upload nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-windows-latest-hosted
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
 
@@ -212,9 +905,252 @@ jobs:
       # Per-run cleanup of the cargo registry cache happens between
       # docker runs because CARGO_HOME stays in the image; only the
       # workspace target/ persists across steps via the mount.
-      DOCKER_RUN: docker run --rm --network=host -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+      # `--init` (2026-07-29) is load-bearing, not hygiene. Without it PID 1 in
+      # this container is the test command itself. Nothing in crates/ sets
+      # PR_SET_CHILD_SUBREAPER, so an orphaned descendant reparents to PID 1, and
+      # Rust's Child::wait() issues waitpid(<specific pid>) -- never wait(-1) --
+      # so PID 1 can never incidentally reap an adopted orphan. The corpse stays
+      # a zombie forever, and all 13 descendant-reaping tests probe liveness with
+      # a shape a zombie satisfies: kill(pid,0) returns 0 for state Z
+      # (runner_contracts.rs:125, pty_capture.rs:783) and /proc/<pid> still
+      # exists for it (wcore-sandbox/tests/process_capture.rs:12,
+      # wcore-swarm/src/worktree_tests/linux.rs:629). 7+2+2+2 = 13, exactly the
+      # cluster. Containment genuinely SUCCEEDS -- the listener is dead and the
+      # process holds nothing -- but every probe reports it as surviving.
+      # Measured 4 ways on a near-exact runner match (Ubuntu 24.04 / Docker
+      # 29.2.1); raw transcript .planning/evidence/ci-image/c4-probe-RESULT.txt:
+      #   native (PID 1 = systemd)          -> GONE,  /proc state '-'  PASS
+      #   container, these flags, no --init -> ALIVE, /proc state 'Z'  FAIL
+      #   container + --init (docker-init)  -> GONE,  /proc state '-'  PASS
+      #   container + --init, LIVE child    -> ALIVE, /proc state 'S'  FAIL  <- control
+      # That last arm is the one that matters: --init does NOT make these tests
+      # unfailable. A genuinely surviving descendant still reds them.
+      # `-e WAYLAND_BUILD_SOURCE_SHA` (2026-07-29) is load-bearing, not hygiene.
+      # `docker run` here has NO `-u`, so the container runs as **root** while the
+      # bind-mounted workspace is owned by the runner uid (1001). git refuses that:
+      # `fatal: detected dubious ownership in repository at '/work'`, rc=128
+      # (reproduced directly: as root a root-owned repo answers `rev-parse HEAD`
+      # rc=0, the same repo chowned to 1001 answers rc=128). `actions/checkout`
+      # DOES add a safe.directory exception, but for `/home/runner/work/...` in the
+      # RUNNER's git config — a different path, uid and HOME than this container.
+      #
+      # `crates/wcore-cli/build.rs` therefore got no `git rev-parse HEAD` and
+      # embedded `WAYLAND_SOURCE_SHA=unknown`, which
+      # `wcore-eval-scenarios::artifact` correctly refuses at seal time —
+      # `packaged_f04_run_is_repeatable_and_content_addressed` failed on every
+      # retry of CI run 30434804220 with `Probe("expected source identity is not
+      # 40 lowercase hexadecimal characters")`. The non-containerized Linux leg
+      # passed at the same commit, because it never lost git.
+      #
+      # `github.sha` is the authoritative identity of what was checked out (for
+      # `pull_request` it is the merge commit, which is what checkout materialises),
+      # so passing it is strictly better provenance than re-deriving it from a git
+      # invocation. Adding `-e GIT_CONFIG_*=safe.directory` was the alternative and
+      # was rejected: it repairs git-in-container generally but leaves provenance
+      # derived rather than pinned, and the `F01 packaged wayland-eval driver gate`
+      # step below already established the pinned-env idiom.
+      DOCKER_RUN: docker run --rm --init --network=host -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+
+      # Same as DOCKER_RUN plus the four grants bubblewrap needs. Applied ONLY to
+      # the test step -- fmt, clippy, build and audit keep the default posture,
+      # because grant scope should track need scope.
+      #
+      # Installing the bubblewrap PACKAGE is necessary and NOT sufficient. All
+      # four flags were measured individually; each closes a distinct refusal,
+      # and removing any one puts the failure back:
+      #   apparmor=unconfined     Ubuntu 24.04 sets
+      #                           kernel.apparmor_restrict_unprivileged_userns=1
+      #                           (confirmed on the build host). Without this:
+      #                           "bwrap: No permissions to create new namespace".
+      #   seccomp=unconfined      without it, after the userns is created:
+      #                           "bwrap: loopback: Failed RTM_NEWADDR: Operation
+      #                           not permitted" (--unshare-all brings up lo).
+      #   cap-add SYS_ADMIN       without it: "bwrap: Failed to make / slave:
+      #                           Permission denied".
+      #   systempaths=unconfined  Docker masks paths under /proc; those masks are
+      #                           locked mounts, so bwrap's `--proc /proc` is
+      #                           refused with "bwrap: Can't mount proc on
+      #                           /newroot/proc: Operation not permitted".
+      #                           THIS is the flag the earlier attempt was missing:
+      #                           it diagnosed a bind-mount/propagation problem and
+      #                           removed its job. That diagnosis is REFUTED --
+      #                           running the identical bwrap argv against a
+      #                           container-internal directory instead of the
+      #                           bind-mounted /work fails identically, so the bind
+      #                           mount was never the variable. Its namespace probe
+      #                           passed only because it omitted --proc, i.e. it
+      #                           answered an easier question than the engine asks.
+      #
+      # Proof this is the right trade, measured on the build host with this exact
+      # image at this exact commit (.planning/CI-IMAGE.md):
+      #   bwrap installed, NO grant  -> 100 tests run: 86 passed, 14 failed
+      #   bwrap installed, grant     -> 100 tests run: 100 passed,  0 failed
+      # Zero regressions: nothing that passed without the grant fails with it,
+      # including the fail-closed and hard-containment cases that are the ones
+      # most sensitive to sandbox posture.
+      #
+      # On the security question: this container is a workaround for a GHA
+      # runner-agent crash (see the block above), NOT a boundary against the code
+      # under test -- the workflow already executes arbitrary repo code directly
+      # on the ephemeral runner in the macOS and Windows legs. The grant moves the
+      # Linux container TOWARD a normal Linux host, which is the environment these
+      # tests are written for; the container's extra restrictions are the anomaly.
+      # Cross-audit was 2-of-3 for granting the whole test leg, 1-of-3 (kimi) for a
+      # separate privileged job on scope-discipline grounds. That dissent is the
+      # reason this is a second variable used by one step rather than folded into
+      # DOCKER_RUN, and the reason every flag above carries its measured refusal.
+      # Do NOT copy these flags to another step without re-measuring.
+      # WCORE_REQUIRE_ENFORCING_SANDBOX=1 (anvil_forge_transaction.rs:780) is armed
+      # deliberately. Before this commit the hard-containment test qualified-and-
+      # skipped here and the leg stayed green, so a sandbox that quietly stopped
+      # enforcing was indistinguishable from one that never could. Now that the
+      # grant above makes an enforcing sandbox genuinely available, there is no
+      # remaining reason to tolerate a skip: if bwrap ever stops working in this
+      # container -- GitHub tightening userns, a base-image change, a dropped flag
+      # -- this step goes RED instead of silently skipping. Mirrors the
+      # WCORE_SMOKE_REQUIRE_PREBUILT idiom (#190).
+      #
+      # `-e WAYLAND_BUILD_SOURCE_SHA` is here for the same reason it is on
+      # DOCKER_RUN above (see that block): this is the step that runs the test
+      # suite, so it is the one that consumes the embedded source identity. The
+      # two variables MUST agree — a different value between the pre-build step
+      # and the test step re-triggers `cargo:rerun-if-env-changed` and rebuilds
+      # wcore-cli for no reason.
+      #
+      # WCORE_REQUIRE_DELEGATED_BACKEND=1 (crates/wcore-swarm/tests/common/mod.rs)
+      # is armed for the same reason WCORE_REQUIRE_ENFORCING_SANDBOX is, one
+      # layer up. Eight wcore-swarm tests now skip HONESTLY where no sandbox
+      # backend can own a descendant tree — which is the truth on a stock macOS
+      # runner, where `sandbox_exec` is not a hard-containment backend and the
+      # Docker fallback needs a default-OFF feature plus a live daemon. This leg
+      # is the one that PROVES the delegated-dispatch guarantee (bwrap qualifies
+      # here, given the four grants above), so a skip here would mean the
+      # guarantee went unproven everywhere while the run stayed green. With this
+      # set, the skip path PANICS instead: if bwrap ever stops qualifying in this
+      # container, these tests go RED rather than quietly qualifying out.
+      DOCKER_RUN_SANDBOX: docker run --rm --init --network=host --cap-add SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined -e WCORE_REQUIRE_ENFORCING_SANDBOX=1 -e WCORE_REQUIRE_DELEGATED_BACKEND=1 -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
     steps:
+      # ── macOS runner budget report ────────────────────────────────────
+      # The residual risk of an opt-in gate is SILENT ABSENCE: a lane push goes
+      # green having never touched macOS and looks identical to a fully covered
+      # one. An absent job is at least visible in the checks list; this makes it
+      # explicit in the run summary and as a run-level annotation. All three
+      # cross-audit models raised this independently and it is the one part of
+      # the design that is mitigated rather than eliminated.
+      #
+      # This lives inside `ci-linux` (which always runs, on ubuntu, with no
+      # `needs:`) precisely so that reporting costs ZERO extra jobs and adds
+      # ZERO hops to the critical path — see the reverted `budget` job note at
+      # the top of `jobs:`. DARWIN below MUST stay byte-identical to the
+      # condition in the two `strategy.matrix` expressions.
+      - name: Report macOS runner budget (DARWIN_REQUESTED / DARWIN_SKIPPED)
+        env:
+          DARWIN: ${{ (github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### macOS runner budget"
+            echo
+            echo "- event: \`${GITHUB_EVENT_NAME}\`"
+            echo "- ref: \`${GITHUB_REF_NAME}\`"
+            echo "- macOS jobs scheduled: **\`${DARWIN}\`**"
+            echo
+            if [ "$DARWIN" = "true" ]; then
+              echo "DARWIN_REQUESTED — \`CI (macos-latest)\`, \`Build (aarch64-apple-darwin)\` and \`Build (x86_64-apple-darwin)\` are scheduled on the GitHub-hosted pool."
+              echo
+              echo "The self-hosted \`Build (aarch64-apple-darwin) [self-hosted]\` job stands DOWN for this run:"
+              echo "the hosted job of that name is running instead, and both upload the same artifact name."
+            else
+              echo "DARWIN_SKIPPED (hosted pool) — the three GitHub-hosted macOS jobs did not run."
+              echo "Linux and Windows coverage are unchanged."
+              echo
+              echo "**Native arm64 Darwin coverage is still present.** \`Build (aarch64-apple-darwin) [self-hosted]\`"
+              echo "compiles this commit on the self-hosted Apple-silicon runner and uploads"
+              echo "\`wayland-core-aarch64-apple-darwin\`, so \`gh run download -n wayland-core-aarch64-apple-darwin\`"
+              echo "works on this run. That job asserts \`uname -m = arm64\` and \`lipo -archs = arm64\` before uploading."
+              echo
+              echo "Still NOT covered here: the macOS **test/lint verdict** (\`CI (macos-latest)\` — fmt, clippy,"
+              echo "full nextest, audit, release smoke, eval gate) and the **Intel** \`Build (x86_64-apple-darwin)\`"
+              echo "compile + artifact. Both remain on the hosted pool by design; see .planning/CI-SELFHOSTED-MAC.md."
+              echo
+              echo "To get those too, push again with \`[ci-darwin]\` in the commit message:"
+              echo '```'
+              echo 'git commit --allow-empty -m "[ci-darwin] need the full hosted macOS matrix"'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DARWIN" = "true" ]; then
+            echo "::notice title=macOS budget::DARWIN_REQUESTED for ${GITHUB_REF_NAME} — full hosted macOS matrix; self-hosted arm64 job stands down."
+          else
+            echo "::warning title=macOS budget::DARWIN_SKIPPED for ${GITHUB_REF_NAME} — no HOSTED macOS jobs. Native arm64 compile + artifact still produced by the self-hosted runner; the macOS test verdict and the Intel build are absent. Push with [ci-darwin] for the full hosted matrix."
+          fi
+
       - uses: actions/checkout@v6
+
+      # ── anti-vacuity gate ─────────────────────────────────────────────
+      # THIS STEP USED TO BE DEAD, TWICE, IN TWO DIFFERENT WAYS.
+      #
+      # (1) It lived in the `ci` matrix job guarded by `if: runner.os ==
+      #     'Linux'`, but that job's matrix is ["macos-latest", [self-hosted
+      #     Windows]] — no Linux entry — so the condition never held and the
+      #     gate never ran once. A gate against zero-test runs, that itself
+      #     never ran, while the Windows leg executed zero tests for EIGHT
+      #     consecutive runs.
+      #
+      # (2) Moving it here fixed that and broke it differently: it was placed
+      #     FIRST in `steps:`, on the reasoning that nothing earlier could
+      #     then shadow it. But FIRST is before `actions/checkout`, so
+      #     `scripts/` did not exist yet and the step died on ENOENT before
+      #     scanning a single line — failing closed, but never inspecting
+      #     anything, and skipping every step behind it.
+      #
+      # So: immediately AFTER checkout, and no later. It is a ~50ms pure text
+      # scan, it needs only the working tree, and it self-tests before it
+      # scans so a broken checker fails loudly instead of passing everything.
+      #
+      # The general lesson, paid for twice: a gate that cannot reach its own
+      # PASS state is worth exactly as much as one that cannot reach FAIL.
+      # Both were "green-looking absence of signal". Whenever this step is
+      # moved again, confirm from a real run's log that it printed a scan
+      # result — not merely that the job was green.
+      - name: No vacuous `cargo test` invocations
+        run: |
+          python3 scripts/check-no-vacuous-cargo-test.py --self-test
+          python3 scripts/check-no-vacuous-cargo-test.py
+
+      # ── pre-publish personal-identifier gate ──────────────────────────
+      # Placed here for the same reasons as the step above, which paid for
+      # them twice: AFTER checkout (it needs the working tree) and EARLY (a
+      # ~3s pure text scan needing no toolchain, so it cannot be shadowed by
+      # a build failure and never delays a real signal).
+      #
+      # This is NOT the credential gate. Credentials were swept three times
+      # with the grep proven alive on a known positive each time and are
+      # clean. This stops the maintainer's PERSONAL identifiers — Matrix
+      # MXIDs, joinable room IDs, real phone numbers, personal email —
+      # accumulating in committed evidence ahead of a public release. Live
+      # channel proofs transcribe whatever the real service printed, so they
+      # reintroduce these by default unless something says no.
+      #
+      # `--self-test` runs first and asserts BOTH directions: the gate fires
+      # on the real pre-redaction values and stays silent on redacted
+      # evidence plus the fixture corpora. A checker that has quietly stopped
+      # matching therefore fails loudly instead of passing everything.
+      #
+      # Absolute home paths are deliberately NOT blocking inside `.planning/`.
+      # 2967 of the 2998 in this tree are there, in evidence that transcribes
+      # what a real machine printed; every in-flight lane adds more, so one
+      # blocking number over them turns integration red on whichever lane
+      # merges first, about a change the gate has nothing to say about — and
+      # the fix would be to bump the baseline, which teaches everyone to bump
+      # the baseline. Outside `.planning/` they DO block (baseline 31), where a
+      # hardcoded /Users/<name> is a portability defect in its own right. The
+      # self-test drives the real scanner over throwaway git repos to prove
+      # exactly that split, in both directions, on every run.
+      - name: No personal identifiers in committed content
+        run: |
+          python3 scripts/check-no-personal-identifiers.py --self-test
+          python3 scripts/check-no-personal-identifiers.py
 
       - name: Free disk space (drop unused preinstalled toolchains)
         run: |
@@ -235,9 +1171,24 @@ jobs:
         run: |
           docker build -t "$CI_IMAGE" -f - . <<'EOF'
           FROM rust:1.95-slim-bookworm
+          # python3 / procps / bubblewrap (2026-07-29): 49 of the 68 failures the
+          # restored --no-fail-fast signal revealed were this image missing three
+          # binaries, not the product being broken. Every one of the 68 was
+          # re-measured by name on a host that HAS them: 67 passed.
+          #   python3     23 failures. crates/wcore-cli/tests/portability_hostile_corpus.rs:119
+          #               shells out to it and `.expect()`s, so its absence is fatal, not skipped:
+          #               "python3 must be available to materialise a hostile corpus:
+          #                Os { code: 2, NotFound }"
+          #   procps (ps)  6 failures. crates/wcore-exec-backend/src/orphan.rs:321 is the ONLY
+          #               call site that shells out; everything else reads /proc:
+          #               "could not run 'ps' to enumerate processes: No such file or directory"
+          #   bubblewrap  20 failures. NOTE: the package alone does NOT fix these -- measured,
+          #               see the security-opt block on the test step below. It is necessary
+          #               and not sufficient.
           RUN apt-get update -qq \
             && apt-get install -y -qq --no-install-recommends \
                  libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold ca-certificates git \
+                 python3 procps bubblewrap \
             && rm -rf /var/lib/apt/lists/*
           RUN cargo install --locked cargo-nextest --version "^0.9"
           RUN cargo install --locked cargo-audit
@@ -255,6 +1206,26 @@ jobs:
       - name: Clippy (warnings = errors)
         run: $DOCKER_RUN "$CI_IMAGE" cargo clippy --workspace --all-targets -- -D warnings
 
+      # `--workspace` above does NOT cover this. `live-docker` is an optional
+      # feature that NO workspace member enables, so every line behind
+      # `#[cfg(feature = "live-docker")]` — the whole Docker backend and the
+      # wcore-swarm delegated-dispatch paths that consume it — was invisible to
+      # clippy on every run this repo has ever done. It was linted nowhere: not
+      # here, not in the macOS leg, not in macos-docker-gate.yml (which runs the
+      # feature's tests but never lints it).
+      #
+      # Found the honest way: a real `collapsible_if` sitting unnoticed in
+      # `backends/docker.rs`. A `-D warnings` repo cannot have a whole backend
+      # exempt from the lint that the release gate enforces.
+      #
+      # This leg covers the target-independent and Linux-cfg lints. The
+      # `cfg(target_os = "macos")` branch inside the same file is unreachable
+      # from here and is covered by the macOS leg's twin of this step.
+      - name: Clippy the live-docker feature graph (not covered by --workspace)
+        run: |
+          $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-sandbox --features live-docker --all-targets -- -D warnings
+          $DOCKER_RUN "$CI_IMAGE" cargo clippy -p wcore-swarm --features wcore-sandbox/live-docker --all-targets -- -D warnings
+
       # Wrapped in a retry: the GHA runner-agent crash documented at the
       # top of this file (line 28: "reproducibly crashes the runner agent
       # ~56s into the nextest step") still hits this containerized job
@@ -264,17 +1235,181 @@ jobs:
       # eliminates the LOGS-NEVER-FLUSH variant but not the SIGTERM one.
       # Two attempts so a transient signal is absorbed without hiding a
       # genuine code-level test failure (which would fail both attempts).
+      #
+      # `--no-fail-fast` (2026-07-29): this command had drifted from
+      # `just test-ci`, which has always carried the flag, and from the native
+      # matrix leg above (line 164) which invokes `just test-ci` directly. Only
+      # this containerized leg fail-fasted, and Linux is the ONLY platform that
+      # runs here — so on the 2026-07-29 run nextest stopped at test 2,348 of
+      # 12,775 and reported ONE failure where there were THREE. The consequence
+      # is not limited to that run: every historical CI failure count on this
+      # repository is a LOWER BOUND, not a total, and any triage that treated a
+      # count as complete was reading a truncated suite.
       - name: Run tests (nextest CI profile)
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 45
           max_attempts: 2
-          command: $DOCKER_RUN "$CI_IMAGE" cargo nextest run --workspace --profile ci
+          command: $DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --workspace --profile ci --no-fail-fast
+
+      # ── Swarm delegated-dispatch gate ────────────────────────────────────
+      # THE COUNTERWEIGHT TO THE HONEST SKIP.
+      #
+      # Eight wcore-swarm tests gained a skip path (see
+      # crates/wcore-swarm/tests/common/mod.rs) because on a stock macOS runner
+      # they had NO reachable pass state: `Swarm::dispatch` refuses to run a
+      # worker unless a backend satisfies `owns_descendants_hard`, macOS's
+      # `sandbox_exec` does not, and the qualified Docker fallback needs the
+      # default-OFF `wcore-sandbox/live-docker` feature plus a live daemon. A
+      # gate that cannot pass is exactly as worthless as one that cannot fail,
+      # so those eight now skip with a stated, recorded reason there.
+      #
+      # A skip path is a liability everywhere ELSE, though: the same mechanism
+      # that stops macOS lying green would let the guarantee evaporate silently
+      # on the ONE leg that can actually prove it. This step is what stops that.
+      # THIS is the leg that certifies delegated dispatch, and it fails if any
+      # of the eight skips here, or stops being collected at all.
+      #
+      # THREE INDEPENDENT FAILURE MODES, each closed by a different mechanism —
+      # none of them is exit status, which is the one thing a vacuous filter
+      # preserves:
+      #
+      #   1. SKIPPED HERE. `WCORE_REQUIRE_DELEGATED_BACKEND=1` turns the skip
+      #      path into a panic, so a backend regression reds the test itself.
+      #      Belt-and-braces: the skip LEDGER is read back below, because a
+      #      passing test's stdout is captured by nextest and a print-only skip
+      #      would be invisible in exactly the run that matters.
+      #   2. NO LONGER COLLECTED. A rename, a new `#[ignore]`, or a `cfg` that
+      #      compiles one of them out would leave a filter matching 7, or 0, and
+      #      `cargo nextest run` would exit 0 having proved less. So the EXECUTED
+      #      COUNT is parsed out and compared against an exact floor of 8.
+      #      `--no-tests=fail` covers only the all-eight-vanish case; the count
+      #      is what covers losing one.
+      #   3. RAN BUT DID NOT PASS. `passed` is compared to the same 8, so a
+      #      failure cannot be absorbed by the run count alone.
+      #
+      # Deliberately a SEPARATE invocation from the workspace run above rather
+      # than trusting that run's aggregate: the aggregate cannot tell 13,775
+      # passed-with-eight-skipped from 13,775 passed-with-eight-run. target/ is
+      # warm from that step, so these eight cost seconds, not a compile.
+      #
+      # No `--profile ci`: that profile's junit.path is target/nextest/ci/junit.xml,
+      # which the `Upload nextest JUnit report` step and the aggregate `report`
+      # job both consume. Re-running under it here would OVERWRITE the workspace
+      # result with an 8-test file and shrink the evidence the report publishes.
+      # The default profile writes target/nextest/default/junit.xml instead.
+      #
+      # `!cancelled()` and not a plain trailing step: a plain step is skipped
+      # whenever anything earlier in the job goes red, which would let this gate
+      # sit un-run for long stretches while looking correctly configured — the
+      # exact "green-looking absence of signal" this file has been bitten by
+      # twice (see the anti-vacuity block above). It is not `always()`: a
+      # cancelled job should not start fresh work.
+      - name: Swarm delegated dispatch must RUN here, never skip (8 tests)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          # A ledger left by an earlier step would be read as this step's
+          # result. Clear it so what we read back is only what we produced.
+          rm -f target/swarm-delegated-skips.txt
+          EXPECTED=8
+          EXPR='(binary_id(=wcore-swarm::dispatch_smoke) and (test(=dispatches_4_noop_workers_in_parallel) or test(=public_dispatch_owns_git_authority_and_preserves_parent_and_sibling_state) or test(=malformed_heartbeat_fails_closed_and_preserves_bounded_diagnostic) or test(=heartbeat_symlink_cannot_make_parent_disclose_host_data_or_hang))) or (binary_id(=wcore-swarm::heartbeat_test) and test(=worker_writes_heartbeat_during_long_running_task)) or (binary_id(=wcore-swarm::swarm_worker_failure_reporting_e2e) and test(=swarm_reports_failed_worker_status_and_succeeding_workers_complete)) or (binary_id(=wcore-swarm::worker_runtime_limits) and (test(=multi_worker_output_exhaustion_fails_without_retaining_buffers) or test(=timeout_releases_workspace_and_capacity_before_return)))'
+          # Captured rather than streamed because the SUMMARY LINE is the
+          # evidence and it has to be parsed. Printed in full either way, so a
+          # failure is still fully legible in the log.
+          if ! out="$($DOCKER_RUN_SANDBOX "$CI_IMAGE" cargo nextest run --no-tests=fail -E "$EXPR" 2>&1)"; then
+            printf '%s\n' "$out"
+            echo "::error title=Swarm delegated dispatch::The eight delegated-dispatch tests did not pass on the leg that certifies them. With WCORE_REQUIRE_DELEGATED_BACKEND=1 a missing backend PANICS rather than skipping, so this is either a real regression or bwrap has stopped qualifying in this container."
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          summary="$(printf '%s\n' "$out" | grep -E 'Summary \[' | tail -1)"
+          ran="$(printf '%s\n' "$summary" | sed -n 's/.*\] *\([0-9][0-9]*\) tests run.*/\1/p')"
+          passed="$(printf '%s\n' "$summary" | sed -n 's/.*tests run: *\([0-9][0-9]*\) passed.*/\1/p')"
+          ran="${ran:-0}"; passed="${passed:-0}"
+          echo "delegated-dispatch gate: ran=${ran} passed=${passed} expected=${EXPECTED}"
+          if [ "$ran" -ne "$EXPECTED" ]; then
+            echo "::error title=Swarm delegated dispatch::Expected exactly ${EXPECTED} delegated-dispatch tests to be COLLECTED here, nextest ran ${ran}. A test was renamed, #[ignore]d, or cfg'd out — the filter still exits 0 while proving less, which is why the count is checked and not the exit status. Update the filterset in this step together with whatever moved."
+            exit 1
+          fi
+          if [ "$passed" -ne "$EXPECTED" ]; then
+            echo "::error title=Swarm delegated dispatch::${ran} collected but only ${passed} passed."
+            exit 1
+          fi
+          # The load-bearing channel. nextest CAPTURES a passing test's output,
+          # so a skip that only printed would be invisible above; the file is
+          # what makes it observable. With the env armed this should be
+          # unreachable, which is the point — if it ever fires, the panic path
+          # itself has regressed.
+          if [ -f target/swarm-delegated-skips.txt ]; then
+            echo "::error title=Swarm delegated dispatch::A skip was RECORDED on the leg that must never skip:"
+            cat target/swarm-delegated-skips.txt
+            exit 1
+          fi
+          echo "OK: ${EXPECTED}/${EXPECTED} delegated-dispatch tests ran and passed here, zero skips recorded"
+
+      # ── Voice suite (2026-07-29, lane/voice-bargein) ──────────────────
+      # `voice` is off by default (it hard-links libasound.so.2 on Linux —
+      # see crates/wcore-agent/Cargo.toml:234), and `tool_backends::voice_mode`
+      # is `#[cfg(feature = "voice")]`. Consequence, measured: BEFORE this
+      # step, `grep -rn voice .github justfile` returned ZERO — the voice
+      # tests ran in NO CI configuration on any platform. A test that never
+      # runs is not a test, and that is exactly how an empty
+      # `CpalAudioPlayer::stop()` shipped with a green suite.
+      #
+      # The image already installs libasound2-dev (line ~507), so this costs
+      # one incremental rebuild of wcore-agent, not a new job or a new dep.
+      #
+      # ANTI-VACUITY. `cargo test <filter>` exits 0 having run ZERO tests when
+      # the filter matches nothing — the easiest self-passing gate in this repo
+      # (LANE-BRIEF §3.2 flavour (c)). So the executed count is READ BACK and
+      # compared against a floor; a filter typo or a deleted module reds the
+      # step instead of passing silently. `set -o pipefail` because a pipe
+      # would otherwise steal cargo's exit status. Floors are the counts
+      # measured at the commit that added this step (agent 14, tools 32).
+      - name: Voice suite (--features voice; runs in no other configuration)
+        run: |
+          set -euo pipefail
+          run_suite() {
+            crate="$1"; min="$2"; shift 2
+            echo "=== $crate (floor: $min executed) ==="
+            # vacuity-checked: the `test result: ok. N passed` count is parsed out of
+            # "$out" below and compared against "$min", exiting 1 when it falls short.
+            # The readback is BELOW this invocation rather than above it, which is why
+            # scripts/check-no-vacuous-cargo-test.py could not see it and flagged this
+            # line — the check was always real, the annotation was missing.
+            if ! out="$($DOCKER_RUN "$CI_IMAGE" cargo test -p "$crate" "$@" 2>&1)"; then
+              printf '%s\n' "$out" | tail -40
+              echo "::error::$crate voice suite FAILED"
+              exit 1
+            fi
+            printf '%s\n' "$out" | grep -E '^(test |test result:)' || true
+            n="$(printf '%s\n' "$out" | sed -n 's/^test result: ok\. \([0-9]*\) passed;.*/\1/p' | tail -1)"
+            n="${n:-0}"
+            echo "$crate: executed $n voice tests (floor $min)"
+            if [ "$n" -lt "$min" ]; then
+              echo "::error::$crate ran $n voice tests, expected >= $min — a suite that exits 0 having run nothing is not a suite"
+              exit 1
+            fi
+          }
+          run_suite wcore-agent 14 --features voice --lib voice_mode
+          run_suite wcore-tools 32 --lib voice_mode
 
       # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
       # release artifact is a hard failure here, never a silent skip (#190).
       - name: Release binary smoke (catches plugin dead-code-strip)
         run: $DOCKER_RUN -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
+
+      # F01 E3 — non-optional packaged boundary proof. The release Core binary
+      # built above reports this checkout's exact source SHA; wayland-eval then
+      # verifies its digest and drives both PASS and hard-gate failure locally.
+      #
+      # nextest, NOT `cargo test` — see the identical step in the native matrix
+      # job above for the measurement. The CI image already installs nextest
+      # (`cargo install --locked cargo-nextest` in the Dockerfile heredoc), and
+      # the two neighbouring steps in this job already use it.
+      - name: F01 packaged wayland-eval driver gate
+        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo nextest run --no-tests=fail --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
 
       - name: Security audit
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
@@ -286,6 +1421,80 @@ jobs:
           name: nextest-junit-linux-containerized
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
+
+      # 2026-07-29: this leg now runs WITH bubblewrap and WITH the namespace
+      # grants (see DOCKER_RUN_SANDBOX above), so the expected count here is ZERO
+      # and WCORE_REQUIRE_ENFORCING_SANDBOX=1 turns a skip into a test failure
+      # rather than a warning. The step is kept because the count is still the
+      # only channel that distinguishes "ran and enforced" from "qualified out":
+      # nextest captures a PASSING test's output, so a skip that merely prints is
+      # invisible in the run that matters — the file is the load-bearing channel.
+      # ── Signed release-manifest drill (handed over by lane/release-trust-root) ──
+      # 2026-07-29. The ONLY check that the bundled release trust root agrees with
+      # the manifest-signing path. The real FerroxLabs trust root was substituted
+      # into RELEASE_TRUST_ROOT_JSON, replacing the placeholder that made
+      # `self-update` fail closed; if the CI signing secret ever drifts from the
+      # bundled public key then NOTHING PUBLISHES AND THE FAILURE IS SILENT. This
+      # drill is what makes that loud, so it has to run on every push, not once.
+      #
+      # WHY A STEP IN THIS JOB AND NOT A DEDICATED ONE. The handover described it
+      # as "about a minute", and that is true of the DRILL, but it is not true of
+      # a job: the script does `cargo build --release -p wcore-eval-scenarios
+      # --bin wayland-release` and then compiles a `wcore-cli` test binary. In a
+      # fresh job both are COLD — the comparable `Build (x86_64-unknown-linux-gnu)`
+      # release compile measures ~16 min, and ubuntu-latest is itself congested
+      # (live census 32 queued / 13 running). A standalone job would therefore
+      # spend ~20-40 min of a contended pool to run a 1-minute check. Here,
+      # target/ is already warm from this job's own pre-build and its
+      # `clippy --all-targets`, so the marginal cost really is about a minute, and
+      # it costs ZERO extra jobs and ZERO extra hops — the same reasoning that
+      # reverted the `budget` job at the top of this file.
+      #
+      # WHY `!cancelled()` AND NOT A PLAIN TRAILING STEP. A trailing step is
+      # skipped whenever an earlier step in the job fails, and clippy is red
+      # repo-wide as of 2026-07-29 — so a plain step would have run ZERO times
+      # while looking correctly configured, which is the always-on requirement
+      # silently unmet. `!cancelled()` decouples it from earlier reds without
+      # spawning work on a cancelled run. It is NOT `always()`: a cancelled job
+      # should not start a fresh compile.
+      #
+      # It is deliberately NOT on a macOS leg (it is pure Linux work and would
+      # compete for the single self-hosted Apple-silicon runner wired up at the
+      # bottom of this file), and release.yml is untouched.
+      #
+      # VERIFIED rather than taken on trust, before wiring: the script reads no
+      # credential (grep for secrets./_KEY/SEED/GITHUB_TOKEN/password returns
+      # zero, against a live known-positive of 9 `trust-root` matches in the same
+      # file), it mints throwaway keys at run time into a mktemp dir it traps away
+      # on exit, and it asserts the EXECUTED test count against EXPECTED_TESTS=10
+      # rather than trusting exit status — the anti-vacuity discipline this repo
+      # requires, already built in by its author.
+      - name: Signed release-manifest drill (trust root vs manifest-signing path)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          DRILL=.github/scripts/release-manifest-drill.sh
+          TARGET=crates/wcore-cli/tests/release_manifest_pipeline.rs
+          # Fail CLOSED and say which of the two states this is. A missing check
+          # must never read as a pass.
+          for f in "$DRILL" "$TARGET"; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Release manifest drill::'$f' is ABSENT. On main or the integration branch this means the drill or its test target was DELETED — investigate, do not skip. On lane/ci-selfhosted-mac before lane/release-trust-root merges this is EXPECTED: the ci.yml wiring landed first by design, and importing that lane's crates/ changes is outside this lane's fence."
+              exit 1
+            fi
+          done
+          $DOCKER_RUN "$CI_IMAGE" bash "$DRILL"
+
+      - name: Report sandbox skips (none expected now that the grant is in place)
+        if: always()
+        run: |
+          if [ -f target/sandbox-skips.txt ]; then
+            echo "::warning::sandbox-qualified skips recorded even though this leg carries the bwrap grant — the grant has regressed; see .planning/CI-IMAGE.md:"
+            cat target/sandbox-skips.txt
+            echo "count=$(wc -l < target/sandbox-skips.txt)"
+          else
+            echo "no sandbox-qualified skips recorded — the enforcing sandbox was live for this leg"
+          fi
 
   # ── W10A eval-gate (Linux, containerized) ─────────────────────────────
   # The matrix ci: job above skips eval-gate on Linux because GHA's
@@ -331,24 +1540,26 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          # ── Linux ──────────────────────────────────────────────────────
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            use_cross: true
-          # ── macOS ──────────────────────────────────────────────────────
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          # ── Windows ────────────────────────────────────────────────────
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
+      # Selects between two literals (see the admission-control note at the top
+      # of `jobs:`). The full value reproduces the
+      # six-entry `include:` list this replaced exactly — same `os`/`target`
+      # keys, same `use_cross: true` on aarch64-linux — so every job name
+      # (`Build (x86_64-apple-darwin)` …) and both artifact names are unchanged:
+      #   {"include":[
+      #     {"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},
+      #     {"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},
+      #     {"os":"windows-latest","target":"x86_64-pc-windows-msvc"},
+      #     {"os":"windows-latest","target":"aarch64-pc-windows-msvc"},
+      #     {"os":"macos-latest","target":"x86_64-apple-darwin"},        <- opt-in on lane/**
+      #     {"os":"macos-latest","target":"aarch64-apple-darwin"}]}      <- opt-in on lane/**
+      # The four non-Darwin targets are ALWAYS present, so this can never be
+      # empty. Both Darwin entries are RETAINED unconditionally on `main`, on
+      # the integration branch and on every PR — a 4-way cross-audit went 2-1
+      # AGAINST dropping the redundant-looking aarch64 leg, because it is the
+      # only job that UPLOADS the arm64 binary (ci.yml:600 below) and it does so
+      # independently of whether the test suite passed, which is exactly when a
+      # lane needs a binary most. The saving would have been ~1.2% of pool load.
+      matrix: ${{ fromJSON((github.event_name == 'pull_request' || github.ref_name == 'main' || github.ref_name == 'plan/f20-unified-audit-repair' || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]') || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]')) && '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"},{"os":"macos-latest","target":"x86_64-apple-darwin"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]}' || '{"include":[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"ubuntu-latest","target":"aarch64-unknown-linux-gnu","use_cross":true},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"},{"os":"windows-latest","target":"aarch64-pc-windows-msvc"}]}') }}
 
     steps:
       - uses: actions/checkout@v6
@@ -399,6 +1610,233 @@ jobs:
           else
             vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
           fi
+
+      # The binary was already being built and then discarded. Keeping it makes
+      # cross-platform live testing possible from a host that cannot compile for
+      # the target — notably the arm64 macOS leg, where the planning Mac is
+      # forbidden from running Cargo and the only other certified producer was an
+      # ephemeral runner on that same machine. Without this the leg is
+      # structurally unreachable and the only alternative is to record it unproven.
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: wayland-core-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/wayland-core
+            target/${{ matrix.target }}/release/wayland-core.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Native arm64 Darwin build on the self-hosted Mac ──────────────────
+  # 2026-07-29, lane/ci-selfhosted-mac. Raw evidence:
+  # .planning/CI-SELFHOSTED-MAC.md, gated by
+  # .planning/evidence/ci-selfhosted-mac/gate.py.
+  #
+  # A self-hosted Apple-silicon runner (`sean-mac-arm64`, labels self-hosted /
+  # macOS / ARM64, all three READ-ONLY i.e. self-detected) now exists. This job
+  # gives token-less `lane/**` pushes their native arm64 Darwin compile and their
+  # arm64 binary artifact back — the coverage the macOS budget change above
+  # traded away — WITHOUT spending any of the hosted macOS pool.
+  #
+  # WHY ONLY THIS ONE JOB, AND NOT ALL THREE. Measured, not assumed. A
+  # self-hosted runner executes ONE job at a time, so moving all three macOS jobs
+  # SERIALISES them behind each other:
+  #   median executed durations (n=14 executed macOS jobs, hosted, 100-run window)
+  #     CI (macos-latest)             26.2 min   (max 32.7)
+  #     Build (aarch64-apple-darwin)  16.5 min   (max 23.5)
+  #     Build (x86_64-apple-darwin)   16.5 min   (max 23.4)
+  #   all three, serial on one runner = 59.2 min  ->  ~3.0 macOS jobs/hour
+  #   the GitHub-hosted pool measures                 11.25 macOS jobs/hour
+  # So "move everything to self-hosted" is a ~3.7x THROUGHPUT DOWNGRADE. The
+  # single runner's advantage is NOT capacity, it is LATENCY WHILE IDLE: it has
+  # no queue, where a live census on 2026-07-29T06:41Z found 39 macOS jobs QUEUED
+  # against 3 in_progress on the hosted pool. Moving the one cheap, high-value
+  # job captures that latency win; moving the expensive one would spend the
+  # runner's entire duty cycle and rebuild the very queue this repairs.
+  #
+  # WHY THIS JOB SPECIFICALLY. It is the only job that UPLOADS the arm64 binary,
+  # and it does so independently of whether the test suite passed (see the
+  # cross-audit note on the `build` matrix above) — which is exactly when a lane
+  # most needs a binary. It answers "does my change compile on arm64 Darwin?",
+  # which is the most common macOS-only break, and it hands back a runnable
+  # binary for live testing. `CI (macos-latest)` (the fmt/clippy/12.8k-test
+  # verdict) and `Build (x86_64-apple-darwin)` (Intel compile-check) stay on the
+  # hosted pool, opt-in via `[ci-darwin]` on lanes — see §"what stays hosted".
+  #
+  # HERMETICITY. This runner is NOT hermetic and this job is scoped accordingly.
+  # It is a developer desktop: a real login keychain, real fsevents, the owner's
+  # PATH and installed tooling, and state that survives between jobs. This repo
+  # has already been bitten by self-hosted statefulness — see the
+  # "Clear stale install-action state" step above, a recurring `CI (Array)` red
+  # caused by the self-hosted Windows runner leaving a locked directory behind
+  # between runs. A permissive desktop also UNDER-detects missing-dependency
+  # bugs: the Linux CI image comment above records 49 of 68 failures that were
+  # nothing but three absent binaries, a class that a machine with everything
+  # installed can never surface. That is why this job is compile-and-upload ONLY
+  # and runs NO tests: a compile result is near-insensitive to ambient machine
+  # state, whereas the 12.8k-test suite (keychain, fsevents, sandbox,
+  # process-reaping) is exactly the thing that would both behave differently on a
+  # real desktop and risk touching the owner's real keychain state.
+  build-darwin-selfhosted:
+    name: Build (aarch64-apple-darwin) [self-hosted]
+    # Deliberately a DISTINCT job name from the hosted `Build
+    # (aarch64-apple-darwin)`. Reusing the hosted name would keep check-name
+    # stability, but it would also make a non-hermetic desktop build
+    # indistinguishable in the checks list from a hermetic ephemeral-VM build.
+    # Given the two have different trust properties, hiding which one produced an
+    # artifact would be actively misleading. The hosted name is unaffected on
+    # `main`, the integration branch and every PR, so no required check changes.
+    #
+    # GATING — three independent restrictions, each load-bearing:
+    #   1. `push` only, NEVER `pull_request`. This repository is PUBLIC
+    #      (`private:false`, `allow_forking:true`) and its fork-PR approval policy
+    #      is `first_time_contributors`, so a RETURNING contributor's fork PR runs
+    #      with no approval at all. Putting a personal machine on the
+    #      pull_request path would let that code execute on the owner's Mac
+    #      alongside his login keychain and SSH keys. NOTE: the self-hosted
+    #      Windows runners are ALREADY exposed this way through the `ci` matrix,
+    #      which does run on `pull_request`. That is pre-existing and is reported
+    #      as a HIGH finding rather than silently widened here.
+    #   2. `lane/**` only. `main` and the integration branch keep the hermetic
+    #      hosted runner, so anything feeding a release-adjacent decision is built
+    #      in a clean ephemeral VM. release.yml is untouched by this lane, so
+    #      every shipped artifact still comes from a hosted runner.
+    #   3. Mutually exclusive with `[ci-darwin]`/`[ci-macos]`. With the token the
+    #      full hosted macOS matrix runs, including its own
+    #      `Build (aarch64-apple-darwin)`, and BOTH jobs would upload the artifact
+    #      name `wayland-core-aarch64-apple-darwin`.
+    #      actions/upload-artifact@v4+ REJECTS a duplicate artifact name within a
+    #      run (409 Conflict), so overlapping them would hard-fail the run. Making
+    #      them exclusive also keeps the artifact name constant, so
+    #      `gh run download -n wayland-core-aarch64-apple-darwin` works on every
+    #      lane run whether or not the token was used.
+    if: >-
+      github.event_name == 'push'
+      && startsWith(github.ref_name, 'lane/')
+      && !(contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-darwin]')
+      || contains(format('{0}{1}', toJSON(github.event.head_commit.message), toJSON(github.event.commits.*.message)), '[ci-macos]'))
+    runs-on: [self-hosted, macOS, ARM64]
+    # ONE runner, ONE job at a time, on a machine its owner also works on. Without
+    # coalescing, a 5-8-wide lane fan-out pushing ~7.2 times/hour against a
+    # ~16.5-minute build is ~2x oversubscribed and would pile a multi-hour serial
+    # queue onto a personal laptop — the hosted pool's pathology reproduced on one
+    # box. A superseded commit's binary is worthless to the lane that asked for
+    # it, so cancel it. This is a JOB-level group precisely so it cannot affect
+    # any other job: the run-level `cancel-in-progress` above stays false for
+    # pushes, and `main`/integration never reach this job at all.
+    concurrency:
+      group: darwin-selfhosted-${{ github.ref }}
+      cancel-in-progress: true
+    # Hard ceiling on how long this may occupy the owner's machine.
+    timeout-minutes: 45
+    steps:
+      # Runs BEFORE checkout so a mislabelled runner is rejected before it is
+      # handed any repository code.
+      #
+      # This is the Rosetta trap, made fatal instead of trusted. The FIRST
+      # install of this runner carried `ARM64` as a hand-written `custom` label
+      # while the runtime self-reported `X64` — the x64 package under Rosetta. A
+      # job targeting [self-hosted, macOS, ARM64] would have matched it and then
+      # compiled and tested x86_64 under emulation while believing it had
+      # Apple-silicon coverage, and would have uploaded that as
+      # `wayland-core-aarch64-apple-darwin`. The current runner self-detects all
+      # three labels (`read-only`), but a label is a CLAIM and this step is the
+      # check: `uname -m` is measured from the running process, and a mismatch
+      # fails the job rather than producing a mislabelled artifact.
+      - name: Assert this runner really is Apple silicon (label is a claim, not proof)
+        run: |
+          set -euo pipefail
+          echo "runner_name=${RUNNER_NAME:-<unset>}"
+          echo "runner_os=${RUNNER_OS:-<unset>} runner_arch=${RUNNER_ARCH:-<unset>}"
+          UNAME_M="$(uname -m)"
+          echo "uname_m=${UNAME_M}"
+          sw_vers || true
+          if [ "${UNAME_M}" != "arm64" ]; then
+            echo "::error title=Runner arch mismatch::Runner is labelled ARM64 but uname -m reports '${UNAME_M}'. Refusing to build — this is the Rosetta/x64-package trap. Do NOT relabel; reinstall the arm64 runner package."
+            exit 1
+          fi
+          if [ "${RUNNER_ARCH:-}" != "ARM64" ]; then
+            echo "::error title=Runner arch mismatch::RUNNER_ARCH='${RUNNER_ARCH:-<unset>}', expected ARM64."
+            exit 1
+          fi
+          echo "OK: genuine Apple silicon"
+
+      # Default `clean: true` is KEPT on purpose. It runs `git clean -ffdx`, which
+      # wipes target/ and therefore forfeits the warm-cache speedup a self-hosted
+      # runner could give. That is the deliberate trade: this runner's whole
+      # liability is that state survives between jobs, so the one form of
+      # statefulness that is trivially removable is removed. `~/.cargo`'s registry
+      # still persists outside the workspace, which keeps the dependency download
+      # cost down without letting stale compiled artifacts cross between lane
+      # branches. `clean: false` is available as a future lever; it is not taken
+      # here because it trades correctness isolation for minutes.
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # aarch64-apple-darwin is the HOST triple here, so its std is already
+      # present and `--target` needs no `rustup target add` — which matters
+      # because a self-hosted runner is not guaranteed to have rustup on PATH the
+      # way the hosted images are. Kept explicit and tolerant rather than assumed.
+      - name: Ensure aarch64-apple-darwin target (host triple; no-op when present)
+        run: |
+          set -euo pipefail
+          if command -v rustup >/dev/null 2>&1; then
+            rustup target add aarch64-apple-darwin
+          else
+            echo "rustup not on PATH; aarch64-apple-darwin is the host triple, std is present"
+          fi
+
+      - name: Build release binary
+        run: vx cargo build --release --target aarch64-apple-darwin -p wcore-cli
+
+      # The artifact-integrity check. `file -b` / `lipo -archs` are used rather
+      # than `file <path>`, because `file` echoes the PATH it was given and that
+      # path contains `aarch64-apple-darwin` — grepping the un-suppressed output
+      # for an arch token would match the directory name and pass on a binary of
+      # ANY architecture. That is a tautological gate; `-b` removes the filename
+      # so only the measured Mach-O header can satisfy it. No pipeline is used to
+      # decide the outcome either, so no exit status can be stolen by a pipe.
+      - name: Verify the produced binary is genuinely arm64
+        run: |
+          set -euo pipefail
+          BIN="target/aarch64-apple-darwin/release/wayland-core"
+          test -f "$BIN"
+          DESC="$(file -b "$BIN")"
+          ARCHS="$(lipo -archs "$BIN")"
+          echo "file -b   : ${DESC}"
+          echo "lipo -archs: ${ARCHS}"
+          case "$ARCHS" in
+            arm64) echo "OK: lipo reports exactly arm64" ;;
+            *) echo "::error title=Wrong architecture::lipo -archs reported '${ARCHS}', expected exactly 'arm64'"; exit 1 ;;
+          esac
+          case "$DESC" in
+            *arm64*) echo "OK: Mach-O header says arm64" ;;
+            *) echo "::error title=Wrong architecture::file -b reported '${DESC}'"; exit 1 ;;
+          esac
+          # Native execution: it runs on the machine that built it.
+          "$BIN" --version
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          # Byte-identical to the hosted job's artifact name (guaranteed unique
+          # per run by the mutual exclusion in `if:` above), so the documented
+          # `gh run download -n wayland-core-aarch64-apple-darwin` route is
+          # unchanged for consumers.
+          name: wayland-core-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/wayland-core
+          if-no-files-found: error
+          retention-days: 14
+
+      # Visibility into what this job leaves behind on a machine nobody reimages.
+      - name: Report runner disk (self-hosted runners are not reimaged)
+        if: always()
+        run: df -h / "$RUNNER_TEMP" 2>/dev/null || df -h /
 
   # ── W10: Chromium live e2e (debt-register A.1) ───────────────────────
   # Closes A.1 — chromiumoxide live tests don't run in CI because runners
@@ -483,13 +1921,61 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # `merge-multiple: true` was REMOVED 2026-08-02 (lane/ci-windows-fallback).
+      # Every producing leg uploads its report under the SAME filename,
+      # `junit.xml` (the path baked into the `ci` nextest profile), and
+      # merge-multiple extracts every artifact into ONE directory — so the four
+      # legs' reports all landed on `junit-reports/junit.xml` and clobbered each
+      # other. `COUNT` in the assertion below could read 1 with four legs
+      # reporting, and `dorny/test-reporter` published whichever leg happened to
+      # be extracted last. Without the flag each artifact gets its own directory
+      # (`junit-reports/nextest-junit-<leg>/junit.xml`); the `**/*.xml` globs
+      # already used by both consumers below match either layout, so nothing
+      # else changes. This lane added a FOURTH producer, which is what surfaced
+      # it — but the defect predates the addition and cost the aggregate report
+      # its per-leg detail for as long as more than one leg has been uploading.
       - name: Download nextest JUnit artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: nextest-junit-*
-          merge-multiple: true
           path: junit-reports
         continue-on-error: true
+
+      # A TEST STEP THAT NEVER RAN MUST NOT BE REPORTABLE AS ANYTHING BUT A
+      # FAILURE. Added 2026-07-30 (lane/fix-clippy-gate) after measuring the
+      # consequence of not having it.
+      #
+      # The `ci` matrix uploads its JUnit with `if: always()` AND
+      # `if-no-files-found: ignore` (line ~331). When a leg dies before its test
+      # step — as every completed Windows self-hosted job in the last 40 runs did,
+      # 5 of 5, all at "Clippy (warnings = errors)" with "Run tests (nextest CI
+      # profile)" SKIPPED — `target/nextest/ci/junit.xml` is never written, so the
+      # artifact is silently not created. `report` then finds zero XML, the
+      # `hashFiles(...) != ''` guard below skips the only step that does anything,
+      # and **the `report` job concludes SUCCESS**. A green check named `report`
+      # whose actual meaning is "zero tests ran anywhere" is indistinguishable in
+      # the checks list from one that published a clean suite. That is how Windows
+      # read green while running no tests, continuously, since 4d5f8ec9.
+      #
+      # This step closes it: no JUnit at all is a hard failure with a named
+      # annotation, so the absence of test signal is louder than a test failure
+      # rather than quieter. It is skipped only on a CANCELLED `ci` — a run the
+      # user or the concurrency gate stopped was never going to produce evidence
+      # and should not be re-reported as a defect.
+      - name: Assert test evidence exists (a skipped test step is not a pass)
+        if: ${{ needs.ci.result != 'cancelled' && needs.ci.result != 'skipped' }}
+        run: |
+          set -euo pipefail
+          mkdir -p junit-reports
+          FOUND=$(find junit-reports -type f -name '*.xml' | sort)
+          COUNT=$(printf '%s' "$FOUND" | grep -c . || true)
+          echo "ci job result      : ${{ needs.ci.result }}"
+          echo "junit report count : $COUNT"
+          printf '%s\n' "$FOUND"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error title=NO TEST SIGNAL::The ci matrix produced zero nextest JUnit reports, so no test ran on any leg. The ci job result was '${{ needs.ci.result }}'. A leg that dies before its test step (for example at the Clippy step) leaves no artifact, and without this check the report job would have gone GREEN on zero tests. See .planning/lanes/fix-clippy-gate/NOTES.md."
+            exit 1
+          fi
 
       - name: Publish test report
         uses: dorny/test-reporter@v3

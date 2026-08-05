@@ -91,6 +91,26 @@ pub fn spec_to_core(s: &BrowserToolSpec) -> CoreBrowserToolSpec {
     }
 }
 
+/// Copy the operator's resolved `[browser.policy]` config onto every captured
+/// `BrowserToolSpec` before the host reifies them.
+///
+/// The plugin shell registers a `BrowserPolicySpec::default()` (deny-all);
+/// without this copy every navigate denies regardless of what the operator put
+/// in their `config.toml`. Extracted out of `AgentBootstrap` (27-C2(a)) so the
+/// config-hint round-trip guard exercises the SAME code the engine runs rather
+/// than a re-implementation of it — a second copy of this mapping is exactly
+/// how a hint and a loader drift apart unnoticed.
+pub fn apply_config_policy(
+    policy: &wcore_config::browser::BrowserPolicyConfig,
+    specs: &mut [BrowserToolSpec],
+) {
+    for spec in specs {
+        spec.policy.default_action = policy.default_action.clone();
+        spec.policy.allowed_origins = policy.allowed_origins.clone();
+        spec.policy.denied_origins = policy.denied_origins.clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

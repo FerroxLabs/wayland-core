@@ -1,0 +1,16 @@
+PANEL-CMD: ssh -o BatchMode=yes SeanD@seandesktop powershell -NoProfile -EncodedCommand <base64 UTF-16LE of winprobe.ps1>
+SOURCE-SCRIPT-SHA256: a66b13c9914b97fa1dc404bd41d0ba8cf449f45056230e93b111e918f0dbeaff
+HOST: SeanDesktop
+#< CLIXML
+PSVERSION: 5.1.26100.8875
+DATE: 2026-07-26T15:29:08Z
+=== URL: https://api.machines.dev/v1/apps?org_slug=personal
+STATUS: 401
+CT: content-type: application/json; charset=utf-8
+BODY200: {"error":"Authenticate: token validation error"}
+=== URL: https://api.machines.dev/v1/apps/wayland-f25-probe/machines
+STATUS: 401
+CT: content-type: application/json; charset=utf-8
+BODY200: {"error":"Authenticate: token validation error"}
+PROBE-COMPLETE
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>SSH_EXIT=0

@@ -1,0 +1,25 @@
+{"seq":1,"kind":"submit","at":"2026-07-28T17:54:38.393Z","update_id":1,"token":"f24c3-h4-pre-0-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-pre-0-e3b96833"}
+{"seq":2,"kind":"submit","at":"2026-07-28T17:54:38.397Z","update_id":2,"token":"f24c3-h4-pre-1-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-pre-1-e3b96833"}
+{"seq":3,"kind":"submit","at":"2026-07-28T17:54:38.398Z","update_id":3,"token":"f24c3-h4-pre-2-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-pre-2-e3b96833"}
+{"seq":4,"kind":"submit","at":"2026-07-28T17:54:38.399Z","update_id":4,"token":"f24c3-h4-pre-3-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-pre-3-e3b96833"}
+{"seq":5,"kind":"submit","at":"2026-07-28T17:54:42.402Z","update_id":5,"token":"f24c3-h4-live-0-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-live-0-e3b96833"}
+{"seq":6,"kind":"submit","at":"2026-07-28T17:54:42.905Z","update_id":6,"token":"f24c3-h4-live-1-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-live-1-e3b96833"}
+{"seq":7,"kind":"submit","at":"2026-07-28T17:54:43.407Z","update_id":7,"token":"f24c3-h4-live-2-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-live-2-e3b96833"}
+{"seq":8,"kind":"deleteWebhook","at":"2026-07-28T17:54:43.892Z"}
+{"seq":9,"kind":"getUpdates.open","at":"2026-07-28T17:54:43.894Z","poll":1,"offset":0,"timeout_ms":1000,"open":1}
+{"seq":10,"kind":"getUpdates.close","at":"2026-07-28T17:54:43.895Z","poll":1,"offset":0,"deleted":[],"served":[1,2,3,4,5,6,7],"open_before_close":1}
+{"seq":11,"kind":"getUpdates.open","at":"2026-07-28T17:54:43.896Z","poll":2,"offset":8,"timeout_ms":1000,"open":1}
+{"seq":12,"kind":"confirm","at":"2026-07-28T17:54:43.897Z","poll":2,"offset":8,"deleted":[1,2,3,4,5,6,7]}
+{"seq":13,"kind":"submit","at":"2026-07-28T17:54:43.911Z","update_id":8,"token":"f24c3-h4-live-3-e3b96833","chat_id":"770001","sender_id":"770001","text":"@bot please ack f24c3-h4-live-3-e3b96833"}
+{"seq":14,"kind":"getUpdates.close","at":"2026-07-28T17:54:43.922Z","poll":2,"offset":8,"deleted":[1,2,3,4,5,6,7],"served":[8],"open_before_close":1}
+{"seq":15,"kind":"getUpdates.open","at":"2026-07-28T17:54:43.923Z","poll":3,"offset":9,"timeout_ms":1000,"open":1}
+{"seq":16,"kind":"confirm","at":"2026-07-28T17:54:43.924Z","poll":3,"offset":9,"deleted":[8]}
+{"seq":17,"kind":"getUpdates.close","at":"2026-07-28T17:54:44.930Z","poll":3,"offset":9,"deleted":[8],"served":[],"open_before_close":1}
+{"seq":18,"kind":"getUpdates.open","at":"2026-07-28T17:54:44.932Z","poll":4,"offset":9,"timeout_ms":1000,"open":1}
+{"seq":19,"kind":"getUpdates.close","at":"2026-07-28T17:54:45.940Z","poll":4,"offset":9,"deleted":[],"served":[],"open_before_close":1}
+{"seq":20,"kind":"getUpdates.open","at":"2026-07-28T17:54:45.942Z","poll":5,"offset":9,"timeout_ms":1000,"open":1}
+{"seq":21,"kind":"getUpdates.close","at":"2026-07-28T17:54:46.947Z","poll":5,"offset":9,"deleted":[],"served":[],"open_before_close":1}
+{"seq":22,"kind":"getUpdates.open","at":"2026-07-28T17:54:46.949Z","poll":6,"offset":9,"timeout_ms":1000,"open":1}
+{"seq":23,"kind":"deleteWebhook","at":"2026-07-28T17:54:47.518Z"}
+{"seq":24,"kind":"getUpdates.open","at":"2026-07-28T17:54:47.520Z","poll":7,"offset":9,"timeout_ms":1000,"open":2}
+{"seq":25,"kind":"getUpdates.close","at":"2026-07-28T17:54:47.953Z","poll":6,"offset":9,"deleted":[],"served":[],"open_before_close":2}

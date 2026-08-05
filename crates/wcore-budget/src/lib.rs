@@ -21,11 +21,35 @@
 //! models need to share defaults. `wcore-config::budget` is a re-export.
 
 pub mod config;
+pub mod daily;
 pub mod execution;
 pub mod tracker;
 
-pub use config::BudgetConfig;
-pub use execution::{AgentDepthGuard, ExecutionBudget, ExecutionBudgetView, ToolRunGuard};
+/// Validation failures while persisting or restoring durable budget authority.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetSnapshotError {
+    /// The serialized representation is malformed, unsafe, or inconsistent.
+    #[error("invalid budget snapshot: {reason}")]
+    Invalid { reason: String },
+    /// A snapshot can only be applied once to a pristine restore target.
+    #[error("budget snapshot restore target is not pristine")]
+    RestoreTargetNotPristine,
+    /// Snapshot schemas are versioned and must be explicitly supported.
+    #[error("unsupported budget snapshot schema version {found}; expected {expected}")]
+    UnsupportedVersion { found: u32, expected: u32 },
+}
+
+pub use config::{BudgetConfig, BudgetConfigError};
+pub use daily::{
+    DAILY_LEDGER_SCHEMA_VERSION, DailyAuthority, DailyGrant, DailyPosition, DailySpendError,
+    DailySpendStore,
+};
+pub use execution::{
+    AgentDepthGuard, ExecutionBudget, ExecutionBudgetSnapshot, ExecutionBudgetView,
+    ProcessCleanupProof, ToolRunGuard,
+};
 pub use tracker::{
-    BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetTracker,
+    BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetExtensionError,
+    BudgetExtensionOutcome, BudgetReservation, BudgetTracker, BudgetTrackerSnapshot,
+    RestoredReservationReconciliation,
 };

@@ -1,0 +1,6 @@
+{
+ "observed": true,
+ "probe": "containment-differential",
+ "detail": "the child was refused \\BaseNamedObjects with 0xC0000022, which AppContainer confines by construction"
+}
+

@@ -17,7 +17,7 @@ Terminal-first · Multi-provider · Self-evolving · MCP-native · Embeddable ·
 [![platforms](https://img.shields.io/badge/macOS_·_Linux_·_Windows-2b2b2b?style=for-the-badge)](#install)
 [![status](https://img.shields.io/badge/status-public_beta-e85d2a?style=for-the-badge)](#built-to-endure)
 
-[Install](#install) · [Quick start](#quick-start) · [Providers](#provider-neutral-core) · [Orchestration](#orchestration--swarms) · [Crucible](#crucible--a-mixture-of-providers-council) · [Security](#security-by-default-fail-closed) · [Channels](#omni-channel-deployment--scheduled-triggers) · [Browser](#browser--computer-use) · [Memory](#memory-sessions--cost-governance) · [Evolution](#self-evolution-gepa) · [Endurance](#built-to-endure) · [Embedding](#embedding-json-lines-protocol--acp-interop) · [Docs](#documentation)
+[Install](#install) · [Quick start](#quick-start) · [Providers](#provider-neutral-core) · [Orchestration](#orchestration--swarms) · [Anvil](#anvil--the-gated-forge-smart-loops) · [Crucible](#crucible--a-mixture-of-providers-council) · [Security](#security-by-default-fail-closed) · [Channels](#omni-channel-deployment--scheduled-triggers) · [Browser](#browser--computer-use) · [Memory](#memory-sessions--cost-governance) · [Evolution](#self-evolution-gepa) · [Endurance](#built-to-endure) · [Embedding](#embedding-json-lines-protocol--acp-interop) · [Docs](#documentation)
 
 </div>
 
@@ -122,7 +122,7 @@ include_usage_in_stream = false   # self-hosted server rejects stream_options
 
 ## Orchestration & swarms
 
-A single agent is the floor, not the ceiling. Wayland Core fans one task out across many workers and brings the results back, with real isolation between them. Three distinct mechanisms ship in the code, and a four-tier topology model governs all of them: **Spawn** (5 agents), **Swarm** (20), **Mesh** (50), **Fleet** (100). Each tier fixes the agent cap, how much the parent sees, and the blackboard scope — and the caps are enforced, not advisory. Ask for 51 agents on a 50-cap tier and you get `TopologyError::ExceedsCap`, not a quietly-truncated run.
+A single agent is the floor, not the ceiling. Wayland Core fans one task out across many workers and brings the results back, with real isolation between them. Three distinct mechanisms ship in the code, and a four-tier topology model governs all of them: **Spawn** (5 agents), **Swarm** (100), **Mesh** (50), **Fleet** (100). Each tier fixes the agent cap, how much the parent sees, and the blackboard scope — and the caps are enforced, not advisory. Ask for 51 agents on a 50-cap tier and you get `TopologyError::ExceedsCap`, not a quietly-truncated run.
 
 - **Sub-agents (`Spawn`)** fan parallel work out from one tool call. Each sub-agent gets its own conversation context and its own tool access; the count is capped by the active topology (default Spawn, 5).
 - **Worktree swarm** runs N workers as OS subprocesses, each in a fresh `git worktree` on its own branch. A dirty-checkout guard runs `git status --porcelain` first and **refuses to dispatch on an uncommitted tree** — that guard exists because a contamination incident in v0.2.2 taught us why it has to. Per-worker timeouts, `kill_on_drop` SIGKILL on expiry, and idempotent `git worktree remove --force` cleanup. Process isolation, not threads, so one bad worker can't corrupt another.
@@ -146,7 +146,7 @@ wayland-core swarm --workers 5 --worker-command "pytest" --reduce consensus
 - `consensus` — strict majority: a bucket wins only if its votes are more than half of the *successful* workers, otherwise the top three are returned as disputed.
 - `debate` — first round whose workers agree wins; at the CLI the batch is a single round (multi-round replay lives in the orchestrator, not the CLI path).
 
-Topology is pure data with cap enforcement, the guards have tests behind them (58 across the swarm crate), and the live TUI labels the running tier by sub-agent count — 0-5 Spawn, 6-20 Swarm, 21-50 Mesh, 51+ Fleet. One note on reach: the standard monitored relay clamps Spawn fan-out to the Mesh cap of 50, so the 100-agent Fleet ceiling is the unmonitored library path, not the everyday `Spawn` call.
+Topology is pure data with cap enforcement, the guards have tests behind them (58 across the swarm crate), and the live TUI labels the running tier by sub-agent count — 0-5 Spawn, 6-20 Swarm, 21-50 Mesh, 51+ Fleet. Those bands are a **display** heuristic (`tui/agents/strip.rs:431`) and are deliberately not the tier caps above: Swarm's own cap is `MAX_DISPATCH_WORKERS` = 100, so a 30-worker Swarm is within its cap while the TUI is labelling that count "Mesh". One note on reach: the standard monitored relay clamps Spawn fan-out to the Mesh cap of 50, so the 100-agent Fleet ceiling is the unmonitored library path, not the everyday `Spawn` call.
 
 <div align="center">
 
@@ -159,6 +159,43 @@ Topology is pure data with cap enforcement, the guards have tests behind them (5
 ![Orchestration, compared](docs/img/compare-orchestration.png)
 
 </div>
+
+## Anvil — the gated forge (Smart Loops)
+
+Anvil is where work with a **real executable gate** goes — tests, a build, a typecheck. Hand it a task with a provable finish line and it iterates until the gate actually passes, then hands you a machine-stamped receipt. Judgment work with no checkable reward — naming, prose, architecture opinions — goes to [Crucible](#crucible--a-mixture-of-providers-council) instead. That's the whole doctrine: the gate is the anvil, the models are the hammer.
+
+It's on by default and needs zero config. In a repo with a test suite:
+
+```bash
+wayland-core forge "fix the failing auth tests"
+```
+
+Or just ask in a session — "iterate until it provably passes" — and the `Forge` tool routes the work to the forge. The gate is auto-detected from the workspace (cargo, npm, go, pytest, just, make); an explicit `[anvil] gate` always wins.
+
+How a climb works: a builder sub-agent is forked into an isolated git worktree, the gate runs sandboxed (network-denied) after every round, and the climb accepts only strict improvement — a candidate that doesn't beat the current best is discarded, not merged. Your tree is never touched; the winning change lands on a review branch.
+
+Every climb ends in a receipt:
+
+```text
+Forged: verified · 1/1 checks · 3 iterations
+```
+
+Only machinery earns `verified` — a model's opinion of its own work never does. A climb that can't get there reports an honest terminal state (`needs_escalation`, `timed_out`) instead of a hopeful one, and cost is shown or marked "unpriced" — never $0.
+
+**The escalation valve.** When consecutive rounds fail with the *same* fail-set, the climb buys exactly ONE read-only diagnostic turn from your frontier session model, feeds the guidance back to the cheap builder, and resumes. You pay for the unblocking, not the grinding.
+
+**Seat routing.** The frontier model plans, a mid-tier driver iterates — or FluxRouter's `flux-auto` lane drives when a Flux key is connected — and machinery verifies. Three knobs in `[anvil]`:
+
+```toml
+[anvil]
+enabled = true                     # kill-switch; a project config can disable, never re-enable (tighten-only)
+# gate = ["cargo", "test"]         # empty = auto-detect from the workspace
+# driver_provider = "flux-router"  # explicit driver seat; driver_model pins the model
+```
+
+Safety is structural, not advisory. The forge is invocation-only and refuses outright without a gate. Builders get edit tools but **no shell** — the gate does the executing. Trampoline gates (`npm test`, `make test`, `just test`) are content-pinned against tampering: a candidate that touches the dispatch manifest fails a Safety-class gate-integrity check that can't be traded away. Baseline probes run sandboxed in scratch worktrees, never in yours.
+
+Shipped in v0.12.25 as the Smart Loops layer, live-proven end to end. [→ docs/advanced.md](docs/advanced.md)
 
 ## Crucible — a Mixture-of-Providers council
 
@@ -226,7 +263,7 @@ egress_allow = ["example.com",          # registrable domain — covers subdomai
                 "myapp.workers.dev"]     # shared host — exact match only, no apex
 ```
 
-Turning the gate off is deliberately awkward. It takes `enabled = false` in the config file *and* a `--i-accept-exfil-risk` flag on the command line at the same invocation. No single environment variable can silence it.
+Turning the gate off takes `enabled = false`, and only the operator can write it. `[security] enabled` is read from your **global** config alone, so a project-level `config.toml` that arrives with a cloned repo cannot disable the boundary no matter what it says. No environment variable sets it, and there is no CLI flag: the switch is the global `[security]` block or nothing.
 
 The source backs this: the sandbox crate alone carries 110+ test cases, with 90+ more across output safety and 50+ across permissions, and the threat model is written down in `docs/security/permissions-threat-model.md`.
 
@@ -260,7 +297,7 @@ The agent doesn't stop at the filesystem. Wayland Core ships two real desktop-au
 Both families register through a thin plugin shell. Per audit F2 the `wayland-browser` and `wayland-cua` crates carry no dependency on the real `wcore-browser`/`wcore-cua` engine crates — they register a spec mirror through the plugin API and the host reifies the actual tool, so the isolation boundary is structural, not a convention. The host has to advertise `capabilities.browser_suite` / `capabilities.computer_use` or neither family registers at all. On Linux Wayland the adapter goes further and refuses registration outright on a restricted compositor (GNOME mutter default, focus-steal-off Hyprland), probed live and re-checked mid-session.
 
 ```toml
-[browser]
+[browser.policy]
 # Disabled by default (fail-closed). Allow specific domains to turn it on:
 allowed_origins = ["example.com", "*.mysite.com"]
 # Or, not recommended (SSRF risk):
@@ -275,6 +312,7 @@ The same engine runs as a chat bot on ten messaging platforms, and fires itself 
 
 Each platform is its own crate, written against the platform-native API, not a generic webhook shim: **Slack** (Web API plus an Events webhook, HMAC-SHA256 signed with a 5-minute replay window), **Discord** (REST plus a Gateway WebSocket with heartbeat), **Telegram** (long-poll), **WhatsApp** (Cloud API plus Meta `X-Hub-Signature-256`), **Signal** (a `signal-cli` subprocess under a respawn supervisor), **SMS** (Twilio, HMAC-SHA1 webhook), **email** (SMTP out, IMAP poll in), **iMessage** (macOS, reads `chat.db` read-only, sends via AppleScript), **Matrix** (raw CS-API, deliberately no `matrix-sdk`), and **MS Teams** (Bot Framework, OAuth2 client-credentials).
 
+- **Three of the ten have been driven at the real platform.** Slack, Discord and Matrix were each exercised against a real workspace, guild and room by the shipped binary, and two of them came back wrong: Slack and Discord had both claimed exactly-once delivery on the strength of a mock, and each produced *two* messages when a delivery key was finally replayed live. Both are now corrected to at-most-once; Matrix held, and is the only exactly-once adapter of the ten — conditionally, for a body that fits in one platform message (32,768 chars), above which it is chunked, sent unkeyed, and degrades to at-least-once. The other seven — Telegram, WhatsApp, Twilio SMS, email, Signal, iMessage, MS Teams — are implemented and carry their own test suites, but no replay has been driven at their real destination, which is real evidence about our code and none at all about the platform's behaviour. [→ docs/delivery-semantics.md](docs/delivery-semantics.md) has the per-adapter table, and a test fails the build if it drifts from the code.
 - **One file per channel, auto-registered on boot.** The engine scans the channels dir, parses each TOML, and registers the rest. A disabled, unknown, or malformed config is skipped with a warn log — one bad file can never crash boot.
 - **Inbound is fail-closed.** An unconfigured channel denies every message. The default DM policy is an *empty* allowlist, groups are disabled, and a mention is required. You name the stable platform sender ids that may drive the agent; everyone else is refused.
 - **A tool posture decides what the agent may touch.** `conversational` (default) gives the host no filesystem or shell. Opt up to `workspace` (jailed to a workspace root) or `full` (host-wide). It is enforced at the tool registry, so dropped tools are un-dispatchable, not merely hidden.
@@ -308,7 +346,7 @@ wayland-core cron list           # also: status · history · enable · disable 
 wayland-core cron daemon         # detached background runner
 ```
 
-**What we do not claim yet.** Not every platform is full duplex. MS Teams is a send-only MVP; inbound is parsed but not yet exposed over the host. The inbound webhook host serves Slack, WhatsApp, and Twilio SMS only — the poll-based connectors (Telegram, Matrix, Signal) don't take webhooks. DM pairing is fail-closed: a pairing request is denied until you add the sender to the allowlist by hand. In the headless daemon, `--skill` and `--channel` jobs dispatch, but `--slash` jobs record as *staged* rather than executing. And inbound media enrichment (image-to-description, voice-to-transcript) is inert unless a vision or transcription key is configured. `tools = "full"` on a publicly reachable channel is host-wide access identical to a local CLI session — the code and docs both flag it as dangerous.
+**What we do not claim yet.** Not every platform is full duplex. MS Teams is duplex: inbound arrives over the webhook host at `/webhooks/msteams`, authenticated by Bot Framework JWT validation (signature, issuer, audience, expiry) with the token's `serviceUrl` claim bound to the Activity's — though its inbound **attachments** are still not fetched. The inbound webhook host serves Slack, WhatsApp, Twilio SMS and MS Teams — the poll-based connectors (Telegram, Matrix, Signal) don't take webhooks. DM pairing is fail-closed: a pairing request is denied until you add the sender to the allowlist by hand. In the headless daemon, `--skill` and `--channel` jobs dispatch, but `--slash` jobs record as *staged* rather than executing. And inbound media enrichment (image-to-description, voice-to-transcript) is inert unless a vision or transcription key is configured. `tools = "full"` on a publicly reachable channel is host-wide access identical to a local CLI session — the code and docs both flag it as dangerous.
 
 Ten platform crates, in-tree, each wired to a registry factory. More than 500 tests across the channels, registry, cron, and per-platform crates. [→ docs/channels.md](docs/channels.md)
 
@@ -326,9 +364,9 @@ It also keeps itself from growing unbounded:
 
 **Sessions.** Every run is saved to disk, the provider, model, working directory, token usage, and full message history, under a versioned schema with a migration ladder and WAL crash recovery, so a `SIGKILL` mid-turn does not corrupt the file. Resume the most recent with `-c`, jump to a specific one with `--resume <id>`, see them all with `--list-sessions`, or print what the agent remembers about one with `--memory-show <session>`.
 
-**Cost governance.** Real spend caps that block the next turn when crossed. Set per-session token and dollar caps; a rejected charge does not stick, verified by tests that assert the running total is unchanged after a blocked overrun. A separate execution budget tracks a whole session tree, wall time, tool runtime, process count, agent depth, tokens, and cost, rolling child counters up to ancestors and checking caps in a fixed, deterministic order. Per-turn cost is computed from a real provider-by-model pricing catalog (USD per million tokens, bundled at compile time, 46 sections today) and returned in integer microcents, so a million input tokens at $15/Mtok is exactly 1,500,000,000 microcents, no float drift. The engine charges against the model that was actually dispatched, not the premium tier you asked for.
+**Cost governance.** Real spend caps reserve the next provider call before dispatch and settle it from returned usage afterward. Set per-session input, output, and dollar caps; concurrent reservations are atomic, so parallel calls cannot each spend the same remaining allowance. A separate execution budget tracks the whole session tree—wall time, tool runtime, process-spawning call concurrency, and agent depth—rolling child counters up to ancestors and checking caps in a fixed order. Per-turn cost resolves the provider and model actually dispatched against the bundled pricing catalog; an unpriceable route is rejected while a strict dollar cap is active rather than treated as free.
 
-Two honest limits, stated up front. Caps are **post-hoc, not pre-flight**: a turn is billed by the provider before it is charged against the budget, so a cap cannot un-spend the turn that crossed it, only block the next one. And cost accuracy depends on the catalog, a miss falls back to a heuristic that for some models is $0.00, an honest absent charge rather than a wrong one. The live-pricing refresh diffs OpenRouter against the bundled catalog on a 24-hour TTL but only emits change events for a human to inspect; it never auto-applies a price.
+Two honest limits, stated up front. A transport failure can occur after a provider accepted a request but before usage returns; that ambiguous attempt consumes its conservative reservation so a retry ring cannot exceed the cap. The process concurrency cap limits admitted tool calls that spawn native processes, not every descendant PID inside one admitted shell command; descendant process-tree limits remain the platform sandbox's responsibility.
 
 ```toml
 # .wayland-core.toml — memory is ON by default; spend caps are opt-in
@@ -341,12 +379,25 @@ decay_interval_secs       = 3600   # decay sweep cadence (1 hour)
 [session_cap]
 max_tokens_in  = 200000
 max_tokens_out = 16384
-max_cost_usd   = 1.50              # blocks the NEXT turn once crossed
+max_cost_usd   = 1.50              # reserves before each provider dispatch
 max_wall_time_secs    = 600        # execution-tree caps
 max_tool_runtime_secs = 120
-max_processes         = 8
+max_concurrent_process_tools = 8 # legacy `max_processes` is still accepted
 max_agent_depth       = 4
+
+[budget]
+max_daily_cost_usd = 20.0          # UTC-day ceiling, ACROSS sessions and processes
 ```
+
+Every cap above is per session, which means none of them bind a caller that
+starts a *fresh session per process* — a crash-looping daemon, a cron job, a
+channel gateway answering inbound messages. Each run is correctly inside its
+own budget while the machine bills without limit. `max_daily_cost_usd` is the
+one that binds that shape: it is backed by a small durable ledger holding only
+the current UTC day's spend, mutated under an exclusive cross-process file lock
+and published atomically, so concurrent processes serialize and a crash between
+reserve and settle over-counts for one lease rather than reopening the hole. It
+is opt-in and absent by default.
 
 ```bash
 wayland-core --list-sessions
@@ -520,7 +571,7 @@ Closed-source tools (Claude Code, Codex CLI) are a docs-based orientation, not a
 | [Channels](docs/channels.md) | Messaging-platform connectors, inbound policy, cron triggers |
 | [Memory](docs/memory.md) | Partitions, tiers, the dream cycle, cost governance |
 | [Self-Evolution](docs/wcore-evolve.md) | The GEPA loop, mutators, scoring, curator hand-off |
-| [Advanced](docs/advanced.md) | Sub-agents, hooks, memory, plan mode, compaction |
+| [Advanced](docs/advanced.md) | Sub-agents, hooks, memory, plan mode, compaction, the Anvil forge |
 | [Resilience](docs/resilience.md) | The endurance trial: method, measurements, and honesty bounds |
 | [JSON Stream Protocol](docs/json-stream-protocol.md) | Host integration protocol spec |
 

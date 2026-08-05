@@ -1,0 +1,3 @@
+F23_CACHE=session id=8ea00290-0f3b-4047-8c74-4b6143048be7 round_trips=1 compactions=0 hit_ratio=0.0000 cost_usd=0.075600 cost_truth=estimated complete=true updated=2026-07-29T13:45:02.915Z path=/root/f23-c4-live/home3/cache-ledger/8ea00290-0f3b-4047-8c74-4b6143048be7.json
+F23_CACHE=session id=6f9aa7b5-719a-4edc-93b4-5ce0703b4555 round_trips=1 compactions=0 hit_ratio=0.0000 cost_usd=0.061650 cost_truth=estimated complete=true updated=2026-07-29T13:44:58.659Z path=/root/f23-c4-live/home3/cache-ledger/6f9aa7b5-719a-4edc-93b4-5ce0703b4555.json
+F23_CACHE=list sessions=2 dir=/root/f23-c4-live/home3/cache-ledger

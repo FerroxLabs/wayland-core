@@ -20,9 +20,25 @@
 //! handles only.
 
 pub mod api;
+pub mod bridge;
 pub mod config;
 pub mod error;
 pub mod inbound;
+
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`api::download_media`] caps the
+/// streamed body at `MEDIA_BOUNDS.max_bytes`. One constant, both sites, so the
+/// advertised number and the enforced number cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 100 MiB — a 4x gap nobody could see,
+/// because the declaration had no reader anywhere in the workspace. 100 MiB is
+/// the value that has actually governed inbound fetches since 2026-06-12.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 100 * 1024 * 1024,
+    max_attachments: 10,
+};
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -36,6 +52,7 @@ use wcore_channels::{
 };
 use wcore_config::credentials::CredentialsStore;
 
+pub use bridge::{WhatsappBackend, WhatsappBridgeChannel, WhatsappBridgeConfig};
 pub use config::WhatsappConfig;
 pub use error::WhatsappError;
 
@@ -132,6 +149,106 @@ impl WhatsappChannel {
         }
         Ok(())
     }
+
+    /// The one outbound path. `key` is the gateway's delivery id when this send
+    /// came through [`Channel::send_message_idempotent`], and `None` otherwise.
+    ///
+    /// Both trait methods route here so the keyed and unkeyed paths cannot
+    /// drift apart in anything but the tracking field. A second copy of this
+    /// function is how "the keyed path also handles attachments" quietly stops
+    /// being true.
+    async fn post(
+        &mut self,
+        msg: OutgoingMessage,
+        key: Option<&str>,
+    ) -> Result<MessageReceipt, ChannelError> {
+        if self.state != ConnectionState::Connected {
+            return Err(ChannelError::NotStarted);
+        }
+        let access_token = self
+            .access_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("access token not loaded".to_string()))?;
+
+        let recipient = if msg.conversation_id.is_empty() {
+            if self.config.default_recipient.is_empty() {
+                return Err(ChannelError::Rejected(
+                    "no conversation_id and no default_recipient configured".to_string(),
+                ));
+            }
+            self.config.default_recipient.clone()
+        } else {
+            msg.conversation_id.clone()
+        };
+
+        // When the outbound carries attachments, send each as a media message
+        // (link variant) so a non-text reply isn't silently dropped. The first
+        // attachment carries `msg.text` as its caption (Cloud API media messages
+        // support a caption for image/video/document), so a single text+media
+        // reply lands as one message; remaining attachments follow caption-less.
+        // The wamid recorded is the last media message's id.
+        let wamid = if !msg.attachments.is_empty() {
+            let mut last_wamid: Option<String> = None;
+            for (idx, url) in msg.attachments.iter().enumerate() {
+                let caption = if idx == 0 && !msg.text.is_empty() {
+                    Some(msg.text.clone())
+                } else {
+                    None
+                };
+                let media_req = api::SendMediaRequest::new_link(recipient.clone(), url, caption)
+                    // Only the first message quotes the reply context.
+                    .with_reply_context(if idx == 0 { msg.reply_to.clone() } else { None })
+                    // EVERY part carries the same delivery id: they are one
+                    // logical delivery, and a tracking string that differed per
+                    // part could not be joined back to its cause.
+                    .with_tracking_data(key);
+                let resp = api::send_media(
+                    &self.http,
+                    &self.config.api_base_url,
+                    &self.config.graph_version,
+                    &self.config.phone_number_id,
+                    access_token,
+                    &media_req,
+                    self.config.max_retry_attempts,
+                )
+                .await
+                .map_err(ChannelError::from)?;
+                last_wamid = Some(resp.messages[0].id.clone());
+            }
+            // attachments is non-empty, so the loop ran at least once.
+            last_wamid.unwrap_or_default()
+        } else {
+            // Quote the message being replied to (if this turn is a reply) so the
+            // bot threads in-context. `reply_to` carries the inbound wamid via the
+            // shared inbound subscriber; None for a fresh message.
+            let req = api::SendMessageRequest::new_text(recipient.clone(), msg.text.clone())
+                .with_reply_context(msg.reply_to.clone())
+                .with_tracking_data(key);
+
+            let resp = api::send_message(
+                &self.http,
+                &self.config.api_base_url,
+                &self.config.graph_version,
+                &self.config.phone_number_id,
+                access_token,
+                &req,
+                self.config.max_retry_attempts,
+            )
+            .await
+            .map_err(ChannelError::from)?;
+
+            // Per Meta docs the first messages[0].id is the wamid we should
+            // record as the platform_id. Earlier api::send_message already
+            // validated messages[] is non-empty.
+            resp.messages[0].id.clone()
+        };
+
+        Ok(MessageReceipt {
+            id: wamid,
+            conversation_id: recipient,
+            ts_secs: chrono::Utc::now().timestamp(),
+        })
+    }
 }
 
 #[async_trait]
@@ -212,87 +329,60 @@ impl Channel for WhatsappChannel {
     }
 
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
-        if self.state != ConnectionState::Connected {
-            return Err(ChannelError::NotStarted);
-        }
-        let access_token = self
-            .access_token
-            .as_deref()
-            .ok_or_else(|| ChannelError::Auth("access token not loaded".to_string()))?;
+        self.post(msg, None).await
+    }
 
-        let recipient = if msg.conversation_id.is_empty() {
-            if self.config.default_recipient.is_empty() {
-                return Err(ChannelError::Rejected(
-                    "no conversation_id and no default_recipient configured".to_string(),
-                ));
-            }
-            self.config.default_recipient.clone()
-        } else {
-            msg.conversation_id.clone()
-        };
+    /// Carries the gateway's delivery id in the Cloud API's documented
+    /// `biz_opaque_callback_data` tracking field — see
+    /// [`api::SendMessageRequest::with_tracking_data`].
+    ///
+    /// Meta is not claimed to deduplicate on it; see
+    /// [`Self::supports_outbound_idempotency`], which stays `false`. What it
+    /// buys is **attributability**: the value is echoed back in the `statuses`
+    /// object of the `messages` webhook, so an arrival — or a delivery status
+    /// that lands long afterwards — can be traced to the exact
+    /// `cron:{job_id}:{scheduled_for_millis}` that produced it. Before this
+    /// existed, a `whatsapp.messages` arrival carried no identity at all and a
+    /// repeated body was unclassifiable in principle: neither provably a replay
+    /// nor provably a recurrence.
+    async fn send_message_idempotent(
+        &mut self,
+        msg: OutgoingMessage,
+        key: &str,
+    ) -> Result<MessageReceipt, ChannelError> {
+        self.post(msg, Some(key)).await
+    }
 
-        // When the outbound carries attachments, send each as a media message
-        // (link variant) so a non-text reply isn't silently dropped. The first
-        // attachment carries `msg.text` as its caption (Cloud API media messages
-        // support a caption for image/video/document), so a single text+media
-        // reply lands as one message; remaining attachments follow caption-less.
-        // The wamid recorded is the last media message's id.
-        let wamid = if !msg.attachments.is_empty() {
-            let mut last_wamid: Option<String> = None;
-            for (idx, url) in msg.attachments.iter().enumerate() {
-                let caption = if idx == 0 && !msg.text.is_empty() {
-                    Some(msg.text.clone())
-                } else {
-                    None
-                };
-                let media_req = api::SendMediaRequest::new_link(recipient.clone(), url, caption)
-                    // Only the first message quotes the reply context.
-                    .with_reply_context(if idx == 0 { msg.reply_to.clone() } else { None });
-                let resp = api::send_media(
-                    &self.http,
-                    &self.config.api_base_url,
-                    &self.config.graph_version,
-                    &self.config.phone_number_id,
-                    access_token,
-                    &media_req,
-                    self.config.max_retry_attempts,
-                )
-                .await
-                .map_err(ChannelError::from)?;
-                last_wamid = Some(resp.messages[0].id.clone());
-            }
-            // attachments is non-empty, so the loop ran at least once.
-            last_wamid.unwrap_or_default()
-        } else {
-            // Quote the message being replied to (if this turn is a reply) so the
-            // bot threads in-context. `reply_to` carries the inbound wamid via the
-            // shared inbound subscriber; None for a fresh message.
-            let req = api::SendMessageRequest::new_text(recipient.clone(), msg.text.clone())
-                .with_reply_context(msg.reply_to.clone());
-
-            let resp = api::send_message(
-                &self.http,
-                &self.config.api_base_url,
-                &self.config.graph_version,
-                &self.config.phone_number_id,
-                access_token,
-                &req,
-                self.config.max_retry_attempts,
-            )
-            .await
-            .map_err(ChannelError::from)?;
-
-            // Per Meta docs the first messages[0].id is the wamid we should
-            // record as the platform_id. Earlier api::send_message already
-            // validated messages[] is non-empty.
-            resp.messages[0].id.clone()
-        };
-
-        Ok(MessageReceipt {
-            id: wamid,
-            conversation_id: recipient,
-            ts_secs: chrono::Utc::now().timestamp(),
-        })
+    /// **`false`, and it must stay `false` until a replay is driven at
+    /// `graph.facebook.com` itself.**
+    ///
+    /// This adapter DOES transmit the delivery id (see
+    /// [`api::SendMessageRequest::with_tracking_data`]). That is a fact about
+    /// our request; this method is a claim about **Meta's arrival count**, and
+    /// they are different claims. Slack and Discord both declared this bit
+    /// `true` on exactly that inference — from `mockito` tests proving a token
+    /// left the process — and both produced **two** messages the first time a
+    /// replay was driven at their real API (2026-07-30).
+    ///
+    /// Meta documents `biz_opaque_callback_data` as *tracking* data. Nothing in
+    /// the Cloud API describes it as a dedup slot, and the send endpoint
+    /// exposes no other client-supplied idempotency surface. That is a strong
+    /// prior and it is **not** a measurement. We hold no Meta Business
+    /// credentials; the live replay is written and gated in
+    /// `crates/wcore-channels-registry/tests/live_twilio_whatsapp_identity.rs`
+    /// and skips loudly naming the credential it needs. **A skip is not a
+    /// pass.**
+    ///
+    /// # One bit, potentially several transports
+    ///
+    /// This adapter speaks the Cloud API only. If a future backend seam brings
+    /// a non-Cloud transport (Baileys / whatsapp-web) under this same
+    /// `Channel`, this single bit speaks for that transport too — and the
+    /// tracking carrier above does not exist off the Cloud API. Re-derive the
+    /// value per transport at that point rather than letting a new backend
+    /// inherit a declaration that was reasoned about a different one.
+    fn supports_outbound_idempotency(&self) -> bool {
+        false
     }
 
     fn config_schema(&self) -> &str {
@@ -302,6 +392,40 @@ impl Channel for WhatsappChannel {
     /// WhatsApp caps a single text message body at 4096 characters.
     fn max_message_len(&self) -> Option<usize> {
         Some(4096)
+    }
+
+    /// WhatsApp Cloud API: **edit and revoke are inbound-only concepts.**
+    ///
+    /// Meta documents both, and documents them as WEBHOOK EVENTS — a `type:
+    /// "edit"` message notification carrying `edit.original_message_id`, and a
+    /// `type: "revoke"` entry in `smb_message_echoes` describing *a business
+    /// customer deleting a previously sent message* from the SMB app. Neither
+    /// has an outbound counterpart: there is no Graph verb by which a Cloud
+    /// API sender alters or withdraws a message it has already sent. So this is
+    /// [`PlatformHasNoApi`](wcore_channels::ActionSupport::PlatformHasNoApi),
+    /// not a backlog item — no amount of work here closes it.
+    ///
+    /// `typing` is the opposite case and that is exactly why the two states are
+    /// separate. Cloud API **does** have a typing indicator, posted to
+    /// `/{phone_number_id}/messages` with `typing_indicator: {type: "text"}` —
+    /// but it is keyed to the `message_id` of a RECEIVED message, and
+    /// [`Channel::send_typing`] is handed only a `conversation_id`. The
+    /// capability is real and unreachable through the current trait signature,
+    /// which is a seam finding rather than an absence, so it is recorded as
+    /// `NotImplemented` with the reason.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::{Implemented, NotImplemented, PlatformHasNoApi};
+        wcore_channels::NativeActions::none()
+            .edit(PlatformHasNoApi)
+            .delete(PlatformHasNoApi)
+            .react(Implemented)
+            .typing(NotImplemented)
+            .note(
+                "edit/delete: Cloud API models edit and revoke as INBOUND webhook events only \
+                 (messages/edit, smb_message_echoes revoke) — there is no outbound verb. \
+                 typing: the endpoint exists but is keyed to a received message_id, which \
+                 Channel::send_typing(conversation_id) cannot supply — trait-signature gap.",
+            )
     }
 
     /// Send a reaction message — the ack signal. `conversation_id` is the
@@ -357,6 +481,12 @@ impl Channel for WhatsappChannel {
         )
         .await
         .map_err(ChannelError::from)
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], which is
+    /// the same constant [`api::download_media`] caps the streamed body at.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 
     /// Handle a Meta WhatsApp Cloud API webhook request.
@@ -446,6 +576,126 @@ mod tests {
             ("whatsapp.test.access_token", "EAAtest-token"),
             ("whatsapp.test.app_secret", "shhh"),
         ])
+    }
+
+    // -----------------------------------------------------------------
+    // Delivery identity on the wire — BOTH DIRECTIONS.
+    //
+    // The keyed test is RED at base: before this change the adapter had no
+    // `send_message_idempotent` at all and the field did not exist, so it is
+    // the one that proves work was done. The unkeyed test is GREEN at base
+    // and is not pretending otherwise — its job is to guard a failure that
+    // only becomes REACHABLE once the field exists, namely attaching it
+    // unconditionally. That would mark every unkeyed arrival as identified,
+    // and it would be silent, because a receipt full of identified arrivals
+    // is what a healthy run looks like.
+    //
+    // It uses `Matcher::Json` (exact) rather than `PartialJson`, because
+    // partial matching cannot express "this key is absent" — the assertion
+    // would pass on the very body it is meant to reject.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn a_keyed_send_carries_the_delivery_id_as_biz_opaque_callback_data() {
+        let mut server = mockito::Server::new_async().await;
+        let key = "cron:job-wa:1785121776528";
+        let mock = server
+            .mock("POST", "/v18.0/10000000000/messages")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "messaging_product": "whatsapp",
+                "to": "+15555550100",
+                "biz_opaque_callback_data": key,
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"messaging_product":"whatsapp","messages":[{"id":"wamid.KEYED"}]}"#)
+            .create_async()
+            .await;
+
+        let mut ch = WhatsappChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        // Asserted in the SAME test as the wire fact, deliberately. Reading
+        // the two apart is how Slack and Discord came to declare `true` on
+        // the strength of a token they merely transmitted.
+        assert!(
+            !ch.supports_outbound_idempotency(),
+            "WhatsApp must NOT claim outbound idempotency. biz_opaque_callback_data is \
+             documented as TRACKING data, no replay has ever been driven at \
+             graph.facebook.com, and transmitting a value is not evidence that Meta \
+             collapses two sends carrying it."
+        );
+
+        let receipt = ch
+            .send_message_idempotent(OutgoingMessage::text("+15555550100", "keyed"), key)
+            .await
+            .expect("keyed send must reach the fixture carrying the tracking field");
+        assert_eq!(receipt.id, "wamid.KEYED");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_unkeyed_send_omits_biz_opaque_callback_data_entirely() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v18.0/10000000000/messages")
+            // EXACT body: any extra key — including an empty-string tracking
+            // field — makes this stop matching, mockito answers 501, and the
+            // send below fails.
+            .match_body(mockito::Matcher::Json(serde_json::json!({
+                "messaging_product": "whatsapp",
+                "to": "+15555550100",
+                "type": "text",
+                "text": {"body": "unkeyed", "preview_url": false}
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"messaging_product":"whatsapp","messages":[{"id":"wamid.UNKEYED"}]}"#)
+            .create_async()
+            .await;
+
+        let mut ch = WhatsappChannel::new("test", cfg_for(&server.url()), store_for_test());
+        ch.start().await.unwrap();
+        let _ = ch.poll_events().await.unwrap();
+
+        let receipt = ch
+            .send_message(OutgoingMessage::text("+15555550100", "unkeyed"))
+            .await
+            .expect("unkeyed send must reach the fixture with no tracking field");
+        assert_eq!(receipt.id, "wamid.UNKEYED");
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn an_empty_key_leaves_the_tracking_field_omitted_rather_than_blank() {
+        // A blank tracking string is the worst of both worlds: the sink reads
+        // a present-but-empty value, and whether that counts as identified
+        // depends on which side trims. Omission keeps "unidentified" a single
+        // unambiguous state.
+        let req = api::SendMessageRequest::new_text("+1", "x").with_tracking_data(Some(""));
+        assert_eq!(req.biz_opaque_callback_data, None);
+        let req = api::SendMessageRequest::new_text("+1", "x").with_tracking_data(None);
+        assert_eq!(req.biz_opaque_callback_data, None);
+    }
+
+    #[test]
+    fn an_over_long_key_is_truncated_to_metas_cap_on_a_char_boundary() {
+        // Meta caps the field at 512 characters. A longer value must degrade
+        // into a truncated tracking string, never into a rejected send:
+        // losing attributability is bad, losing the message is worse.
+        let long = "é".repeat(600);
+        let req = api::SendMessageRequest::new_text("+1", "x").with_tracking_data(Some(&long));
+        let got = req.biz_opaque_callback_data.expect("must be present");
+        assert_eq!(
+            got.chars().count(),
+            api::MAX_TRACKING_DATA_CHARS,
+            "truncation must count CHARACTERS, not bytes"
+        );
+        // The known-negative: a value already inside the cap is untouched.
+        let short = "cron:job:1";
+        let req = api::SendMessageRequest::new_text("+1", "x").with_tracking_data(Some(short));
+        assert_eq!(req.biz_opaque_callback_data.as_deref(), Some(short));
     }
 
     #[tokio::test]

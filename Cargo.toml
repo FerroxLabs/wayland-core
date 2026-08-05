@@ -47,6 +47,10 @@ members = [
     "crates/wcore-budget",
     # M5.1: container-isolated tool execution (Docker behind `live-docker` feature).
     "crates/wcore-sandbox",
+    # F25-01: provider-neutral execution-backend contract (local / container /
+    # ssh / one hibernating cloud machine). COMPOSES wcore-sandbox containment
+    # and wcore-egress; never depends on wcore-agent or wcore-cli.
+    "crates/wcore-exec-backend",
     "crates/wcore-memory",
     # Wave B2: multi-actor ACL + bearer token (Team Mode foundation).
     "crates/wcore-permissions",
@@ -124,6 +128,11 @@ members = [
     # v0.8.1 U7: cron scheduler — memory-resident scheduled triggers with
     # 3 target types (slash command, channel message, skill invocation).
     "crates/wcore-cron",
+    # Phase 24 plan 24-01: persistent gateway runtime — lifecycle state
+    # machine, Windows-safe pid lock, drain, and the exactly-once delivery
+    # ledger. Mid layer: depends downward only and must never reach
+    # wcore-agent. Consumed by 24-02 (automation) and 24-03 (support bundle).
+    "crates/wcore-gateway",
     # v0.6.1 H2: output validator + PII scrubber primitives (R8 + Sec5).
     "crates/wcore-safety",
     # v0.6.5 Task 3.1: subprocess plugin host (JSON-RPC over stdio,
@@ -143,7 +152,7 @@ members = [
 exclude = ["templates/**", "examples/**"]
 
 [workspace.package]
-version = "0.12.25"
+version = "0.12.26"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -178,6 +187,7 @@ wcore-budget        = { path = "crates/wcore-budget" }
 wcore-pricing       = { path = "crates/wcore-pricing" }
 wcore-permissions   = { path = "crates/wcore-permissions" }
 wcore-sandbox       = { path = "crates/wcore-sandbox" }
+wcore-exec-backend  = { path = "crates/wcore-exec-backend" }
 wcore-memory        = { path = "crates/wcore-memory" }
 wcore-observability = { path = "crates/wcore-observability" }
 wcore-repomap       = { path = "crates/wcore-repomap" }
@@ -203,6 +213,9 @@ wcore-channel-msteams  = { path = "crates/wcore-channel-msteams" }
 # hand-wire the 7 channel crates.
 wcore-channels-registry = { path = "crates/wcore-channels-registry" }
 wcore-cron             = { path = "crates/wcore-cron" }
+# Phase 24 plan 24-01: the persistent gateway runtime. 24-02 consumes its
+# lifecycle states and delivery ledger; 24-03 consumes its support bundle.
+wcore-gateway          = { path = "crates/wcore-gateway" }
 wcore-safety        = { path = "crates/wcore-safety" }
 # v0.6.5 Task 1.5 — wcore-agent host-side adapter reifies the user-model
 # plugin shell. Same host↑plugin dep asymmetry as wcore-browser/wcore-cua.
@@ -218,17 +231,35 @@ reqwest = { version = "0.12", features = ["json", "stream", "multipart", "rustls
 
 # Serialization
 serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` lets the session journal hash the checksum material exactly as it
+# was written rather than a re-encoding of the decoded value — 23B-H1.
+serde_json = { version = "1", features = ["raw_value"] }
 # #326: surface unknown / mis-sectioned config keys as warnings (rather
 # than silently dropping them) without the breaking-change risk of
 # `deny_unknown_fields`.
 serde_ignored = "0.1"
 
-# OpenAPI 3.0.3 document generation for the REST transport (wcore-acp).
-# Pinned to 4.x for axum 0.7 compatibility; utoipa 5 requires axum 0.8
-# (a repo-wide bump). `axum_extras` adds the Path-extractor glue so path
-# params document cleanly.
-utoipa = { version = "4.2", features = ["axum_extras"] }
+# OpenAPI 3.1.0 document generation for the REST transport (wcore-acp).
+#
+# Moved 4.2 -> 5 on 2026-07-29 to eliminate RUSTSEC-2024-0370 at source:
+# `utoipa-gen` 4.x has a REQUIRED `proc-macro-error ^1.0` dependency (an
+# unmaintained crate with `patched = []`, so no bump of it can ever clear the
+# advisory); `utoipa-gen` 5.x dropped it entirely. `cargo tree -i
+# proc-macro-error@1.0.4` showed exactly one path, through this crate.
+#
+# The previous comment here claimed "utoipa 5 requires axum 0.8 (a repo-wide
+# bump)". That is FALSE at the dependency level and was measured to be so:
+# neither utoipa 4.2.3 nor utoipa 5.5.0 declares axum as a dependency, optional
+# or otherwise. `axum_extras` is a codegen-behaviour flag forwarded to
+# `utoipa-gen?/axum_extras`; the axum-0.8 coupling is purely SEMANTIC (utoipa 5
+# infers params against axum 0.8's extractor + `/{id}` route syntax). This repo
+# does not rely on that inference — `wcore-acp/src/transport/rest.rs` declares
+# every path param explicitly via `params((...))` and already writes `{id}`
+# brace syntax. axum stays on 0.7.
+#
+# The real, wire-visible cost of the bump: `GET /openapi.json` now emits
+# OpenAPI **3.1.0** instead of 3.0.3.
+utoipa = { version = "5", features = ["axum_extras"] }
 
 # Async trait support
 async-trait = "0.1"
@@ -243,6 +274,9 @@ anyhow    = "1"
 # File globbing
 glob = "0.3"
 
+# Cross-platform advisory file locks for serializing confidential-key creation.
+fd-lock = "4.0.4"
+
 # RON (Rusty Object Notation) — declarative workflow DSL front-end
 # (orchestration/workflow). Lowers to the existing `GraphConfig` IR.
 ron = "0.8"
@@ -253,10 +287,19 @@ tar    = "0.4"
 flate2 = "1"
 
 # #650 doc_extract — office-doc text extraction (pure-Rust, no native libs).
-# calamine: xlsx/xls/ods; quick-xml: docx/pptx OOXML part parsing (0.39 already
-# in the tree); csv: robust quoted-CSV parsing.
-calamine = "0.26"
-quick-xml = "0.39"
+# calamine: xlsx/xls/ods; quick-xml: docx/pptx OOXML part parsing; csv: robust
+# quoted-CSV parsing.
+#
+# F29-02-H1: both XML-stack pins are held at or above quick-xml 0.41 to keep
+# RUSTSEC-2026-0194 (quadratic attribute duplicate-check) and RUSTSEC-2026-0195
+# (unbounded NsReader namespace allocation) out of the tree AT SOURCE. Both are
+# fixed only in quick-xml >= 0.41.0 and both are reachable here from
+# user-supplied files: DocExtractTool parses docx/pptx with quick-xml directly
+# and xlsx/ods through calamine. calamine < 0.36 pins quick-xml ^0.31/^0.38/
+# ^0.39, so it must not be floated back below 0.36.
+# DO NOT downgrade either pin without re-running `cargo audit`.
+calamine = "0.36"
+quick-xml = "0.41"
 csv = "1.3"
 
 # v0.9.0 W1 B8 postgres_schema_tool backend — real tokio-postgres client
@@ -388,7 +431,9 @@ unicode-width = "0.2"
 libc = "0.2"
 
 # W5 memory v2 dependencies — SQLite (bundled to avoid system-lib drift on Windows)
-rusqlite      = { version = "0.32", features = ["bundled", "blob", "chrono"] }
+# `backup` exposes sqlite3_backup_*, the online-backup API `sqlite_snapshot`
+# uses to capture a LIVE WAL database consistently (F26-SC3-O1).
+rusqlite      = { version = "0.32", features = ["bundled", "blob", "chrono", "backup"] }
 sqlite-vec    = "0.1"
 uuid          = { version = "1", features = ["v4", "v5", "v7", "serde"] }
 parking_lot   = "0.12"
@@ -489,6 +534,32 @@ hound = "3"
 # `panic = "abort"` would make catch_unwind a no-op and tool panics fatal,
 # losing the fault-isolation invariant. The unwind-tables binary-size cost
 # is acceptable in exchange.
+# Debug-build size control. WHY: with no [profile.dev] the cargo default is
+# debug = true (full DWARF) for this crate AND every dependency, which on a
+# ~54-crate workspace produced test binaries over 1 GB each. Because every code
+# change mints a new hash-suffixed binary and nothing reaps the old ones, one
+# target/ dir reached 314 GB across 190,330 files and filled a 1.8 TB build host
+# to 95%, which then caused 39 spurious test failures that were initially read
+# as product reds.
+#
+# "line-tables-only" keeps exactly what a test failure needs -- panic backtraces
+# with file and line -- and drops the type/variable DWARF that a debugger would
+# want but CI never reads. Dependencies get nothing: we do not step through
+# tokio. Set debug = true locally if you need a full interactive debug session.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+# nextest and `cargo test` build under the test profile, which inherits dev.
+# Stated explicitly so a future edit to dev does not silently re-inflate tests.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
+
 [profile.release]
 lto           = "thin"
 codegen-units = 1

@@ -46,6 +46,7 @@ wcore-plugin-api.workspace    = true
 wcore-plugin-wasm.workspace       = true
 wcore-plugin-subprocess.workspace = true
 wcore-observability.workspace = true
+wcore-safety.workspace        = true
 # M5.3: ExecutionBudget + ExecutionBudgetView extracted into wcore-budget;
 # `wcore_agent::budget` re-exports them. New BudgetTracker / BudgetCap /
 # BudgetEvent surfaces are also reached via this dep.
@@ -89,6 +90,12 @@ wayland-honcho.workspace      = true
 
 tokio.workspace       = true
 futures.workspace     = true
+# Journal error paths are reported in one representation on every entry
+# point: `dunce::simplified` converts the verbatim `\\?\` form that
+# `std::fs::canonicalize` returns on Windows back to the ordinary form
+# whenever that is safe. Same helper wcore-swarm uses for worktree roots.
+dunce                 = "1"
+
 serde.workspace       = true
 serde_json.workspace  = true
 serde_yaml.workspace  = true
@@ -181,6 +188,20 @@ hound = { workspace = true, optional = true }
 
 workspace-hack.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 [features]
 # W7 Pre-flight 0.0e: opt-in test-driver helpers (ScriptedProvider,
 # TestSink, run_synthetic_turn, build_for_test) for downstream
@@ -235,6 +256,16 @@ rstest.workspace      = true
 serial_test.workspace = true
 inventory.workspace   = true
 criterion.workspace   = true
+# 27-C2(a): `tests/browser_config_hint_roundtrip.rs` parses the exact TOML the
+# browser tool's remediation hint prints through the real `ConfigFile` serde
+# types, so the hint cannot drift from the loader again. Dev-only.
+toml.workspace        = true
+# `tests/watch_self_edit_loop_test.rs` builds `watch::ExternalEvent` values
+# directly so the harness self-test can pin the renderer's filtering without a
+# platform notifier in the loop. `notify` is already a normal dependency of
+# this crate, so this only makes the type NAMEABLE from the test binary — it
+# adds nothing to the build graph.
+notify.workspace      = true
 
 # ── Integration test binaries ──────────────────────────────────────────────
 [[test]]
@@ -260,4 +291,3 @@ required-features = ["test-utils"]
 [[bench]]
 name    = "orchestration_graph_bench"
 harness = false
-

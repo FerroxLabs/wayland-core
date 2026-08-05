@@ -1,0 +1,2 @@
+warning: profile "work" not found at /tmp/jsr-prefix/D_PROFILE/fakehome/.config/wayland-core-profiles/work — using the default home
+Error: refusing to start --json-stream with --profile "work" but no WAYLAND_HOME set. A host that drives profiles must set WAYLAND_HOME to the profile's isolated home before spawning the engine; otherwise the engine would write the shared default home and cross-write another profile's credentials and memory. Create the home with `wayland-core profile create`, or set WAYLAND_HOME per spawn.

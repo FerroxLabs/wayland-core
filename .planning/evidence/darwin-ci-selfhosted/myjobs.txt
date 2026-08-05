@@ -1,0 +1,11 @@
+queued	-	-	CI (Array)
+in_progress	-	GitHub Actions 1000034687	CI (linux-containerized)
+in_progress	-	GitHub Actions 1000034691	Eval acceptance gate (Linux, containerized)
+in_progress	-	GitHub Actions 1000034690	Build (x86_64-unknown-linux-gnu)
+in_progress	-	GitHub Actions 1000034689	Build (aarch64-pc-windows-msvc)
+in_progress	-	GitHub Actions 1000034688	Build (aarch64-unknown-linux-gnu)
+in_progress	-	GitHub Actions 1000034693	Build (x86_64-pc-windows-msvc)
+in_progress	-	GitHub Actions 1000034692	Browser live e2e (chromium) (ubuntu-latest)
+in_progress	-	sean-mac-arm64	Build (aarch64-apple-darwin) [self-hosted]
+--- macOS-hosted job scan (expect ZERO) ---
+0

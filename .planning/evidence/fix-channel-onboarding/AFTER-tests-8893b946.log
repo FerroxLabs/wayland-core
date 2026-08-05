@@ -1,0 +1,582 @@
+
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling smallvec v1.15.1
+   Compiling typenum v1.20.1
+   Compiling serde_core v1.0.228
+   Compiling stable_deref_trait v1.2.1
+   Compiling itoa v1.0.18
+   Compiling parking_lot_core v0.9.12
+   Compiling subtle v2.6.1
+   Compiling pin-project-lite v0.2.17
+   Compiling scopeguard v1.2.0
+   Compiling bytes v1.11.1
+   Compiling lock_api v0.4.14
+   Compiling futures-core v0.3.32
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling writeable v0.6.3
+   Compiling serde v1.0.228
+   Compiling generic-array v0.14.7
+   Compiling litemap v0.8.2
+   Compiling cc v1.2.63
+   Compiling once_cell v1.21.4
+   Compiling utf8_iter v1.0.4
+   Compiling icu_normalizer_data v2.2.0
+   Compiling icu_properties_data v2.2.0
+   Compiling memchr v2.8.1
+   Compiling zmij v1.0.21
+   Compiling percent-encoding v2.3.2
+   Compiling serde_json v1.0.150
+   Compiling autocfg v1.5.1
+   Compiling slab v0.4.12
+   Compiling http v1.4.1
+   Compiling cpufeatures v0.2.17
+   Compiling httparse v1.10.1
+   Compiling untrusted v0.9.0
+   Compiling futures-task v0.3.32
+   Compiling pkg-config v0.3.33
+   Compiling futures-util v0.3.32
+   Compiling syn v2.0.117
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.50
+   Compiling bitflags v2.11.1
+   Compiling try-lock v0.2.5
+   Compiling rustls v0.23.40
+   Compiling getrandom v0.2.17
+   Compiling errno v0.3.14
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling block-buffer v0.10.4
+   Compiling libdbus-sys v0.2.7
+   Compiling rand_core v0.6.4
+   Compiling signal-hook-registry v1.4.8
+   Compiling http-body v1.0.1
+   Compiling parking_lot v0.12.5
+   Compiling tower-service v0.3.3
+   Compiling crypto-common v0.1.7
+   Compiling want v0.3.1
+   Compiling digest v0.10.7
+   Compiling form_urlencoded v1.2.2
+   Compiling tracing-core v0.1.36
+   Compiling futures-channel v0.3.32
+   Compiling ring v0.17.14
+   Compiling unicase v2.9.0
+   Compiling atomic-waker v1.1.2
+   Compiling thiserror v2.0.18
+   Compiling rustix v1.1.4
+   Compiling inout v0.1.4
+   Compiling mime_guess v2.0.5
+   Compiling aho-corasick v1.1.4
+   Compiling sync_wrapper v1.0.2
+   Compiling tower-layer v0.3.3
+   Compiling regex-syntax v0.8.10
+   Compiling iana-time-zone v0.1.65
+   Compiling getrandom v0.4.2
+   Compiling linux-raw-sys v0.12.1
+   Compiling ryu v1.0.23
+   Compiling ipnet v2.12.0
+   Compiling winnow v1.0.3
+   Compiling base64 v0.22.1
+   Compiling dbus v0.9.11
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling universal-hash v0.5.1
+   Compiling hashbrown v0.17.1
+   Compiling anyhow v1.0.103
+   Compiling futures-sink v0.3.32
+   Compiling log v0.4.30
+   Compiling option-ext v0.2.0
+   Compiling mime v0.3.17
+   Compiling toml_writer v1.1.1+spec-1.1.0
+   Compiling opaque-debug v0.3.1
+   Compiling base64ct v1.8.3
+   Compiling equivalent v1.0.2
+   Compiling poly1305 v0.8.0
+   Compiling toml v1.1.2+spec-1.1.0
+   Compiling indexmap v2.14.0
+   Compiling password-hash v0.5.0
+   Compiling dirs-sys v0.5.0
+   Compiling regex-automata v0.4.14
+   Compiling blake2 v0.10.6
+   Compiling sha2 v0.10.9
+   Compiling aead v0.5.2
+   Compiling http-body-util v0.1.3
+   Compiling rtoolbox v0.0.5
+   Compiling fastrand v2.4.1
+   Compiling unsafe-libyaml v0.2.11
+   Compiling workspace-hack v0.1.0 (/root/wayland-chanonb/workspace-hack)
+   Compiling rpassword v7.5.2
+   Compiling argon2 v0.5.3
+   Compiling fd-lock v4.0.4
+   Compiling tempfile v3.27.0
+   Compiling dirs v6.0.0
+   Compiling synstructure v0.13.2
+   Compiling serde_ignored v0.1.14
+   Compiling glob v0.3.3
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zeroize_derive v1.4.3
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling tokio-macros v2.7.0
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling thiserror-impl v2.0.18
+   Compiling ppv-lite86 v0.2.21
+   Compiling zeroize v1.8.2
+   Compiling tokio v1.52.3
+   Compiling rustls-pki-types v1.14.1
+   Compiling cipher v0.4.4
+   Compiling rand_chacha v0.3.1
+   Compiling chacha20 v0.9.1
+   Compiling rustls-webpki v0.103.13
+   Compiling webpki-roots v1.0.7
+   Compiling dbus-secret-service v4.1.0
+   Compiling regex v1.12.3
+   Compiling async-trait v0.1.89
+   Compiling chacha20poly1305 v0.10.1
+   Compiling rand v0.8.6
+   Compiling zerofrom v0.1.8
+   Compiling tracing v0.1.44
+   Compiling yoke v0.8.2
+   Compiling keyring v3.6.3
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling chrono v0.4.44
+   Compiling serde_urlencoded v0.7.1
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling wcore-compact v0.12.25 (/root/wayland-chanonb/crates/wcore-compact)
+   Compiling icu_provider v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling wcore-budget v0.12.25 (/root/wayland-chanonb/crates/wcore-budget)
+   Compiling wcore-types v0.12.25 (/root/wayland-chanonb/crates/wcore-types)
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling hyper v1.10.1
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling tokio-util v0.7.18
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling wcore-config v0.12.25 (/root/wayland-chanonb/crates/wcore-config)
+   Compiling wcore-channels v0.12.25 (/root/wayland-chanonb/crates/wcore-channels)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.60s
+     Running unittests src/lib.rs (target/debug/deps/wcore_channels-ae5071f3854deebd)
+
+running 123 tests
+test actions::tests::default_is_not_implemented_never_platform_has_no_api ... ok
+test actions::tests::entries_order_is_stable ... ok
+test actions::tests::is_implemented_discriminates_the_two_negative_states_from_the_positive ... ok
+test binding::tests::a_conversation_id_cannot_impersonate_a_thread_of_another_conversation ... ok
+test binding::tests::an_unbound_conversation_takes_the_declared_default_not_the_last_route ... ok
+test binding::tests::binding_key_from_message_uses_the_channel_name_when_no_platform_is_stamped ... ok
+test binding::tests::escaping_is_reversible_enough_to_stay_injective ... ok
+test actions::tests::serde_round_trips_with_stable_snake_case_tokens ... ok
+test chunk::tests::empty_text_is_single_empty_chunk ... ok
+test binding::tests::resolution_prefers_thread_then_conversation_then_space ... ok
+test chunk::tests::hard_split_for_unbroken_run ... ok
+test chunk::tests::leading_break_char_does_not_loop ... ok
+test chunk::tests::never_splits_a_codepoint ... ok
+test chunk::tests::prefers_newline_break ... ok
+test chunk::tests::prefers_space_break_when_no_newline ... ok
+test chunk::tests::short_text_is_single_chunk ... ok
+test chunk::tests::zero_max_disables_chunking ... ok
+test config::tests::an_empty_legacy_secrets_table_is_also_rejected ... ok
+test config::tests::credential_handles_ignores_unrelated_and_non_string_keys ... ok
+test config::tests::credential_handles_finds_nested_and_suffixed_email_handles ... ok
+test config::tests::legacy_secrets_table_is_rejected_with_a_named_migration ... ok
+test config::tests::load_all_missing_dir_returns_ok_empty ... ok
+test config::tests::the_migrated_form_of_that_same_config_loads ... ok
+test config::tests::load_all_empty_dir_returns_ok_empty ... ok
+test dispatch::access::tests::dm_disabled_denies_even_with_wildcard ... ok
+test config::tests::load_all_round_trips_one_config ... ok
+test config::tests::missing_inbound_table_defaults_fail_closed ... ok
+test dispatch::access::tests::ack_mode_parses_and_defaults ... ok
+test config::tests::name_must_match_file_stem ... ok
+test config::tests::inbound_table_round_trips_into_policy ... ok
+test dispatch::access::tests::dm_empty_allowlist_denies ... ok
+test dispatch::access::tests::dm_exact_id_allows_only_that_id ... ok
+test config::tests::non_toml_files_skipped ... ok
+test dispatch::access::tests::dm_open_allows_all ... ok
+test dispatch::access::tests::default_policy_is_fail_closed ... ok
+test dispatch::access::tests::channel_chat_type_uses_group_policy ... ok
+test dispatch::access::tests::dm_pairing_denies_with_specific_reason ... ok
+test dispatch::access::tests::dm_wildcard_allows_anyone ... ok
+test dispatch::access::tests::group_allowlist_empty_lists_deny ... ok
+test dispatch::access::tests::group_allowlist_requires_both_group_and_sender ... ok
+test dispatch::access::tests::group_disabled_denies_even_with_wildcards ... ok
+test dispatch::access::tests::group_open_allows ... ok
+test dispatch::access::tests::permits_helper_semantics ... ok
+test dispatch::admission::tests::bot_message_dropped_without_history ... ok
+test dispatch::access::tests::tool_posture_parses_and_defaults ... ok
+test dispatch::admission::tests::channel_unmentioned_is_observe_only ... ok
+test dispatch::admission::tests::dm_dispatches_regardless_of_mention ... ok
+test dispatch::admission::tests::group_without_require_mention_dispatches ... ok
+test dispatch::admission::tests::mentioned_group_dispatches ... ok
+test dispatch::admission::tests::self_flag_beats_mention_gating ... ok
+test dispatch::admission::tests::self_message_dropped_without_history ... ok
+test dispatch::admission::tests::unmentioned_group_is_observe_only ... ok
+test dispatch::dedupe::tests::duplicate_refreshes_recency_for_lru ... ok
+test dispatch::dedupe::tests::immediate_duplicate_is_not_new ... ok
+test dispatch::dedupe::tests::key_equality_is_on_all_three_fields ... ok
+test dispatch::dedupe::tests::lru_evicts_oldest_keeps_recently_touched ... ok
+test dispatch::dedupe::tests::new_key_is_new_and_recorded ... ok
+test dispatch::dedupe::tests::peek_does_not_record ... ok
+test dispatch::dedupe::tests::peek_respects_ttl ... ok
+test dispatch::dedupe::tests::reappears_as_new_after_ttl_elapses ... ok
+test dispatch::dedupe::tests::ttl_zero_disables_expiry ... ok
+test dispatch::rate_limit::tests::distinct_conversations_are_independent ... ok
+test dispatch::rate_limit::tests::conversation_map_is_bounded_by_cap ... ok
+test dispatch::rate_limit::tests::eviction_keeps_the_just_recorded_conversation ... ok
+test dispatch::rate_limit::tests::over_limit_is_suppressed ... ok
+test dispatch::rate_limit::tests::under_limit_passes ... ok
+test dispatch::rate_limit::tests::window_rollover_reallows ... ok
+test dispatch::rate_limit::tests::zero_window_disables_limiting ... ok
+test dispatch::session_key::tests::channel_uses_group_composition ... ok
+test dispatch::session_key::tests::dm_key_with_thread ... ok
+test dispatch::session_key::tests::dm_key_without_thread ... ok
+test dispatch::session_key::tests::group_isolated_per_user ... ok
+test dispatch::session_key::tests::group_shared_when_per_user_off ... ok
+test dispatch::session_key::tests::group_thread_shared_when_disabled ... ok
+test dispatch::session_key::tests::group_thread_split_ignored_without_thread_id ... ok
+test dispatch::session_key::tests::group_thread_split_when_enabled ... ok
+test dispatch::tests::allowed_dm_dispatches_with_session_key ... ok
+test dispatch::tests::allowed_group_dispatches_with_per_user_key ... ok
+test dispatch::tests::dedup_key_uses_platform_field_over_channel_name ... ok
+test dispatch::tests::disallowed_dm_drops_with_deny_reason ... ok
+test dispatch::tests::duplicate_message_drops_after_first_dispatch ... ok
+test dispatch::tests::self_message_drops_without_history ... ok
+test dispatch::tests::unmentioned_group_is_observe_only_and_skips_dedup ... ok
+test event::tests::push_bounded_keeps_under_cap_in_order ... ok
+test health::tests::a_non_healthy_record_without_a_reason_fails_the_invariant ... ok
+test health::tests::connecting_is_degraded_not_healthy ... ok
+test health::tests::every_non_healthy_state_requires_a_reason ... ok
+test health::tests::unknown_is_the_registered_but_unobserved_state ... ok
+test event::tests::push_bounded_drops_oldest_on_overflow ... ok
+test manager::tests::ingest_webhook_unknown_channel_errors ... ok
+test manager::tests::concurrent_ingest_to_different_channels_does_not_serialize ... ok
+test dispatch::dedupe::tests::max_size_zero_disables_capping ... ok
+test manager::tests::concurrent_ingest_and_send_across_channels_share_read_guard ... ok
+test media::tests::an_oversized_attachment_degrades_explicitly_and_is_still_returned ... ok
+test manager::tests::send_to_chunks_overlong_body_to_the_cap ... ok
+test event::tests::push_bounded_sustained_overflow_stays_capped ... ok
+test manager::tests::send_to_registered_channel_routes ... ok
+test media::tests::classifies_the_top_level_mime_families ... ok
+test media::tests::an_empty_reference_degrades_rather_than_producing_a_fetchable_nothing ... ok
+test mock::tests::send_records_outbound ... ok
+test mock::tests::send_after_stop_errors ... ok
+test manager::tests::register_and_list ... ok
+test manager::tests::send_to_does_not_chunk_when_within_cap ... ok
+test probe::tests::unauthenticated_separates_complete_config_from_a_rejected_credential ... ok
+test probe::tests::unsupported_is_not_ready ... ok
+test webhook::tests::header_lookup_is_case_insensitive ... ok
+test media::tests::an_unrecognised_type_is_other_and_is_still_a_kind ... ok
+test media::tests::an_unreported_size_is_accepted_and_is_not_treated_as_small ... ok
+test webhook::tests::query_lookup ... ok
+test webhook::tests::response_constructors ... ok
+test media::tests::falls_back_to_the_extension_only_when_there_is_no_content_type ... ok
+test media::tests::attachments_past_the_count_bound_degrade_instead_of_vanishing ... ok
+test probe::tests::a_seeded_credential_never_appears_in_a_serialized_report ... ok
+test probe::tests::incomplete_names_the_missing_items_and_asks_no_credential_question ... ok
+test media::tests::the_default_bound_is_finite ... ok
+test mock::tests::inject_text_round_trips ... ok
+test manager::tests::send_to_unknown_channel_errors ... ok
+test mock::tests::lifecycle_start_then_stop_emits_state_changes ... ok
+test manager::tests::injected_inbound_reaches_subscriber ... ok
+test manager::tests::start_all_continues_past_a_failing_channel ... ok
+test manager::tests::start_all_emits_connection_state_changes ... ok
+test manager::tests::dead_internal_task_triggers_supervised_reconnect ... ok
+test manager::tests::persistent_poll_failure_triggers_supervised_reconnect ... ok
+
+test result: ok. 123 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+     Running tests/framework_matrix.rs (target/debug/deps/framework_matrix-d556bcd31b4ddfd9)
+
+running 19 tests
+test an_unbound_conversation_follows_the_declared_default ... ok
+test binding_routes_a_thread_to_its_named_profile_and_agent ... ok
+test a_registered_but_unstarted_channel_reads_unknown_not_healthy ... ok
+test media_normalises_against_the_adapters_declared_bound_and_degrades_explicitly ... ok
+test an_implementing_adapter_actually_performs_edit_and_delete ... ok
+test edit_delete_and_react_default_to_a_named_unsupported_never_a_silent_ok ... ok
+test probe_default_is_a_named_unsupported_and_never_a_green ... ok
+test reload_adds_new_adapters_and_removes_deconfigured_ones ... ok
+test probe_reports_each_setup_state_as_a_distinct_operator_action ... ok
+test reload_keeps_the_running_instance_of_an_unchanged_adapter ... ok
+test probe_all_reports_every_registered_channel_including_the_unprobeable ... ok
+test reload_replaces_an_adapter_whose_fingerprint_changed ... ok
+test probe_output_never_carries_the_credential_it_tested ... ok
+test reload_treats_an_unfingerprintable_adapter_as_changed ... ok
+test reload_with_start_newly_registered_does_start_a_poll_task ... ok
+test a_platform_reported_auth_failure_is_distinct_from_a_transport_failure ... ok
+test every_non_healthy_health_record_carries_a_reason ... ok
+test reload_with_leave_stopped_registers_without_starting_a_poll_task ... ok
+test a_reconnect_is_observable_in_health_after_the_channel_recovers ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.60s
+
+     Running tests/media_bounds_enforced.rs (target/debug/deps/media_bounds_enforced-2dc3ef0508ee933e)
+
+running 6 tests
+test each_channel_is_judged_against_its_own_declaration ... ok
+test the_reported_bounds_are_the_bounds_that_get_enforced ... ok
+test one_byte_over_the_declared_bound_is_refused_and_the_reason_names_it ... ok
+test a_payload_at_exactly_the_declared_bound_is_returned_intact ... ok
+test the_unchecked_path_still_yields_oversize_bytes_that_the_manager_refuses ... ok
+test an_adapter_that_declares_nothing_is_still_bounded_by_the_finite_default ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests wcore_channels
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+CHANNELS_RC=0
+
+   Compiling memchr v2.8.1
+   Compiling jobserver v0.1.34
+   Compiling num-traits v0.2.19
+   Compiling futures-macro v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling slab v0.4.12
+   Compiling rustls v0.23.40
+   Compiling futures-io v0.3.32
+   Compiling idna v1.1.0
+   Compiling vcpkg v0.2.15
+   Compiling dunce v1.0.5
+   Compiling fs_extra v1.3.0
+   Compiling lexical-core v0.7.6
+   Compiling nom v5.1.3
+   Compiling openssl v0.10.80
+   Compiling foreign-types-shared v0.1.1
+   Compiling arrayvec v0.5.2
+   Compiling cc v1.2.63
+   Compiling num-conv v0.2.2
+   Compiling thiserror v1.0.69
+   Compiling time-core v0.1.8
+   Compiling powerfmt v0.2.0
+   Compiling static_assertions v1.1.0
+   Compiling url v2.5.8
+   Compiling bitflags v1.3.2
+   Compiling time-macros v0.2.27
+   Compiling serde_json v1.0.150
+   Compiling aho-corasick v1.1.4
+   Compiling deranged v0.5.8
+   Compiling foreign-types v0.3.2
+   Compiling futures-util v0.3.32
+   Compiling sha1 v0.10.6
+   Compiling thiserror-impl v1.0.69
+   Compiling openssl-macros v0.1.1
+   Compiling chrono v0.4.44
+   Compiling num-integer v0.1.46
+   Compiling aws-lc-rs v1.17.0
+   Compiling cmake v0.1.58
+   Compiling native-tls v0.2.18
+   Compiling num-bigint v0.4.6
+   Compiling hmac v0.12.1
+   Compiling untrusted v0.7.1
+   Compiling regex-automata v0.4.14
+   Compiling byteorder v1.5.0
+   Compiling data-encoding v2.11.0
+   Compiling time v0.3.47
+   Compiling openssl-probe v0.2.1
+   Compiling utf-8 v0.7.6
+   Compiling ring v0.17.14
+   Compiling openssl-sys v0.9.116
+   Compiling aws-lc-sys v0.41.0
+   Compiling email-encoding v0.4.1
+   Compiling wcore-budget v0.12.25 (/root/wayland-chanonb/crates/wcore-budget)
+   Compiling wcore-types v0.12.25 (/root/wayland-chanonb/crates/wcore-types)
+   Compiling nom v8.0.0
+   Compiling webpki-roots v0.26.11
+   Compiling pem v3.0.6
+   Compiling base64 v0.13.1
+   Compiling hex v0.4.3
+   Compiling email_address v0.2.9
+   Compiling imap-proto v0.10.2
+   Compiling quoted_printable v0.5.2
+   Compiling bufstream v0.1.4
+   Compiling lazy_static v1.5.0
+   Compiling httpdate v1.0.3
+   Compiling simple_asn1 v0.6.4
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling signature v2.2.0
+   Compiling regex v1.12.3
+   Compiling tower-http v0.6.11
+   Compiling wcore-compact v0.12.25 (/root/wayland-chanonb/crates/wcore-compact)
+   Compiling imap v2.4.1
+   Compiling rustls-webpki v0.103.13
+   Compiling tokio-rustls v0.26.4
+   Compiling tungstenite v0.24.0
+   Compiling hyper-rustls v0.27.9
+   Compiling lettre v0.11.22
+   Compiling reqwest v0.12.28
+   Compiling tokio-tungstenite v0.24.0
+   Compiling wcore-config v0.12.25 (/root/wayland-chanonb/crates/wcore-config)
+   Compiling wcore-egress v0.12.25 (/root/wayland-chanonb/crates/wcore-egress)
+   Compiling jsonwebtoken v10.3.0
+   Compiling wcore-channels v0.12.25 (/root/wayland-chanonb/crates/wcore-channels)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-slack)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-discord)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-signal)
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-sms)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-msteams)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-telegram)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-matrix)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-email)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-chanonb/crates/wcore-channels-registry)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.71s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (target/debug/deps/wcore_channels_registry-e8cb74f27df9eb25)
+
+running 13 tests
+test tests::factory_lookup_covers_all_seven_platforms ... ok
+test tests::factory_lookup_returns_none_for_unknown ... ok
+test tests::factory_lookup_covers_w7m_platforms ... ok
+test tests::auto_register_missing_dir_returns_zero ... ok
+test tests::whatsapp_bridge_config_requires_a_bridge_path ... ok
+test tests::auto_register_empty_dir_returns_zero ... ok
+test tests::disabled_channels_are_skipped ... ok
+test tests::whatsapp_backend_selector_routes_and_rejects ... ok
+test tests::scan_summaries_reports_status_and_never_leaks_secret_values ... ok
+test tests::malformed_toml_is_skipped_not_fatal ... ok
+test tests::non_toml_files_skipped ... ok
+test tests::unknown_platform_is_skipped_not_fatal ... ok
+test tests::auto_register_three_configs_registers_three ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/channels_doc_configs_load.rs (target/debug/deps/channels_doc_configs_load-0db1ad9f17c62297)
+
+running 9 tests
+test the_checker_rejects_a_document_with_no_complete_configs_at_all ... ok
+test the_extractor_ignores_fenced_blocks_without_the_path_marker ... ok
+test the_extractor_finds_the_documented_configs ... ok
+test the_checker_rejects_a_block_missing_a_platform_option ... ok
+test the_checker_rejects_a_block_missing_a_channelconfig_field ... ok
+test the_checker_rejects_a_documented_legacy_secrets_table ... ok
+test the_checker_rejects_a_name_that_does_not_match_the_stem ... ok
+test the_checker_passes_a_hand_written_correct_document ... ok
+test every_documented_channel_config_loads_and_constructs ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/delivery_semantics_declaration.rs (target/debug/deps/delivery_semantics_declaration-ded4e6da12bb8a42)
+
+running 8 tests
+test the_prose_table_agrees_with_the_machine_readable_block ... ok
+test the_recurrence_section_keeps_its_measurement_and_its_correction ... ok
+test comparator_rejects_a_missing_row ... ok
+test declaration_matches_every_adapter ... ok
+test comparator_rejects_a_downgraded_row ... ok
+test comparator_rejects_a_row_for_an_adapter_that_does_not_exist ... ok
+test exactly_one_adapter_is_exactly_once ... ok
+test comparator_rejects_a_flipped_row ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/identity_at_the_sink.rs (target/debug/deps/identity_at_the_sink-931fce02985429f0)
+
+running 1 test
+test twilio_and_whatsapp_arrivals_now_carry_a_delivery_identity ... ignored, shells out to node to run the journey's own classifier
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/live_discord_actions.rs (target/debug/deps/live_discord_actions-d4818d2f0b6403da)
+
+running 2 tests
+test live_edit_and_delete_against_real_discord ... ignored, contacts real Discord and posts real messages
+test live_edit_leaves_changed_content_for_an_external_observer ... ignored, contacts real Discord and leaves a message behind for external corroboration
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/live_slack_actions.rs (target/debug/deps/live_slack_actions-9e8cb1716cc42277)
+
+running 1 test
+test five_message_actions_against_the_real_slack_api ... ignored, live: posts to and deletes from a real Slack workspace; run with --ignored
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/live_twilio_whatsapp_identity.rs (target/debug/deps/live_twilio_whatsapp_identity-5cd006176b9cd0cc)
+
+running 3 tests
+test live_replay_at_real_meta ... ignored, contacts real Meta Graph and sends a real WhatsApp message
+test live_replay_at_real_twilio ... ignored, contacts real Twilio and sends real, billable SMS
+test arrival_count_is_a_number ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/matrix_live_room.rs (target/debug/deps/matrix_live_room-fac0d09bae07714f)
+
+running 3 tests
+test matrix_edit_and_delete_against_a_real_room ... ignored, live: drives a real Matrix homeserver; requires MATRIX_* configuration
+test matrix_inbound_reaches_the_product_from_a_real_room ... ignored, live: drives a real Matrix homeserver; requires MATRIX_* configuration
+test the_derived_transaction_id_is_a_pure_function_of_the_delivery_key ... ok
+
+test result: ok. 1 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/native_action_matrix.rs (target/debug/deps/native_action_matrix-e37e08a984045bd7)
+
+running 3 tests
+test the_matrix_assertion_can_itself_fail_in_both_directions ... ok
+test the_matrix_covers_every_platform_the_registry_knows ... ok
+test every_adapter_behaves_the_way_it_declares ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/readme_live_evidence_agreement.rs (target/debug/deps/readme_live_evidence_agreement-cc0a9bacba5c98b6)
+
+running 6 tests
+test the_comparator_rejects_a_readme_with_no_claim ... ok
+test the_readme_agrees_with_the_enforced_delivery_semantics ... ok
+test the_comparator_rejects_a_platform_on_the_wrong_side ... ok
+test the_comparator_rejects_a_dropped_link ... ok
+test the_comparator_rejects_a_stale_count ... ok
+test the_comparator_passes_when_a_seventh_row_becomes_measured ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wcore_channels_registry
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+REGISTRY_RC=0
+
+   Compiling wcore-channels v0.12.25 (/root/wayland-chanonb/crates/wcore-channels)
+   Compiling wcore-cli v0.12.25 (/root/wayland-chanonb/crates/wcore-cli)
+   Compiling wcore-channel-signal v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-signal)
+   Compiling wcore-channel-matrix v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-matrix)
+   Compiling wcore-channel-telegram v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-telegram)
+   Compiling wcore-channel-slack v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-slack)
+   Compiling wcore-channel-sms v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-sms)
+   Compiling wcore-channel-email v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-email)
+   Compiling wcore-channel-msteams v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-msteams)
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-whatsapp)
+   Compiling wcore-channel-discord v0.12.25 (/root/wayland-chanonb/crates/wcore-channel-discord)
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-chanonb/crates/wcore-channels-registry)
+   Compiling wcore-agent v0.12.25 (/root/wayland-chanonb/crates/wcore-agent)
+    Finished `release` profile [optimized] target(s) in 4m 50s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+CLI_BUILD_RC=0

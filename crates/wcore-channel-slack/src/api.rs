@@ -55,6 +55,103 @@ const PERMANENT_ERROR_CODES: &[&str] = &[
 /// Initial base for exponential backoff (jittered ±25%).
 const BACKOFF_BASE_MS: u64 = 250;
 
+/// Slack `ok:false` codes that mean **the credential itself was refused**, as
+/// opposed to the request being wrong.
+///
+/// The distinction is the operator's next action: these say "rotate or
+/// re-scope the token", everything else says "fix the call". `account_inactive`
+/// belongs here because a deactivated bot user cannot be recovered by retrying
+/// — the token must be reissued against a live account.
+pub fn is_auth_rejection(code: &str) -> bool {
+    matches!(
+        code,
+        "invalid_auth" | "not_authed" | "token_revoked" | "token_expired" | "account_inactive"
+    )
+}
+
+/// `auth.test` response. Slack echoes the authenticated identity on success
+/// and `{"ok": false, "error": "invalid_auth"}` on a rejected token.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthTestResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub team: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Ask Slack whether this bot token is live, **without sending a message**.
+///
+/// # Why this exists
+///
+/// Slack inbound is webhook-driven, so this adapter has no long-lived
+/// connection the platform can reject and no poll that would ever notice a
+/// refusal. Before this call, `start()` resolved the token out of the
+/// credential store and declared the channel connected — a REJECTED token and
+/// a good one produced byte-identical behaviour, and health read `Healthy`
+/// until somebody tried to send. `auth.test` is the one Slack surface that
+/// answers the credential question and puts no traffic on a channel.
+///
+/// # Error mapping is deliberately three-way
+///
+/// - [`SlackError::Auth`] — the platform refused the credential. Actionable,
+///   and the only variant callers may turn into `Unauthenticated`.
+/// - [`SlackError::Http`] — Slack could not be reached, or answered 5xx. This
+///   is NOT a verdict on the credential; treating it as one would flip a
+///   healthy channel to "rotate your token" on every network blip.
+/// - [`SlackError::Api`] / [`SlackError::MalformedPayload`] — Slack answered,
+///   but with something this function cannot interpret as either verdict.
+///
+/// On success returns the authenticated identity (`"<user_id>/<team>"`), never
+/// the token.
+pub async fn auth_test(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+) -> Result<String, SlackError> {
+    let url = format!("{}/api/auth.test", api_base.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .bearer_auth(bot_token)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await
+        .map_err(|e| SlackError::Http(format!("auth.test send error: {e}")))?;
+
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return Err(SlackError::Auth(format!("HTTP {}", status.as_u16())));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        // 5xx and friends are reachability, not a credential verdict.
+        return Err(SlackError::Http(format!(
+            "auth.test HTTP {}: {body}",
+            status.as_u16()
+        )));
+    }
+
+    let parsed: AuthTestResponse = resp
+        .json()
+        .await
+        .map_err(|e| SlackError::MalformedPayload(format!("decode auth.test response: {e}")))?;
+    if !parsed.ok {
+        let code = parsed.error.unwrap_or_else(|| "unknown".to_string());
+        if is_auth_rejection(&code) {
+            return Err(SlackError::Auth(code));
+        }
+        return Err(SlackError::Api(code));
+    }
+
+    Ok(format!(
+        "{}/{}",
+        parsed.user_id.as_deref().unwrap_or("unknown-user"),
+        parsed.team.as_deref().unwrap_or("unknown-team")
+    ))
+}
+
 /// Send `chat.postMessage` with retry. Returns the response on first
 /// success; on permanent failure returns the first non-retryable error.
 pub async fn post_message(
@@ -64,17 +161,45 @@ pub async fn post_message(
     req: &PostMessageRequest,
     max_attempts: u32,
 ) -> Result<PostMessageResponse, SlackError> {
+    post_message_keyed(http, api_base, bot_token, req, max_attempts, None).await
+}
+
+/// Header carrying the delivery ledger's stable idempotency key.
+///
+/// The de-facto standard spelling (Stripe, and every API that copied it). It is
+/// inert against real Slack, which ignores unknown request headers — so this
+/// adds nothing to the production wire beyond one header, and gives a
+/// destination that DOES honour it everything it needs to collapse a replay
+/// into one message.
+pub const IDEMPOTENCY_HEADER: &str = "Idempotency-Key";
+
+/// [`post_message`] carrying an idempotency key the destination may use to
+/// recognise a retry of the same logical delivery.
+///
+/// Note the key is attached OUTSIDE the retry loop and is identical on every
+/// attempt. That is the point: the internal retries here and the gateway's
+/// cross-restart retry must present the same key, or the destination sees two
+/// different deliveries and the guarantee is gone precisely when it matters.
+pub async fn post_message_keyed(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &PostMessageRequest,
+    max_attempts: u32,
+    idempotency_key: Option<&str>,
+) -> Result<PostMessageResponse, SlackError> {
     let url = format!("{}/api/chat.postMessage", api_base.trim_end_matches('/'));
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=max_attempts {
-        let resp = http
+        let mut builder = http
             .post(&url)
             .bearer_auth(bot_token)
-            .header("Content-Type", "application/json; charset=utf-8")
-            .json(req)
-            .send()
-            .await;
+            .header("Content-Type", "application/json; charset=utf-8");
+        if let Some(k) = idempotency_key {
+            builder = builder.header(IDEMPOTENCY_HEADER, k);
+        }
+        let resp = builder.json(req).send().await;
 
         let resp = match resp {
             Ok(r) => r,
@@ -134,14 +259,15 @@ pub async fn post_message(
                 .error
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
+            // Credential verdict FIRST, and through the one classifier — a
+            // hand-rolled list here is how `account_inactive` came to be an
+            // `Api` error on this path while `is_auth_rejection` called it a
+            // credential rejection, so a deactivated bot user published no
+            // `AuthExpired` and health read Healthy.
+            if is_auth_rejection(&code) {
+                return Err(SlackError::Auth(code));
+            }
             if PERMANENT_ERROR_CODES.contains(&code.as_str()) {
-                if code == "invalid_auth"
-                    || code == "not_authed"
-                    || code == "token_revoked"
-                    || code == "token_expired"
-                {
-                    return Err(SlackError::Auth(code));
-                }
                 return Err(SlackError::Api(code));
             }
             // Unknown ok:false code — treat as terminal API error (don't
@@ -264,15 +390,132 @@ pub async fn add_reaction(
         if code == "already_reacted" {
             return Ok(());
         }
-        if matches!(
-            code.as_str(),
-            "invalid_auth" | "not_authed" | "token_revoked" | "token_expired"
-        ) {
+        if is_auth_rejection(&code) {
             return Err(SlackError::Auth(code));
         }
         return Err(SlackError::Api(code));
     }
     Ok(())
+}
+
+/// `chat.update` request body. Slack identifies the target message by
+/// `channel` + `ts` — the same pair `reactions.add` uses, and the same `ts`
+/// [`post_message`] returns in its receipt, so an edit is addressable directly
+/// from a send's own receipt with nothing else stored.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateMessageRequest {
+    pub channel: String,
+    pub ts: String,
+    pub text: String,
+}
+
+/// `chat.delete` request body.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteMessageRequest {
+    pub channel: String,
+    pub ts: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MutateMessageResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub ts: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Slack error codes for `chat.update` / `chat.delete` that mean **the target
+/// is not there / not ours**.
+///
+/// These are surfaced as [`SlackError::Api`] and are NOT retried. They are
+/// listed explicitly rather than folded into "any `ok:false`" because an
+/// operator seeing `message_not_found` should stop, and one seeing a transport
+/// blip should not — the two must not render the same.
+const MUTATE_TERMINAL_CODES: &[&str] = &[
+    "message_not_found",
+    "cant_update_message",
+    "cant_delete_message",
+    "edit_window_closed",
+    "channel_not_found",
+    "is_archived",
+    "msg_too_long",
+];
+
+/// Shared `ok:true`-envelope POST for the two mutate verbs.
+///
+/// Single attempt, deliberately. `post_message` retries because a lost send is
+/// a lost message; an edit or a delete that fails is visible to the caller and
+/// re-issuable by them, and a blind retry of a delete against a platform with
+/// no idempotency slot is how one delete becomes two API errors in the log.
+async fn post_mutate<B: Serialize + ?Sized>(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    method: &str,
+    body: &B,
+) -> Result<MutateMessageResponse, SlackError> {
+    let url = format!("{}/api/{method}", api_base.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .bearer_auth(bot_token)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| SlackError::Api(format!("send error: {e}")))?;
+
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SlackError::Auth(format!(
+            "HTTP {}: {body}",
+            status.as_u16()
+        )));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SlackError::Api(format!("HTTP {}: {body}", status.as_u16())));
+    }
+
+    let parsed: MutateMessageResponse = resp
+        .json()
+        .await
+        .map_err(|e| SlackError::MalformedPayload(format!("decode {method} response: {e}")))?;
+
+    if !parsed.ok {
+        let code = parsed.error.unwrap_or_else(|| "unknown".to_string());
+        if is_auth_rejection(&code) {
+            return Err(SlackError::Auth(code));
+        }
+        // Terminal or unknown — either way this is not retried here; the
+        // distinction is preserved in the message the operator reads.
+        let _ = MUTATE_TERMINAL_CODES.contains(&code.as_str());
+        return Err(SlackError::Api(code));
+    }
+    Ok(parsed)
+}
+
+/// Edit an already-sent message via `POST /api/chat.update`.
+pub async fn update_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &UpdateMessageRequest,
+) -> Result<MutateMessageResponse, SlackError> {
+    post_mutate(http, api_base, bot_token, "chat.update", req).await
+}
+
+/// Delete an already-sent message via `POST /api/chat.delete`.
+pub async fn delete_message(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &DeleteMessageRequest,
+) -> Result<MutateMessageResponse, SlackError> {
+    post_mutate(http, api_base, bot_token, "chat.delete", req).await
 }
 
 /// Slack file-download hosts. `url_private` arrives inside an inbound event
@@ -323,8 +566,9 @@ pub async fn download_file(
     }
     // Bounded streamed read so a file response with no/forged Content-Length
     // can't OOM the process (defense-in-depth atop the files.slack host check).
-    const MAX_MEDIA_BYTES: usize = 100 * 1024 * 1024;
-    let bytes = wcore_egress::read_body_capped(resp, MAX_MEDIA_BYTES)
+    // The cap is the adapter's DECLARED bound, not a second hardcoded number.
+    let max_bytes = usize::try_from(crate::MEDIA_BOUNDS.max_bytes).unwrap_or(usize::MAX);
+    let bytes = wcore_egress::read_body_capped(resp, max_bytes)
         .await
         .map_err(|e| SlackError::Api(format!("media body read: {e}")))?;
     Ok(bytes)
@@ -450,6 +694,183 @@ mod reaction_tests {
             "http://169.254.169.254/latest/meta-data/",
             "xoxb-secret",
             MEDIA_HOSTS,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, SlackError::Api(_)), "got {err:?}");
+    }
+}
+
+/// Every `ok:false` site must agree with [`is_auth_rejection`] about what a
+/// credential rejection is.
+///
+/// `HealthState::Unauthenticated` has exactly one Slack producer on a running
+/// gateway: an outbound call returning [`SlackError::Auth`], which
+/// `SlackChannel::post` turns into `ChannelEvent::AuthExpired`. A site that
+/// answers `SlackError::Api` for a credential code silently drops that
+/// producer, and the channel keeps reading `Healthy` while holding a refused
+/// token — the whole defect. That is not hypothetical: `account_inactive` was
+/// listed in `is_auth_rejection` (with a comment explaining why it belongs)
+/// and omitted from all three hand-rolled lists, so a bot user deactivated by
+/// a Slack admin was classified as an ordinary API error.
+///
+/// These tests iterate the classifier's own codes rather than restating a
+/// list, so adding a code to `is_auth_rejection` and forgetting a call site
+/// reddens here instead of shipping.
+#[cfg(test)]
+mod auth_classification_tests {
+    use super::*;
+
+    /// The codes `is_auth_rejection` accepts. Kept adjacent to the function so
+    /// the assertion below fails loudly if the two ever diverge.
+    const CREDENTIAL_CODES: &[&str] = &[
+        "invalid_auth",
+        "not_authed",
+        "token_revoked",
+        "token_expired",
+        "account_inactive",
+    ];
+
+    #[test]
+    fn the_classifier_and_this_fixture_agree() {
+        for code in CREDENTIAL_CODES {
+            assert!(is_auth_rejection(code), "{code} must be a credential code");
+        }
+        // Negative control — without this the fixture could be a list of
+        // strings the classifier accepts unconditionally.
+        for code in [
+            "channel_not_found",
+            "msg_too_long",
+            "is_archived",
+            "unknown",
+        ] {
+            assert!(
+                !is_auth_rejection(code),
+                "{code} is a request fault, not a credential verdict"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_credential_code_is_auth_on_chat_post_message() {
+        for code in CREDENTIAL_CODES {
+            let mut server = mockito::Server::new_async().await;
+            let _m = server
+                .mock("POST", "/api/chat.postMessage")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(format!(r#"{{"ok":false,"error":"{code}"}}"#))
+                .create_async()
+                .await;
+            let http = wcore_egress::EgressClient::new();
+            let err = post_message(
+                &http,
+                &server.url(),
+                "xoxb-tok",
+                &PostMessageRequest {
+                    channel: "C1".to_string(),
+                    text: "hi".to_string(),
+                    thread_ts: None,
+                },
+                1,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, SlackError::Auth(_)),
+                "chat.postMessage classified {code} as {err:?}, so no AuthExpired \
+                 is published and health stays Healthy on a refused token"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_credential_code_is_auth_on_reactions_add() {
+        for code in CREDENTIAL_CODES {
+            let mut server = mockito::Server::new_async().await;
+            let _m = server
+                .mock("POST", "/api/reactions.add")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(format!(r#"{{"ok":false,"error":"{code}"}}"#))
+                .create_async()
+                .await;
+            let http = wcore_egress::EgressClient::new();
+            let err = add_reaction(
+                &http,
+                &server.url(),
+                "xoxb-tok",
+                &AddReactionRequest {
+                    channel: "C123".to_string(),
+                    timestamp: "1234.5678".to_string(),
+                    name: "eyes".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, SlackError::Auth(_)),
+                "reactions.add classified {code} as {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_credential_code_is_auth_on_chat_update() {
+        for code in CREDENTIAL_CODES {
+            let mut server = mockito::Server::new_async().await;
+            let _m = server
+                .mock("POST", "/api/chat.update")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(format!(r#"{{"ok":false,"error":"{code}"}}"#))
+                .create_async()
+                .await;
+            let http = wcore_egress::EgressClient::new();
+            let err = update_message(
+                &http,
+                &server.url(),
+                "xoxb-tok",
+                &UpdateMessageRequest {
+                    channel: "C1".to_string(),
+                    ts: "1234.5678".to_string(),
+                    text: "edited".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(err, SlackError::Auth(_)),
+                "chat.update classified {code} as {err:?}"
+            );
+        }
+    }
+
+    /// The classification must still be able to say "not a credential problem".
+    /// A site that returned `Auth` for everything would pass the three tests
+    /// above and would flip a healthy channel to "rotate your token" the first
+    /// time somebody posted to an archived channel.
+    #[tokio::test]
+    async fn a_request_fault_is_not_a_credential_verdict() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/chat.postMessage")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error":"channel_not_found"}"#)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        let err = post_message(
+            &http,
+            &server.url(),
+            "xoxb-tok",
+            &PostMessageRequest {
+                channel: "C-nope".to_string(),
+                text: "hi".to_string(),
+                thread_ts: None,
+            },
+            1,
         )
         .await
         .unwrap_err();

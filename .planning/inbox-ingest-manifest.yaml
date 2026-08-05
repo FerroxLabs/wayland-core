@@ -1,0 +1,17 @@
+# Manifest for the 2026-07-23 master-handoff consolidation (Frontier Candidate v2).
+# The inbox docs do not match ingest auto-discovery conventions, so they are
+# listed explicitly. Merge into the existing accepted .planning/ corpus —
+# never overwrite F00-F19 or 20-01..20-16 history.
+docs:
+  # The current-blocker repair spec (verified defect inventory + requirements R1-R12 + acceptance).
+  - path: .planning/inbox/native-uat-repair-BRIEF.md
+    type: SPEC
+    precedence: 0
+  # Whole-program consolidation: parity thesis, live state, phase map F20-F30, controls, document map.
+  - path: .planning/inbox/MASTER-HANDOFF-frontier-v2-PROGRAM.md
+    type: DOC
+    precedence: 1
+  # Phase-20 detail map: everything done/to-do/remaining for the current phase.
+  - path: .planning/inbox/MASTER-HANDOFF-phase20-native-parity.md
+    type: DOC
+    precedence: 2

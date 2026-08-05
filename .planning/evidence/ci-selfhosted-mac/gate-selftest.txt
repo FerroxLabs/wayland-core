@@ -1,0 +1,43 @@
+=== ARM 0: unmutated workflow (MUST pass) ===
+  ok   lane push, no token            self-hosted=True
+  ok   lane push, [ci-darwin]         self-hosted=False
+  ok   lane push, [ci-macos] alias    self-hosted=False
+  ok   lane push, UPPERCASE token     self-hosted=False
+  ok   lane push, token not on tip    self-hosted=False
+  ok   lane push, hostile message     self-hosted=True
+  ok   main push                      self-hosted=False
+  ok   integration push               self-hosted=False
+  ok   PULL_REQUEST (fork safety)     self-hosted=False
+  ok   PULL_REQUEST w/ lane-shaped ref self-hosted=False
+  ok   lane-ish decoy 'lanes/x'       self-hosted=False
+GATE_FAILURES=0
+
+=== ARM: drop the [ci-darwin] mutual exclusion (artifact 409) (MUST fail) ===
+GATE_FAILURES=4
+  FAIL case 'lane push, [ci-darwin]': self-hosted runs=True expected=False
+  FAIL case 'lane push, [ci-macos] alias': self-hosted runs=True expected=False
+  FAIL case 'lane push, UPPERCASE token': self-hosted runs=True expected=False
+  FAIL case 'lane push, token not on tip': self-hosted runs=True expected=False
+  (naive matcher PASSES this mutation — real gate caught what it would have missed)
+
+=== ARM: allow pull_request (fork code on a personal Mac) (MUST fail) ===
+GATE_FAILURES=1
+  FAIL case 'PULL_REQUEST w/ lane-shaped ref': self-hosted runs=True expected=False
+  (naive matcher PASSES this mutation — real gate caught what it would have missed)
+
+=== ARM: retarget to the hosted pool (MUST fail) ===
+GATE_FAILURES=1
+  FAIL runs-on is 'macos-latest', expected ['self-hosted', 'macOS', 'ARM64']
+  (naive matcher PASSES this mutation — real gate caught what it would have missed)
+
+=== ARM: drop concurrency coalescing (pile-up on the owner's laptop) (MUST fail) ===
+GATE_FAILURES=1
+  FAIL concurrency.cancel-in-progress is not true -> superseded builds are not coalesced
+  (naive matcher PASSES this mutation — real gate caught what it would have missed)
+
+=== ARM: make the Rosetta arch assertion non-fatal (MUST fail) ===
+GATE_FAILURES=1
+  FAIL the uname-mismatch branch does not exit non-zero -> a Rosetta/x64 runner would still build and upload a mislabelled arm64 artifact
+  (naive matcher PASSES this mutation — real gate caught what it would have missed)
+
+SELF_TEST=PASS

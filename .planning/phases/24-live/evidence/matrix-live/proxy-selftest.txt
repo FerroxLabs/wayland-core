@@ -1,0 +1,12 @@
+  ok   redact drops authorization
+  ok   redact keeps content-type (known-positive: it is not dropping everything)
+  ok   no serialization of a redacted header set contains the token
+  ok   the UNREDACTED header set WOULD have leaked it (the repair does something)
+  ok   send txnId extracted
+  ok   redact txnId extracted and NOT confused with the event id
+  ok   known-negative: /sync is not a txn route
+  ok   known-negative: a truncated send path yields null
+  ok   stall targets a send PUT
+  ok   stall does NOT target a redact PUT
+  ok   stall does NOT target a GET /sync
+SELFTEST PASS passed=11 failed=0

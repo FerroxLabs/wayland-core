@@ -1,0 +1,42 @@
+=== SNAPSHOT at 30471 bytes, 120x40 ===
+
+  ◆ WAYLAND   Workspace   Sub-Agents   Plan   Config   Diagnostics   Workflows
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▌ Use the Write tool to create a file named uat-deny.txt in the current         ┌ Activity ──────────────────────┐
+   directory containing exactly SHOULD_NOT_EXIST                                   │ ⊘ Pending(1)  press y          │
+                                                                                   │ awaiting Write · D:\lane-…     │
+   ⚙ Pricing unavailable for flux-router/flux-standard; the call remains bounded   │ Pricing unavailable for f…     │
+   by the token envelope and cost is unpriced, not $0.                             │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+   ─────────────────────────────────────────────────────────────────────────────── │                                │
+    ⬇ Write uat-deny.txt  uat-deny.txt                                             │                                │
+    + SHOULD_NOT_EXIST                                                             │                                │
+                                                                                   │                                │
+    [enter/y] approve   [a] always for this tool   [n] deny   [esc] cancel         │                                │
+   [ctrl+f] expand                                                                 │                                │
+                                                                                   │                                │
+     thinking…                                                                     │                                │
+     The user wants me to create a file named "uat-deny.txt" in the current        │                                │
+   working directory with the content "SHOULD_NOT_EXIST".                          │                                │
+     ⊘ Awaiting your approval: Write                                               │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                                   │                                │
+                                                                 ↓ jump to latest  └────────────────────────────────┘
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  › type / for commands
+
+  ⊘ press [y] approve · [a] always · [n] deny · [esc] cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   flux-standard │ Smart  · Default  · STRICT REPO │ ctx                        0% │ — │ 18s
+
+=== CURSOR x=4 y=34 hidden=False ===

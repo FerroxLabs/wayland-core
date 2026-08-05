@@ -1,0 +1,8 @@
+verdict=EXACTLY-ONCE-VIOLATED 1 deliveries arrived under a delivery identity that had already been delivered. This is the real duplicate — the destination received one (job, scheduled instant) pair more than once
+  submitted=12 arrived=24 unique=12 duplicates=12 losses=0
+  replays=1 (same delivery identity twice — a real exactly-once violation)
+  recurrences=11 (same body, DIFFERENT identity — the trigger fired again; not a duplicate)
+  indeterminate=0 (repeat with no identity to judge by; counted AGAINST the run)
+  unidentified_arrivals=0 at endpoint(s) (none)
+step-13 reconcile had read arrived=24 duplicates=12; 0 arrival(s) landed after it.
+The receipt was written and records the true final counts.

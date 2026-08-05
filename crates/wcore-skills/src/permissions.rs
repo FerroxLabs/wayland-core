@@ -1,4 +1,5 @@
-use crate::types::SkillMetadata;
+use crate::types::{ExecutionContext, SkillMetadata, SkillSource};
+use std::path::PathBuf;
 
 /// A parsed permission rule for skill name matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +39,9 @@ pub enum SkillPermission {
     Allow,
     /// Skill is denied by configuration (always blocks, even with auto_approve).
     Deny,
+    /// Executable repository content is not eligible until its fingerprint is
+    /// trusted outside the repository. Carries an actionable operator remedy.
+    Inert { reason: String },
     /// Skill requires user confirmation before execution.
     Ask { reason: String },
 }
@@ -47,7 +51,7 @@ pub enum SkillPermission {
 /// Decision chain (evaluated in order):
 /// 1. deny rules  → `Deny`  (always enforced, even when `auto_approve = true`)
 /// 2. allow rules → `Allow`
-/// 3. safe-properties: `hooks_raw.is_none() && allowed_tools.is_empty()` → `Allow`
+/// 3. safe-properties: inline with no hooks, overrides, artifacts, or shell → `Allow`
 /// 4. `auto_approve` flag → `Allow` (converts what would be `Ask` into `Allow`)
 /// 5. fallback → `Ask { reason }`
 pub struct SkillPermissionChecker {
@@ -55,6 +59,20 @@ pub struct SkillPermissionChecker {
     allow_rules: Vec<PermissionRule>,
     /// When true, Step 4 converts Ask → Allow (but does not bypass Deny).
     auto_approve: bool,
+    /// Independently resolved workspace trust. Project/legacy skills with
+    /// executable capabilities stay inert while false; repository allow rules
+    /// and auto-approval cannot override it.
+    project_execution_trusted: bool,
+    /// Fingerprint captured when the workspace trust decision was resolved.
+    /// Executable project skills are re-fingerprinted at invocation so a
+    /// long-lived session cannot execute repository content changed after the
+    /// operator's decision.
+    project_execution_snapshot: Option<ProjectExecutionSnapshot>,
+}
+
+struct ProjectExecutionSnapshot {
+    workspace: PathBuf,
+    fingerprint: String,
 }
 
 impl SkillPermissionChecker {
@@ -64,11 +82,59 @@ impl SkillPermissionChecker {
             deny_rules: deny.iter().map(|s| PermissionRule::parse(s)).collect(),
             allow_rules: allow.iter().map(|s| PermissionRule::parse(s)).collect(),
             auto_approve,
+            project_execution_trusted: false,
+            project_execution_snapshot: None,
         }
+    }
+
+    pub fn with_project_execution_trust(mut self, trusted: bool) -> Self {
+        self.project_execution_trusted = trusted;
+        self.project_execution_snapshot = None;
+        self
+    }
+
+    /// Bind executable project-skill eligibility to the exact workspace
+    /// fingerprint that was trusted at bootstrap.
+    pub fn with_project_execution_trust_snapshot(
+        mut self,
+        workspace: impl Into<PathBuf>,
+        trust: &wcore_types::workspace_trust::EffectiveWorkspaceTrust,
+    ) -> Self {
+        self.project_execution_trusted = trust.is_trusted();
+        self.project_execution_snapshot = trust.is_trusted().then(|| ProjectExecutionSnapshot {
+            workspace: workspace.into(),
+            fingerprint: trust.fingerprint().to_string(),
+        });
+        self
+    }
+
+    fn project_execution_trust_is_current(&self) -> bool {
+        if !self.project_execution_trusted {
+            return false;
+        }
+        let Some(snapshot) = self.project_execution_snapshot.as_ref() else {
+            return true;
+        };
+        wcore_config::workspace_trust::fingerprint_workspace(&snapshot.workspace)
+            .is_ok_and(|current| current.digest == snapshot.fingerprint)
     }
 
     /// Run the 5-step permission decision chain.
     pub fn check(&self, skill: &SkillMetadata) -> SkillPermission {
+        self.check_with_auto_approve(skill, self.auto_approve)
+    }
+
+    /// Run the permission chain with invocation-time approval authority.
+    ///
+    /// Host-backed callers use this instead of the launch-time snapshot held
+    /// by the compatibility [`check`](Self::check) API. This keeps a live
+    /// Force-to-Default transition authoritative for already-built skill
+    /// tools and cron closures.
+    pub fn check_with_auto_approve(
+        &self,
+        skill: &SkillMetadata,
+        auto_approve: bool,
+    ) -> SkillPermission {
         let name = &skill.name;
 
         // Step 1: deny rules always win.
@@ -76,21 +142,30 @@ impl SkillPermissionChecker {
             return SkillPermission::Deny;
         }
 
+        let is_safe = skill_is_prompt_only(skill);
+        if matches!(skill.source, SkillSource::Project | SkillSource::Legacy)
+            && !self.project_execution_trust_is_current()
+            && !is_safe
+        {
+            return SkillPermission::Inert {
+                reason: "project skill has executable capabilities but the current repository fingerprint is not trusted or has changed; review it and relaunch with --trust-workspace".to_string(),
+            };
+        }
+
         // Step 2: explicit allow.
         if self.allow_rules.iter().any(|r| r.matches(name)) {
             return SkillPermission::Allow;
         }
 
-        // Step 3: safe-properties.
-        // Note: hooks_raw is Option<serde_json::Value> (None check),
-        // allowed_tools is Vec<String> (is_empty check). The two differ by design.
-        let is_safe = skill.hooks_raw.is_none() && skill.allowed_tools.is_empty();
+        // Step 3: safe-properties. `Skill` itself is present in the default
+        // tool allow-list, so this resolved-skill check is the authority
+        // boundary for every capability hidden behind that single tool name.
         if is_safe {
             return SkillPermission::Allow;
         }
 
         // Step 4: auto_approve converts Ask → Allow.
-        if self.auto_approve {
+        if auto_approve {
             return SkillPermission::Allow;
         }
 
@@ -100,27 +175,51 @@ impl SkillPermissionChecker {
     }
 }
 
+pub(crate) fn skill_is_prompt_only(skill: &SkillMetadata) -> bool {
+    skill.hooks_raw.is_none()
+        && skill.allowed_tools.is_empty()
+        && skill.artifacts.is_empty()
+        && skill.execution_context == ExecutionContext::Inline
+        && skill.model.is_none()
+        && skill.effort.is_none()
+        && skill.shell.is_none()
+        && !crate::shell::contains_shell_commands(&skill.content, skill.loaded_from)
+}
+
 /// Build a human-readable reason string for why a skill needs confirmation.
 fn build_ask_reason(skill: &SkillMetadata) -> String {
-    match (skill.hooks_raw.is_some(), !skill.allowed_tools.is_empty()) {
-        (true, true) => format!(
-            "Skill '{}' declares hooks and allowed-tools which grant elevated privileges.",
-            skill.name
-        ),
-        (true, false) => format!(
-            "Skill '{}' declares hooks which may run arbitrary shell commands.",
-            skill.name
-        ),
-        (false, true) => format!(
-            "Skill '{}' declares allowed-tools ({}) which grant elevated tool access.",
-            skill.name,
-            skill.allowed_tools.join(", ")
-        ),
-        (false, false) => {
-            // Should not reach here (safe-properties would have allowed), but be defensive.
-            format!("Skill '{}' requires user approval.", skill.name)
-        }
+    let mut capabilities = Vec::new();
+    if skill.hooks_raw.is_some() {
+        capabilities.push("hooks".to_string());
     }
+    if !skill.allowed_tools.is_empty() {
+        capabilities.push(format!(
+            "allowed-tools ({})",
+            skill.allowed_tools.join(", ")
+        ));
+    }
+    if !skill.artifacts.is_empty() {
+        capabilities.push("artifact writes".to_string());
+    }
+    if skill.execution_context == ExecutionContext::Fork {
+        capabilities.push("forked agent execution".to_string());
+    }
+    if skill.model.is_some() {
+        capabilities.push("model override".to_string());
+    }
+    if skill.effort.is_some() {
+        capabilities.push("effort override".to_string());
+    }
+    if skill.shell.is_some()
+        || crate::shell::contains_shell_commands(&skill.content, skill.loaded_from)
+    {
+        capabilities.push("shell execution".to_string());
+    }
+    format!(
+        "Skill '{}' requests elevated capabilities: {}.",
+        skill.name,
+        capabilities.join(", ")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +338,74 @@ mod tests {
         assert!(matches!(checker.check(&skill), SkillPermission::Ask { .. }));
     }
 
+    #[test]
+    fn artifacts_and_shell_are_not_treated_as_read_only() {
+        let checker = SkillPermissionChecker::new(vec![], vec![], false);
+
+        let mut artifact = make_skill("artifact-writer");
+        artifact.artifacts.push(crate::types::ArtifactSpec {
+            path: "report.md".to_string(),
+            template: "generated".to_string(),
+        });
+        assert!(matches!(
+            checker.check(&artifact),
+            SkillPermission::Ask { .. }
+        ));
+
+        let mut declared_shell = make_skill("declared-shell");
+        declared_shell.shell = Some("bash".to_string());
+        assert!(matches!(
+            checker.check(&declared_shell),
+            SkillPermission::Ask { .. }
+        ));
+
+        let mut embedded_shell = make_skill("embedded-shell");
+        embedded_shell.content = "Collect: !`git status`".to_string();
+        assert!(matches!(
+            checker.check(&embedded_shell),
+            SkillPermission::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn fork_and_context_overrides_are_not_treated_as_read_only() {
+        let checker = SkillPermissionChecker::new(vec![], vec![], false);
+
+        let mut forked = make_skill("forked");
+        forked.execution_context = ExecutionContext::Fork;
+        let SkillPermission::Ask { reason } = checker.check(&forked) else {
+            panic!("forked skill should require approval");
+        };
+        assert!(reason.contains("forked agent execution"));
+
+        let mut model = make_skill("model-override");
+        model.model = Some("provider/model".to_string());
+        let SkillPermission::Ask { reason } = checker.check(&model) else {
+            panic!("model override should require approval");
+        };
+        assert!(reason.contains("model override"));
+
+        let mut effort = make_skill("effort-override");
+        effort.effort = Some(wcore_types::skill_types::EffortLevel::High);
+        let SkillPermission::Ask { reason } = checker.check(&effort) else {
+            panic!("effort override should require approval");
+        };
+        assert!(reason.contains("effort override"));
+    }
+
+    #[test]
+    fn invocation_authority_overrides_boot_snapshot() {
+        let mut skill = make_skill("hooked");
+        skill.hooks_raw = Some(serde_json::json!({ "pre": "echo hi" }));
+        let checker = SkillPermissionChecker::new(vec![], vec![], true);
+
+        assert_eq!(checker.check(&skill), SkillPermission::Allow);
+        assert!(matches!(
+            checker.check_with_auto_approve(&skill, false),
+            SkillPermission::Ask { .. }
+        ));
+    }
+
     // P5-9: no rule match + has hooks → Ask
     #[test]
     fn p5_9_no_match_with_hooks_ask() {
@@ -271,6 +438,62 @@ mod tests {
         assert_eq!(checker.check(&skill_hooked), SkillPermission::Allow);
         // denied skill: deny always wins
         assert_eq!(checker.check(&skill_denied), SkillPermission::Deny);
+    }
+
+    #[test]
+    fn untrusted_project_shell_skill_is_inert_even_when_allowed_and_auto_approved() {
+        let mut skill = make_skill("repo-shell");
+        skill.source = SkillSource::Project;
+        skill.shell = Some("bash".to_string());
+        let checker = SkillPermissionChecker::new(vec![], vec!["repo-shell".to_string()], true);
+
+        assert!(matches!(
+            checker.check(&skill),
+            SkillPermission::Inert { reason } if reason.contains("--trust-workspace")
+        ));
+        assert_eq!(
+            checker.with_project_execution_trust(true).check(&skill),
+            SkillPermission::Allow
+        );
+    }
+
+    #[test]
+    fn executable_project_skill_becomes_inert_when_trusted_surface_changes() {
+        use wcore_types::workspace_trust::{
+            AuthoritySource, WorkspaceTrustInput, resolve_workspace_trust,
+        };
+
+        let workspace = tempfile::tempdir().unwrap();
+        let config = workspace.path().join(".wayland-core.toml");
+        std::fs::write(&config, "[tools]\nauto_approve = false\n").unwrap();
+        let fingerprint =
+            wcore_config::workspace_trust::fingerprint_workspace(workspace.path()).unwrap();
+        let trust = resolve_workspace_trust(
+            fingerprint.digest,
+            [WorkspaceTrustInput::grant(AuthoritySource::User)],
+        );
+
+        let mut skill = make_skill("repo-shell");
+        skill.source = SkillSource::Project;
+        skill.shell = Some("bash".to_string());
+        let checker = SkillPermissionChecker::new(vec![], vec!["repo-shell".to_string()], true)
+            .with_project_execution_trust_snapshot(workspace.path(), &trust);
+        assert_eq!(checker.check(&skill), SkillPermission::Allow);
+
+        std::fs::write(&config, "[tools]\nauto_approve = true\n").unwrap();
+        assert!(matches!(
+            checker.check(&skill),
+            SkillPermission::Inert { reason } if reason.contains("has changed")
+        ));
+    }
+
+    #[test]
+    fn untrusted_project_prompt_only_skill_remains_useful() {
+        let mut skill = make_skill("repo-guidance");
+        skill.source = SkillSource::Project;
+        let checker = SkillPermissionChecker::new(vec![], vec![], false);
+
+        assert_eq!(checker.check(&skill), SkillPermission::Allow);
     }
 
     // P5-13: prefix boundary — "db:*" does not match "database"

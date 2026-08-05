@@ -19,7 +19,7 @@
 //!   "session_id": "...",
 //!   "total_cost_usd": 0.0123,
 //!   "per_turn": [
-//!     { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.008 },
+//!     { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.008, "priced": true },
 //!     ...
 //!   ]
 //! }
@@ -42,18 +42,23 @@ pub struct TurnCost {
     pub model: String,
     pub provider: String,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub priced: bool,
 }
 
 /// Parse a generic decoded JSON event into a [`CostReport`] when it's
 /// a `session_cost`. Returns `None` for any other event type.
 ///
 /// The runner reads stdout line-by-line as `serde_json::Value` and
-/// hands every event through here; the first matching event wins.
+/// hands every event through here; the runner retains the latest aggregate.
 pub fn parse(event: &Value) -> Option<CostReport> {
     if event.get("type").and_then(Value::as_str) != Some("session_cost") {
         return None;
     }
     let total_usd = event.get("total_cost_usd").and_then(Value::as_f64)?;
+    if !total_usd.is_finite() || total_usd < 0.0 {
+        return None;
+    }
     // `per_turn` is `Vec<TurnCost>` in the protocol and always serializes as
     // an array, but treat its absence as an empty breakdown rather than
     // dropping the whole (valid) `total_cost_usd` — a `session_cost` event
@@ -66,6 +71,10 @@ pub fn parse(event: &Value) -> Option<CostReport> {
         .unwrap_or_default();
     let mut per_turn = Vec::with_capacity(per_turn_json.len());
     for row in &per_turn_json {
+        let cost_usd = row.get("cost_usd").and_then(Value::as_f64)?;
+        if !cost_usd.is_finite() || cost_usd < 0.0 {
+            return None;
+        }
         let tc = TurnCost {
             turn: row.get("turn").and_then(Value::as_u64).unwrap_or(0) as usize,
             model: row
@@ -78,7 +87,8 @@ pub fn parse(event: &Value) -> Option<CostReport> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            cost_usd: row.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+            cost_usd,
+            priced: row.get("priced").and_then(Value::as_bool).unwrap_or(false),
         };
         per_turn.push(tc);
     }
@@ -100,7 +110,7 @@ mod tests {
             "session_id": "sess-1",
             "total_cost_usd": 0.0123,
             "per_turn": [
-                { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.0080 },
+                { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.0080, "priced": true },
                 { "turn": 1, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.0043 },
             ],
         });
@@ -110,6 +120,8 @@ mod tests {
         assert_eq!(cr.per_turn[0].turn, 0);
         assert_eq!(cr.per_turn[1].turn, 1);
         assert_eq!(cr.per_turn[0].provider, "openai");
+        assert!(cr.per_turn[0].priced);
+        assert!(!cr.per_turn[1].priced, "legacy rows default to unpriced");
     }
 
     #[test]
@@ -122,5 +134,27 @@ mod tests {
     fn parse_returns_none_for_non_object() {
         let ev = json!(42);
         assert!(parse(&ev).is_none());
+    }
+
+    #[test]
+    fn parse_rejects_negative_totals_and_rows() {
+        let negative_total = json!({
+            "type": "session_cost",
+            "total_cost_usd": -0.01,
+            "per_turn": [],
+        });
+        assert!(parse(&negative_total).is_none());
+
+        let negative_row = json!({
+            "type": "session_cost",
+            "total_cost_usd": 0.01,
+            "per_turn": [{
+                "turn": 0,
+                "model": "fixture",
+                "provider": "deepseek",
+                "cost_usd": -0.01,
+            }],
+        });
+        assert!(parse(&negative_row).is_none());
     }
 }

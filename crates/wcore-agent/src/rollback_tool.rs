@@ -27,9 +27,10 @@ use serde_json::{Value, json};
 use wcore_protocol::events::ToolCategory;
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
+use wcore_tools::vfs::{FileMutationOutcome, FileObservation, IntendedFileMutation};
 use wcore_types::tool::{JsonSchema, ToolResult};
 
-use crate::file_history::{FileHistory, FileHistoryError, byte_digest};
+use crate::file_history::{FileHistory, FileHistoryError};
 
 /// JSON input shape for the Rollback tool.
 #[derive(Deserialize)]
@@ -118,28 +119,16 @@ impl Tool for RollbackTool {
             }
         };
 
-        // External-change guard: if the engine has recorded a post-write
-        // digest for this path, the live file must still match it. If it
-        // doesn't, the user (or some external process) wrote to the file
-        // between the engine's last write and this rollback request —
-        // applying the snapshot now would clobber that work. If no
-        // engine-write digest is recorded (e.g., first run, or test
-        // fixture without an explicit `record_post_write_digest`) the
-        // guard skips and rollback proceeds normally.
-        if let Some(engine_digest) = self.history.last_engine_write_digest(&path)
-            && let Ok(current_bytes) = ctx.vfs.read(&path).await
-        {
-            let current_digest = byte_digest(&current_bytes);
-            if current_digest != engine_digest {
-                return ToolResult {
-                    content: format!(
-                        "{SUSPEND_PREFIX}file {path:?} changed externally since the engine's last \
-                         write; rolling back would clobber unsaved work — manual review required."
-                    ),
-                    is_error: true,
-                };
+        let authority = match self.history.rollback_authority(&path).await {
+            Ok(Some(authority)) => authority,
+            Ok(None) => return suspended(&path, "no durable committed postimage authority exists"),
+            Err(error) => {
+                return suspended(
+                    &path,
+                    &format!("durable rollback authority could not be loaded: {error}"),
+                );
             }
-        }
+        };
 
         let snapshot_bytes = match self.history.read_snapshot(&path, steps).await {
             Ok(b) => b,
@@ -169,11 +158,51 @@ impl Tool for RollbackTool {
             }
         };
 
-        if let Err(e) = ctx.vfs.write(&path, &snapshot_bytes).await {
-            return ToolResult {
-                content: format!("rollback write failed: {e}"),
-                is_error: true,
-            };
+        let current = match ctx.vfs.observe_file(&path).await {
+            Ok(current) => current,
+            Err(error) => {
+                return suspended(
+                    &path,
+                    &format!("current file identity could not be observed: {error}"),
+                );
+            }
+        };
+        if current.observation != FileObservation::Present(authority.postimage)
+            || current.object != authority.object
+        {
+            return suspended(
+                &path,
+                "file bytes or object identity changed after the committed engine write",
+            );
+        }
+
+        let mutation = IntendedFileMutation::from_observation(&current, snapshot_bytes);
+        match ctx.vfs.compare_exchange_file(&path, &mutation).await {
+            Ok(
+                FileMutationOutcome::Applied { .. } | FileMutationOutcome::AlreadyApplied { .. },
+            ) => {}
+            Ok(FileMutationOutcome::Conflict { .. }) => {
+                return suspended(
+                    &path,
+                    "file changed while rollback was being conditionally committed",
+                );
+            }
+            Err(error) => {
+                return suspended(
+                    &path,
+                    &format!("conditional rollback could not be proven: {error}"),
+                );
+            }
+        }
+
+        if let Err(error) = self.history.retire_rollback_authority(&path).await {
+            return suspended(
+                &path,
+                &format!(
+                    "rollback changed the file, but durable authority retirement failed: {error}; \
+                     automatic continuation is unsafe"
+                ),
+            );
         }
 
         ToolResult {
@@ -190,6 +219,15 @@ impl Tool for RollbackTool {
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
         let steps = input.get("steps").and_then(|v| v.as_u64()).unwrap_or(0);
         format!("Rollback {path} (-{steps})")
+    }
+}
+
+fn suspended(path: &std::path::Path, reason: &str) -> ToolResult {
+    ToolResult {
+        content: format!(
+            "{SUSPEND_PREFIX}refused rollback for {path:?}: {reason}; manual review required"
+        ),
+        is_error: true,
     }
 }
 

@@ -1,0 +1,14 @@
+1. **Degrade**, but never report fully Healthy. Emit the one startup notice and expose persistent `Degraded: durable sessions disabled—no confidential credential store`. Refusal should require an explicit “durability mandatory” policy mode.
+
+2. **No confidentiality property is weakened.** With no recovery journal, the encrypted provider request is not written to disk at all—there is nothing for journal encryption to protect. What is lost is durability: saved history and interrupted-turn recovery, not secrecy. Ordinary logs, swap, crash dumps, and provider-side retention remain separate concerns.
+
+PANEL_POSITION=DEGRADE
+hook: Stop
+hook: Stop Completed
+tokens used
+26,361
+1. **Degrade**, but never report fully Healthy. Emit the one startup notice and expose persistent `Degraded: durable sessions disabled—no confidential credential store`. Refusal should require an explicit “durability mandatory” policy mode.
+
+2. **No confidentiality property is weakened.** With no recovery journal, the encrypted provider request is not written to disk at all—there is nothing for journal encryption to protect. What is lost is durability: saved history and interrupted-turn recovery, not secrecy. Ordinary logs, swap, crash dumps, and provider-side retention remain separate concerns.
+
+PANEL_POSITION=DEGRADE

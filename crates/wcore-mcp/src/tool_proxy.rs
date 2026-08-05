@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use super::config::McpServerConfig;
-use super::manager::McpManager;
+use super::manager::{McpManager, McpToolEffectIdentity};
 use wcore_protocol::events::ToolCategory;
 use wcore_tools::Tool;
-use wcore_tools::context::ToolContext;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_tools::context::{ToolContext, ToolEffectContext};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 /// Wraps an MCP server tool as a local Tool trait implementation.
 /// Uses naming convention "mcp__{server}__{tool}" when collisions exist,
@@ -48,6 +48,48 @@ impl McpToolProxy {
             deferred,
         }
     }
+
+    async fn execute_with_optional_effect(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        effect: Option<&ToolEffectContext>,
+    ) -> ToolResult {
+        let effect = effect.map(|effect| {
+            McpToolEffectIdentity::v1(
+                effect.tool_execution_id.clone(),
+                effect.idempotency_key.clone(),
+            )
+        });
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                let _ = self.manager.close_server(&self.server_name).await;
+                ToolResult {
+                    content: format!(
+                        "MCP tool '{}/{}' call aborted by cancellation token \
+                         (server transport torn down)",
+                        self.server_name, self.tool_name,
+                    ),
+                    is_error: true,
+                }
+            }
+            result = self.manager.call_tool_with_effect_identity(
+                &self.server_name,
+                &self.tool_name,
+                input,
+                effect.as_ref(),
+            ) => match result {
+                Ok(outcome) => ToolResult {
+                    content: outcome.text,
+                    is_error: outcome.is_error,
+                },
+                Err(e) => ToolResult {
+                    content: format!("MCP tool error: {}", e),
+                    is_error: true,
+                },
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -71,6 +113,11 @@ impl Tool for McpToolProxy {
 
     fn is_deferred(&self) -> bool {
         self.deferred
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // MCP servers expose arbitrary external effects with no host reconciler.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
@@ -109,22 +156,16 @@ impl Tool for McpToolProxy {
     /// transport-layer timeout (audit C1/C6) is the backstop for the
     /// non-cancelled path; this is the prompt path for interactive cancel.
     async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                // Kill the wedged child so it does not leak or desync the
-                // next call. Best-effort — the server may already be dead.
-                self.manager.close_server(&self.server_name).await;
-                ToolResult {
-                    content: format!(
-                        "MCP tool '{}/{}' call aborted by cancellation token \
-                         (server transport torn down)",
-                        self.server_name, self.tool_name,
-                    ),
-                    is_error: true,
-                }
-            }
-            result = self.execute(input) => result,
-        }
+        self.execute_with_optional_effect(input, ctx, None).await
+    }
+
+    async fn execute_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        effect: Option<&ToolEffectContext>,
+    ) -> ToolResult {
+        self.execute_with_optional_effect(input, ctx, effect).await
     }
 
     fn category(&self) -> ToolCategory {
@@ -158,11 +199,35 @@ impl Tool for McpToolProxy {
 ///
 /// Each tool's deferred flag is read from the server's config:
 /// `McpServerConfig::deferred` — defaults to `true` when absent.
+/// Refreshing the `ToolSearch` catalog is part of registration, not a courtesy
+/// the caller owes afterwards.
+///
+/// `ToolSearchTool` owns a snapshot taken when it was constructed, and deferred
+/// MCP defs are folded out of the outbound `tools[]`, so `ToolSearch` is the
+/// model's ONLY route to an MCP tool. Registering tools without rebuilding that
+/// snapshot therefore produces a server that connects, logs its full tool count,
+/// and is invisible to the model for the life of the session.
+///
+/// That is not hypothetical. The refresh used to be the caller's job and the
+/// callers disagreed: `wcore-cli` pairs it by hand
+/// (`register_mcp_tools(...); reg.refresh_tool_search_catalog(...)`), bootstrap
+/// happens to refresh again later for its own reasons, and the plugin
+/// second-pass in `plugins/mcp_delivery.rs` did not refresh at all. The
+/// single-server `/mcp add` seam already did this internally and carried a
+/// comment about not advertising undiscoverable tools; the bulk path — the one
+/// every config-declared server takes — was simply missed.
+///
+/// Reported from the Wayland Desktop lane 2026-08-04: an MCP server connected
+/// with 101 tools while `ToolSearch` answered `No deferred tools matching
+/// "TradingView"` for a query that had 22 valid candidates. A single-word query
+/// rules out the substring-matching defect fixed alongside this, and points at
+/// exactly this: tools that never reached the snapshot.
 pub fn register_mcp_tools(
     registry: &mut wcore_tools::registry::ToolRegistry,
     manager: &Arc<McpManager>,
     builtin_names: &[String],
     server_configs: &HashMap<String, McpServerConfig>,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) {
     let all_tools = manager.all_tools();
 
@@ -208,6 +273,24 @@ pub fn register_mcp_tools(
 
         registry.register(Box::new(proxy));
     }
+
+    // Rebuild the ToolSearch snapshot HERE, so no caller can register a server
+    // and leave it undiscoverable. Idempotent — callers that already refresh
+    // afterwards (wcore-cli's deferred-connect path, bootstrap) simply rebuild
+    // an identical catalogue.
+    //
+    // Guarded on having registered something. `refresh_tool_search_catalog`
+    // INSERTS a ToolSearch tool when the registry lacks one, so calling it
+    // unconditionally made "register zero MCP tools" leave a registry holding
+    // one tool. Harmless in production, where ToolSearch is always already
+    // present and this is a replace — but it is a real behaviour change for a
+    // caller that registers no servers, and it broke
+    // `register_defaults_to_deferred_when_config_omits_field`, which asserts an
+    // empty registry stays empty. Nothing new is discoverable when nothing was
+    // registered, so there is nothing to refresh.
+    if !all_tools.is_empty() {
+        registry.refresh_tool_search_catalog(defer_cold);
+    }
 }
 
 /// Register tools from a single newly-connected MCP server.
@@ -218,6 +301,7 @@ pub fn register_single_server_tools(
     server_name: &str,
     builtin_names: &[String],
     deferred: bool,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
 ) {
     let all_tools = manager.all_tools();
     let server_tools: Vec<_> = all_tools
@@ -256,6 +340,11 @@ pub fn register_single_server_tools(
 
         registry.register(Box::new(proxy));
     }
+
+    // Live single-server adds happen after bootstrap's ToolSearch snapshot.
+    // Refresh in this shared registration seam so both JSON AddMcpServer and
+    // the TUI `/mcp add` path cannot advertise tools that remain undiscoverable.
+    registry.refresh_tool_search_catalog(defer_cold);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +434,13 @@ mod tests {
         // Empty server configs — deferred field absent
         let configs = HashMap::new();
 
-        register_mcp_tools(&mut registry, &manager, &[], &configs);
+        register_mcp_tools(
+            &mut registry,
+            &manager,
+            &[],
+            &configs,
+            &wcore_config::tools::DeferColdConfig::default(),
+        );
 
         // No tools registered because manager has no tools, but the logic
         // is tested via the deferred default path. Test with a real config below.
@@ -381,9 +476,220 @@ mod tests {
     use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
     use crate::transport::{McpError, McpTransport};
     use async_trait::async_trait;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
-    use wcore_tools::context::ToolContext;
+    use wcore_tools::context::{ToolContext, ToolEffectContext};
+
+    struct CapturingTransport {
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl McpTransport for CapturingTransport {
+        async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            self.requests
+                .lock()
+                .unwrap()
+                .push(serde_json::to_value(req).unwrap());
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".into(),
+                id: req.id,
+                result: Some(json!({
+                    "content": [{"type": "text", "text": "ok"}]
+                })),
+                error: None,
+            })
+        }
+
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_context_reuses_meta_key_and_legacy_call_has_no_meta() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let manager = Arc::new(McpManager::new_for_test(vec![(
+            "capture",
+            false,
+            Box::new(CapturingTransport {
+                requests: Arc::clone(&requests),
+            }),
+        )]));
+        let proxy = McpToolProxy::new(
+            "capture_tool".into(),
+            "capture_tool".into(),
+            "capture".into(),
+            "captures requests".into(),
+            json!({"type": "object"}),
+            manager,
+            false,
+        );
+        let input = json!({"nested": {"value": 7}});
+        let ctx = ToolContext::test_default();
+        let effect = ToolEffectContext {
+            tool_execution_id: "tool-execution-9".into(),
+            idempotency_key: "stable-key-9".into(),
+        };
+
+        proxy
+            .execute_with_effect_ctx(input.clone(), &ctx, Some(&effect))
+            .await;
+        proxy
+            .execute_with_effect_ctx(input.clone(), &ctx, Some(&effect))
+            .await;
+        proxy
+            .execute_with_ctx(input.clone(), &ToolContext::test_default())
+            .await;
+        proxy.execute(input.clone()).await;
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        for request in requests.iter() {
+            assert_eq!(request["params"]["arguments"], input);
+        }
+        let expected_meta = json!({
+            "wayland/durable-effect": {
+                "version": 1,
+                "toolExecutionId": "tool-execution-9",
+                "idempotencyKey": "stable-key-9"
+            }
+        });
+        assert_eq!(requests[0]["params"]["_meta"], expected_meta);
+        assert_eq!(requests[1]["params"]["_meta"], expected_meta);
+        assert!(requests[2]["params"].get("_meta").is_none());
+        assert!(requests[3]["params"].get("_meta").is_none());
+    }
+
+    #[derive(Default)]
+    struct IdempotentRemoteState {
+        cached_results: HashMap<String, String>,
+        request_count: usize,
+        physical_effect_count: usize,
+        cached_replay_count: usize,
+    }
+
+    struct IdempotentRemoteTransport {
+        state: Arc<Mutex<IdempotentRemoteState>>,
+    }
+
+    #[async_trait]
+    impl McpTransport for IdempotentRemoteTransport {
+        async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            let stable_key = req
+                .params
+                .as_ref()
+                .and_then(|params| params.get("_meta"))
+                .and_then(|metadata| metadata.get("wayland/durable-effect"))
+                .and_then(|effect| effect.get("idempotencyKey"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+
+            let result = {
+                let mut state = self.state.lock().unwrap();
+                state.request_count += 1;
+
+                if let Some(stable_key) = stable_key {
+                    if let Some(cached) = state.cached_results.get(&stable_key).cloned() {
+                        state.cached_replay_count += 1;
+                        cached
+                    } else {
+                        state.physical_effect_count += 1;
+                        let result = format!("physical-effect-{}", state.physical_effect_count);
+                        state.cached_results.insert(stable_key, result.clone());
+                        result
+                    }
+                } else {
+                    state.physical_effect_count += 1;
+                    format!("physical-effect-{}", state.physical_effect_count)
+                }
+            };
+
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".into(),
+                id: req.id,
+                result: Some(json!({
+                    "content": [{"type": "text", "text": result}]
+                })),
+                error: None,
+            })
+        }
+
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_server_deduplicates_stable_key_but_not_legacy_calls() {
+        let state = Arc::new(Mutex::new(IdempotentRemoteState::default()));
+        let manager = Arc::new(McpManager::new_for_test(vec![(
+            "idempotent-remote",
+            false,
+            Box::new(IdempotentRemoteTransport {
+                state: Arc::clone(&state),
+            }),
+        )]));
+        let proxy = McpToolProxy::new(
+            "charge_card".into(),
+            "charge_card".into(),
+            "idempotent-remote".into(),
+            "records one externally visible charge".into(),
+            json!({"type": "object"}),
+            manager,
+            false,
+        );
+        let input = json!({"amount": 42});
+        let durable_ctx = ToolContext::test_default();
+        let effect = ToolEffectContext {
+            tool_execution_id: "execution-42".into(),
+            idempotency_key: "stable-charge-key-42".into(),
+        };
+
+        let first = proxy
+            .execute_with_effect_ctx(input.clone(), &durable_ctx, Some(&effect))
+            .await;
+        let replay = proxy
+            .execute_with_effect_ctx(input.clone(), &durable_ctx, Some(&effect))
+            .await;
+
+        assert!(!first.is_error);
+        assert_eq!(first.content, "physical-effect-1");
+        assert!(!replay.is_error);
+        assert_eq!(
+            replay.content, first.content,
+            "the second call must replay the cached result"
+        );
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.request_count, 2);
+            assert_eq!(state.physical_effect_count, 1);
+            assert_eq!(state.cached_replay_count, 1);
+            assert_eq!(state.cached_results.len(), 1);
+        }
+
+        let legacy_first = proxy.execute(input.clone()).await;
+        let legacy_second = proxy
+            .execute_with_ctx(input, &ToolContext::test_default())
+            .await;
+
+        assert_eq!(legacy_first.content, "physical-effect-2");
+        assert_eq!(legacy_second.content, "physical-effect-3");
+        let state = state.lock().unwrap();
+        assert_eq!(state.request_count, 4);
+        assert_eq!(state.physical_effect_count, 3);
+        assert_eq!(state.cached_replay_count, 1);
+        assert_eq!(state.cached_results.len(), 1);
+    }
 
     /// Transport that hangs on `request` (a wedged MCP server) and records
     /// whether `close()` was called.
@@ -451,7 +757,13 @@ mod tests {
         let mut registry = wcore_tools::registry::ToolRegistry::new();
         let builtins = vec!["read".to_string()];
         let configs = HashMap::new();
-        register_mcp_tools(&mut registry, &manager, &builtins, &configs);
+        register_mcp_tools(
+            &mut registry,
+            &manager,
+            &builtins,
+            &configs,
+            &wcore_config::tools::DeferColdConfig::default(),
+        );
 
         let mut names = registry.tool_names();
         names.sort();
@@ -486,6 +798,43 @@ mod tests {
         async fn close(&self) -> Result<(), McpError> {
             Ok(())
         }
+    }
+
+    /// #562: the shared one-server registration seam used by JSON
+    /// `AddMcpServer` and TUI `/mcp add` must refresh the already-registered
+    /// ToolSearch catalog. The proxy is explicitly non-deferred, so finding it
+    /// also proves the global cold split is reapplied before snapshotting.
+    #[tokio::test]
+    async fn single_server_live_add_refreshes_real_tool_search_catalog() {
+        use crate::protocol::McpToolDef;
+
+        let manager = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "dynamic",
+            false,
+            Box::new(StubTransport),
+            vec![McpToolDef {
+                name: "late_dynamic".into(),
+                description: Some("late dynamic MCP fixture".into()),
+                input_schema: json!({"type": "object"}),
+            }],
+        )]));
+        let defer_cold = wcore_config::tools::DeferColdConfig::default();
+        let mut registry = wcore_tools::registry::ToolRegistry::new();
+        registry.refresh_tool_search_catalog(&defer_cold);
+
+        register_single_server_tools(&mut registry, &manager, "dynamic", &[], false, &defer_cold);
+
+        let result = registry
+            .get("ToolSearch")
+            .expect("live add must retain ToolSearch")
+            .execute(json!({"query": "late_dynamic"}))
+            .await;
+        assert!(
+            result.content.contains("\"name\": \"late_dynamic\"")
+                && result.content.contains("\"parameters\""),
+            "live-added tool must be discoverable through the real ToolSearch; got {}",
+            result.content
+        );
     }
 
     #[tokio::test]

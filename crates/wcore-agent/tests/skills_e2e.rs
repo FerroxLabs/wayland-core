@@ -170,9 +170,23 @@ async fn e5_shell_expansion() {
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
-    let tool = make_tool(skills, &cwd);
+    let approval_manager = Arc::new(wcore_protocol::ToolApprovalManager::new());
+    approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
+    let tool = SkillTool::new(
+        Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(skills)),
+        cwd.clone(),
+        SkillPermissionChecker::new(vec![], vec![], false).with_project_execution_trust(true),
+    )
+    .with_live_approval_manager(approval_manager);
 
-    let result = tool.execute(json!({"skill": "shell-demo"})).await;
+    let ctx = wcore_tools::context::ToolContext::test_default().with_sandbox(std::sync::Arc::new(
+        wcore_sandbox::SandboxRegistry::new(std::sync::Arc::new(
+            wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new(),
+        )),
+    ));
+    let result = tool
+        .execute_with_ctx(json!({"skill": "shell-demo"}), &ctx)
+        .await;
     assert!(!result.is_error, "E5 FAIL: error: {}", result.content);
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -223,24 +237,27 @@ async fn e7_system_prompt_injection() {
     let skill_refs: Vec<wcore_skills::refs::SkillRef> = skills
         .iter()
         .cloned()
-        .map(|m| wcore_skills::refs::SkillRef {
-            name: m.name,
-            display_name: m.display_name,
-            description: m.description,
-            when_to_use: m.when_to_use,
-            paths: m.paths,
-            source: m.source,
-            loaded_from: m.loaded_from,
-            file_path: m
-                .skill_root
-                .as_deref()
-                .map(|root| std::path::Path::new(root).join("SKILL.md"))
-                .unwrap_or_default(),
-            content_length_hint: m.content_length,
-            user_invocable: m.user_invocable,
-            disable_model_invocation: m.disable_model_invocation,
-            has_artifacts: false,
-            inline_content: None,
+        .map(|m| {
+            let skill_root = m.skill_root.as_deref().map(std::path::PathBuf::from);
+            wcore_skills::refs::SkillRef {
+                name: m.name,
+                display_name: m.display_name,
+                description: m.description,
+                when_to_use: m.when_to_use,
+                paths: m.paths,
+                source: m.source,
+                loaded_from: m.loaded_from,
+                file_path: skill_root
+                    .as_ref()
+                    .map(|root| root.join("SKILL.md"))
+                    .unwrap_or_default(),
+                skill_root,
+                content_length_hint: m.content_length,
+                user_invocable: m.user_invocable,
+                disable_model_invocation: m.disable_model_invocation,
+                has_artifacts: false,
+                inline_content: None,
+            }
         })
         .collect();
 

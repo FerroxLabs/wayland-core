@@ -5,11 +5,33 @@
 //! interpretation), per AGENTS.md cross-platform rules. Working directory
 //! is set with `.current_dir(...)` on the returned `tokio::process::Command`.
 
+use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, mpsc};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use wcore_config::shell;
+use wcore_sandbox::process_capture::{CaptureLimits, ProcessCaptureError, capture_bounded_process};
+use wcore_sandbox::{DirectoryHandleLoan, RegularFileAuthority};
 
 use crate::error::{Result, SwarmError};
+
+#[path = "worktree_paths.rs"]
+mod paths;
+use paths::normalized_root;
+
+#[path = "worktree_security.rs"]
+mod security;
+use security::{
+    DirectoryAuthority, DirectoryAuthorityIdentity, ensure_absent_destination,
+    ensure_real_directory, ensure_unchanged_real_directory, is_real_directory_entry,
+    make_guard_dir_private, reject_option_like_ref, validate_worker_id, write_empty_private_config,
+};
 
 /// Manages the `<repo>/.swarm-worktrees/` directory and per-worker
 /// worktrees within it. Each worker gets a fresh checkout at
@@ -17,111 +39,771 @@ use crate::error::{Result, SwarmError};
 /// [`super::SwarmBrief::worker_branch_prefix`] + `/` + `worker_id`.
 pub struct WorktreeManager {
     repo_root: PathBuf,
+    repo_authority: DirectoryAuthority,
     swarm_root: PathBuf,
+    swarm_authority: DirectoryAuthority,
+    swarm_parent: PathBuf,
+    git_program: String,
+    capture_limits: CaptureLimits,
+    _git_guard_dir: tempfile::TempDir,
+    empty_git_config: PathBuf,
+    disabled_hooks: PathBuf,
+    control_root: PathBuf,
+    admission_lock: Mutex<()>,
+    active_reservations: ActiveReservationRegistry,
+    #[cfg(test)]
+    ambient_git_env: Vec<(String, std::ffi::OsString)>,
+    #[cfg(test)]
+    git_prefix_args: Vec<String>,
 }
 
-impl WorktreeManager {
-    /// Construct a new manager for `repo_root`. Creates the
-    /// `.swarm-worktrees/` directory if it does not exist.
-    pub fn new(repo_root: &Path) -> Result<Self> {
-        let swarm_root = repo_root.join(".swarm-worktrees");
-        std::fs::create_dir_all(&swarm_root)?;
-        Ok(Self {
-            repo_root: repo_root.to_path_buf(),
-            swarm_root,
-        })
-    }
+/// Parent-issued storage proof for one delegated mutation checkout.
+#[derive(Clone, Copy, Debug)]
+pub struct WorkspaceCapacity {
+    pub available_bytes: u64,
+    pub safety_margin_bytes: u64,
+    pub max_transaction_bytes: u64,
+    pub max_aggregate_bytes: u64,
+}
 
-    /// Return the underlying repository root.
-    pub fn repo_root(&self) -> &Path {
-        &self.repo_root
-    }
+/// Identity-bound roots owned by one delegated mutation transaction.
+#[derive(Clone)]
+pub struct TransactionWorkspace {
+    pub owner: String,
+    pub root: PathBuf,
+    pub checkout: PathBuf,
+    pub scratch: PathBuf,
+    pub base_commit: String,
+    pub head_commit: String,
+    pub tree: String,
+    pub reserved_bytes: u64,
+    authorities: Arc<TransactionWorkspaceAuthorities>,
+    cleanup: Arc<TransactionCleanup>,
+}
 
-    /// Return the swarm worktree root (`<repo>/.swarm-worktrees/`).
-    pub fn swarm_root(&self) -> &Path {
-        &self.swarm_root
-    }
+struct TransactionWorkspaceAuthorities {
+    checkout: DirectoryAuthority,
+    scratch: DirectoryAuthority,
+    reservation: Arc<RegularFileAuthority>,
+}
 
-    /// Reject dispatch on a dirty checkout. Runs `git status --porcelain`
-    /// in `repo_root` and returns [`SwarmError::DirtyCheckout`] if the
-    /// output is non-empty.
-    ///
-    /// This is the collision-detection gate that prevents the v0.2.2
-    /// incident (dirty worker contaminating main).
-    pub async fn assert_clean(&self) -> Result<()> {
-        let mut cmd = shell::shell_command_argv("git", &["status", "--porcelain"]);
-        cmd.current_dir(&self.repo_root);
-        let out = cmd
-            .output()
-            .await
-            .map_err(|e| SwarmError::WorktreeIo(format!("git status: {e}")))?;
-        if !out.status.success() {
-            return Err(SwarmError::WorktreeIo(format!(
-                "git status failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )));
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if !stdout.trim().is_empty() {
-            return Err(SwarmError::DirtyCheckout(stdout.trim().to_string()));
-        }
-        Ok(())
-    }
+#[derive(Clone)]
+struct ActiveReservation {
+    root_identity: DirectoryAuthorityIdentity,
+    authority: Arc<RegularFileAuthority>,
+    bytes: u64,
+}
 
-    /// Create a fresh worktree at `<swarm_root>/<worker_id>` on a new
-    /// branch `branch` checked out from `base`. Returns the worktree path.
-    pub async fn create_worker_tree(
-        &self,
-        worker_id: &str,
-        branch: &str,
-        base: &str,
-    ) -> Result<PathBuf> {
-        let tree_path = self.swarm_root.join(worker_id);
-        let tree_path_str = tree_path.to_string_lossy().into_owned();
-        let args: [&str; 6] = [
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            tree_path_str.as_str(),
-            base,
-        ];
-        let mut cmd = shell::shell_command_argv("git", &args);
-        cmd.current_dir(&self.repo_root);
-        let out = cmd
-            .output()
-            .await
-            .map_err(|e| SwarmError::WorktreeIo(format!("worktree add: {e}")))?;
-        if !out.status.success() {
-            return Err(SwarmError::WorktreeIo(format!(
-                "git worktree add failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )));
-        }
-        Ok(tree_path)
-    }
+type ActiveReservationRegistry = Arc<StdMutex<HashMap<String, ActiveReservation>>>;
 
-    /// Remove every directory under `.swarm-worktrees/` via
-    /// `git worktree remove --force`. Best-effort and idempotent: a
-    /// failure on one entry is logged but does not abort the loop.
-    pub async fn cleanup_all(&self) -> Result<()> {
-        if !self.swarm_root.exists() {
-            return Ok(());
-        }
-        let entries: Vec<PathBuf> = std::fs::read_dir(&self.swarm_root)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        for path in entries {
-            let path_str = path.to_string_lossy().into_owned();
-            let args: [&str; 4] = ["worktree", "remove", "--force", path_str.as_str()];
-            let mut cmd = shell::shell_command_argv("git", &args);
-            cmd.current_dir(&self.repo_root);
-            if let Err(e) = cmd.status().await {
-                tracing::warn!(?path, error = %e, "worktree cleanup failed; continuing");
+const RESERVATION_FILE: &str = ".wayland-reservation";
+const LEASE_FILE: &str = ".wayland-active-lease";
+const CONTROL_DIR: &str = ".wayland-control";
+/// Directory name [`WorktreeManager::new`] mints INSIDE the repository root to
+/// hold per-worker checkouts.
+///
+/// It is named here rather than spelled inline because two call sites must agree
+/// on it exactly: the constructor that creates it, and the dirty-checkout guard
+/// that must not mistake it for the user's own uncommitted work. See
+/// [`WorktreeManager::assert_clean`].
+pub(crate) const SWARM_ROOT_DIR: &str = ".swarm-worktrees";
+/// The swarm-root advisory-lock sentinel, resolved beneath [`CONTROL_DIR`].
+///
+/// MIGRATION CONSEQUENCE, decided and accepted: the on-disk lock artifact moved
+/// from the swarm-root DIRECTORY object to this regular file on EVERY platform,
+/// because a platform split would leave the Windows mechanism unexercisable by
+/// any Linux-CI test — precisely the condition that hid the original defect.
+/// During a unix version-skew window a process running an older build (locking
+/// the directory) and one running this build (locking this sentinel) will NOT
+/// interlock. The blast radius is bounded to admission serialization and
+/// aggregate capacity accounting; it weakens NO authority proof, because
+/// `validate_swarm_root`, `validate_repo_authority`, every `DirectoryAuthority`
+/// identity check and the reservation receipts are all lock-independent and
+/// still fail closed. Windows has no compatibility surface to preserve — the
+/// lock never engaged there at all — so the skew is unix-only.
+const SWARM_LOCK_FILE: &str = ".wayland-swarm-lock";
+const WORKSPACE_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_TRANSACTION_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_AGGREGATE_WORKSPACE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_RESERVATION_FILE_BYTES: u64 = 64;
+
+struct ActiveLease {
+    release: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ActiveLease {
+    fn acquire(file: DirectoryHandleLoan) -> Result<Self> {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("wayland-swarm-lease".to_owned())
+            .spawn(move || {
+                let result: std::io::Result<()> = (|| {
+                    let mut lock = fd_lock::RwLock::new(file);
+                    let guard = lock.write()?;
+                    ready_tx.send(Ok(())).map_err(|_| {
+                        std::io::Error::new(ErrorKind::BrokenPipe, "lease owner disappeared")
+                    })?;
+                    let _ = release_rx.recv();
+                    drop(guard);
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                }
+            })
+            .map_err(|error| SwarmError::WorktreeIo(format!("active lease: {error}")))?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                release: Some(release_tx),
+                thread: Some(thread),
+            }),
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                Err(SwarmError::WorktreeIo(format!("active lease: {error}")))
+            }
+            Err(error) => {
+                let _ = thread.join();
+                Err(SwarmError::WorktreeIo(format!("active lease: {error}")))
             }
         }
+    }
+
+    fn close(&mut self) {
+        self.release.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for ActiveLease {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+struct TransactionCleanup {
+    owner: String,
+    root: PathBuf,
+    root_authority: StdMutex<Option<DirectoryAuthority>>,
+    checkout_authority: std::sync::OnceLock<DirectoryAuthority>,
+    swarm_root: PathBuf,
+    swarm_authority: DirectoryAuthority,
+    quarantine_root: PathBuf,
+    quarantine_authority: DirectoryAuthority,
+    reservation_authority: Arc<RegularFileAuthority>,
+    reserved_bytes: u64,
+    active_reservations: ActiveReservationRegistry,
+    release_lock: StdMutex<()>,
+    lease: StdMutex<Option<ActiveLease>>,
+    released: AtomicBool,
+}
+
+impl TransactionCleanup {
+    fn root_authority(&self) -> Result<DirectoryAuthority> {
+        self.root_authority
+            .lock()
+            .map_err(|_| {
+                SwarmError::WorktreeIo("transaction root authority is poisoned".to_owned())
+            })?
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                SwarmError::WorktreeIo("transaction root authority was already consumed".to_owned())
+            })
+    }
+
+    pub(super) fn bind_checkout_authority(&self, checkout: DirectoryAuthority) {
+        let _ = self.checkout_authority.set(checkout);
+    }
+
+    fn release(&self) -> Result<()> {
+        let _release = self.release_lock.lock().map_err(|_| {
+            SwarmError::WorktreeIo("transaction cleanup authority is poisoned".to_owned())
+        })?;
+        if self.released.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self
+            .checkout_authority
+            .get()
+            .is_some_and(|checkout| checkout.has_outstanding_loans())
+        {
+            return Err(SwarmError::WorktreeIo(
+                "worker descendant still holds the retained checkout descriptor; \
+                 transaction cleanup refused and its reservation held for retry"
+                    .to_owned(),
+            ));
+        }
+        self.root_authority()?;
+        validate_reservation_contents(&self.reservation_authority, self.reserved_bytes)?;
+        let cleanup_result = with_directory_lock(&self.swarm_root, &self.swarm_authority, || {
+            // The lease is dropped INSIDE the swarm critical section, and that
+            // ordering is load-bearing rather than tidiness.
+            //
+            // `WorktreeManager::reclaim_abandoned_transactions` treats a
+            // transaction root whose lease nobody holds as abandoned by a
+            // process that no longer exists, and reclaims its reservation. That
+            // inference is only sound if a LIVE transaction is never observably
+            // lease-free. Closing the lease before contending for the swarm
+            // sentinel opened exactly that window: a peer process reclaiming
+            // between the close and the lock would delete a root out from under
+            // its own live owner, turning a worker that succeeded into
+            // "transaction cleanup: ...".
+            //
+            // Reclaim holds the SAME sentinel, so with the close moved in here
+            // the window cannot be observed at all. The lock ORDER is unchanged
+            // — `create_isolated_checkout` already acquires the transaction
+            // lease while holding the swarm sentinel — and release only ever
+            // drops the lease, which cannot block.
+            let mut lease_was_poisoned = false;
+            let mut slot = match self.lease.lock() {
+                Ok(slot) => slot,
+                Err(error) => {
+                    lease_was_poisoned = true;
+                    self.lease.clear_poison();
+                    error.into_inner()
+                }
+            };
+            if let Some(mut lease) = slot.take() {
+                lease.close();
+            }
+            drop(slot);
+            if lease_was_poisoned {
+                return Err(SwarmError::WorktreeIo(
+                    "transaction lease authority was poisoned; lease was closed but cleanup must be retried"
+                        .to_owned(),
+                ));
+            }
+            let retained_reservation = self
+                .active_reservations
+                .lock()
+                .map_err(|_| {
+                    SwarmError::WorktreeIo("active reservation registry is poisoned".to_owned())
+                })?
+                .remove(&self.owner);
+            let root_authority = match self
+                .root_authority
+                .lock()
+                .map_err(|_| {
+                    SwarmError::WorktreeIo("transaction root authority is poisoned".to_owned())
+                })?
+                .take()
+            {
+                Some(authority) => authority,
+                None => {
+                    if let Some(retained) = retained_reservation {
+                        self.active_reservations
+                            .lock()
+                            .map_err(|_| {
+                                SwarmError::WorktreeIo(
+                                    "active reservation registry is poisoned".to_owned(),
+                                )
+                            })?
+                            .insert(self.owner.clone(), retained);
+                    }
+                    return Err(SwarmError::WorktreeIo(
+                        "transaction root authority was already consumed".to_owned(),
+                    ));
+                }
+            };
+            match remove_transaction_root(
+                &self.swarm_root,
+                &self.swarm_authority,
+                &self.owner,
+                &self.root,
+                root_authority,
+                &self.quarantine_root,
+                &self.quarantine_authority,
+            ) {
+                Ok(()) => Ok(()),
+                Err((error, root_authority)) => {
+                    *self.root_authority.lock().map_err(|_| {
+                        SwarmError::WorktreeIo("transaction root authority is poisoned".to_owned())
+                    })? = Some(root_authority);
+                    if let Some(retained) = retained_reservation {
+                        self.active_reservations
+                            .lock()
+                            .map_err(|_| {
+                                SwarmError::WorktreeIo(
+                                    "active reservation registry is poisoned".to_owned(),
+                                )
+                            })?
+                            .insert(self.owner.clone(), retained);
+                    }
+                    Err(error)
+                }
+            }
+        });
+        cleanup_result?;
+        self.released.store(true, Ordering::Release);
         Ok(())
     }
 }
+
+impl Drop for TransactionCleanup {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
+impl std::fmt::Debug for TransactionWorkspace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransactionWorkspace")
+            .field("owner", &self.owner)
+            .field("root", &self.root)
+            .field("checkout", &self.checkout)
+            .field("scratch", &self.scratch)
+            .field("base_commit", &self.base_commit)
+            .field("head_commit", &self.head_commit)
+            .field("tree", &self.tree)
+            .field("reserved_bytes", &self.reserved_bytes)
+            .finish()
+    }
+}
+
+/// The ONE derivation of the swarm-root advisory-lock target.
+///
+/// Every swarm-root critical section — all three [`with_directory_lock`]
+/// callers AND `cleanup_all`'s lease — resolves this exact sentinel, so
+/// admission and full cleanup still exclude each other exactly as they did when
+/// they all locked the shared swarm-root directory object. Splitting this into
+/// two derivations would silently dissolve that interlock.
+///
+/// The sentinel lives INSIDE [`CONTROL_DIR`], and that placement is
+/// LOAD-BEARING, not tidiness: four production loops enumerate the swarm root's
+/// direct children and skip only the control directory —
+/// `reserved_workspace_bytes`, `cleanup_all`, `retained_worker_count` and
+/// `sandbox_read_denies` — and the first three hard-`Err` through
+/// `is_real_directory_entry` on any non-directory child. A sentinel placed
+/// directly under the swarm root would therefore break admission accounting,
+/// cleanup and the residual sweep. Moving it out requires changing those four
+/// loops first.
+///
+/// The control directory is opened with the open-or-create form deliberately:
+/// `TransactionCleanup::release` reaches here through a `swarm_authority` that
+/// unit-test fixtures open on a bare temporary directory with no control
+/// directory present, so an open-only form would fail cleanup for a reason
+/// unrelated to locking.
+fn swarm_lock_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
+    authority
+        .open_or_create_child_directory(CONTROL_DIR)?
+        .open_or_create_child_lock_file(SWARM_LOCK_FILE)
+}
+
+/// The ONE derivation of a transaction's lease target.
+///
+/// This is the file the code already created and then immediately discarded
+/// without ever locking it, so [`LEASE_FILE`]'s name is now accurate and
+/// [`transaction_is_active`] finally means what it says. The returned loan is
+/// accounted against the transaction root's own counter, so a root whose lease
+/// is held still refuses `remove_open_dir_all`.
+fn transaction_lease_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
+    authority.open_or_create_child_lock_file(LEASE_FILE)
+}
+
+fn with_directory_lock<T>(
+    path: &Path,
+    authority: &DirectoryAuthority,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    authority.validate_path(path)?;
+    // The lock target MUST be a regular file: Windows byte-range locking is
+    // undefined on directory objects and `fd-lock` calls `LockFileEx` directly.
+    // The sentinel is resolved through the retained handle rather than by
+    // re-resolving a pathname, so a swap of the directory between the identity
+    // proofs bracketing this critical section cannot redirect the lock.
+    let file = swarm_lock_handle(authority)?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = loop {
+        match lock.write() {
+            Ok(guard) => break guard,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    authority.validate_path(path)?;
+    action()
+}
+
+fn remove_transaction_root(
+    swarm_root: &Path,
+    swarm_authority: &DirectoryAuthority,
+    owner: &str,
+    root: &Path,
+    root_authority: DirectoryAuthority,
+    quarantine_root: &Path,
+    quarantine_authority: &DirectoryAuthority,
+) -> std::result::Result<(), (SwarmError, DirectoryAuthority)> {
+    remove_transaction_root_inner_with_hooks(
+        swarm_root,
+        swarm_authority,
+        owner,
+        root,
+        root_authority,
+        quarantine_root,
+        quarantine_authority,
+        || {},
+        || {},
+        || {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn remove_transaction_root_inner(
+    swarm_root: &Path,
+    swarm_authority: &DirectoryAuthority,
+    owner: &str,
+    root: &Path,
+    root_authority: DirectoryAuthority,
+    quarantine_root: &Path,
+    quarantine_authority: &DirectoryAuthority,
+    before_quarantine: impl FnOnce(),
+) -> std::result::Result<(), (SwarmError, DirectoryAuthority)> {
+    remove_transaction_root_inner_with_hooks(
+        swarm_root,
+        swarm_authority,
+        owner,
+        root,
+        root_authority,
+        quarantine_root,
+        quarantine_authority,
+        before_quarantine,
+        || {},
+        || {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_transaction_root_inner_with_hooks(
+    swarm_root: &Path,
+    swarm_authority: &DirectoryAuthority,
+    owner: &str,
+    root: &Path,
+    root_authority: DirectoryAuthority,
+    _quarantine_root: &Path,
+    _quarantine_authority: &DirectoryAuthority,
+    before_quarantine: impl FnOnce(),
+    before_transaction_delete: impl FnOnce(),
+    before_placeholder_delete: impl FnOnce(),
+) -> std::result::Result<(), (SwarmError, DirectoryAuthority)> {
+    validate_worker_id(owner).map_err(|error| (error, root_authority.clone()))?;
+    if root != swarm_root.join(owner) || !root.starts_with(swarm_root) {
+        return Err((
+            SwarmError::WorktreeIo("refused cleanup outside owned transaction root".to_owned()),
+            root_authority,
+        ));
+    }
+    swarm_authority
+        .validate_path(swarm_root)
+        .map_err(|error| (error, root_authority.clone()))?;
+    before_quarantine();
+    // Deletion resolves from the retained directory object. No quarantine
+    // pathname is needed, so failures return the same authority and stage.
+    before_transaction_delete();
+    before_placeholder_delete();
+    root_authority.remove_open_dir_all()
+}
+
+fn transaction_is_active(authority: &DirectoryAuthority, path: &Path) -> Result<bool> {
+    authority.validate_path(path)?;
+    // Probe the SAME target `transaction_lease_handle` locks, through the
+    // OPEN-ONLY constructor so the probe is non-mutating: it runs over foreign
+    // and legacy transaction roots during capacity accounting and cleanup, and
+    // creating a lease file inside a directory it is merely observing would be
+    // a side effect. "No lease file" correctly means "nobody holds the lease",
+    // which is exactly the disposition the surrounding code already assumes on
+    // its other not-found paths.
+    let file = match authority.open_child_lock_file(LEASE_FILE) {
+        Ok(file) => file,
+        Err(SwarmError::Io(error)) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut lock = fd_lock::RwLock::new(file);
+    match lock.try_write() {
+        Ok(_guard) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(true),
+        Err(error) if error.kind() == ErrorKind::Interrupted => {
+            transaction_is_active(authority, path)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_workspace_reservation(path: &Path) -> Result<u64> {
+    let authority = RegularFileAuthority::open(path)
+        .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?;
+    let value = authority
+        .read_bounded_to_string(MAX_RESERVATION_FILE_BYTES)
+        .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?;
+    authority
+        .validate_path(path)
+        .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?;
+    let bytes = value.trim().parse::<u64>().map_err(|_| {
+        SwarmError::DispatchAdmission(format!("invalid workspace reservation: {}", path.display()))
+    })?;
+    if bytes == 0 || bytes > MAX_TRANSACTION_WORKSPACE_BYTES {
+        return Err(SwarmError::DispatchAdmission(format!(
+            "workspace reservation is outside the admitted range: {}",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn validate_reservation_authority(
+    authority: &RegularFileAuthority,
+    path: &Path,
+    expected_bytes: u64,
+) -> Result<()> {
+    authority
+        .validate_path(path)
+        .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?;
+    validate_reservation_contents(authority, expected_bytes)
+}
+
+fn validate_reservation_contents(
+    authority: &RegularFileAuthority,
+    expected_bytes: u64,
+) -> Result<()> {
+    let value = authority
+        .read_bounded_to_string(MAX_RESERVATION_FILE_BYTES)
+        .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?;
+    let actual = value.trim().parse::<u64>().map_err(|_| {
+        SwarmError::DispatchAdmission("invalid retained workspace reservation".to_owned())
+    })?;
+    if actual != expected_bytes {
+        return Err(SwarmError::DispatchAdmission(format!(
+            "retained workspace reservation changed: expected {expected_bytes}, observed {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_legacy_linked_worktree(root: &Path) -> bool {
+    let git = root.join(".git");
+    RegularFileAuthority::open(&git).is_ok() && !root.join("scratch").exists()
+}
+
+/// Measure a retained tree's logical size WITHOUT asking for any right the
+/// measurement does not use.
+///
+/// # Why the child opens are observational
+///
+/// This walk only ever enumerates names and reads file lengths — two callers
+/// in `worktree_manager` already describe it in their own comments as
+/// "`logical_tree_bytes` (read-only enumeration)". The implementation did not
+/// match that description: it opened every child directory through
+/// `open_child_directory`, whose Windows access mask adds `FILE_GENERIC_WRITE |
+/// DELETE`.
+///
+/// The `DELETE` right is SHARE-ARBITRATED. Windows refuses a `DELETE`-bearing
+/// open while any existing handle on the object omits `FILE_SHARE_DELETE`, and
+/// a live process whose current directory is that object is precisely such a
+/// handle — as is a `git` child working inside `.git`. So an accounting pass
+/// that never deletes anything was nevertheless refused with
+/// ERROR_SHARING_VIOLATION whenever it raced ordinary repository activity, and
+/// because `WorkspaceMonitor` treats an accounting error as a dispatch refusal
+/// the worker was killed and reported as
+/// `workspace accounting refused ".git": ... (os error 32)` — a healthy worker
+/// failed, and told the operator the wrong reason.
+///
+/// MEASURED on SeanDesktop (32 CPUs, four concurrent test processes): 8 of 24
+/// runs of `multi_worker_output_exhaustion_fails_without_retaining_buffers`
+/// died this way. The observational sibling requests `FILE_GENERIC_READ |
+/// SYNCHRONIZE`, pays no share-arbitration cost, and keeps every other
+/// guarantee — the open is still handle-relative, still no-follow, and still
+/// validated as a real directory. On non-Windows it is the same call.
+///
+/// Do not widen these back to the mutating form: this function has no
+/// destructive step to justify it.
+fn logical_tree_bytes(
+    root: wcore_sandbox::DirectoryAuthority,
+    limit: u64,
+    cancel: Option<&CancellationToken>,
+) -> Result<u64> {
+    let mut total = 0_u64;
+    let mut pending = vec![root];
+    let mut entries = 0_u64;
+    while let Some(directory) = pending.pop() {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(SwarmError::DispatchAdmission(
+                "workspace accounting cancelled".to_owned(),
+            ));
+        }
+        entries = entries
+            .checked_add(1)
+            .ok_or_else(|| SwarmError::WorktreeIo("workspace entry count overflowed".to_owned()))?;
+        if entries > 1_000_000 {
+            return Err(SwarmError::DispatchAdmission(
+                "workspace entry count exceeded the runtime budget".to_owned(),
+            ));
+        }
+        for name in directory
+            .child_names()
+            .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?
+        {
+            match directory.open_child_directory_observational(&name) {
+                Ok(child) => pending.push(child),
+                Err(wcore_sandbox::SandboxError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotADirectory =>
+                {
+                    let file = directory.open_child_file(&name).map_err(|error| {
+                        SwarmError::DispatchAdmission(format!(
+                            "workspace accounting refused {name:?}: {error}"
+                        ))
+                    })?;
+                    total = total
+                        .checked_add(file.len().map_err(|error| {
+                            SwarmError::DispatchAdmission(format!(
+                                "workspace accounting refused {name:?}: {error}"
+                            ))
+                        })?)
+                        .ok_or_else(|| {
+                            SwarmError::WorktreeIo("workspace size overflowed".to_owned())
+                        })?;
+                    if total > limit {
+                        return Ok(total);
+                    }
+                }
+                Err(error) => {
+                    return Err(SwarmError::DispatchAdmission(format!(
+                        "workspace accounting refused {name:?}: {error}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+impl TransactionWorkspace {
+    /// Return the retained transaction-root capability. Orchestration
+    /// evidence beneath this root must be accessed through this capability;
+    /// [`Self::root`] is display metadata only.
+    pub fn root_authority(&self) -> Result<wcore_sandbox::DirectoryAuthority> {
+        Ok(self.cleanup.root_authority()?.to_sandbox())
+    }
+
+    /// Return a clone of the retained checkout capability. Consumers must use
+    /// this object for filesystem authority; [`Self::checkout`] is display
+    /// metadata only and must never be reopened to mint a successor authority.
+    pub fn checkout_authority(&self) -> wcore_sandbox::DirectoryAuthority {
+        self.authorities.checkout.to_sandbox()
+    }
+
+    /// Return a clone of the retained scratch capability. Consumers must use
+    /// this object for filesystem authority; [`Self::scratch`] is display
+    /// metadata only.
+    pub fn scratch_authority(&self) -> wcore_sandbox::DirectoryAuthority {
+        self.authorities.scratch.to_sandbox()
+    }
+
+    pub(crate) fn validate_execution_authority(&self) -> Result<()> {
+        self.cleanup.root_authority()?.validate_path(&self.root)?;
+        self.authorities.checkout.validate_path(&self.checkout)?;
+        self.authorities.scratch.validate_path(&self.scratch)?;
+        validate_reservation_authority(
+            &self.authorities.reservation,
+            &self.root.join(RESERVATION_FILE),
+            self.reserved_bytes,
+        )?;
+        if self.checkout.starts_with(&self.scratch)
+            || self.scratch.starts_with(&self.checkout)
+            || self.checkout.parent() != Some(self.root.as_path())
+            || self.scratch.parent() != Some(self.root.as_path())
+        {
+            return Err(SwarmError::DispatchAdmission(
+                "transaction checkout and scratch authority relationship changed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Mint an opaque, live landing-candidate seal bound to this isolated
+    /// checkout. This is the sole caller-facing entry: it first re-proves
+    /// execution authority (the drift/dirty/identity guard), then hands the
+    /// live retained authorities and resolved commit/tree to the seal's
+    /// crate-private mint, which computes the source manifest and immediately
+    /// revalidates before returning. There is no other constructor, so a seal
+    /// can never be produced over already-drifted state.
+    pub fn seal_candidate(&self) -> Result<CandidateSeal> {
+        self.validate_execution_authority()?;
+        CandidateSeal::mint(
+            &self.owner,
+            &self.authorities.checkout,
+            &self.cleanup,
+            &self.base_commit,
+            &self.head_commit,
+            &self.tree,
+        )
+    }
+
+    pub(crate) fn logical_used_bytes(&self) -> Result<u64> {
+        self.logical_used_bytes_with_cancel(None)
+    }
+
+    pub(crate) fn logical_used_bytes_with_cancel(
+        &self,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<u64> {
+        self.validate_execution_authority()?;
+        let checkout = logical_tree_bytes(self.checkout_authority(), self.reserved_bytes, cancel)?;
+        if checkout > self.reserved_bytes {
+            self.validate_execution_authority()?;
+            return Ok(checkout);
+        }
+        let remaining = self.reserved_bytes - checkout;
+        let scratch = logical_tree_bytes(self.scratch_authority(), remaining, cancel)?;
+        let total = checkout
+            .checked_add(scratch)
+            .ok_or_else(|| SwarmError::WorktreeIo("workspace size overflowed".to_owned()))?;
+        self.validate_execution_authority()?;
+        Ok(total)
+    }
+}
+
+const CLEANUP_GRACE: Duration = Duration::from_secs(5);
+const GIT_CAPTURE_LIMITS: CaptureLimits = CaptureLimits {
+    stdout_bytes: 1024 * 1024,
+    stderr_bytes: 256 * 1024,
+    timeout: Duration::from_secs(120),
+};
+const UNSAFE_CHECKOUT_CONFIG: &str =
+    r"^(filter\..*\.(clean|smudge|process)|include\.path|includeif\..*\.path)$";
+#[path = "worktree/candidate.rs"]
+mod candidate;
+#[path = "worktree_cleanup.rs"]
+mod cleanup;
+#[path = "worktree_manager.rs"]
+mod manager;
+#[path = "worktree/parent.rs"]
+mod parent;
+pub use candidate::CandidateSeal;
+pub use parent::{
+    LandingOutcome, ParentLandingError, ParentPreimage, ParentSuccessor, RollbackHandle,
+};
+
+fn capture_error(context: &str, error: ProcessCaptureError) -> SwarmError {
+    SwarmError::WorktreeIo(format!("{context}: {error}"))
+}
+
+fn worktree_add_error(path: &Path, reason: String) -> SwarmError {
+    let residual = match std::fs::symlink_metadata(path) {
+        Ok(_) => format!("; residual worktree path preserved: {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => format!(
+            "; could not inspect possible residual worktree path {}: {error}",
+            path.display()
+        ),
+    };
+    SwarmError::WorktreeIo(format!("{reason}{residual}"))
+}
+
+#[cfg(test)]
+#[path = "worktree_tests.rs"]
+mod tests;

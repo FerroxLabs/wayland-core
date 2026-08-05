@@ -1,0 +1,13 @@
+=== is the repeat predicted by the DELIVERY WINDOW exceeding the 60s recurrence? ===
+
+windows-attempt3     delivery arrivals= 24  first->last span=  67.7s  repeats=12
+                     window > 60s recurrence? YES -> repeat PREDICTED
+
+windows-FINAL        delivery arrivals= 12  first->last span=   0.3s  repeats=0
+                     window > 60s recurrence? NO  -> single occurrence PREDICTED
+
+=== receipt-level: all four archived runs ===
+windows-receipt-attempt3.json    run= 188.9s  true_arrived(cov)= 24  repeats=12
+FINAL-windows-receipt.json       run= 151.2s  true_arrived(cov)= 12  repeats=0
+FINAL-macos-receipt.json         run=  71.9s  true_arrived(cov)= 12  repeats=0
+FINAL-linux-receipt.json         run=  73.5s  true_arrived(cov)= 12  repeats=0

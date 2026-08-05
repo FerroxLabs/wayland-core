@@ -53,6 +53,16 @@ impl StreamableHttpTransport {
         headers: &HashMap<String, String>,
         allow_local: bool,
     ) -> Result<Self, McpError> {
+        Self::connect_with_policy(url, headers, allow_local, wcore_egress::default_policy()).await
+    }
+
+    /// Create a transport bound to one session's immutable egress policy.
+    pub async fn connect_with_policy(
+        url: &str,
+        headers: &HashMap<String, String>,
+        allow_local: bool,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<Self, McpError> {
         // M-13 (SSRF) — validate the configured URL before attaching any
         // secret-bearing header. `is_safe_url` fails closed on
         // private/internal/metadata targets and on DNS failure.
@@ -115,6 +125,7 @@ impl StreamableHttpTransport {
         // SsrfSafeResolver drops loopback at connect time). Both variants keep
         // every non-loopback SSRF protection intact.
         let builder = wcore_egress::EgressClient::builder()
+            .policy(egress_policy)
             .pool_idle_timeout(std::time::Duration::from_secs(5))
             .connect_timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(120));
@@ -133,7 +144,7 @@ impl StreamableHttpTransport {
         };
         let client = builder
             .build()
-            .unwrap_or_else(|_| wcore_egress::EgressClient::new());
+            .map_err(|e| McpError::Transport(format!("HTTP client initialization failed: {e}")))?;
 
         Ok(Self {
             client,

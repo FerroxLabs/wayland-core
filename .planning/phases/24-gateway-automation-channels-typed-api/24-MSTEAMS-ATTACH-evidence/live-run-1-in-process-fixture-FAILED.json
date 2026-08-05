@@ -1,0 +1,48 @@
+{
+  "at": "2026-07-29T05:45:00.251Z",
+  "host": "Ubuntu-2404-noble-amd64-base",
+  "ports": {
+    "webhook": 19631,
+    "bf": 19632,
+    "llm": 19633
+  },
+  "binary": "/root/wayland-24-msteams-attach/target/debug/wayland-core",
+  "matcher_self_test": "PASS (3/3)",
+  "results": [
+    {
+      "clause": "M1-turn",
+      "ok": false,
+      "detail": "POST=400 turn=NO | STATUS 400"
+    },
+    {
+      "clause": "M2-control-no-attachments",
+      "ok": false,
+      "detail": "no turn to inspect"
+    },
+    {
+      "clause": "M2-attach",
+      "ok": false,
+      "detail": "POST=400 block=null kind_ok=false ref_ok=false wrapper_suppressed=false"
+    },
+    {
+      "clause": "M3-no-phantom",
+      "ok": false,
+      "detail": "POST=400 turn=NO block=null want=null"
+    },
+    {
+      "clause": "M4-auth",
+      "ok": true,
+      "detail": "POST=400 (want non-200) turn=none | STATUS 400"
+    }
+  ],
+  "passed": 1,
+  "total": 5,
+  "notes": [
+    "webhook host up after 6s",
+    "bf fixture journal: []",
+    "turns observed: 0"
+  ],
+  "bf_journal": [],
+  "turns": [],
+  "core_log_tail": "\u001b[2m2026-07-29T05:42:24.738206Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24msteams \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mmsteams\n[gateway] channels registered=1\n[gateway] inbound: subscriber spawned, webhook host listening bind=127.0.0.1:19631 policies=1\n\u001b[2m2026-07-29T05:42:28.528490Z\u001b[0m \u001b[33m WARN\u001b[0m channel start() failed; skipping and continuing with the rest \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24msteams \u001b[3merror\u001b[0m\u001b[2m=\u001b[0mauth failed: Bot Framework token: network: error sending request for url (http://127.0.0.1:19632/token)\n[gateway] started pid=3111572 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0\n[gateway] shutdown signal received\n[gateway] drain Clean: observations=1 abandoned=0 flushed=true\n[gateway] stopped (clean=true)\n"
+}

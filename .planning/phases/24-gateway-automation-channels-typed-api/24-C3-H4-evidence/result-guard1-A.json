@@ -1,0 +1,72 @@
+{
+  "finding": "F24-C3-H4",
+  "binary": "/root/wl-24c3h4-prefix",
+  "binary_sha256": "402f7c70dbdf678eb9a07ed9aae000b1898f7e99dfee79dd5c91111df2149cf4",
+  "build_info": "wayland-core 0.12.25 (source 353a5f6e5b25fa622df2c50c17497b282f88d42f)",
+  "run_id": "e3b96833",
+  "submitted_total": 8,
+  "preload": 4,
+  "live": 4,
+  "replied_total": 0,
+  "turns_total": 0,
+  "raw_replies_total": 0,
+  "instrument_fault": null,
+  "cron_requested": false,
+  "cron_text": null,
+  "cron_fires": null,
+  "lost_total": 8,
+  "lost": [
+    {
+      "token": "f24c3-h4-pre-0-e3b96833",
+      "phase": "preload",
+      "update_id": 1
+    },
+    {
+      "token": "f24c3-h4-pre-1-e3b96833",
+      "phase": "preload",
+      "update_id": 2
+    },
+    {
+      "token": "f24c3-h4-pre-2-e3b96833",
+      "phase": "preload",
+      "update_id": 3
+    },
+    {
+      "token": "f24c3-h4-pre-3-e3b96833",
+      "phase": "preload",
+      "update_id": 4
+    },
+    {
+      "token": "f24c3-h4-live-0-e3b96833",
+      "phase": "live",
+      "update_id": 5
+    },
+    {
+      "token": "f24c3-h4-live-1-e3b96833",
+      "phase": "live",
+      "update_id": 6
+    },
+    {
+      "token": "f24c3-h4-live-2-e3b96833",
+      "phase": "live",
+      "update_id": 7
+    },
+    {
+      "token": "f24c3-h4-live-3-e3b96833",
+      "phase": "live",
+      "update_id": 8
+    }
+  ],
+  "duplicated_total": 0,
+  "duplicated": [],
+  "max_concurrent_getupdates": 2,
+  "poll_total": 179,
+  "still_pending": [],
+  "replies": [],
+  "gateway_log_lines": [
+    "\u001b[2m2026-07-28T17:54:42.088870Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24c3h4tg \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mtelegram",
+    "\u001b[2m2026-07-28T17:54:43.894915Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24c3h4tg \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mtelegram",
+    "[gateway] channels registered=1",
+    "[gateway] inbound: subscriber spawned, webhook host disabled policies=1"
+  ]
+}

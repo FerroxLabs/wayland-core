@@ -1,0 +1,5 @@
+PANEL-MEMBER: codex
+PANEL-QUESTION-SHA256: daa6b1d1353c04b66b44e4b263e27dbf8f8be56bf30e9c3cd8d40cf0380b7db7
+---
+PANEL-VERDICT: send-back-rounded-up
+PANEL-BASIS: F26-SC1/F26-01’s macOS replay validates `b671f9ad`, not certified SHA `9b2ed829`, while the Windows-bearing CLOSED keys replay only on Hetzner. In particular, F26-04’s named remap evidence does not prove its claimed Windows interruption rollback.

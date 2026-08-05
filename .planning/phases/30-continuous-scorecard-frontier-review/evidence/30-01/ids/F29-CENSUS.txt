@@ -1,0 +1,19 @@
+EVIDENCE ID : F29-CENSUS
+LEDGER ROW  : 37
+ARTIFACT    : `phases/29-supply-chain-release-integrity/29-01-SUMMARY.md` — 30 census rows, **nine HIGH, no CRITICAL**. Recorded as prominently as the gaps: the release path **already** carries keyless Sigstore SLSA provenance (`actions/attest-build-provenance@v4`), npm `--provenance`, and `self_update.rs` fails **closed** without `gh attestation verify`. `grep -rn 'environment:' .github/workflows/` returns **zero** — no job declares a GitHub Environment. F29-CEN-17: rollback rehearsal does not exist anywhere in CI
+
+== PATH RESOLUTION ==
+[OK]   stat phases/29-supply-chain-release-integrity/29-01-SUMMARY.md
+       -> .planning/phases/29-supply-chain-release-integrity/29-01-SUMMARY.md  size=21274
+       head:
+---
+phase: 29-supply-chain-release-integrity
+plan: "01"
+subsystem: supply-chain / release integrity
+status: complete
+termination_state: 1 (Complete)
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

@@ -1,0 +1,19 @@
+EVIDENCE ID : F24-B-LIFECYCLE
+LEDGER ROW  : 23
+ARTIFACT    : `phases/24-gateway-automation-channels-typed-api/24-B-SUMMARY.md` §5 — real `wayland-core 0.12.25` release on `hetzner-dsm` against real `systemctl --user`: `install` wrote a real unit and `is-enabled` → `enabled`; `kill -9` recorded by systemd itself (`code=killed, status=9/KILL`) and **RECOVERED after 5s with a new pid — nothing in the run restarted it**; `drain --budget-ms 5000` went `Draining (pending 12)` → `Drained (pending 0)` with all 12 abandoned BY NAME and recorded durably; `uninstall` left no residual process. Four HIGH defects found by running it. §6 records that the macOS CI binary **provably does not carry this code** (`--help \| grep -cE "^\s+gateway"` → `0`)
+
+== PATH RESOLUTION ==
+[OK]   stat phases/24-gateway-automation-channels-typed-api/24-B-SUMMARY.md
+       -> .planning/phases/24-gateway-automation-channels-typed-api/24-B-SUMMARY.md  size=14673
+       head:
+---
+phase: 24-gateway-automation-channels-typed-api
+plan: "B"
+subsystem: gateway
+tags: [operator-verbs, service-lifecycle, drain, profile-isolation, delivery-continuity]
+status: partial
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

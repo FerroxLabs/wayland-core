@@ -10,7 +10,8 @@
 //! file always read back `Ok(None)` from `worker_status` — that's fine;
 //! the orchestrator falls back to a "no heartbeat yet" interpretation.
 
-use std::fs;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +21,7 @@ use crate::error::{Result, SwarmError};
 
 /// Filename within each worker's worktree where the heartbeat lives.
 pub const STATUS_FILE: &str = ".swarm-status.json";
+const MAX_STATUS_BYTES: u64 = 4096;
 
 /// Wire-format heartbeat payload. Workers write this; orchestrator reads
 /// it. `last_alive_at` is unix-epoch milliseconds. `step` is a free-form
@@ -78,12 +80,83 @@ impl HeartbeatWriter {
 /// from "corrupt heartbeat".
 pub fn read_status(worktree: &Path) -> Result<Option<WorkerStatusFile>> {
     let path = worktree.join(STATUS_FILE);
-    let bytes = match fs::read(&path) {
-        Ok(b) => b,
+    let bytes = match open_status_file(&path) {
+        Ok(file) => read_status_bytes(file)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(SwarmError::Io(e)),
     };
-    let payload: WorkerStatusFile = serde_json::from_slice(&bytes)
-        .map_err(|e| SwarmError::WorktreeIo(format!("heartbeat decode: {e}")))?;
-    Ok(Some(payload))
+    decode_status(&bytes).map(Some)
+}
+
+/// Read a heartbeat through an already-retained checkout capability. This is
+/// the orchestrator path: a worker cannot redirect it by replacing the
+/// checkout pathname after admission.
+pub fn read_status_authorized(
+    checkout: &wcore_sandbox::DirectoryAuthority,
+) -> Result<Option<WorkerStatusFile>> {
+    let Some(bytes) = checkout
+        .read_child_bounded(STATUS_FILE, MAX_STATUS_BYTES)
+        .map_err(|error| SwarmError::WorktreeIo(format!("heartbeat authority read: {error}")))?
+    else {
+        return Ok(None);
+    };
+    decode_status(&bytes).map(Some)
+}
+
+fn decode_status(bytes: &[u8]) -> Result<WorkerStatusFile> {
+    serde_json::from_slice(bytes).map_err(|e| {
+        SwarmError::WorktreeIo(format!(
+            "heartbeat decode: {e}; payload={:?}",
+            String::from_utf8_lossy(bytes)
+        ))
+    })
+}
+
+fn open_status_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+fn read_status_bytes(file: File) -> Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(SwarmError::WorktreeIo(
+                "heartbeat file is a reparse point".to_owned(),
+            ));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(SwarmError::WorktreeIo(
+            "heartbeat file must be a regular file".to_owned(),
+        ));
+    }
+    if metadata.len() > MAX_STATUS_BYTES {
+        return Err(SwarmError::WorktreeIo(format!(
+            "heartbeat file exceeds {MAX_STATUS_BYTES} bytes"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_STATUS_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STATUS_BYTES {
+        return Err(SwarmError::WorktreeIo(format!(
+            "heartbeat file exceeds {MAX_STATUS_BYTES} bytes"
+        )));
+    }
+    Ok(bytes)
 }

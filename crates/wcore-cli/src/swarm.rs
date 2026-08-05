@@ -20,14 +20,18 @@ use std::time::Duration;
 use clap::Args;
 use clap::builder::RangedU64ValueParser;
 use serde::Deserialize;
-use wcore_swarm::{ReduceMode, RuleBasedScorer, Swarm, SwarmBrief, reduce};
+use wcore_swarm::{MAX_DISPATCH_WORKERS, ReduceMode, RuleBasedScorer, Swarm, SwarmBrief, reduce};
 
 #[derive(Args, Debug)]
 pub struct SwarmArgs {
-    /// Number of parallel workers to dispatch (minimum 1).
+    /// Number of parallel workers to dispatch (1 through the safe Swarm cap).
     // F-071: value_parser rejects 0 at the clap level so the user gets
     // a clear "1..=max" range error before any work is attempted.
-    #[arg(long, value_parser = RangedU64ValueParser::<usize>::new().range(1..))]
+    #[arg(
+        long,
+        value_parser = RangedU64ValueParser::<usize>::new()
+            .range(1..=MAX_DISPATCH_WORKERS as u64)
+    )]
     pub workers: usize,
 
     /// argv-style worker command. Split on ASCII whitespace; the first
@@ -286,6 +290,33 @@ mod tests {
         let mut argv = vec!["prog", "--workers", "1", "--worker-command", "true"];
         argv.extend_from_slice(&["--reduce", "bogus"]);
         assert!(ReduceHarness::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn workers_flag_enforces_dispatch_cap() {
+        let cap = MAX_DISPATCH_WORKERS.to_string();
+        let accepted = [
+            "prog",
+            "--workers",
+            cap.as_str(),
+            "--worker-command",
+            "true",
+        ];
+        assert!(ReduceHarness::try_parse_from(accepted).is_ok());
+
+        for rejected in ["0".to_string(), (MAX_DISPATCH_WORKERS + 1).to_string()] {
+            let argv = [
+                "prog",
+                "--workers",
+                rejected.as_str(),
+                "--worker-command",
+                "true",
+            ];
+            assert!(
+                ReduceHarness::try_parse_from(argv).is_err(),
+                "accepted worker count {rejected}"
+            );
+        }
     }
 
     #[test]

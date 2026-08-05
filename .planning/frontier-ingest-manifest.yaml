@@ -1,0 +1,13 @@
+docs:
+  - path: docs/design/2026-07-13-wayland-core-frontier-build-plan.md
+    type: SPEC
+    precedence: 0
+  - path: docs/design/2026-07-13-wayland-core-frontier-evaluation-program.md
+    type: SPEC
+    precedence: 1
+  - path: docs/design/2026-07-13-wayland-core-frontier-cross-audit.md
+    type: DOC
+    precedence: 2
+  - path: docs/design/2026-07-13-wayland-core-frontier-gap-audit-and-execution-plan.md
+    type: DOC
+    precedence: 3

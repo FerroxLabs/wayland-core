@@ -1,0 +1,8 @@
+case: ATK-07
+what: a measured comparative's interval is replaced by a point estimate
+half: PRISTINE
+class: comparative
+scope: SCRIPTED_HARNESS
+text: Hermes completed the scripted task more reliably than wayland-core.
+outcome: ACCEPTED
+rule: NONE

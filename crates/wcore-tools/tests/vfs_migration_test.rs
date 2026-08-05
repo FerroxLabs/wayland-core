@@ -19,15 +19,13 @@ use wcore_tools::write::WriteTool;
 
 fn sandboxed_ctx(root: &std::path::Path) -> ToolContext {
     let vfs = SandboxedFs::new(RealFs, root.to_path_buf());
-    ToolContext {
-        call_id: String::new(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        vfs: Arc::new(vfs),
-        source_agent: None,
-        sink: Arc::new(wcore_tools::NullToolOutputSink),
-        file_write_notifier: None,
-        workspace: None,
-    }
+    ToolContext::new(
+        String::new(),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(vfs),
+        None,
+        Arc::new(wcore_tools::NullToolOutputSink),
+    )
 }
 
 #[tokio::test]
@@ -190,15 +188,14 @@ fn ctx_with_notifier(
     notifier: Arc<RecordingNotifier>,
 ) -> (ToolContext, Arc<RecordingNotifier>) {
     let vfs = SandboxedFs::new(RealFs, root.to_path_buf());
-    let ctx = ToolContext {
-        call_id: String::new(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        vfs: Arc::new(vfs),
-        source_agent: None,
-        sink: Arc::new(wcore_tools::NullToolOutputSink),
-        file_write_notifier: Some(notifier.clone() as Arc<dyn FileWriteNotifier>),
-        workspace: None,
-    };
+    let ctx = ToolContext::new(
+        String::new(),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(vfs),
+        None,
+        Arc::new(wcore_tools::NullToolOutputSink),
+    )
+    .with_file_write_notifier(notifier.clone() as Arc<dyn FileWriteNotifier>);
     (ctx, notifier)
 }
 

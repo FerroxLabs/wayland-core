@@ -1,0 +1,37 @@
+probe scm host=SEANDESKTOP user=seand#< CLIXML
+
+probe scm now=2026-07-26T22:44:17.7098856+07:00
+probe scm identity=SeanDesktop\seand elevated=True
+probe scm --- sc.exe create ---
+probe scm create> [SC] CreateService SUCCESS
+probe scm create rc=0
+probe scm --- sc.exe start ---
+probe scm start> [SC] StartService FAILED 1053:
+probe scm start> 
+probe scm start> The service did not respond to the start or control request in a timely fashion.
+probe scm start> 
+probe scm start rc=1053
+probe scm heartbeat-after-start lines=586
+probe scm query> 
+probe scm query> SERVICE_NAME: F24ProbeSvc 
+probe scm query>         TYPE               : 10  WIN32_OWN_PROCESS  
+probe scm query>         STATE              : 1  STOPPED 
+probe scm query>         WIN32_EXIT_CODE    : 0  (0x0)
+probe scm query>         SERVICE_EXIT_CODE  : 0  (0x0)
+probe scm query>         CHECKPOINT         : 0x0
+probe scm query>         WAIT_HINT          : 0x7d0
+probe scm stop> [SC] ControlService FAILED 1062:
+probe scm stop> 
+probe scm stop> The service has not been started.
+probe scm stop> 
+probe scm delete> [SC] DeleteService SUCCESS
+probe scm post-delete-query> [SC] EnumQueryServicesStatus:OpenService FAILED 1060:
+probe scm post-delete-query> 
+probe scm post-delete-query> The specified service does not exist as an installed service.
+probe scm post-delete-query> 
+probe scm NOTE: registration rc=0 (session is elevated, so registration is not gated here)
+probe scm NOTE: start rc=1053; 1053 means the image did not answer the service control handshake
+probe scm NOTE: the probe binary is a plain console executable and cannot answer that handshake
+probe scm VERDICT: registration AVAILABLE, survival NOT DEMONSTRATED by this probe
+PROBE scm RESULT=unsupported RC=1053
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T><T>System.Object</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj><Obj S="progress" RefId="1"><TNRef RefId="0" /><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj></Objs>

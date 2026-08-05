@@ -15,8 +15,10 @@
 //! Token source. Two places hold xAI credentials, and the manager prefers
 //! whichever is FRESHER so it rarely has to refresh itself (which avoids
 //! racing the Grok CLI for the single-use, rotating refresh token):
-//! - the engine's own store `~/.wayland/oauth/xai.json` (written by the Wayland
-//!   app's "Sign in with X (Grok)" flow or by a prior refresh);
+//! - the engine's own store — the credential ladder (OS keyring → encrypted
+//!   vault → REFUSE), written by the Wayland app's "Sign in with X (Grok)" flow
+//!   or by a prior refresh. `~/.wayland/oauth/xai.json` is the pre-migration
+//!   form: still readable, promoted into the ladder and removed on first load;
 //! - the Grok CLI's `~/.grok/auth.json` (the CLI keeps it fresh), whose `key`
 //!   field is the access token, nested under a `"https://auth.x.ai::<cid>"`
 //!   wrapper.
@@ -26,7 +28,7 @@
 //! token is already burned server-side.
 
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
@@ -59,7 +61,13 @@ const XAI_SCOPES: &str = "openid profile email offline_access grok-cli:access ap
 const REFRESH_LEAD_SECS: u64 = 120;
 
 /// Per network call ceiling for the refresh round-trip.
-const PER_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// The refresh POST's wall-clock cap. Re-exported from `refresh_lock` rather
+/// than duplicated: the cross-process lock's wait ceiling and staleness are
+/// DERIVED from this number, so a local copy that drifted would silently
+/// undersize them. There were three independent `20`s before this — the
+/// shared constant's own doc claimed they could not drift apart, and nothing
+/// enforced it (the shared one was dead code).
+use super::refresh_lock::PER_CALL_TIMEOUT;
 
 /// Sentinel marking a `429` refresh (rate limit, not auth failure) so the
 /// caller can keep using a still-valid current token (C3).
@@ -459,7 +467,11 @@ mod tests {
         // Isolate from any real ~/.grok/auth.json so the test is deterministic.
         unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
         let tmp = TempDir::new().unwrap();
-        let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
+        let storage = OAuthStorage::at_root(
+            tmp.path().join("oauth"),
+            Box::new(wcore_config::credentials::InMemoryCredentialsStore::new()),
+        )
+        .unwrap();
         storage
             .store(PROVIDER, &token("at-fresh", Some("rt"), Some(far_future())))
             .unwrap();

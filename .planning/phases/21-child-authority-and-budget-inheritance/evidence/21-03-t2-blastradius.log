@@ -1,0 +1,141 @@
+RUN_SHA=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+HOST=hetzner-dsm
+THROWAWAY_WORKTREE=/root/wayland-p21-probe (created from the triage commit, deleted after the probe)
+PURPOSE=21-03 Task 2 Step 1 blast-radius probe. Each candidate applied ALONE, reverted between candidates.
+NOTE=Pass 1's inline extraction missed nextest's 'TRY n TMT/FAIL [' prefix and the digest binary's key=value output, so its verdict lines were computed against an empty non-passing baseline. Those lines are retained below, renamed SUPERSEDED-BLAST-RADIUS, and the authoritative verdicts are the corrected pass at the end, re-derived from the SAME run's retained artifacts.
+=================== PASS 1 TRANSCRIPT ===================
+RUN_SHA=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+PROBE_TREE=/root/wayland-p21-probe
+PROBE_HEAD=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+PROBE_PKGS=-p wcore-agent -p wcore-types -p wcore-permissions -p wcore-protocol -p wcore-budget
+PROBE_START=2026-07-26T13:03:36Z
+BASELINE TESTS_PASSED=3421 RC=100
+BASELINE_NONPASSING_COUNT=0
+     Summary [ 121.774s] 3422 tests run: 3421 passed (2 slow), 1 timed out, 12 skipped
+   TRY 2 TMT [  60.006s] (3422/3422) wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+error: test run failed
+CONTRACT-DIGEST BASELINE RC=0
+===== CANDIDATE F21-02-01 =====
+APPLIED F21-02-01
+--- files changed by F21-02-01 ---
+crates/wcore-agent/src/bootstrap.rs
+crates/wcore-agent/src/spawner.rs
+--- test tail ---
+  TRY 2 FAIL [   0.129s] (3381/3422) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+   TRY 2 TMT [  60.006s] (3422/3422) wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+error: test run failed
+--- non-passing after F21-02-01 ---
+--- verdict-changing tests (present after, absent at baseline) ---
+NEW_FAILURES_F21-02-01=0
+--- contract digest after F21-02-01 ---
+CONTRACT-DIGEST F21-02-01 UNCHANGED
+SUPERSEDED-BLAST-RADIUS F21-02-01 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3420 RC=100
+===== CANDIDATE F21-02-02 =====
+APPLIED F21-02-02
+--- files changed by F21-02-02 ---
+crates/wcore-types/src/execution_policy.rs
+--- test tail ---
+  TRY 2 FAIL [   0.128s] (3381/3422) wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+   TRY 2 TMT [  60.007s] (3422/3422) wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+error: test run failed
+--- non-passing after F21-02-02 ---
+--- verdict-changing tests (present after, absent at baseline) ---
+NEW_FAILURES_F21-02-02=0
+--- contract digest after F21-02-02 ---
+CONTRACT-DIGEST F21-02-02 UNCHANGED
+SUPERSEDED-BLAST-RADIUS F21-02-02 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3420 RC=100
+===== CANDIDATE F21-02-03 =====
+APPLIED F21-02-03
+--- files changed by F21-02-03 ---
+crates/wcore-agent/src/engine.rs
+--- test tail ---
+  TRY 2 FAIL [   2.086s] (3413/3422) wcore-agent::dangerous_lease_e2e_test dangerous_expiry_reaches_bootstrapped_spawn_child
+   TRY 2 TMT [  60.006s] (3422/3422) wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+error: test run failed
+--- non-passing after F21-02-03 ---
+--- verdict-changing tests (present after, absent at baseline) ---
+NEW_FAILURES_F21-02-03=0
+--- contract digest after F21-02-03 ---
+CONTRACT-DIGEST F21-02-03 UNCHANGED
+SUPERSEDED-BLAST-RADIUS F21-02-03 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3398 RC=100
+PROBE_TREE_CLEAN=0
+PROBE_END=2026-07-26T13:17:45Z
+=================== PASS 2 AUTHORITATIVE VERDICTS ===================
+RUN_SHA=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+VERDICT_PASS=corrected-extraction
+VERDICT_SOURCE=/root/p21probe (artifacts retained from the single probe run)
+VERDICT_AT=2026-07-26T13:21:31Z
+BASELINE TESTS_PASSED=3421 RC=101 NONPASSING=1
+BASELINE_NONPASSING_SET:
+wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+BASELINE_CONTRACT_DIGEST source_inputs_digest=sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28
+BASELINE_CONTRACT_DIGEST_MATCHES_PINNED_FIXTURE=yes
+===== VERDICT F21-02-01 =====
+NONPASSING_AFTER=2
+wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+VERDICT_CHANGING_TESTS=1
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+CONTRACT-DIGEST F21-02-01 CHANGED base=source_inputs_digest=sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28 after=source_inputs_digest=sha256:9c7b98e291538fdbf304a6d594aa832bf865acae21db8cbac9e45968e69d4e53
+BLAST-RADIUS F21-02-01 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3420 RC=101
+===== VERDICT F21-02-02 =====
+NONPASSING_AFTER=2
+wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+VERDICT_CHANGING_TESTS=1
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+CONTRACT-DIGEST F21-02-02 CHANGED base=source_inputs_digest=sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28 after=source_inputs_digest=sha256:5b0263bc677cd2eaa3d75ad1b8f6a120f075012de4e18bacdd412ad4c378467e
+BLAST-RADIUS F21-02-02 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3420 RC=101
+===== VERDICT F21-02-03 =====
+NONPASSING_AFTER=24
+wcore-agent::dangerous_lease_e2e_test dangerous_expiry_cancels_production_streaming_bash_process_tree
+wcore-agent::dangerous_lease_e2e_test dangerous_expiry_reaches_bootstrapped_spawn_child
+wcore-agent engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+wcore-agent engine::audit_2026_05_22_tests::cancelled_persisted_approval_repairs_tool_pair_before_turn_cancelled
+wcore-agent engine::audit_2026_05_22_tests::cancelled_run_snapshot_carries_delta_for_terminal_stream_end
+wcore-agent engine::audit_2026_05_22_tests::newly_unknown_tool_stops_the_live_turn_before_another_provider_call
+wcore-agent::execution_posture_e2e_test approval_bypass_retains_required_sandbox_and_tool_function
+wcore-agent::json_stream_approval_test askuser_always_needs_approval_even_in_autoedit_mode_v093_w8_h2
+wcore-agent::json_stream_approval_test non_askuser_answer_falls_through_to_execute
+wcore-agent::json_stream_approval_test test_client_disconnect_aborts
+wcore-agent::output_compaction_test case_6_compressed_content_reaches_llm
+wcore-agent::output_compaction_test secret_tool_result_is_redacted_before_host_provider_and_persistence
+wcore-agent::runaway_loop_test improving_numeric_outcomes_do_not_trip_route_monitor
+wcore-agent::runaway_loop_test normalized_alternating_route_replans_once_then_stops_if_ignored
+wcore-agent::runaway_loop_test one_step_volatile_route_replans_once_then_stops_if_ignored
+wcore-agent::runaway_loop_test repeated_identical_successful_tool_call_converges_via_loopguard
+wcore-agent::runaway_loop_test varied_bash_failures_remain_bounded_without_a_turn_cap
+wcore-agent::typed_execution_policy_e2e_test typed_auto_edit_allows_write_but_denies_bash
+wcore-agent::typed_execution_policy_e2e_test typed_bypass_executes_bash_inside_required_sandbox
+wcore-agent::typed_execution_policy_e2e_test typed_bypass_executes_read_without_bypassing_required_sandbox
+wcore-agent::w9_1_skill_drafting_per_turn engine_deduplicates_repeated_skill_drafted_emissions
+wcore-agent::w9_1_skill_drafting_per_turn engine_emits_skill_drafted_trace_after_three_identical_turns
+wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+VERDICT_CHANGING_TESTS=23
+wcore-agent::dangerous_lease_e2e_test dangerous_expiry_cancels_production_streaming_bash_process_tree
+wcore-agent::dangerous_lease_e2e_test dangerous_expiry_reaches_bootstrapped_spawn_child
+wcore-agent engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+wcore-agent engine::audit_2026_05_22_tests::cancelled_persisted_approval_repairs_tool_pair_before_turn_cancelled
+wcore-agent engine::audit_2026_05_22_tests::cancelled_run_snapshot_carries_delta_for_terminal_stream_end
+wcore-agent engine::audit_2026_05_22_tests::newly_unknown_tool_stops_the_live_turn_before_another_provider_call
+wcore-agent::execution_posture_e2e_test approval_bypass_retains_required_sandbox_and_tool_function
+wcore-agent::json_stream_approval_test askuser_always_needs_approval_even_in_autoedit_mode_v093_w8_h2
+wcore-agent::json_stream_approval_test non_askuser_answer_falls_through_to_execute
+wcore-agent::json_stream_approval_test test_client_disconnect_aborts
+wcore-agent::output_compaction_test case_6_compressed_content_reaches_llm
+wcore-agent::output_compaction_test secret_tool_result_is_redacted_before_host_provider_and_persistence
+wcore-agent::runaway_loop_test improving_numeric_outcomes_do_not_trip_route_monitor
+wcore-agent::runaway_loop_test normalized_alternating_route_replans_once_then_stops_if_ignored
+wcore-agent::runaway_loop_test one_step_volatile_route_replans_once_then_stops_if_ignored
+wcore-agent::runaway_loop_test repeated_identical_successful_tool_call_converges_via_loopguard
+wcore-agent::runaway_loop_test varied_bash_failures_remain_bounded_without_a_turn_cap
+wcore-agent::typed_execution_policy_e2e_test typed_auto_edit_allows_write_but_denies_bash
+wcore-agent::typed_execution_policy_e2e_test typed_bypass_executes_bash_inside_required_sandbox
+wcore-agent::typed_execution_policy_e2e_test typed_bypass_executes_read_without_bypassing_required_sandbox
+wcore-agent::w9_1_skill_drafting_per_turn engine_deduplicates_repeated_skill_drafted_emissions
+wcore-agent::w9_1_skill_drafting_per_turn engine_emits_skill_drafted_trace_after_three_identical_turns
+wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+CONTRACT-DIGEST F21-02-03 CHANGED base=source_inputs_digest=sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28 after=source_inputs_digest=sha256:636807f92e2daaa22d64488c71de2bad103839a4a8b964f870895287380586c2
+BLAST-RADIUS F21-02-03 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3398 RC=101
+VERDICT_END=2026-07-26T13:21:31Z

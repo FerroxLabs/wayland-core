@@ -33,8 +33,8 @@ pub fn is_priceable(
 ) -> bool {
     match model {
         Some(m) => catalog
-            .estimate_cost_microcents_resolved(provider, m, 1, 1, markup)
-            .is_some(),
+            .estimate_cost_status_resolved(provider, m, 1, 1, markup)
+            .is_some_and(|status| status.priced),
         None => false,
     }
 }
@@ -44,6 +44,8 @@ pub fn is_priceable(
 pub struct ProviderSpend {
     pub provider: String,
     pub model: Option<String>,
+    /// Total input processed across uncached, cache-read, and cache-write
+    /// categories.
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Cost in microcents (0 when the catalog has no price for provider×model).
@@ -96,13 +98,15 @@ pub struct CouncilSpend {
 /// Price a single (provider, model, usage) via the bundled catalog.
 fn price_one(provider: &str, model: Option<&str>, usage: &TokenUsage) -> ProviderSpend {
     let (cost_microcents, priced) = match model {
-        Some(m) => match DEFAULT_CATALOG.estimate_cost_microcents(
+        Some(m) => match DEFAULT_CATALOG.estimate_cost_with_cache_status(
             provider,
             m,
             usage.input_tokens,
             usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
         ) {
-            Ok(c) => (c, true),
+            Ok(status) => (status.microcents, status.priced),
             Err(_) => (0, false),
         },
         None => (0, false),
@@ -110,7 +114,7 @@ fn price_one(provider: &str, model: Option<&str>, usage: &TokenUsage) -> Provide
     ProviderSpend {
         provider: provider.to_string(),
         model: model.map(str::to_string),
-        input_tokens: usage.input_tokens,
+        input_tokens: usage.total_input_tokens(),
         output_tokens: usage.output_tokens,
         cost_microcents,
         priced,
@@ -131,9 +135,11 @@ impl CouncilSpend {
     ) -> Self {
         let mut spend = CouncilSpend::default();
         let mut push = |ps: ProviderSpend| {
-            spend.total_input_tokens += ps.input_tokens;
-            spend.total_output_tokens += ps.output_tokens;
-            spend.total_cost_microcents += ps.cost_microcents;
+            spend.total_input_tokens = spend.total_input_tokens.saturating_add(ps.input_tokens);
+            spend.total_output_tokens = spend.total_output_tokens.saturating_add(ps.output_tokens);
+            spend.total_cost_microcents = spend
+                .total_cost_microcents
+                .saturating_add(ps.cost_microcents);
             spend.per_provider.push(ps);
         };
         for p in proposals {
@@ -156,15 +162,17 @@ impl CouncilSpend {
     ) -> f64 {
         model
             .and_then(|m| {
-                DEFAULT_CATALOG.estimate_cost_microcents_resolved(
+                DEFAULT_CATALOG.estimate_cost_with_cache_status_resolved(
                     provider,
                     m,
                     usage.input_tokens,
                     usage.output_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_creation_tokens,
                     markup,
                 )
             })
-            .map(|mc| mc as f64 / MICROCENTS_PER_USD)
+            .map(|status| status.microcents as f64 / MICROCENTS_PER_USD)
             .unwrap_or(0.0)
     }
 
@@ -224,10 +232,12 @@ impl CouncilSpend {
 
         for (provider, model) in proposers {
             match model.and_then(|m| {
-                catalog.estimate_cost_microcents_resolved(provider, m, in_worst, out_worst, markup)
+                catalog.estimate_cost_status_resolved(provider, m, in_worst, out_worst, markup)
             }) {
-                Some(c) => microcents = microcents.saturating_add(c),
-                None => fully_priced = false,
+                Some(status) if status.priced => {
+                    microcents = microcents.saturating_add(status.microcents);
+                }
+                Some(_) | None => fully_priced = false,
             }
         }
 
@@ -245,10 +255,12 @@ impl CouncilSpend {
             let judge_out =
                 (AGGREGATOR_MAX_TURNS as u64).saturating_mul(AGGREGATOR_MAX_TOKENS as u64);
             match model.and_then(|m| {
-                catalog.estimate_cost_microcents_resolved(provider, m, judge_in, judge_out, markup)
+                catalog.estimate_cost_status_resolved(provider, m, judge_in, judge_out, markup)
             }) {
-                Some(c) => microcents = microcents.saturating_add(c),
-                None => fully_priced = false,
+                Some(status) if status.priced => {
+                    microcents = microcents.saturating_add(status.microcents);
+                }
+                Some(_) | None => fully_priced = false,
             }
         }
 
@@ -299,6 +311,36 @@ mod tests {
         assert_eq!(spend.total_input_tokens, 300);
         assert_eq!(spend.total_output_tokens, 130);
         assert_eq!(spend.per_provider.len(), 2);
+    }
+
+    #[test]
+    fn rolls_up_disjoint_cached_input_without_double_counting_cost() {
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 20,
+            cache_read_tokens: 80,
+        };
+        let proposals = vec![Proposal {
+            provider: "anthropic".to_string(),
+            model: Some("claude-opus-4-7".to_string()),
+            text: "ans".to_string(),
+            is_error: false,
+            usage: usage.clone(),
+            latency_ms: 0,
+        }];
+
+        let spend = CouncilSpend::from_run(&proposals, None);
+        let expected = DEFAULT_CATALOG
+            .estimate_cost_with_cache_status("anthropic", "claude-opus-4-7", 100, 50, 80, 20)
+            .unwrap();
+        assert_eq!(spend.total_input_tokens, 200);
+        assert_eq!(spend.per_provider[0].input_tokens, 200);
+        assert_eq!(spend.total_cost_microcents, expected.microcents);
+        assert_eq!(
+            CouncilSpend::usd_for_usage("anthropic", Some("claude-opus-4-7"), &usage, 1.0),
+            expected.microcents as f64 / MICROCENTS_PER_USD
+        );
     }
 
     #[test]
@@ -452,6 +494,14 @@ mod tests {
             1.0,
         );
         assert!(pre_flux.fully_priced && pre_flux.microcents > 0);
+
+        let router_alias: Vec<(&str, Option<&str>)> = vec![("flux-router", Some("flux-auto"))];
+        let pre_router =
+            CouncilSpend::estimate_preflight_microcents(&cat, &router_alias, None, 4, 4096, 1.0);
+        assert!(
+            !pre_router.fully_priced,
+            "an explicit unpriced router row must not certify a zero price"
+        );
     }
 
     #[test]
@@ -495,6 +545,8 @@ mod tests {
             Some("flux-pinned-gpt-5"),
             1.0
         ));
+        assert!(is_priceable(&cat, "ollama", Some("local"), 1.0));
+        assert!(!is_priceable(&cat, "flux-router", Some("flux-auto"), 1.0));
         // Unknown native SKU, no row, and no model are all unpriceable.
         assert!(!is_priceable(
             &cat,

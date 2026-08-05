@@ -1,0 +1,48 @@
+     Running unittests src/lib.rs (target/debug/deps/wcore_cli-1127fa469a1e3658)
+     Running unittests src/lib.rs (target/debug/deps/failing_fixture-451498ab39fd9d87)
+failures:
+---- always_fails stdout ----
+thread 'always_fails' (36256) panicked at src/lib.rs:2:21:
+failures:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+error: test failed, to rerun pass `--lib`
+test result: ok. 1917 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.98s
+     Running unittests src/main.rs (target/debug/deps/wayland_core-3feb673a17dcc8e5)
+test result: ok. 52 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.05s
+     Running tests/acp_engine_turn.rs (target/debug/deps/acp_engine_turn-c58069ef8749b786)
+test result: ok. 9 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/acp_gate_d012.rs (target/debug/deps/acp_gate_d012-fb3005933ec7fa4a)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.10s
+     Running tests/automation_cli_surface.rs (target/debug/deps/automation_cli_surface-9180f37034de28fc)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/backup_sqlite_capture.rs (target/debug/deps/backup_sqlite_capture-561907368f67bf7b)
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+     Running tests/build_provenance.rs (target/debug/deps/build_provenance-e42cba9873b7fa39)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+     Running tests/build_script_provenance.rs (target/debug/deps/build_script_provenance-ea1e170b75a568f3)
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/cache_ledger_cli.rs (target/debug/deps/cache_ledger_cli-77969e9638d8621f)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+     Running tests/child_attribution_corpus.rs (target/debug/deps/child_attribution_corpus-5776c3dc5fb6d04f)
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.16s
+     Running tests/child_authority_corpus.rs (target/debug/deps/child_authority_corpus-dbc6b47795211b46)
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.15s
+     Running tests/child_lifecycle_wire_live.rs (target/debug/deps/child_lifecycle_wire_live-27349ca370bcbb8c)
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 45.09s
+     Running tests/cli_marketplace.rs (target/debug/deps/cli_marketplace-f08e9e6efd9a4032)
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/composer_attachments_e2e.rs (target/debug/deps/composer_attachments_e2e-92617f6987a35e61)
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+     Running tests/deterministic_openai_loop.rs (target/debug/deps/deterministic_openai_loop-28b86f55f687f23f)
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 73.06s
+     Running tests/doctor_smoke.rs (target/debug/deps/doctor_smoke-7924f791e9c34ad0)
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+     Running tests/engine_rebind.rs (target/debug/deps/engine_rebind-fdf749ee703fca68)
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+     Running tests/f14_sigkill_recovery.rs (target/debug/deps/f14_sigkill_recovery-0c2c7646b8296b33)
+failures:
+---- isolated_profile_without_secure_store_fails_before_turn_or_provider_intent stdout ----
+thread 'isolated_profile_without_secure_store_fails_before_turn_or_provider_intent' (102511) panicked at crates/wcore-cli/tests/f14_sigkill_recovery.rs:204:9:
+failures:
+test result: FAILED. 10 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 14.11s
+error: test failed, to rerun pass `-p wcore-cli --test f14_sigkill_recovery`

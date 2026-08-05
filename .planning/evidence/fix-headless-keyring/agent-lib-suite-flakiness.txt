@@ -1,0 +1,116 @@
+wcore-agent --lib: the parallel suite is FLAKY at a fixed commit, and it is
+flaky at the integration base too. Not caused by this lane.
+
+I ran this because my change touches engine.rs, so the crate's own lib suite
+had to be measured, not assumed. It came back 16 failed - all
+"session journal writer lease is already held". Four measurements settle it:
+
+1. MY SHA, SINGLE-THREADED, whole suite:
+   test result: ok. 2252 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out
+   Fully green. No test in the crate fails at my commit when run serially.
+
+2. SAME COMMAND, SAME COMMIT, RUN TWICE BACK TO BACK (the decisive one):
+   run1: 2235 passed; 17 failed      run2: 2235 passed; 17 failed
+   ...but SIX of the seventeen are DIFFERENT tests between the two runs.
+   A deterministic regression cannot do that.
+SHA=551d900127c03989061b44f170674c12419f6971
+REPEAT1_RC=101
+REPEAT1_RESULT=test result: FAILED. 2235 passed; 17 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.40s
+REPEAT2_RC=101
+REPEAT2_RESULT=test result: FAILED. 2235 passed; 17 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.40s
+=== same command, same commit, twice: do the failure SETS differ? ===
+run1_count=17  run2_count=17
+--- only in run1 ---
+    engine::audit_2026_05_22_tests::invalid_live_session_switch_leaves_existing_authority_untouched
+    engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state
+    engine::audit_2026_05_22_tests::recovered_denial_resumes_after_partial_no_start_without_dispatch
+    engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay
+    engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once
+    orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects
+--- only in run2 ---
+    engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+    engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch
+    goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition
+    session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror
+    session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal
+    session::tests::test_f034_empty_session_gc
+
+3. THE INTEGRATION BASE, same parallel command:
+   test result: FAILED. 2238 passed; 14 failed
+   Already red at bc90ee1c, before any of my code existed.
+
+4. The failing SETS at base and at my SHA OVERLAP BUT NEITHER CONTAINS THE
+   OTHER - base fails six tests mine passes. A regression would be a stable
+   superset; this is noise.
+=== BASE parallel failures (run B) ===
+    channel_lease::tests::an_already_running_observer_takes_over_when_the_owner_dies
+    channel_lease::tests::the_service_takes_polling_from_a_session_that_got_there_first
+    engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+    engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch
+    engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay
+    engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once
+    engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call
+    engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch
+    engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop
+    engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session
+    goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition
+    orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects
+    session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral
+    session_journal::fault_tests::session_retirement_removes_private_effect_checkpoints
+COUNT_BASE=14
+
+=== MY SHA parallel failures (earlier t4 run) ===
+    engine::audit_2026_05_22_tests::actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay
+    engine::audit_2026_05_22_tests::cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch
+    engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches
+    engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state
+    engine::audit_2026_05_22_tests::recovered_multi_tool_round_replays_first_and_retries_second_once
+    engine::audit_2026_05_22_tests::recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call
+    engine::audit_2026_05_22_tests::restart_reconciles_durable_provider_success_without_redispatch
+    engine::audit_2026_05_22_tests::resumed_engine_holds_journal_lease_until_drop
+    engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch
+    engine::retry_wedge_protection_tests::ceiling_abort_does_not_persist_unrecoverable_session
+    goal::strategy::tests::every_terminal_shape_survives_the_round_trip_through_the_canonical_transition
+    session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable
+    session::tests::active_session_holds_exclusive_lease_until_drop
+    session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror
+    session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal
+    session::tests::test_f034_empty_session_gc
+COUNT_MINE=16
+
+=== IN MINE BUT NOT IN BASE (the only ones that could be mine) ===
+    engine::audit_2026_05_22_tests::durable_provider_success_before_terminal_composite_never_redispatches
+    engine::audit_2026_05_22_tests::live_session_switch_transfers_journal_authority_and_runtime_state
+    engine::audit_2026_05_22_tests::terminal_checkpoint_commits_after_restart_without_provider_redispatch
+    session_lifecycle::tests::cancel_terminates_an_interrupted_turn_and_the_state_is_durable
+    session::tests::active_session_holds_exclusive_lease_until_drop
+    session::tests::execution_load_restores_journal_conversation_over_stale_legacy_mirror
+    session::tests::execution_session_imports_exactly_once_and_snapshots_the_journal
+    session::tests::test_f034_empty_session_gc
+=== IN BASE BUT NOT IN MINE ===
+    channel_lease::tests::an_already_running_observer_takes_over_when_the_owner_dies
+    channel_lease::tests::the_service_takes_polling_from_a_session_that_got_there_first
+    engine::audit_2026_05_22_tests::recovered_denial_terminalizes_without_provider_or_tool_replay
+    orchestration::tests::live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects
+    session_journal::fault_tests::session_retirement_never_deletes_a_replacement_journal_or_collateral
+    session_journal::fault_tests::session_retirement_removes_private_effect_checkpoints
+
+Mechanism: every failure is a journal/session writer-lease acquisition in a
+tempdir. hetzner-dsm runs several lanes at once and LANE-BRIEF section 6
+already documents this contention class for this host. Reported, not fixed
+and not silenced - I added no #[ignore], no retry and no serial_test guard.
+
+SHA assertions around the base checkout (the worktree was returned to my
+commit and verified):
+STEP1_SHA=551d900127c03989061b44f170674c12419f6971
+=== A: full --lib SINGLE-THREADED at MY sha ===
+A_RC=0
+A_RESULT=test result: ok. 2252 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 140.34s
+=== switching to BASE ===
+STEP2_SHA=bc90ee1c1f08b76e6682b4beab2386fc7216a52e
+=== B: full --lib PARALLEL at BASE (same command that reds at my sha) ===
+B_RC=101
+B_RESULT=test result: FAILED. 2238 passed; 14 failed; 3 ignored; 0 measured; 0 filtered out; finished in 30.49s
+=== restoring MY sha ===
+STEP3_SHA=551d900127c03989061b44f170674c12419f6971
+WLDONE

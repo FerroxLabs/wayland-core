@@ -1,0 +1,136 @@
+CLAIM-vs-TREE CHECK
+date : 2026-07-28T15:28:26Z
+base : 9a6a1f2ffe38860ec3b7e4aab98db98d95292a11
+ledger refreshed at : 77e20891 2026-07-28 08:28:39 +0700
+roadmap reconciled  : e007b907 2026-07-28 08:42:14 +0700
+
+### CTRL-01 PORT-* : 'Plans 26-02 (import/apply + executable-content quarantine)
+###                  and 26-04 (hostile corpora), both unstarted'
+-- STALE-01
+   claim : 26-02 unstarted
+   cmd   : test -f .planning/phases/26-migration-export-backup-restore/26-02-SUMMARY.md
+   out   : EXISTS  (18076 bytes)  status: complete  termination_state: 1 (Complete)
+   cmd   : grep -cF 'status: complete' .planning/phases/26-migration-export-backup-restore/26-02-SUMMARY.md -> 1
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-02
+   claim : 26-04 unstarted
+   cmd   : test -f .planning/phases/26-migration-export-backup-restore/26-04-SUMMARY.md
+   out   : EXISTS  (25987 bytes)  status: complete  termination_state: 2 (Complete with named open criteria)
+   cmd   : grep -cF 'status: complete' .planning/phases/26-migration-export-backup-restore/26-04-SUMMARY.md -> 1
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+### CTRL-01 NATIVE-* : 'no soak (28-03 not landed), no signed platform-binding
+###                    receipt and no finding adjudication (28-04 not landed),
+###                    the phase is not closed'
+-- STALE-03
+   claim : 28-03 soak not landed
+   cmd   : test -f .planning/phases/28-native-cross-platform-certification/28-03-SOAK-RESULTS.md
+   out   : EXISTS  (20524 bytes)  status: <none>  termination_state: <none>
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-04
+   claim : 28-04 signed receipt not landed
+   cmd   : test -f .planning/phases/28-native-cross-platform-certification/28-04-CERTIFICATION-RECEIPT.json
+   out   : EXISTS  (97795 bytes)  status: <none>  termination_state: <none>
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-05
+   claim : no finding adjudication
+   cmd   : test -f .planning/phases/28-native-cross-platform-certification/28-04-FINDING-LEDGER.md
+   out   : EXISTS  (75179 bytes)  status: <none>  termination_state: <none>
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-06
+   claim : phase 28 not closed / no verdict
+   cmd   : test -f .planning/phases/28-native-cross-platform-certification/28-04-PHASE-VERDICT.md
+   out   : EXISTS  (22661 bytes)  status: <none>  termination_state: <none>
+   cmd   : grep -cF 'Criterion 4' .planning/phases/28-native-cross-platform-certification/28-04-PHASE-VERDICT.md -> 4
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+### CTRL-01 SUPPLY-* : 'Plans 29-03 ... and 29-04 ...' listed as the NEXT proof
+-- STALE-07
+   claim : 29-03 is still the next proof
+   cmd   : test -f .planning/phases/29-supply-chain-release-integrity/29-03-SUMMARY.md
+   out   : EXISTS  (16528 bytes)  status: complete  termination_state: "2 — Complete with named real-key limits"
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-08
+   claim : 29-04 is still the next proof
+   cmd   : test -f .planning/phases/29-supply-chain-release-integrity/29-04-SUMMARY.md
+   out   : EXISTS  (13145 bytes)  status: complete  termination_state: 2 (Complete, goal not achieved)
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+### CTRL-01 REACH-* : 'three of four criteria are NOT MET. C1 fails on the
+###                   hibernating cloud leg, unexercised for want of a
+###                   credential only Sean can mint. C2 fails ... not a second
+###                   physical host. C4 fails ... orphan counts are NOT MEASURED'
+-- STALE-11
+   claim : Phase 25 has 1 of 4 Success Criteria MET
+   cmd   : grep -cE '\*\*MET' 25-PHASE-STATUS.md verdict table rows 7-10
+   out   : 4 of 4 criteria rows now carry a bolded MET
+          | 1 — one task across local / container / ssh / cloud | **MET** | `lane/25-cloud`, 2026-07-28 |
+          | 2 — nodes pair, advertise, revoke, recover, mixed versions, attribution | **MET on every named property**, o
+          | 3 — twelve-verb plugin lifecycle | **MET on Linux**, PARTIAL on Windows | `lane/25`, 2026-07-27 |
+          | 4 — fail closed, no orphaned execution | **MET** | `lane/25-hosts`, 2026-07-28 |
+   VERDICT: CLAIM FALSIFIED BY THE TREE — the ledger UNDERSTATES this family
+
+-- STALE-12
+   claim : the cloud leg is blocked for want of a credential only Sean can mint
+   cmd   : test -f 25-CLOUD-SUMMARY.md  (the lane that ran it)
+   out   : EXISTS — Criterion 1 is now MET
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+-- STALE-13
+   claim : no second physical host / no SSH trust relationship exists (C2)
+   cmd   : test -f 25-HOSTS-SUMMARY.md
+   out   : EXISTS (22157 bytes)
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+### CTRL-01 refresh obligations : two sibling registers said to be stale
+-- STALE-09
+   claim : ROADMAP.md's progress table still reads 'Not started' for phases 21-29
+   cmd   : grep -c 'Not started' .planning/ROADMAP.md
+   out   : 0
+   VERDICT: CLAIM FALSIFIED BY THE TREE (reconciled at e007b907)
+
+-- STALE-10
+   claim : REQUIREMENTS.md's Phase 24 disposition still says only 24-01 executed
+   cmd   : grep -c 'is out of date' .planning/REQUIREMENTS.md
+   out   : 2  (a self-correcting note means the register was reconciled)
+   VERDICT: CLAIM FALSIFIED BY THE TREE
+
+### EXECUTION CHECK — file existence is NOT execution.
+### A SUMMARY can exist purely to RECORD a non-start (23A-02 is tagged
+### not-executed with provides: [] and created: []; 24-04's exists to say
+### its own four tasks were never started). Every claim falsified above is
+### therefore re-checked on the summary's own declared status, not on stat.
+   26-02-SUMMARY.md                                                 status=complete   EXECUTED
+        
+   26-04-SUMMARY.md                                                 status=complete   EXECUTED
+        
+   28-03-SUMMARY.md                                                 status=complete   EXECUTED
+        tags: [F28-02, soak, delta-bands, cross-audit, positive-
+   28-04-SUMMARY.md                                                 status=complete   EXECUTED
+        tags: [F28-03, F28-04, receipt, finding-ledger, phase-ve
+   29-03-SUMMARY.md                                                 status=complete   EXECUTED
+        tags: [self-update, supply-chain, rollback, freeze, revo
+   29-04-SUMMARY.md                                                 status=complete   EXECUTED
+        tags: [tamper-corpus, paired-control, release-states, se
+   23A-02-SUMMARY.md                                                status=not_started RECORDS A NON-START — not execution
+        tags: [not-executed, blocked]
+
+### CONTROL — a claim the tree should CONFIRM, so this check is not a
+###           rubber stamp that falsifies everything put to it.
+-- CTRL-A
+   claim : 24-C3 (inbound channel matrix) has NOT landed
+   cmd   : test -f .planning/phases/24-gateway-automation-channels-typed-api/24-C3-SUMMARY.md
+   out   : ABSENT
+   VERDICT: claim holds
+
+-- CTRL-B
+   claim : 30-02 (comparative trials) has NOT landed — it is the next plan in this phase
+   cmd   : test -f .planning/phases/30-continuous-scorecard-frontier-review/30-02-SUMMARY.md
+   out   : ABSENT
+   VERDICT: claim holds
+

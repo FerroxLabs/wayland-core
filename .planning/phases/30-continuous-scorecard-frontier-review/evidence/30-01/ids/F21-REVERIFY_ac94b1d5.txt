@@ -1,0 +1,20 @@
+EVIDENCE ID : F21-REVERIFY@ac94b1d5
+LEDGER ROW  : 11
+ARTIFACT    : `phases/21-child-authority-and-budget-inheritance/21-REVERIFICATION.md` — third grading, verified 2026-07-27T01:30:00Z at `ac94b1d57cc95b577f60b8b3da3be0d536a6d7ad`. SC1 upgraded NOT MET → MET-WITH-STATED-EXCEPTIONS (tool-authority intersection at all six production spawner sites + dispatch-time `PolicyGate` + source-derived seventh-site guard, live-proven with a differential control); F21-04-02 DISPROVED; F21-04-03 repaired (6/6 clean live two-sibling runs). SC3 still NOT MET. **Linux only; no Windows run produced.** Phase goal NOT ACHIEVED for the third time
+
+== PATH RESOLUTION ==
+[OK]   stat phases/21-child-authority-and-budget-inheritance/21-REVERIFICATION.md
+       -> .planning/phases/21-child-authority-and-budget-inheritance/21-REVERIFICATION.md  size=30587
+       head:
+---
+phase: 21-child-authority-and-budget-inheritance
+verified: 2026-07-27T01:30:00Z
+verified_at_sha: ac94b1d57cc95b577f60b8b3da3be0d536a6d7ad
+branch: plan/f20-unified-audit-repair
+status: gaps_found
+
+== GIT OBJECT RESOLUTION ==
+[OK]   COMMIT git cat-file -t ac94b1d57cc95b577f60b8b3da3be0d536a6d7ad -> commit
+       git log -1 ac94b1d57cc95b577f60b8b3da3be0d536a6d7ad -> ac94b1d57cc95b577f60b8b3da3be0d536a6d7ad 2026-07-27 tools: make worktree rescue produce patches that actually apply
+
+== VERDICT == CONFIRMED

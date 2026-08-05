@@ -1,0 +1,21 @@
+# Per-target binary manifest for the resolved candidate -- RE-RESOLVED by plan 28-02.
+# Every one of the six CI release targets appears. A target may be UNBINDABLE but it may
+# never be absent: an omission would let an OS family look certified on evidence that
+# never existed.
+# Consumed by: f28-resolve-candidate.py --resolve --target-manifest <this file>
+# Columns: target	status	digest	provenance	reason
+#
+# MEASURED, not inherited. Plan 28-01 recorded all six as unbindable because CI run
+# 30269095004 at this exact commit was status=queued when it measured. That run has since
+# COMPLETED (conclusion=failure at the workflow level; the `build` job is separate and its
+# artifacts uploaded regardless). Every artifact below was DOWNLOADED and hashed on the
+# planning Mac by this plan; none of these digests is copied from a document.
+# The aarch64-apple-darwin binary was additionally EXECUTED on the certification Mac
+# (`wayland-core --version` -> `wayland-core 0.12.25`), so the claim that no macOS binary
+# is obtainable is refuted by a live run rather than by an argument.
+x86_64-unknown-linux-gnu	bound	e8431ba208c5e794813e6e0b10a005229d982a9a99f05642e3eee98e2adc47d3	CI run 30269095004 artifact wayland-core-x86_64-unknown-linux-gnu, downloaded and hashed 2026-07-27 by plan 28-02	
+aarch64-unknown-linux-gnu	bound	f98153b1f1b34fa08fdb710919ffc34a10919eee88fb8402a8bb7f215559c887	CI run 30269095004 artifact wayland-core-aarch64-unknown-linux-gnu, downloaded and hashed 2026-07-27 by plan 28-02	
+x86_64-apple-darwin	bound	545f307ffc2957931cf51aee6bb64ffd4b419cb66a983a77567c000b5bb3cc1f	CI run 30269095004 artifact wayland-core-x86_64-apple-darwin, downloaded and hashed 2026-07-27 by plan 28-02	
+aarch64-apple-darwin	bound	945534d6ebfab321bffc8ba6034201035f577031b496e0a72e08f87746ea5af7	CI run 30269095004 artifact wayland-core-aarch64-apple-darwin, downloaded and hashed 2026-07-27 by plan 28-02	
+x86_64-pc-windows-msvc	bound	baf9bd692833eb7b9d54f00053739115b6ad5257fbdb0b0e99a8694a2ee996a6	CI run 30269095004 artifact wayland-core-x86_64-pc-windows-msvc, downloaded and hashed 2026-07-27 by plan 28-02	
+aarch64-pc-windows-msvc	bound	3e57417c17222b258fa5d09d6df9943ce49fa28297cc69b089acf6a57a00d196	CI run 30269095004 artifact wayland-core-aarch64-pc-windows-msvc, downloaded and hashed 2026-07-27 by plan 28-02	

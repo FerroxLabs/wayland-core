@@ -1,0 +1,62 @@
+=== ARM slack-2-absent-fixed ===
+binary: /root/wayland-authprod/target/debug/wayland-core
+wayland-core 0.12.25
+sha256: bc82f7f89ba7831d399daff4c415235eb004a3152435187a292c14d80e407ac1
+platform: slack   token mode: absent
+WAYLAND_HOME: /root/wl-authprod-slack-2-absent-fixed
+-- PRECONDITIONS, asserted before any measurement --
+handle_in_config=1   (must be 1)
+handle_in_store=0   (bogus/real: 1, absent: 0)
+owners_of_this_home_BEFORE_start=0   (must be 0)
+
+-- start gateway --
+gateway_pid=3990297
+health file after 2s: /root/wl-authprod-slack-2-absent-fixed/channel-health.json
+-- PARTICIPANT ASSERTION --
+gateway_alive=yes   (must be yes)
+owners_of_this_home_DURING=1   (must be exactly 1: mine)
+
+-- gateway log: platform-facing evidence --
+count_4004=0
+count_invalid_auth=0
+count_auth_test_rejected=0
+count_mgr_terminal=0
+count_gateway_stop=0
+[gateway] channels registered=1
+[gateway] started pid=3990297 role=Owner profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+
+-- channel health --json (DEFAULT exit status) --
+{
+  "configured": 1,
+  "registered": 1,
+  "channels": [
+    {
+      "channel": "slack",
+      "platform": "slack",
+      "state": "disconnected",
+      "reason": "start() failed: auth failed: no value for credential handle \"slack.authprod.ABSENT_KEY\"",
+      "consecutive_errors": 0,
+      "reconnects": 0
+    }
+  ]
+}
+HEALTH_RC=0
+
+-- STICKINESS: same query again after 20s (state must not drift) --
+      "state": "disconnected",
+      "reason": "start() failed: auth failed: no value for credential handle \"slack.authprod.ABSENT_KEY\"",
+HEALTH2_RC=0
+
+-- channel health --require-healthy (the gate), FULL output --
+configured: 1   registered: 1
+slack (slack)
+  state:      Disconnected
+  reason:     start() failed: auth failed: no value for credential handle "slack.authprod.ABSENT_KEY"
+  errors:     0
+  reconnects: 0
+wayland-core channel: 1 of 1 channels are not Healthy: slack (Disconnected: start() failed: auth failed: no value for credential handle "slack.authprod.ABSENT_KEY")
+REQUIRE_RC=1
+
+-- teardown BY PID, verified --
+teardown=ok pid dead
+owners_of_this_home_AFTER=0   (must be 0)

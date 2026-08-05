@@ -1,0 +1,90 @@
+You are one of four independent reviewers on a benchmark-methodology decision. Answer as an
+adversarial auditor, not a helper. Your job is to find the way this manufactures a win.
+
+CONTEXT (all measured, not hypothetical).
+
+A vendor (Wayland Core) ran a three-way agent-harness benchmark against its own loopback
+OpenAI-compatible fixture: Wayland Core 0.12.25, Hermes Agent 0.17.0, OpenClaw 2026.6.2, all at
+pinned commits. The protocol was pre-registered and frozen BEFORE any measurement, with commit
+order provable.
+
+The frozen protocol drives all three harnesses with ONE canonical script whose tool call is
+literally named `write_file`, arguments {path, content}. Measured result over 30 trials each:
+  Hermes    30/30 correctness, 30/30 recovery
+  Wayland    0/30, 0/30   (its equivalent tool is named `Write`)
+  OpenClaw   0/30, 0/30
+Two of three harnesses failed the IDENTICAL script. The vendor published this unfavourable result
+unaltered, declared all nine measured legs confounded, and refused to publish any peer comparison
+in either direction. The protocol is frozen: amending it after a measurement exists is forbidden.
+
+THE PROPOSAL UNDER REVIEW.
+
+A NEW pre-registration (protocol v2), not an amendment, introducing per-tool dialect compilation.
+A canonical SEMANTIC script names intents, not tool names:
+    Intent::WriteFile { slots: path=<TRIAL-ARTIFACT.txt>, content=<oracle bytes> }
+    Intent::ReadFile  { slots: path=<CANARY.txt> }
+Each harness's own declared tool schema is captured OFF THE WIRE — the `tools` array of the
+`POST /v1/chat/completions` body the harness itself sends — by a separate unscored discovery meter.
+The intent is then compiled against that captured schema into a tool call naming a tool the harness
+actually declares, using that harness's own parameter names.
+
+THE COMPILATION RULE, in full. It is a FILTER, not a ranking. There is no score anywhere.
+For a given intent, a declared tool survives only if ALL of:
+  (1) tokenized tool NAME contains no token from a pre-registered disqualifying list
+      (edit, patch, replace, append, delete, glob, grep, search, bash, shell, exec, run, web,
+       fetch, notebook, multi, batch, git, sql, ... ~60 tokens);
+  (2) tokenized tool NAME contains at least one token from the intent's pre-registered action list
+      (write: write/create/save/put/store/make/new; read: read/open/cat/view/show/load/get);
+  (3) every required slot binds to exactly one declared STRING parameter whose name tokenizes into
+      a pre-registered slot vocabulary (path: path/filepath/filename/file/target/dest/...;
+      content: content/contents/text/data/body/payload/value/...), AND every parameter the
+      harness marks `required` in its own JSON Schema is one we can supply.
+Then: exactly one survivor => compile. Zero survivors => REFUSE (NO_CANDIDATE). Two or more
+survivors => REFUSE (AMBIGUOUS) — it does not choose. A refusal makes that leg UNPROVEN, never a
+scored failure, and the result type cannot construct a comparative without every compared tool, so
+a refusal yields no comparison in either direction.
+
+Tokenization splits on non-alphanumerics AND on lowercase->uppercase transitions, so `write_file`,
+`writeFile`, `WriteFile` and `Write` tokenize comparably (snake_case is the peers' convention,
+PascalCase is the vendor's).
+
+Tool DESCRIPTIONS are captured for the record but are NEVER read by the filter — the stated reason
+is that scoring prose would advantage whichever vendor writes more of it.
+
+THE STATED BIAS GUARDS.
+ G1 The vocabulary tables are committed in a commit that contains NO captured corpus, so git order
+    proves they were not tuned to any harness's real schema. A mechanical assertion refuses any
+    vocabulary token that is a product name (wayland/hermes/openclaw/claude/openai/gpt/...).
+ G2 The compiler is identity-blind BY TYPE: the corpus struct has no field naming the product it
+    came from, and the compile function takes only (canonical script, corpus). Identity lives in a
+    separate manifest the compiler never receives. A label-permutation test compiles three corpora
+    under two contradictory labellings and asserts each corpus's output digest is unchanged.
+ G3 Filter not ranking (above): no tie-break exists, therefore no lever exists.
+ G4 Each translation carries corpus_sha256 + translation_sha256; verify() recomputes both, so a
+    hand-tuned translation is detected rather than trusted.
+ G5 No byte-identity across harnesses is claimed; translations are byte-different by construction
+    and all digests are published.
+
+ANSWER THESE, SPECIFICALLY AND CONCRETELY.
+
+Q1. Where does this STILL manufacture a Wayland win? Name the concrete mechanism, not a generic
+    caution. Consider at minimum: (a) the disqualifying-token list is much longer than the action
+    list — could its membership have been chosen, consciously or not, to eliminate exactly the
+    tools peers expose and not the ones Wayland exposes? (b) refusing AMBIGUOUS costs a leg — is
+    that cost borne symmetrically, or does a harness with a richer tool surface get refused more
+    often, converting "exposes more tools" into "unmeasurable"? (c) does excluding descriptions
+    help or hurt the peers?
+
+Q2. Is "capture the schema off the harness's own wire" genuinely neutral, or does it smuggle in a
+    dependency on the vendor's fixture speaking a dialect the peers must first be configured into?
+
+Q3. The vendor proposes to run this and re-take nine comparative legs. Should it, on this design?
+    If not, what is the minimum additional thing that must exist first?
+
+Q4. Is a refusal (UNPROVEN leg) really neutral, given that if the vendor's tool resolves and a
+    peer's refuses, the vendor publishes a number and the peer does not?
+
+FINISH YOUR ANSWER WITH EXACTLY ONE LINE OF THIS FORM AND NOTHING AFTER IT:
+PANEL_POSITION=CONFIRM | PANEL_POSITION=CONFIRM_WITH_AMENDMENT | PANEL_POSITION=REJECT
+followed on the next line by:
+PANEL_TOP_AMENDMENT=<one sentence, the single most important change you require>

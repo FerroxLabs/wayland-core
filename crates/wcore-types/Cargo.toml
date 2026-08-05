@@ -12,3 +12,32 @@ serde.workspace       = true
 serde_json.workspace  = true
 async-trait.workspace = true
 chrono.workspace      = true
+thiserror.workspace   = true
+sha2.workspace        = true
+
+# `process_liveness` only. This crate holds no other OS-facing code and should
+# not acquire any: the module is one enum plus two functions, it spawns
+# nothing and signals nothing. Both deps are target-gated leaf system crates
+# with no transitive Rust dependencies, so they cost nothing on the platform
+# that does not select them.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
+# tests/real_zombie.rs asserts that the OLD probe shape reports a real corpse
+# as alive at the same instant the new one reports it dead. That third
+# assertion is what proves the repair does anything, and it needs the raw
+# syscalls the old shape used.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }

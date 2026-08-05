@@ -1,0 +1,41 @@
+OBSERVATION A -- two clean target directories, nothing else differs
+started:   2026-07-27T23:26:38Z
+source:    /root/wayland-29-02
+commit:    148330aeadcb628c1a772171ce4de041b53e3d8c
+dirty:     0 paths
+toolchain: rustc 1.95.0 (59807616e 2026-04-14)
+cargo:     cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+lockfile:  sha256=b538881b7bd78d4774bb7cd720386cb4d0a4a23825ab896de11d02c24e6edfa7
+target:    x86_64-unknown-linux-gnu
+command:   cargo build --release --locked --target x86_64-unknown-linux-gnu -p wcore-cli --bin wayland-core
+
+STALENESS GUARD: both target dirs are created empty immediately above.
+  a1 entries before build: 0
+  a2 entries before build: 0
+  newest source mtime:     1785166885.0927579680
+
+build a1: rc=0  320s
+build a2: rc=0  320s
+
+PROOF THE BUILDS ACTUALLY HAPPENED (an artifact older than the run is a build that did not happen):
+  run started at epoch 1785194798
+  a1 binary mtime epoch: 1785195118
+  a2 binary mtime epoch: 1785195438
+  a1 object files built: 1028
+  a2 object files built: 636
+
+SIZES:
+-rwxr-xr-x 2 root root 92871448 Jul 27 23:31 /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/wayland-core
+-rwxr-xr-x 2 root root 92871040 Jul 27 23:37 /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/wayland-core
+
+DIGESTS:
+ca35c34fe071850aa8920aa548f03f5dafc88e90aa67302ec90522497d45f7bb  /root/f29-repro/a1/x86_64-unknown-linux-gnu/release/wayland-core
+d6cd315419aff3dbba4ddaae4fed0a436ce5079c752ca4341edeefb0825d3c2c  /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/wayland-core
+
+a1=ca35c34fe071850aa8920aa548f03f5dafc88e90aa67302ec90522497d45f7bb
+a2=d6cd315419aff3dbba4ddaae4fed0a436ce5079c752ca4341edeefb0825d3c2c
+RESULT: DIFFER
+
+first differing byte:
+/root/f29-repro/a1/x86_64-unknown-linux-gnu/release/wayland-core /root/f29-repro/a2/x86_64-unknown-linux-gnu/release/wayland-core differ: byte 41, line 1
+finished: 2026-07-27T23:37:19Z

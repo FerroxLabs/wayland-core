@@ -1,0 +1,140 @@
+===== TEST desktop_contract_corpus
+   Compiling wcore-protocol v0.12.25 (/root/wayland-contract-regen/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+     Running tests/desktop_contract_corpus.rs (target/debug/deps/desktop_contract_corpus-04e9f042133619dd)
+
+running 15 tests
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test inventory_is_exactly_eighteen_commands_and_forty_nine_events ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test manifest_pins_generator_and_all_three_digests ... ok
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+
+WLRC_desktop_contract_corpus=0
+===== TEST desktop_contract_adversarial
+   Compiling wcore-protocol v0.12.25 (/root/wayland-contract-regen/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.59s
+     Running tests/desktop_contract_adversarial.rs (target/debug/deps/desktop_contract_adversarial-94b9a439ea0d2fed)
+
+running 17 tests
+test malformed_and_unknown_commands_never_deserialize_for_dispatch ... ok
+test canonical_ready_advertises_the_embedded_generated_contract ... ok
+test negotiated_host_drops_serialized_unknown_noncritical_event ... ok
+test remaining_deferrals_exclude_live_negotiation_guarantees ... ok
+test runtime_diagnostics_is_closed_versioned_correlated_and_redacted ... ok
+test serialized_policy_reducer_fails_closed_on_conflict_gap_version_and_criticality ... ok
+test serialized_policy_reducer_accepts_valid_revisions_and_duplicate_replay ... ok
+test serialized_recovery_reducer_accepts_pinned_cursor_replay ... ok
+test negotiated_observer_accepts_authoritative_anvil_invalidation ... ok
+test serialized_anvil_reducer_replays_invalidation_and_never_resurrects_trust ... ok
+test serialized_recovery_reducer_fails_closed_on_version_cursor_and_state_drift ... ok
+test ready_replay_fails_closed_on_major_schema_and_fixture_mismatch ... ok
+test negotiated_host_rejects_unknown_critical_and_unclassified_events ... ok
+test production_workflow_reducer_replays_the_checked_corpus ... ok
+test serialized_workflow_reducer_replays_correlated_node_and_child_lifecycle ... ok
+test serialized_workflow_reducer_detects_conflict_gaps_and_absorbs_terminals ... ok
+test serialized_anvil_reducer_proves_duplicate_inert_and_fail_closed_vectors ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+WLRC_desktop_contract_adversarial=0
+===== TEST golden_v0_1_21
+   Compiling wcore-protocol v0.12.25 (/root/wayland-contract-regen/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running tests/golden_v0_1_21.rs (target/debug/deps/golden_v0_1_21-f20d805e08c5cc31)
+
+running 22 tests
+test golden_config_changed_v0_1_21 ... ok
+test golden_each_w0_capability_flag_locks_its_documented_name ... ok
+test golden_error_v0_1_21 ... ok
+test golden_error_without_msg_id_v0_1_21 ... ok
+test golden_info_v0_1_21 ... ok
+test golden_mcp_ready_v0_1_21 ... ok
+test golden_ready_v0_1_21 ... ok
+test golden_pong_v0_1_21 ... ok
+test golden_ready_with_cost_attribution_advertised ... ok
+test golden_session_cost_empty_per_turn ... ok
+test golden_stream_end_error_v0_1_21 ... ok
+test golden_session_cost_v_w6 ... ok
+test golden_stream_end_every_finish_reason_serializes_snake_case ... ok
+test golden_stream_end_length_v0_1_21 ... ok
+test golden_stream_end_no_new_keys_when_unset_279 ... ok
+test golden_stream_end_stop_v0_1_21 ... ok
+test golden_stream_end_with_new_keys_when_set_279 ... ok
+test golden_text_delta_v0_1_21 ... ok
+test golden_stream_start_v0_1_21 ... ok
+test golden_thinking_v0_1_21 ... ok
+test golden_tool_cancelled_v0_1_21 ... ok
+test golden_usage_with_full_cache_fields_v0_1_21 ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+WLRC_golden_v0_1_21=0
+===== TEST host_decoder_contract
+   Compiling wcore-protocol v0.12.25 (/root/wayland-contract-regen/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+     Running tests/host_decoder_contract.rs (target/debug/deps/host_decoder_contract-0f360c34438825ea)
+
+running 31 tests
+test capability_aware_host_parses_compact_offload_279 ... ok
+test engine_emits_session_cost_in_v6_known_type_namespace ... ok
+test host_decoder_still_distinguishes_malformed_with_gepa_enabled_known_types ... ok
+test host_decoder_handles_noisy_stream_without_panic ... ok
+test forged_receipt_nested_in_plugin_event_is_not_top_level ... ok
+test host_decoder_still_distinguishes_malformed_with_w7_known_types ... ok
+test forged_receipt_nested_in_sub_agent_event_is_not_top_level ... ok
+test engine_emits_anvil_receipt_with_correct_type ... ok
+test host_decodes_evolution_event_under_gepa_enabled_opt_in ... ok
+test host_decodes_anvil_receipt_under_opt_in ... ok
+test host_decoder_still_distinguishes_malformed_with_structured_traces_known_types ... ok
+test host_decodes_known_v0_1_21_variant ... ok
+test host_decodes_ready_with_default_capabilities ... ok
+test host_decodes_w7_event_types_under_opted_in_decoder ... ok
+test host_distinguishes_malformed_from_unknown ... ok
+test host_decodes_trace_event_under_structured_traces_opt_in ... ok
+test host_drops_budget_exceeded_silently_per_w8a_a7 ... ok
+test host_drops_anvil_receipt_silently_under_v0_1_21_decoder ... ok
+test host_drops_compact_offload_when_capability_unknown_279 ... ok
+test host_drops_evolution_event_silently_under_v0_1_21_decoder ... ok
+test host_drops_multiple_unknown_types_quietly ... ok
+test host_drops_plugin_event_silently_per_w8a_h1 ... ok
+test host_drops_session_cost_when_not_in_v0_1_21_known_types ... ok
+test host_drops_trace_event_silently_under_v0_1_21_decoder ... ok
+test host_drops_unknown_event_type_silently ... ok
+test host_drops_w7_event_types_silently_under_v0_1_21_decoder ... ok
+test host_tolerates_unknown_capabilities_flag_on_ready ... ok
+test host_tolerates_unknown_fields_on_known_variants ... ok
+test host_tolerates_unknown_fields_on_stream_end_279 ... ok
+test host_renders_chip_only_from_top_level_anvil_receipt ... ok
+test structured_traces_and_gepa_enabled_are_independent_opt_ins ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+WLRC_host_decoder_contract=0
+===== TEST approval_resume_contract
+   Compiling wcore-protocol v0.12.25 (/root/wayland-contract-regen/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running tests/approval_resume_contract.rs (target/debug/deps/approval_resume_contract-01581677af0e3962)
+
+running 4 tests
+test approval_resume_command_accepted_with_token_from_event ... ok
+test approval_resume_command_denied_with_modifications ... ok
+test approval_required_event_serializes_correctly ... ok
+test resume_token_round_trip_from_event_to_command ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+WLRC_approval_resume_contract=0
+WLDONE

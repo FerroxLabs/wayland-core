@@ -64,6 +64,7 @@ fn golden_turn_trace_full_shape() {
         cache_write: 0,
         cache_hit_rate: 0.8,
         cost_usd: 0.0,
+        cost_priced: false,
         tool_calls: vec![tcc_full()],
         hook_actions: vec![],
         source_product: SOURCE_PRODUCT.to_string(),
@@ -80,6 +81,7 @@ fn golden_turn_trace_full_shape() {
         "cache_write": 0,
         "cache_hit_rate": 0.8,
         "cost_usd": 0.0,
+        "cost_priced": false,
         "tool_calls": [{
             "call_id": "call_001",
             "tool_name": "Read",

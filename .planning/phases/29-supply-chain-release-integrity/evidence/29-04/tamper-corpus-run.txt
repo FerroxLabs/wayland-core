@@ -1,0 +1,32 @@
+=== 29-04 TAMPER CORPUS — live run on hetzner-dsm (Linux x86_64) ===
+worktree: /root/wayland-29-04
+commit: f6196a3275d41eaf769d4271b38d145e18739f26
+captured: 2026-07-28T03:38:21Z
+
+$ cargo test -p wcore-eval-scenarios --test supply_chain_tamper_corpus -- --nocapture --test-threads=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running tests/supply_chain_tamper_corpus.rs (target/debug/deps/supply_chain_tamper_corpus-66174fb6e148e0a0)
+
+running 3 tests
+test every_tamper_case_has_a_pristine_control_that_is_accepted ... TAMPER-META controls_accepted=12 of 12
+ok
+test every_tamper_case_is_accepted_pristine_then_refused_after_one_mutation ... TAMPER-CASE F29-03-BINARY-1::control=ACCEPTED::mutated=REFUSED::class=BINARY::point=artifact_binding::mutation=one byte of the packaged release archive, so its bytes no longer digest to the value the signed manifest recorded
+TAMPER-CASE F29-03-SBOM-1::control=ACCEPTED::mutated=REFUSED::class=SBOM::point=sbom_digest::mutation=one byte of the CycloneDX SBOM document, so its digest no longer equals the digest the signed manifest bound
+TAMPER-CASE F29-03-UPDATE-1::control=ACCEPTED::mutated=REFUSED::class=UPDATE::point=signed_manifest::mutation=the manifest sequence lowered by one — the field the updater's rollback and freeze protection reads — without re-signing
+TAMPER-CASE F29-03-UPDATE-2::control=ACCEPTED::mutated=REFUSED::class=UPDATE::point=signed_manifest::mutation=the manifest issued_at moved 90 days into the past — the staleness field the updater reads on a first run — without re-signing
+TAMPER-CASE F29-03-PLUGIN-1::control=ACCEPTED::mutated=REFUSED::class=PLUGIN::point=signed_manifest::mutation=the plugin artifact entry's recorded sha256 inside the signed release manifest
+TAMPER-CASE F29-03-BACKEND-RECEIPT-1::control=ACCEPTED::mutated=REFUSED::class=BACKEND-RECEIPT::point=signed_manifest::mutation=the certification binding's receipt_body_sha256 inside the signed manifest
+TAMPER-CASE F29-03-BACKEND-RECEIPT-2::control=ACCEPTED::mutated=REFUSED::class=BACKEND-RECEIPT::point=certification_join::mutation=the bound receipt body itself — its identity.binary_sha256 — so the receipt no longer digests to what the untouched manifest signed
+TAMPER-CASE F29-03-MANIFEST-1::control=ACCEPTED::mutated=REFUSED::class=MANIFEST::point=signed_manifest::mutation=a manifest body field (release_id) changed without re-signing, so the body digest and the signature disagree
+TAMPER-CASE F29-03-MANIFEST-2::control=ACCEPTED::mutated=REFUSED::class=MANIFEST::point=signed_manifest::mutation=the manifest schema_version raised to a version this verifier does not know
+TAMPER-CASE F29-03-KEY-1::control=ACCEPTED::mutated=REFUSED::class=KEY::point=signed_manifest::mutation=the authority key id replaced with an id the independently supplied trust root does not know
+TAMPER-CASE F29-03-KEY-2::control=ACCEPTED::mutated=REFUSED::class=KEY::point=signed_manifest::mutation=the trust root retires the signing key at an instant before the evaluation instant; the signature stays cryptographically valid
+TAMPER-CASE F29-03-KEY-3::control=ACCEPTED::mutated=REFUSED::class=KEY::point=signed_manifest::mutation=the manifest signature replaced with one the SAME key minted over the SAME body digest under the release-state signature domain — a cross-domain replay
+TAMPER-CORPUS cases=12 all_paired=true
+ok
+test the_corpus_covers_every_f29_03_object_class ... TAMPER-META classes_covered=7 key_class_attacks=3
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.44s
+
+--- exit=0 ---

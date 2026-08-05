@@ -6,16 +6,19 @@
 //! crate depends up on `wcore-egress` and builds its client here, so the egress
 //! policy is enforced in exactly one place.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use crate::error::EgressError;
+use crate::observer::{SharedEgressObserver, default_observer};
 use crate::policy::{SharedPolicy, default_policy};
 use crate::request::EgressRequestBuilder;
 
 /// A policy-gated HTTP client wrapping [`reqwest::Client`].
 ///
-/// Cheap to clone (the inner reqwest client and the policy `Arc` are both
-/// reference-counted). Construct via [`EgressClient::builder`] or the
+/// Cheap to clone (the inner reqwest client, policy, observer, and attempt-ID
+/// sequence are reference-counted). Construct via [`EgressClient::builder`] or the
 /// [`EgressClient::streaming`] / [`EgressClient::tool`] presets, which carry the
 /// hardened timeout + no-redirect policy that previously lived in
 /// `wcore_providers::http_client`.
@@ -23,6 +26,8 @@ use crate::request::EgressRequestBuilder;
 pub struct EgressClient {
     inner: reqwest::Client,
     policy: SharedPolicy,
+    observer: SharedEgressObserver,
+    next_attempt_id: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for EgressClient {
@@ -102,6 +107,12 @@ impl EgressClient {
         self
     }
 
+    /// Replace this client's no-op observer with an explicit per-client sink.
+    pub fn with_observer(mut self, observer: SharedEgressObserver) -> Self {
+        self.observer = observer;
+        self
+    }
+
     /// The egress policy this client enforces.
     pub fn policy(&self) -> &SharedPolicy {
         &self.policy
@@ -146,6 +157,8 @@ impl EgressClient {
         EgressRequestBuilder::new(
             self.inner.clone(),
             self.policy.clone(),
+            self.observer.clone(),
+            self.next_attempt_id.clone(),
             self.inner.request(method, url),
         )
     }
@@ -158,10 +171,11 @@ impl Default for EgressClient {
 }
 
 /// Builder for [`EgressClient`]. Mirrors the [`reqwest::ClientBuilder`] methods
-/// the workspace actually uses, plus [`EgressClientBuilder::policy`].
+/// the workspace actually uses, plus its policy and observer seams.
 pub struct EgressClientBuilder {
     inner: reqwest::ClientBuilder,
     policy: Option<SharedPolicy>,
+    observer: Option<SharedEgressObserver>,
 }
 
 impl EgressClientBuilder {
@@ -181,6 +195,7 @@ impl EgressClientBuilder {
                 .pool_idle_timeout(Some(Duration::from_secs(20)))
                 .tcp_keepalive(Some(Duration::from_secs(15))),
             policy: None,
+            observer: None,
         }
     }
 
@@ -270,12 +285,20 @@ impl EgressClientBuilder {
         self
     }
 
+    /// Set the per-client egress observer. Defaults to a no-op when omitted.
+    pub fn observer(mut self, observer: SharedEgressObserver) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// Build the [`EgressClient`].
     pub fn build(self) -> Result<EgressClient, EgressError> {
         let inner = self.inner.build()?;
         Ok(EgressClient {
             inner,
             policy: self.policy.unwrap_or_else(default_policy),
+            observer: self.observer.unwrap_or_else(default_observer),
+            next_attempt_id: Arc::new(AtomicU64::new(1)),
         })
     }
 }

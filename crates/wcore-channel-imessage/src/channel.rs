@@ -31,10 +31,25 @@ use crate::db::{
 const SEND_QUEUE_MAX: usize = 50;
 const OSASCRIPT_TIMEOUT_MS: u64 = 15_000;
 
+/// The single source of this adapter's inbound media bounds.
+///
+/// [`Channel::media_bounds`] returns this, and [`MAX_ATTACHMENT_BYTES`] is
+/// derived from it. One constant, both sites, so the advertised number and the
+/// enforced number cannot drift apart.
+///
+/// This adapter previously declared NOTHING, so it advertised the 25 MiB trait
+/// default while enforcing a hardcoded 64 MiB, because the declaration had no
+/// reader anywhere in the workspace. 64 MiB is the value that has actually
+/// governed inbound reads since 2026-06-12.
+pub const MEDIA_BOUNDS: wcore_channels::MediaBounds = wcore_channels::MediaBounds {
+    max_bytes: 64 * 1024 * 1024,
+    max_attachments: 10,
+};
+
 /// Upper bound on a single attachment read in `fetch_media`. iMessage media is
 /// already on local disk (no network fetch), but a multi-GB video must not be
 /// slurped into memory; the enricher only needs bytes for vision/transcription.
-const MAX_ATTACHMENT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES: u64 = MEDIA_BOUNDS.max_bytes;
 
 /// Coarse [`MediaKind`] for a local attachment path, keyed off its extension.
 /// Used only to label inbound attachments so the host enricher routes them
@@ -256,6 +271,49 @@ impl Channel for IMessageChannel {
         include_str!("schemas/imessage.json")
     }
 
+    /// iMessage: **permanently absent, measured against the scripting
+    /// dictionary rather than assumed.**
+    ///
+    /// Messages.app on macOS 13+ lets a *human* edit and unsend a message. That
+    /// is a UI affordance, and this adapter's only outbound path is
+    /// [`applescript::run_osascript`] — so what matters is whether the
+    /// capability is exposed to AppleScript. It is not, and the measurement is
+    /// unusually clean because Messages.app's dictionary is tiny:
+    ///
+    /// ```text
+    /// $ sdef /System/Applications/Messages.app | grep -o '<command name="[^"]*"' | sort -u
+    /// <command name="login"
+    /// <command name="logout"
+    /// <command name="send"
+    /// ```
+    ///
+    /// Three commands, total. Measured on macOS 26.3 (build 25D125),
+    /// Messages.app 26.0, 2026-07-30, with `send` as the known-positive
+    /// (1 hit — the instrument was alive) and
+    /// `edit|unsend|delete|redact|recall|remove` returning **0**.
+    ///
+    /// The stronger fact is the class list: `account`, `chat`, `file transfer`,
+    /// `participant`. **There is no `message` class at all.** So there is not
+    /// merely no delete verb — there is no scriptable object representing a sent
+    /// message to address one to. That is what makes this `PlatformHasNoApi`
+    /// rather than a backlog item.
+    ///
+    /// Reactions (tapbacks) and the typing indicator are absent from the
+    /// dictionary for the same reason.
+    fn native_actions(&self) -> wcore_channels::NativeActions {
+        use wcore_channels::ActionSupport::PlatformHasNoApi;
+        wcore_channels::NativeActions::none()
+            .edit(PlatformHasNoApi)
+            .delete(PlatformHasNoApi)
+            .react(PlatformHasNoApi)
+            .typing(PlatformHasNoApi)
+            .note(
+                "Messages.app's entire AppleScript dictionary is login/logout/send with no \
+                 `message` class — there is no scriptable handle for a sent message. \
+                 Measured via sdef on macOS 26.3 / Messages 26.0.",
+            )
+    }
+
     /// Read an inbound attachment's bytes off local disk. iMessage attachments
     /// are written under `~/Library/Messages/Attachments` by Messages.app, so
     /// the path is already local — there is no URL to fetch and no SSRF surface.
@@ -283,6 +341,12 @@ impl Channel for IMessageChannel {
         })
         .await
         .map_err(|e| ChannelError::Transport(format!("attachment read task panic: {e}")))?
+    }
+
+    /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
+    /// [`MAX_ATTACHMENT_BYTES`] is derived.
+    fn media_bounds(&self) -> wcore_channels::MediaBounds {
+        MEDIA_BOUNDS
     }
 }
 

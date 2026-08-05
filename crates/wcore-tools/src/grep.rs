@@ -1,11 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use wcore_config::shell::shell_command_argv;
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -96,6 +96,27 @@ impl Tool for GrepTool {
         ToolCategory::Info
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
+    /// Grep spawns a search process but mutates nothing, so a failure — a
+    /// refused traversal path, a missing target, a bad regex — is
+    /// authoritative rather than an ambiguous external effect. See the note on
+    /// `ReadTool::effect_contract` (live UAT D1).
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        ToolEffectContract {
+            kind: ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        }
+    }
+
+    /// Grep's own search subprocess is fixed and argv-invoked — no input it
+    /// accepts can turn it into a mutation. Safe under `read_only`.
+    fn read_only_safe(&self, _input: &Value) -> bool {
+        true
+    }
+
     fn describe(&self, input: &Value) -> String {
         let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -116,6 +137,40 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
     let path = input["path"].as_str().unwrap_or(".");
     let glob_pattern = input["glob"].as_str();
     let case_insensitive = input["case_insensitive"].as_bool().unwrap_or(false);
+
+    // #661, Windows half. The exit-code discipline in `try_ripgrep`/`try_grep`
+    // is what stops an unreadable or absent target being reported as a clean
+    // "No matches found" — the failure that let a model conclude a symbol was
+    // undefined and safe to delete. POSIX `grep` and `rg` support it by exiting
+    // 2 on a target they cannot open. `findstr` does NOT: measured on Windows
+    // (`findstr /S /N /R /C:needle "..\escape\*"`) it exits 1 with EMPTY
+    // stderr, byte-for-byte indistinguishable from a genuine no-match, so no
+    // amount of exit-code or stderr inspection downstream can recover the
+    // difference. The `#[cfg(unix)]` gate on `try_grep_reports_real_error_not_
+    // no_matches` recorded that gap rather than closing it.
+    //
+    // Prove the target exists here instead, before any backend is chosen, so
+    // the answer is the same on all three platforms and does not depend on
+    // which of the three search binaries happens to be installed.
+    let resolved = match search_root {
+        Some(root) => root.join(path),
+        None => PathBuf::from(path),
+    };
+    match tokio::fs::try_exists(&resolved).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return ToolResult {
+                content: format!("grep error: no such file or directory: {path}"),
+                is_error: true,
+            };
+        }
+        Err(error) => {
+            return ToolResult {
+                content: format!("grep error: cannot access {path}: {error}"),
+                is_error: true,
+            };
+        }
+    }
 
     // Try ripgrep first, fallback to grep.
     match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {
@@ -189,6 +244,35 @@ async fn try_grep(
     case_insensitive: bool,
     search_root: Option<&Path>,
 ) -> ToolResult {
+    // #661 (Windows half) — resolve the target BEFORE spawning anything.
+    //
+    // The exit-code guard below is sufficient for POSIX `grep` (>=2 == error)
+    // but is a no-op on Windows: `findstr` returns exit **1** with empty stdout
+    // both for a clean no-match and for "FINDSTR: Cannot open <path>". Measured
+    // on Windows 10.0.26200: an explicitly named missing file exits 1, and a
+    // missing directory under the `<dir>\*` lowering exits 1 with no output at
+    // all. So an unreadable target was reported as "No matches found" with
+    // is_error=false — the model concludes the symbol is undefined and deletes
+    // live code. A stat of the target makes "could not look" unrepresentable as
+    // "looked and found nothing", on every platform.
+    //
+    // Resolve against `search_root` because that is the subprocess cwd (F36), so
+    // a relative `path` must be interpreted the same way here as it will be
+    // there.
+    let target = match search_root {
+        Some(root) => root.join(path),
+        None => std::path::PathBuf::from(path),
+    };
+    let is_dir = match std::fs::metadata(&target) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) => {
+            return ToolResult {
+                content: format!("grep error: cannot search {path:?}: {e}"),
+                is_error: true,
+            };
+        }
+    };
+
     // F43: route through `shell_command_argv` (argv mode, no shell) on both
     // platforms for consistent PATHEXT resolution + kill-on-drop.
     let mut cmd = if cfg!(windows) {
@@ -200,14 +284,38 @@ async fn try_grep(
         // semantics the bare-`/R` form had (and matching the Unix `grep`/`rg`
         // regex contract). The `/C:` value is a single argv entry, so a leading
         // `/` in the pattern can no longer be switch-parsed.
-        let dir = format!("{}\\*", path.trim_end_matches(['\\', '/']));
+        //
+        // #661 (single file) — findstr has no recursive-directory form, so a
+        // DIRECTORY must be lowered to a `<dir>\*` wildcard. Applying that
+        // lowering to a FILE yields `file.rs\*`, which matches nothing: exit 1,
+        // empty stdout, reported as "No matches found" for a pattern the file
+        // demonstrably contains. Pass a file through verbatim, and drop `/S`
+        // with it so a same-named file in a subdirectory cannot be picked up
+        // instead.
+        //
+        // #661 (drive walk) — build the spec from the RESOLVED absolute target,
+        // never from the raw argument. `path.trim_end_matches(['\\', '/'])` maps
+        // both "" and "/" to the empty string, so the spec became `\*` — the
+        // root of the current drive — and `/S` then walked the entire drive.
+        // (Measured: still running after 25s, against 157ms for the same scan
+        // scoped to its intended directory.)
+        let resolved = std::path::absolute(&target).unwrap_or_else(|_| target.clone());
+        let resolved = resolved.to_string_lossy().into_owned();
+        let spec = if is_dir {
+            format!("{}\\*", resolved.trim_end_matches(['\\', '/']))
+        } else {
+            resolved
+        };
         let cflag = format!("/C:{pattern}");
-        let mut args: Vec<&str> = vec!["/S", "/N", "/R"];
+        let mut args: Vec<&str> = vec!["/N", "/R"];
+        if is_dir {
+            args.push("/S");
+        }
         if case_insensitive {
             args.push("/I");
         }
         args.push(&cflag);
-        args.push(&dir);
+        args.push(&spec);
         shell_command_argv("findstr", &args)
     } else {
         let mut args: Vec<&str> = vec!["-rn"];
@@ -266,14 +374,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// #661: a real grep error (exit >= 2 — here an unreadable/nonexistent
-    /// target) must be surfaced as `is_error: true`, not swallowed as
-    /// "No matches found". Previously `try_grep` only checked whether stdout
-    /// was empty, so an exit-2 failure looked identical to a clean no-match.
-    #[cfg(unix)]
+    /// #661: an unreadable/nonexistent target must be surfaced as
+    /// `is_error: true`, not swallowed as "No matches found" — otherwise the
+    /// model concludes the symbol is undefined and deletes live code.
+    ///
+    /// This test is deliberately NOT `#[cfg(unix)]`. The original guard was,
+    /// and so it could never execute on Windows — which is exactly where the
+    /// defect was reported and where it was still live: POSIX `grep` signals a
+    /// hard error with exit >=2, but `findstr` returns exit **1** with empty
+    /// stdout for BOTH a clean no-match and "FINDSTR: Cannot open <path>", so
+    /// the exit-code guard alone was a no-op there. A guard that cannot run
+    /// where the defect lives is not a guard.
     #[tokio::test]
-    async fn try_grep_reports_real_error_not_no_matches() {
-        // `grep -rn -- pattern <nonexistent>` exits 2 with empty stdout.
+    async fn try_grep_reports_unreadable_target_not_no_matches() {
         let out = try_grep(
             "pattern",
             "this_path_does_not_exist_9f3a2b.txt",
@@ -283,12 +396,79 @@ mod tests {
         .await;
         assert!(
             out.is_error,
-            "grep exit-2 must be is_error=true, got: {}",
+            "an unreadable target must be is_error=true, got: {}",
             out.content
         );
         assert!(
             !out.content.contains("No matches found"),
             "a real error must not be reported as a clean no-match: {}",
+            out.content
+        );
+    }
+
+    /// #661: grepping a SINGLE FILE must return that file's matches.
+    ///
+    /// `findstr` has no recursive-directory form, so the Windows arm lowers a
+    /// directory to a `<dir>\*` wildcard. Applying that lowering to a file
+    /// produced `file.txt\*`, which matches nothing — exit 1, empty stdout,
+    /// reported as a clean "No matches found" for a pattern the file plainly
+    /// contains. Runs on every platform; on Windows it fails without the
+    /// file/directory split.
+    #[tokio::test]
+    async fn try_grep_finds_pattern_when_target_is_a_single_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = "WAYLAND_GREP_SINGLE_FILE_MARKER_661";
+        let file = dir.path().join("needle.txt");
+        std::fs::write(&file, format!("first line\n{marker}\nlast line\n")).expect("write needle");
+        // A decoy in a subdirectory: if `/S` leaked back in, a same-named file
+        // below the target could be matched instead of the file we asked for.
+        std::fs::create_dir_all(dir.path().join("sub")).expect("mkdir sub");
+
+        let out = try_grep(marker, &file.to_string_lossy(), false, None).await;
+        assert!(!out.is_error, "single-file grep failed: {}", out.content);
+        assert!(
+            out.content.contains(marker),
+            "grepping a single file must return its matches, got: {}",
+            out.content
+        );
+    }
+
+    /// #661: a target that resolves to nothing must never become an unbounded
+    /// scan. The Windows arm built its spec with
+    /// `path.trim_end_matches(['\\', '/'])`, which maps both "" and "/" to the
+    /// empty string — so the spec became `\*`, the root of the current drive,
+    /// and `/S` walked the whole drive silently (measured: still running after
+    /// 25s, vs 157ms for the same scan scoped to its intended directory).
+    /// Resolving the target first makes the degenerate spec unreachable.
+    #[tokio::test]
+    async fn try_grep_rejects_an_empty_path_instead_of_scanning_from_the_root() {
+        let out = try_grep("pattern", "", false, None).await;
+        assert!(
+            out.is_error,
+            "an empty path must be a loud error, not a scan: {}",
+            out.content
+        );
+    }
+
+    /// Positive control for the two guards above: with the same helper and the
+    /// same tempdir, a DIRECTORY target still finds the marker. Without this,
+    /// a `try_grep` that errored on everything would satisfy both guards.
+    #[tokio::test]
+    async fn try_grep_finds_pattern_when_target_is_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = "WAYLAND_GREP_DIR_MARKER_661";
+        std::fs::create_dir_all(dir.path().join("sub")).expect("mkdir sub");
+        std::fs::write(
+            dir.path().join("sub").join("needle.txt"),
+            format!("{marker}\n"),
+        )
+        .expect("write needle");
+
+        let out = try_grep(marker, &dir.path().to_string_lossy(), false, None).await;
+        assert!(!out.is_error, "directory grep failed: {}", out.content);
+        assert!(
+            out.content.contains(marker),
+            "recursive directory grep must find the marker, got: {}",
             out.content
         );
     }
@@ -335,6 +515,38 @@ mod tests {
             result.content.contains(marker),
             "relative '.' grep must find the marker inside the jail root, got: {}",
             result.content
+        );
+    }
+
+    /// #661 mutation-kill. The `try_exists` pre-check in `run_grep` is the only
+    /// thing that makes a missing target an error *identically on all three
+    /// platforms*: `rg`/POSIX `grep` exit >=2, but `findstr` exits 1 with empty
+    /// stderr, indistinguishable from a clean no-match.
+    ///
+    /// The lane's mutation run reported `grep-target-exists` as SURVIVED —
+    /// deleting the pre-check failed no test, because the backend tests call
+    /// `try_grep` directly and on Unix the backend still errors on its own. So
+    /// this asserts the exact message ONLY the pre-check emits. Assert on
+    /// `is_error` alone and the mutant survives again.
+    #[tokio::test]
+    async fn run_grep_pre_check_rejects_missing_target_on_every_platform() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = json!({
+            "pattern": "anything",
+            "path": "this_path_does_not_exist_4c81de.txt",
+        });
+        let out = run_grep(&input, Some(dir.path())).await;
+
+        assert!(
+            out.is_error,
+            "a missing target must be an error: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("no such file or directory"),
+            "the pre-check must own this refusal on every platform, not the \
+             backend's exit code (which findstr cannot provide); got: {}",
+            out.content
         );
     }
 }

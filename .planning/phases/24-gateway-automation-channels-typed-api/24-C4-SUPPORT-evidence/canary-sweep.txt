@@ -1,0 +1,9 @@
+/root/wl-24c4-bundle/channel-health.json:0
+/root/wl-24c4-bundle/gateway-liveness.json:0
+/root/wl-24c4-bundle/gateway-status.json:0
+/root/wl-24c4-bundle/recent-log.txt:0
+/root/wl-24c4-bundle/manifest.json:0
+/root/wl-24c4-bundle/deliveries.jsonl:0
+/root/wl-24c4-bundle/credential-keys.txt:0
+/root/wl-24c4-bundle/config-keys.txt:0
+/root/wl-24c4-bundle/environment-keys.txt:0

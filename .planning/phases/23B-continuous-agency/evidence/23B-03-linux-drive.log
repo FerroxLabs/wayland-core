@@ -1,0 +1,55 @@
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+F23_03_PROVENANCE=ok platform=linux sha=b33827d3a2b8ebc70a17a16a556cf1bde0e4228b
+F23_03_CORPUS=repo path=/root/wayland-23B-03
+F23_03_MEASURE=cold-build platform=linux sample=1 value=1535
+F23_03_MEASURE=store-size platform=linux sample=1 value=66555904
+F23_03_CORPUS=indexed sample=1 records=3603 symbols=37868 read=3603
+F23_03_MEASURE=warm-start platform=linux sample=1 value=109
+F23_03_WARM=sample=1 read=0 extracted=0
+F23_03_MEASURE=cold-build platform=linux sample=2 value=1541
+F23_03_MEASURE=store-size platform=linux sample=2 value=66555904
+F23_03_CORPUS=indexed sample=2 records=3603 symbols=37868 read=3603
+F23_03_MEASURE=warm-start platform=linux sample=2 value=113
+F23_03_WARM=sample=2 read=0 extracted=0
+F23_03_MEASURE=cold-build platform=linux sample=3 value=1504
+F23_03_MEASURE=store-size platform=linux sample=3 value=66555904
+F23_03_CORPUS=indexed sample=3 records=3603 symbols=37868 read=3603
+F23_03_MEASURE=warm-start platform=linux sample=3 value=107
+F23_03_WARM=sample=3 read=0 extracted=0
+F23_03_MEASURE=latency-p50 platform=linux sample=1 value=5810
+F23_03_MEASURE=latency-p95 platform=linux sample=1 value=6159
+F23_03_LATENCY=samples n=20 unit=microseconds all= 5633 5485 5513 5810 5648 6029 5714 5539 6093 5955 5968 6106 5643 5909 5727 6159 5942 5797 7171 6023
+F23_03_QUALITY_CASE=IndexStore precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/store.rs
+F23_03_QUALITY_CASE=normalize_rel precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
+F23_03_QUALITY_CASE=ScopeIdentity precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/scope.rs
+F23_03_QUALITY_CASE=semantic_status precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/search.rs
+F23_03_QUALITY_CASE=extract_rust precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/rust.rs
+F23_03_QUALITY_CASE=extract_typescript precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/typescript.rs
+F23_03_QUALITY_CASE=strip_comments_rust_style precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/extractor/mod.rs
+F23_03_QUALITY_CASE=SymbolKind precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=IndexOptions precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=RepoMapError precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/types.rs
+F23_03_QUALITY_CASE=first_meaningful precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/lib.rs
+F23_03_QUALITY_CASE=reciprocal_rank_fusion precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/search.rs
+F23_03_QUALITY_CASE=content_hash_invalidation precision_at_1=0 recall_at_10=1.0000 top=crates/wcore-agent/src/orchestration/anvil/forge.rs
+F23_03_QUALITY_CASE=worktree_identity precision_at_1=0 recall_at_10=1.0000 top=.planning/phases/20-transactional-delegated-mutation/20-06-PLAN.md
+F23_03_QUALITY_CASE=bm25_full_text precision_at_1=0 recall_at_10=1.0000 top=crates/wcore-memory/src/retrieve.rs
+F23_03_QUALITY_CASE=walker_gitignore_hidden precision_at_1=1 recall_at_10=1.0000 top=crates/wcore-repomap/src/lib.rs
+F23_03_MEASURE=precision platform=linux sample=1 value=0.8125
+F23_03_MEASURE=recall platform=linux sample=1 value=1.0000
+F23_03_QUALITY=corpus queries=16 precision_at_1=0.8125 recall_at_10=1.0000
+F23_03_FALLBACK_REPORTED=true
+F23_03_SCRATCH=files=3608
+F23_03_MUTATION_BASE=records=3603
+F23_03_MUTATION=add platform=linux status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3603
+F23_03_MUTATION=edit platform=linux status=PASS unchanged_reextracted=0 changed=1 extracted=1 unchanged=3603
+F23_03_MUTATION=delete platform=linux status=PASS unchanged_reextracted=0 deleted=1 extracted=0 unchanged=3603
+F23_03_MUTATION=rename platform=linux status=PASS unchanged_reextracted=0 renamed=1 extracted=0 unchanged=3603
+F23_03_MUTATION=branch-switch platform=linux status=PASS unchanged_reextracted=0 added=1 extracted=1 unchanged=3603
+F23_03_SCOPE_AFTER_SWITCH=commit=484186fb2d45421e9fba6524d762bb07efcd5b68 ref=refs/heads/f23-drive-d3b14061fc7a3735 gitdir=/tmp/tmp.Vk2IRiqUiU/scratch/clone/.git
+F23_03_STALENESS_REPORTED=true
+F23_03_VERIFY=agrees= exit=6
+F23_03_STORE_CONTROL_OCCURRENCES=1
+F23_03_STORE_NONCE_OCCURRENCES=0
+F23_03_DRIVE=PASS platform=linux nonce=d3b14061fc7a3735

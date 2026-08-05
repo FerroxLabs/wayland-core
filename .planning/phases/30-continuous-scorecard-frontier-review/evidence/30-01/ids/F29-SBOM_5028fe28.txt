@@ -1,0 +1,20 @@
+EVIDENCE ID : F29-SBOM@5028fe28
+LEDGER ROW  : 38
+ARTIFACT    : `phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md` — byte-deterministic CycloneDX SBOM, **865 components, 447,364 bytes, sha256 `5028fe28…`**, cross-path byte-identical from differing `cargo metadata` inputs (1,538 checkout-path occurrences each). A real defect was found in getting there: the serial was derived from the raw text and moved at byte 83 between checkout paths
+
+== PATH RESOLUTION ==
+[OK]   stat phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+       -> .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md  size=14897
+       head:
+# 29-02 — Clean-Room Results
+
+**Measured at** `148330ae` / `2c89b141` (branch `lane/29-02`, merge-base
+`2fd771d2cd69e13f5c686f859547ab46ebddd41f`).
+**Host:** Hetzner Linux `6.8.0-101-generic x86_64`, rustc `1.95.0` (the pin in `rust-toolchain.toml`).
+**Captured evidence:** `evidence/29-02/` — machine index `evidence/29-02/CLAUSE-LEDGER.tsv`.
+
+== GIT OBJECT RESOLUTION ==
+[OK]   DIGEST 5028fe28 found 2x in .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+       cmd: /usr/bin/grep -c -F 5028fe28 .planning/phases/29-supply-chain-release-integrity/29-02-CLEANROOM-RESULTS.md
+
+== VERDICT == CONFIRMED

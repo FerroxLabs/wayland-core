@@ -1,0 +1,9 @@
+APPLY_RC=0
+MUTATION_HITS=2
+MUTATED_RC=0
+NOENV_RC=0
+HITS_AFTER_RESTORE=0
+WLDONE
+---
+/tmp/wls-linux-record-lock/mutated.log:test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+/tmp/wls-linux-record-lock/nomut.log:test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s

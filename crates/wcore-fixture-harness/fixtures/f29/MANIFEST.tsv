@@ -1,0 +1,37 @@
+# Phase 29 (F29-01) pinned SBOM determinism corpus.
+#
+# Small on purpose. The fixture exists to prove that the CycloneDX transform is
+# a byte-deterministic pure function, and a multi-megabyte capture of the real
+# 865-package workspace graph would make every future diff unreadable while
+# proving exactly the same thing.
+#
+# cargo-metadata.json is a hand-authored `cargo metadata --format-version 1`
+# document shaped like the real one. It deliberately contains:
+#   - packages listed OUT of package-url order, so the ordering test cannot
+#     pass vacuously against an input that happened to arrive sorted;
+#   - absolute `file:///` package ids and `manifest_path` values, so the
+#     no-path-leak test has something real to catch;
+#   - one workspace member WITH a license (wcore-types) and one WITHOUT
+#     (wcore-fixture-harness), mirroring the real workspace, where exactly two
+#     of 865 packages declare no license and both are our own;
+#   - one registry crate declaring only `license-file` and no SPDX expression
+#     (ring), which must be marked unknown AND flagged rather than treated as
+#     permissive;
+#   - one version carrying build metadata (toml 1.1.2+spec-1.1.0), so the
+#     package-url percent-encoding is exercised. Real: this workspace's locked
+#     graph contains six such versions.
+#
+# expected-sbom.json is the byte-exact output of
+#   wayland-release sbom --metadata cargo-metadata.json --output <file>
+# generated on Hetzner Linux at lane/29-02 5b2fce2e, and reproduced digest-for-
+# digest after transfer to macOS. Regenerate it ONLY when the document shape
+# changes deliberately, and bump sbom::SBOM_TRANSFORM_VERSION when you do.
+#
+# Note the serial number visible in expected-sbom.json is NOT a digest of this
+# metadata file. It is a digest of the canonical output payload — see
+# `the_serial_number_is_derived_from_the_canonical_output_not_the_raw_input`
+# and the two-worktree measurement that forced that change.
+#
+# Columns: name<TAB>bytes<TAB>sha256
+cargo-metadata.json	2649	8ec20514fc342a8c4b99fdbd4610e2bb8c54df18d982bace9f26f52e5db54fd2
+expected-sbom.json	2809	28f7c0538ed86bc70af9a90a18799aa597943f9375838956006c208fdfc9e3b3

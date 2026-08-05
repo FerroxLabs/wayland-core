@@ -122,10 +122,9 @@ fn is_mcp(t: &dyn Tool) -> bool {
 
 /// Whether `tool` survives under `posture`.
 ///
-/// `read_deny_enforced`: the result of
-/// `wcore_sandbox::default_for_platform().enforces_read_deny()` at the time
-/// `apply_posture` is called (bootstrap UX gate). When `false`, `Bash` is
-/// dropped from `Workspace` posture because the active backend cannot
+/// `read_deny_enforced`: the result of the immutable session sandbox
+/// runtime's `enforces_read_deny()` capability at bootstrap. When `false`,
+/// `Bash` is dropped from `Workspace` posture because the active backend cannot
 /// provably enforce secret-read-deny at the OS layer — advertising it would
 /// only result in exec-time refusals from `bash.rs`.
 fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: bool) -> bool {
@@ -153,10 +152,10 @@ fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: 
 /// the posture forbids and, for `Workspace`, install the `SandboxedFs` jail
 /// so the surviving filesystem tools cannot escape `scope.workspace_root`.
 ///
-/// `read_deny_enforced` is `wcore_sandbox::default_for_platform().enforces_read_deny()`
-/// computed by the caller (bootstrap). When `false`, `Bash` is dropped from
-/// `Workspace` posture — a UX gate so the LLM schema doesn't advertise a
-/// tool that would always refuse at exec time.
+/// `read_deny_enforced` is computed from the same immutable session runtime
+/// that will execute Bash. When `false`, `Bash` is dropped from `Workspace`
+/// posture — a UX gate so the LLM schema doesn't advertise a tool that would
+/// always refuse at exec time.
 ///
 /// For [`ChannelToolPosture::Full`] it drops only the unconfined-search tools
 /// ([`FULL_CHANNEL_DENY`]) and installs no jail; every other tool survives.

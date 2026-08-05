@@ -1,0 +1,45 @@
+# FALSIFICATION BATTERY — cargo-deny gate, run #2 (final config)
+# 2026-07-29, hetzner-dsm /root/wayland-29-deny, cargo-deny 0.20.2,
+# with [graph] all-features = true and the 5-entry ignore list.
+# Verbatim stdout of falsify.sh. Each mutation must FLIP green -> red.
+#
+# cargo-deny exit codes are a BITMASK: advisories=1 bans=2 licenses=4 sources=8.
+# Cross-check: the pre-fix baseline exited 5 = 1|4 = advisories + licenses.
+#
+# F2 is run FIVE times, once per ignore id, because a battery that drops the
+# whole list at once cannot tell a load-bearing exception from a passenger.
+# F10 is the one case EXPECTED to stay green: narrowing the graph back to
+# all-features = false makes three of the five advisories invisible, which is
+# precisely the scope gap the flip closed. Reported as a control, not a pass.
+# ----------------------------------------------------------------------
+===== F0 control: unmutated tree must be GREEN =====
+FALSIFY tag=F0-control rc=0 errors=0 verdict=[advisories ok, bans ok, licenses ok, sources ok]
+===== F1: revert the license one-liner -> licenses MUST fail =====
+FALSIFY tag=F1-license-reverted rc=4 errors=1 verdict=[advisories ok, bans ok, licenses FAILED, sources ok]
+===== F2..F6: drop ONE ignore id at a time -> advisories MUST fail each time =====
+      (proves no id is a passenger riding on another's suppression)
+FALSIFY tag=F2-unignored-RUSTSEC-2025-0141 rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+FALSIFY tag=F2-unignored-RUSTSEC-2026-0192 rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+FALSIFY tag=F2-unignored-RUSTSEC-2024-0436 rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+FALSIFY tag=F2-unignored-RUSTSEC-2025-0119 rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+FALSIFY tag=F2-unignored-RUSTSEC-2025-0134 rc=1 errors=1 verdict=[advisories FAILED, bans ok, licenses ok, sources ok]
+===== F7: ban a crate that IS in the tree -> bans MUST fail =====
+FALSIFY tag=F7-bans-serde rc=2 errors=1 verdict=[advisories ok, bans FAILED, licenses ok, sources ok]
+===== F8: empty allow-registry -> sources MUST fail =====
+FALSIFY tag=F8-sources-empty rc=8 errors=892 verdict=[advisories ok, bans ok, licenses ok, sources FAILED]
+===== F9: remove MIT from allowlist -> licenses MUST fail =====
+FALSIFY tag=F9-license-no-mit rc=4 errors=183 verdict=[advisories ok, bans ok, licenses FAILED, sources ok]
+===== F10: revert all-features true -> false -> the 3 optional-feature =====
+      advisories become UNSEEN, so the gate goes GREEN with 3 fewer checks.
+      This one is EXPECTED to stay green; it is the control that proves the
+      widened graph is what admits them, and it is reported as such.
+FALSIFY tag=F10-narrow-graph-control rc=0 errors=0 verdict=[advisories ok, bans ok, licenses ok, sources ok]
+===== restore + final control: must be GREEN again =====
+FALSIFY tag=F11-restored-control rc=0 errors=0 verdict=[advisories ok, bans ok, licenses ok, sources ok]
+ M Cargo.lock
+ M Cargo.toml
+ M crates/wcore-acp/src/transport/rest.rs
+ M crates/wcore-acp/tests/rest_roundtrip.rs
+ M crates/wcore-fixture-harness/Cargo.toml
+ M deny.toml
+ M justfile

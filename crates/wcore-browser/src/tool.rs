@@ -58,7 +58,7 @@ use tokio::select;
 use wcore_protocol::events::ToolCategory;
 use wcore_tools::path_validation::validate_user_path;
 use wcore_tools::{Tool, context::ToolContext};
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::op::BrowserOp;
 use crate::policy::{BrowserPolicy, PolicyOutcome};
@@ -297,6 +297,12 @@ impl BrowserTool {
         if let Some(s) = self.sessions.lock().get(&key) {
             return Ok(s.clone());
         }
+        if self.provider.backend_name() == "camoufox" {
+            self.supervisor
+                .ensure_ready()
+                .await
+                .map_err(BrowserOpError::Backend)?;
+        }
         // The lock is released across this `await` (we must not hold a
         // `parking_lot::Mutex` guard over an await point). Two concurrent
         // first-calls for the same key can therefore both miss above and both
@@ -427,6 +433,15 @@ impl Tool for BrowserTool {
         ToolCategory::Mcp
     }
 
+    fn execution_class_for(&self, _input: &Value) -> wcore_tools::ToolExecutionClass {
+        wcore_tools::ToolExecutionClass::ProcessSpawning
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Browser actions can mutate local and remote state without reconciliation.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         self.execute_with_ctx(input, &ToolContext::test_default())
             .await
@@ -481,14 +496,15 @@ impl Tool for BrowserTool {
                     && self.policy.allowed_origins.is_empty()
                     && self.policy.default_action == crate::policy::PolicyAction::Deny
                 {
-                    "Browser tool is disabled by default. \
-                     Add allowed domains to your config.toml to enable it:\n\n\
-                     [browser]\n\
-                     # Allow specific domains (glob patterns supported)\n\
-                     allowed_origins = [\"example.com\", \"*.mysite.com\"]\n\n\
-                     Alternatively, set default_action = \"allow\" to permit all origins \
-                     (not recommended — exposes SSRF risk)."
-                        .to_string()
+                    // 27-C2(a): the section header here MUST be the one the
+                    // config loader reads (`[browser.policy]`). It named
+                    // `[browser]`, which `#[serde(default)]` silently drops,
+                    // so following this hint verbatim left the tool disabled
+                    // with no diagnostic. The text now comes from
+                    // `config_hint`, whose snippets are round-tripped through
+                    // the real loader by
+                    // `wcore-agent/tests/browser_config_hint_roundtrip.rs`.
+                    crate::config_hint::disabled_by_default_hint()
                 } else {
                     format!("policy: {e}")
                 }
@@ -575,6 +591,55 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "ok"
         }
+    }
+
+    struct CamoufoxNamedOkBackend;
+
+    #[async_trait]
+    impl BrowserProvider for CamoufoxNamedOkBackend {
+        async fn open_session(
+            &self,
+            persistent_profile: bool,
+        ) -> Result<BrowserSession, BrowserOpError> {
+            Ok(BrowserSession {
+                ctx: SessionCtx::for_test("camoufox-ok"),
+                persistent_profile,
+            })
+        }
+
+        async fn close_session(&self, _ctx: &SessionCtx) -> Result<(), BrowserOpError> {
+            Ok(())
+        }
+
+        async fn dispatch(
+            &self,
+            _ctx: &SessionCtx,
+            _op: BrowserOp,
+        ) -> Result<OpResult, BrowserOpError> {
+            Ok(OpResult::Ok)
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "camoufox"
+        }
+    }
+
+    #[tokio::test]
+    async fn camoufox_tool_checks_sidecar_before_opening_session() {
+        let supervisor = BrowserSupervisor::with_config(crate::supervisor::SupervisorConfig {
+            healthcheck_url: "http://127.0.0.1:9/health".into(),
+            sidecar_program: Some("wcore-camoufox-command-that-does-not-exist".into()),
+            startup_timeout: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let tool = BrowserTool::new(
+            Arc::new(CamoufoxNamedOkBackend),
+            BrowserPolicy::default(),
+            Arc::new(supervisor),
+        );
+        let result = tool.execute(json!({ "op": { "kind": "get_state" } })).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("Install @askjo/camofox-browser"));
     }
 
     #[tokio::test]

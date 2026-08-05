@@ -18,10 +18,49 @@ on:
   schedule:
     - cron: "30 5 * * *"
   workflow_dispatch:
+    inputs:
+      # Candidate mode: a single Sean-authorized exact-SHA dual-platform F20
+      # native UAT dispatch. When false (the default, and always for the
+      # scheduled cron) the normal Windows soak runs unchanged. When true, ONLY
+      # the exact F20 native jobs run: the self-hosted AppContainer-capable
+      # Windows client runner plus the pinned ephemeral macOS runner, both
+      # asserted against the same explicitly authorized f20_expected_sha, with
+      # caches and issue automation disabled and no secrets.
+      f20_candidate:
+        description: "Run the exact-candidate F20 native UAT jobs only"
+        type: boolean
+        required: false
+        default: false
+      # Explicit candidate binding (20A-05). Previously both candidate jobs set
+      # EXPECTED_COMMIT: ${{ github.sha }} and then asserted HEAD == EXPECTED_COMMIT.
+      # That assertion was TAUTOLOGICAL — it compared the checkout against whatever
+      # the dispatch ref happened to resolve to, so it could never detect that the
+      # WRONG candidate had been proven. Because workflow_dispatch's `ref` accepts
+      # only a branch or a tag (never a raw SHA), any movement of the dispatched
+      # branch silently retargets the proof while every in-run check still passes.
+      # The authorized candidate SHA is now supplied explicitly here and asserted
+      # against the real checkout; a mismatch fails the job closed.
+      f20_expected_sha:
+        description: "Exact 40-lowercase-hex candidate commit the checkout MUST equal (candidate mode). Dispatch --ref must be a tag/branch that resolves to this SHA."
+        type: string
+        required: false
+        default: ""
+      f20_macos_runner_label:
+        description: "Pinned f20-image-<sha256> label for the ephemeral macOS runner (candidate mode)"
+        type: string
+        required: false
+        default: ""
+      f20_request_nonce:
+        description: "Candidate request nonce, propagated verbatim into both native job logs (candidate mode)"
+        type: string
+        required: false
+        default: ""
 
+# Least-privilege default. The scheduled soak's issue-opening step needs
+# issues: write, so that job re-grants it at job scope; the candidate F20 jobs
+# never do — they run with only the workflow-default contents: read.
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: nightly-windows-soak
@@ -41,8 +80,13 @@ env:
 jobs:
   windows-soak:
     name: Windows soak (windows-2022)
+    # Skipped in candidate mode — only the exact F20 native jobs run then.
+    if: github.event.inputs.f20_candidate != 'true'
     runs-on: windows-2022
     timeout-minutes: 60
+    permissions:
+      contents: read
+      issues: write
 
     steps:
       # NOTE: when this workflow lands on main, the SHA-pinning sweep
@@ -100,7 +144,12 @@ jobs:
           name: windows-soak-logs-${{ github.run_id }}
           path: windows-soak-results/
           retention-days: 14
-          if-no-files-found: warn
+          # `error`, not `warn`. A soak that produced no logs at all did not
+          # soak anything, and `warn` is how that stays invisible: run
+          # 30193657704 went green having uploaded exactly two files
+          # (0-versions.log, F-build.log) with no G-nextest.log and no
+          # H-mutants.log, and nothing in the run said so.
+          if-no-files-found: error
 
       # Open (or update) a GitHub issue when the soak fails. Mirrors
       # mutants-nightly.yml so a failure shows up in the tracker the next
@@ -158,3 +207,387 @@ jobs:
                 labels: ['windows-soak', 'test-debt'],
               });
             }
+
+  # --------------------------------------------------------------------------
+  # The OAuth-sized-secret leg: does a real Windows Credential Manager hold a
+  # whole token set?
+  #
+  # Windows caps `CredentialBlob` at CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes)
+  # and the `keyring` crate encodes the value as UTF-16, so ONE entry holds 1280
+  # code units — several times smaller than a ChatGPT token set (access JWT + id
+  # JWT + refresh token). When OAuth tokens moved onto the credential ladder the
+  # keyring rung started refusing every login, and a Windows desktop with no
+  # WAYLAND_VAULT_PASSPHRASE had no rung left: `auth login` was refused outright
+  # where it had previously succeeded.
+  #
+  # This is a property of the HOST's credential store, so no Linux or macOS run
+  # can observe it — hence a Windows job. It lives here rather than in its own
+  # workflow so it runs on every nightly tick, not only when someone remembers
+  # to dispatch it.
+  #
+  # Hosted `windows-2022`, deliberately: the self-hosted msvc box is shared and
+  # contended, and this leg needs a plain interactive-logon credential store,
+  # not AppContainer capability.
+  keyring-blob-size:
+    name: OAuth-sized secret through the real Credential Manager (windows-2022)
+    if: github.event.inputs.f20_candidate != 'true'
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show the tree under test
+        shell: pwsh
+        run: git log --oneline -1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-reg-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-reg-windows-
+
+      # `cargo test -- --ignored` exits 0 when it selects NOTHING, so the exit
+      # status alone is a gate that cannot go red on the failure mode that
+      # actually happens here (a renamed, unbuilt or unselected test). Require
+      # the test's own PASS marker AND its REFUSED single-entry control, so a
+      # run that did not exercise the cap fails instead of passing quietly.
+      #
+      # vacuity-checked: the two Select-String guards below assert this run
+      # reached `PASS an_oauth_sized_secret_survives_the_hosts_real_keyring`
+      # AND recorded `single_entry_write=REFUSED`. Neither marker can appear
+      # unless the test actually executed and actually exercised the blob cap,
+      # so a zero-selected run throws instead of exiting 0.
+      - name: Live keyring blob-size test
+        shell: pwsh
+        run: |
+          cargo test -p wcore-config --test keyring_blob_size_live -- --ignored --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath keyring-blob.log
+          $rc = $LASTEXITCODE
+          Get-Content keyring-blob.log | Select-String -Pattern 'MEASURED|PASS an_oauth'
+          # vacuity-checked: this line is not an invocation — it is the exit-code
+          # check FOR the invocation above, whose vacuity is proven by the two
+          # marker assertions that follow. Annotated because the scanner matches
+          # the literal text inside this error message.
+          if ($rc -ne 0) { throw "cargo test exited ${rc}" }
+          if (-not (Select-String -Path keyring-blob.log -Pattern 'PASS an_oauth_sized_secret_survives_the_hosts_real_keyring' -Quiet)) {
+            throw "the live keyring test did not run to its PASS marker - NOT MEASURED"
+          }
+          if (-not (Select-String -Path keyring-blob.log -Pattern 'single_entry_write=REFUSED' -Quiet)) {
+            throw "the single-entry positive control was not REFUSED - this run did not exercise the Windows blob cap"
+          }
+
+      - name: Upload the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyring-blob-log-${{ github.run_id }}
+          path: keyring-blob.log
+
+  # --------------------------------------------------------------------------
+  # 20A-01 Wiring C — the native Windows live-acceptance ignored set.
+  #
+  # crates/wcore-sandbox/tests/live_fs_acl.rs holds twelve Windows-only
+  # #[ignore]d ACL tests; before 20A-01 exactly TWO of them were named by any
+  # runner anywhere (f20-native-windows-proof.ps1's canonical six-target array).
+  # The other ten ran NOWHERE — including deny_ace_still_blocks_granted_read and
+  # normal_sid_only_grant_is_denied, the two that would have caught the
+  # fs_read_deny silent no-op. crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+  # likewise had an unselected native_containment_gate_marker. A security test
+  # with no runner is not a control.
+  #
+  # This job is deliberately NOT the native proof. f20-native-windows-proof.ps1
+  # is untouched: verifyNativeLog in scripts/f20-native-uat-proof.mjs fails
+  # closed on any target marker outside its canonical six, on any duplicate and
+  # on any reorder, so adding targets there would make the six-target proof fail
+  # closed on its own new markers, and widening the selector on
+  # windows-retained-handle / windows-appcontainer-acl would load two
+  # certified-green targets with ten never-executed tests. That array is
+  # 20A-04's verified invariant.
+  #
+  # Self-hosted, not windows-2022: the hosted image is a server SKU reporting
+  # AppContainerBackend::is_available() == false (the same reason the
+  # f20-windows-candidate job below runs self-hosted), so these tests can only
+  # execute on an AppContainer-capable Windows client. (An SSH logon to the same
+  # box is NOT such an environment either: a non-interactive session-0 SSH logon
+  # reports AppContainerBackend::is_available() == false, so every one of these
+  # tests fails its gate there regardless of correctness — measured 2026-07-26 on
+  # SEANDESKTOP against the CI-certified-green granted_path_is_readable_then_revoked.
+  # These tests can only be observed through the runner service.)
+  #
+  # NOTE (20A-01 BACKLOG M6): this job shares the self-hosted box with ci.yml's
+  # Windows leg and with 20A-02/03/04 measurements. Nothing serializes them; if a
+  # measurement produces an inexplicable result, check contention first.
+  #
+  # CANDIDATE-MODE WIRING (REQ-native-r2 closeout). This job was previously
+  # skipped by `if: github.event.inputs.f20_candidate != 'true'`, which made it
+  # the ONLY runner of deny_ace_still_blocks_granted_read and
+  # normal_sid_only_grant_is_denied AND excluded it from the one dispatch mode
+  # that proves a candidate — so those two ACL tests had no observed green at
+  # any sealed SHA. It now runs in BOTH modes:
+  #   * non-candidate (cron / plain dispatch): unchanged behaviour. The candidate
+  #     job is skipped, so `!cancelled()` alone admits this job.
+  #   * candidate: runs AFTER f20-windows-candidate succeeds. `needs:` is what
+  #     serializes the two — both target the SAME single self-hosted box, and
+  #     concurrent compile load has previously corrupted a proof run (HANDOFF
+  #     trap 9), so this job must never run alongside the six-target proof.
+  # The six-target proof itself is untouched: f20-native-windows-proof.ps1 and
+  # its canonical $targets array are not modified, this job emits no
+  # F20_NATIVE_* markers (it runs the soak script's PHASE L), and it writes to a
+  # separate log/artifact that verifyNativeLog never reads.
+  windows-live-acceptance:
+    name: Windows live-acceptance ignored set (self-hosted msvc)
+    needs: f20-windows-candidate
+    if: >-
+      ${{ !cancelled()
+      && (github.event.inputs.f20_candidate != 'true'
+      || needs.f20-windows-candidate.result == 'success') }}
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      # In candidate mode, pin the checkout to the AUTHORIZED CANDIDATE SHA so
+      # this job's ACL evidence binds to the same tree the six-target proof
+      # certifies. In non-candidate mode f20_expected_sha is the empty string,
+      # which actions/checkout treats exactly as "not supplied" (the default
+      # ref for the event) — the pre-existing behaviour.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.f20_expected_sha }}
+
+      # Same rationale as the candidate job below: the self-hosted checkout dir
+      # is owned by BUILTIN\Administrators while the runner service is
+      # NT AUTHORITY\NETWORK SERVICE, so git aborts on "dubious ownership".
+      - name: Trust the checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
+      # Candidate-mode only: the same non-tautological binding the candidate
+      # jobs perform. Fails closed BEFORE any toolchain work if this checkout is
+      # not the explicitly authorized candidate.
+      - name: Assert checkout is the authorized candidate
+        if: github.event.inputs.f20_candidate == 'true'
+        shell: pwsh
+        env:
+          F20_EXPECTED_SHA: ${{ github.event.inputs.f20_expected_sha }}
+        run: |
+          $expected = "$env:F20_EXPECTED_SHA".Trim()
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
+            throw "f20_expected_sha must be exactly 40 lowercase hex characters; got '$expected'"
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed" }
+          Write-Host "authorized_candidate=$expected checkout_head=$actual"
+          if ($actual -cne $expected) {
+            throw "wrong candidate: checkout HEAD is $actual, authorized candidate is $expected"
+          }
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run the native Windows live-acceptance ignored set
+        shell: pwsh
+        env:
+          # `only` runs PHASE L alone — the windows-2022 job above already
+          # covers phases F/G/H, so this box is not asked to repeat them.
+          # The soak script sets WAYLAND_SANDBOX_LIVE_WINDOWS itself, in the
+          # trap-safe PowerShell form, and hard-fails if the value did not take
+          # effect byte-exactly. It is NOT set here: the `cmd` form
+          # `set VAR=value && ...` appends a trailing space that Rust reads
+          # verbatim, which would make every one of these tests skip or fail
+          # for the wrong reason and report a vacuous result.
+          WAYLAND_SOAK_LIVE_ACCEPTANCE: only
+          LOCAL_RESULTS_DIR: ${{ github.workspace }}\windows-live-acceptance-results
+        run: |
+          pwsh scripts/wayland-e2e-windows-soak.ps1
+
+      - name: Upload live-acceptance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-live-acceptance-logs-${{ github.run_id }}
+          path: windows-live-acceptance-results/
+          retention-days: 14
+          # See the rationale on the windows-soak job's upload above: no logs
+          # means PHASE L produced no evidence, which is a failure, not a warn.
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Candidate-mode F20 native UAT jobs.
+  #
+  # These run ONLY on a manual workflow_dispatch with f20_candidate=true — the
+  # single Sean-authorized exact-SHA dispatch. Both jobs run against the same
+  # github.sha, carry the same request nonce, grant only contents: read, receive
+  # no secrets, use no persisted caches, and open no issues. Untrusted dispatch
+  # inputs (nonce, runner label) are landed into env vars first and read via
+  # $env:/$NAME, never interpolated into a run: body.
+  # --------------------------------------------------------------------------
+  f20-windows-candidate:
+    name: F20 native Windows candidate (self-hosted msvc)
+    if: github.event.inputs.f20_candidate == 'true'
+    # AppContainer-capable self-hosted Windows client SKU. The hosted
+    # windows-2022 image reports AppContainerBackend::is_available() == false
+    # (server SKU without the client AppContainer runtime), so the native
+    # hard-containment proof can never run there. These labels select an online
+    # self-hosted msvc runner on a Windows 11 client that provides AppContainer.
+    # Candidate mode still grants only contents: read, receives no secrets, uses
+    # no persisted caches, and opens no issues; runner identity is recorded into
+    # the UAT evidence via the run's runner_id/runner_name (bound by
+    # scripts/f20-native-uat-proof.mjs bindRun).
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      # Check out the AUTHORIZED CANDIDATE, not the dispatch ref. GitHub always
+      # reads the workflow DEFINITION from the ref passed to workflow_dispatch,
+      # and that ref must therefore be a branch/tag that already carries this
+      # file. Pinning the checkout to f20_expected_sha decouples the two: the
+      # dispatch ref supplies only the workflow, while the proven tree is the
+      # exact authorized commit. The assertion step below still fails closed if
+      # this checkout did not land on it.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.f20_expected_sha }}
+
+      # The self-hosted SEANDESKTOP runner's checkout dir is owned by
+      # BUILTIN\Administrators while the service runs as NT AUTHORITY\NETWORK
+      # SERVICE, so git aborts every command with "detected dubious ownership"
+      # before the proof can start. Trust the checkout for this single-tenant,
+      # contents:read, no-secrets candidate job. Must run before any git call.
+      - name: Trust the candidate checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
+      # Non-tautological candidate binding. Fails closed BEFORE any toolchain or
+      # proof work when the checkout is not the explicitly authorized candidate.
+      - name: Assert checkout is the authorized candidate
+        shell: pwsh
+        env:
+          F20_EXPECTED_SHA: ${{ github.event.inputs.f20_expected_sha }}
+          DISPATCH_RESOLVED_SHA: ${{ github.sha }}
+        run: |
+          $expected = "$env:F20_EXPECTED_SHA".Trim()
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
+            throw "f20_expected_sha must be exactly 40 lowercase hex characters; got '$expected'"
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse HEAD failed" }
+          Write-Host "authorized_candidate=$expected checkout_head=$actual dispatch_resolved=$env:DISPATCH_RESOLVED_SHA"
+          if ($actual -cne $expected) {
+            throw "wrong candidate: checkout HEAD is $actual, authorized candidate is $expected"
+          }
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Run exact-candidate F20 native Windows proof
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT: ${{ github.event.inputs.f20_expected_sha }}
+          F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
+          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
+        run: |
+          $expectedTree = (git rev-parse "$env:EXPECTED_COMMIT^{tree}").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "resolve expected tree failed" }
+          pwsh scripts/f20-native-windows-proof.ps1 `
+            -ExpectedCommit $env:EXPECTED_COMMIT `
+            -ExpectedTree $expectedTree `
+            -Nonce $env:F20_REQUEST_NONCE
+
+  f20-macos-candidate:
+    name: F20 native macOS candidate (ephemeral)
+    if: github.event.inputs.f20_candidate == 'true'
+    # Dynamically pinned ephemeral runner. The f20-image-<sha256> label is
+    # supplied by the authorized dispatch input; the runner is idle-selected,
+    # exposes no ambient secrets, and deregisters after this single job.
+    runs-on:
+      - self-hosted
+      - f20-native-macos
+      - f20-ephemeral
+      - f20-no-ambient-secrets
+      - ${{ github.event.inputs.f20_macos_runner_label }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      # Check out the AUTHORIZED CANDIDATE, not the dispatch ref — see the
+      # rationale on the Windows candidate job's checkout above.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.f20_expected_sha }}
+
+      # Defensive parity with the Windows candidate job: a freshly re-registered
+      # ephemeral macOS runner's checkout-dir ownership is unproven, so trust it
+      # for this single-tenant, contents:read, no-secrets job before any git
+      # call. Harmless no-op when ownership already matches.
+      - name: Trust the candidate checkout for git
+        shell: bash
+        run: git config --global --add safe.directory '*'
+
+      # Non-tautological candidate binding — bash mirror of the Windows job's
+      # assertion. Fails closed BEFORE the proof when the checkout is not the
+      # explicitly authorized candidate.
+      - name: Assert checkout is the authorized candidate
+        shell: bash
+        env:
+          F20_EXPECTED_SHA: ${{ github.event.inputs.f20_expected_sha }}
+          DISPATCH_RESOLVED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          expected="${F20_EXPECTED_SHA}"
+          if ! printf '%s' "$expected" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$'; then
+            echo "f20_expected_sha must be exactly 40 lowercase hex characters; got '$expected'" >&2
+            exit 1
+          fi
+          actual="$(git rev-parse HEAD)"
+          echo "authorized_candidate=$expected checkout_head=$actual dispatch_resolved=$DISPATCH_RESOLVED_SHA"
+          if [ "$actual" != "$expected" ]; then
+            echo "wrong candidate: checkout HEAD is $actual, authorized candidate is $expected" >&2
+            exit 1
+          fi
+
+      - name: Run exact-candidate F20 native macOS proof
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ github.event.inputs.f20_expected_sha }}
+          F20_REQUEST_NONCE: ${{ github.event.inputs.f20_request_nonce }}
+          WAYLAND_F20_NATIVE_ACCEPTANCE: "1"
+        run: |
+          set -euo pipefail
+          expected_tree="$(git rev-parse "${EXPECTED_COMMIT}^{tree}")"
+          bash scripts/f20-native-macos-proof.sh \
+            --expected-commit "$EXPECTED_COMMIT" \
+            --expected-tree "$expected_tree" \
+            --nonce "$F20_REQUEST_NONCE"

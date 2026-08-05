@@ -1,0 +1,14 @@
+   Compiling wcore-channel-whatsapp v0.12.25 (/root/wayland-whatsapp-bridge/crates/wcore-channel-whatsapp)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.36s
+     Running tests/live_bridge.rs (target/debug/deps/live_bridge-9fcc0f4bcd158350)
+
+running 6 tests
+test live_preflight_clears_against_the_real_bridge ... ok
+test live_a_missing_bridge_fails_closed_even_when_node_is_installed ... ok
+test live_a_dependency_free_bridge_copy_is_refused_before_it_can_lie ... ok
+test live_handshake_succeeds_and_the_verdict_stops_at_pairing ... ok
+test live_the_ok_verdict_is_reachable_when_pairing_material_is_present ... ok
+test live_the_backend_selector_selects_against_the_real_bridge ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

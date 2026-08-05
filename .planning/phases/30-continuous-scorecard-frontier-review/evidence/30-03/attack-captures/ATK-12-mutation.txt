@@ -1,0 +1,10 @@
+case: ATK-12
+what: a limitation's substitution point is removed
+half: MUTATION
+class: limitation
+scope: SCRIPTED_HARNESS
+text: The security dimension was not measured: the meter records body digests.
+outcome: REFUSED
+rule: limitation_without_substitution_point
+refusal: limitation `P` names no substitution point
+missing: a named substitution point

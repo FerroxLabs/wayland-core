@@ -65,6 +65,77 @@ pub struct PropagationReport {
     pub depth_reached: u32,
 }
 
+// ---------------------------------------------------------------------------
+// F23-03 — the AGE dimension of staleness
+// ---------------------------------------------------------------------------
+//
+// The KG cascade above answers "was this node invalidated by something that
+// changed?". Recall provenance also has to answer "how old is this, and is it
+// still inside the retention bound the operator set?". Both are staleness, so
+// both live here rather than in a second, competing module — a user shown two
+// different staleness answers for one item would be right to distrust both.
+
+use serde::{Deserialize, Serialize};
+
+/// Age verdict for one recalled item.
+///
+/// The Fresh/Aging/Stale boundaries are reporting bands, not policy: nothing
+/// is excluded because it is Stale. `Expired` is different in kind — it means
+/// the item is past an operator-set retention bound and WAS excluded from the
+/// prompt, which is why it carries the bound it violated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum StalenessVerdict {
+    Fresh,
+    Aging,
+    Stale,
+    Expired { max_age_secs: i64 },
+}
+
+impl StalenessVerdict {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Aging => "aging",
+            Self::Stale => "stale",
+            Self::Expired { .. } => "expired",
+        }
+    }
+
+    /// True only for `Expired`. Retrieval excludes on this, and on nothing
+    /// else, so a reporting band can never quietly become a filter.
+    #[must_use]
+    pub fn excludes_from_recall(self) -> bool {
+        matches!(self, Self::Expired { .. })
+    }
+}
+
+/// One day in seconds — the Fresh boundary.
+pub const AGE_FRESH_SECS: i64 = 24 * 60 * 60;
+/// Seven days in seconds — the Aging boundary.
+pub const AGE_AGING_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Classify an item's age, honouring an operator retention bound when one is
+/// set. A bound of zero expires everything with a non-zero age, which is the
+/// literal reading of "retain nothing" and is the behaviour an operator
+/// setting zero is asking for.
+#[must_use]
+pub fn verdict_for_age(age_secs: i64, max_age_secs: Option<i64>) -> StalenessVerdict {
+    if let Some(max) = max_age_secs
+        && age_secs > max
+    {
+        return StalenessVerdict::Expired { max_age_secs: max };
+    }
+    if age_secs < AGE_FRESH_SECS {
+        StalenessVerdict::Fresh
+    } else if age_secs < AGE_AGING_SECS {
+        StalenessVerdict::Aging
+    } else {
+        StalenessVerdict::Stale
+    }
+}
+
 /// Idempotently create the sibling staleness table. Safe to call on an
 /// existing memory DB. Caller must have already invoked
 /// `crate::kg::init_kg(conn)` so the FK target table exists.
@@ -451,5 +522,57 @@ mod tests {
         unsafe { std::env::set_var(ENV_STALENESS, "1") };
         assert!(staleness_enabled());
         restore_env(ENV_STALENESS, prior);
+    }
+
+    // ----- F23-03 age dimension -----
+
+    #[test]
+    fn age_bands_are_reporting_only_and_never_exclude() {
+        assert_eq!(verdict_for_age(0, None), StalenessVerdict::Fresh);
+        assert_eq!(
+            verdict_for_age(AGE_FRESH_SECS - 1, None),
+            StalenessVerdict::Fresh
+        );
+        assert_eq!(
+            verdict_for_age(AGE_FRESH_SECS, None),
+            StalenessVerdict::Aging
+        );
+        assert_eq!(
+            verdict_for_age(AGE_AGING_SECS - 1, None),
+            StalenessVerdict::Aging
+        );
+        assert_eq!(
+            verdict_for_age(AGE_AGING_SECS, None),
+            StalenessVerdict::Stale
+        );
+        // A very old item is Stale, not Expired, when no bound is set: a
+        // reporting band must never quietly become a filter.
+        assert_eq!(verdict_for_age(10_000_000, None), StalenessVerdict::Stale);
+        for v in [
+            StalenessVerdict::Fresh,
+            StalenessVerdict::Aging,
+            StalenessVerdict::Stale,
+        ] {
+            assert!(!v.excludes_from_recall(), "{v:?} must not exclude");
+        }
+    }
+
+    #[test]
+    fn retention_bound_expires_and_carries_the_bound_it_violated() {
+        let v = verdict_for_age(120, Some(60));
+        assert_eq!(v, StalenessVerdict::Expired { max_age_secs: 60 });
+        assert!(v.excludes_from_recall());
+        assert_eq!(v.as_str(), "expired");
+        // Exactly at the bound is still inside it.
+        assert_eq!(verdict_for_age(60, Some(60)), StalenessVerdict::Fresh);
+    }
+
+    #[test]
+    fn a_zero_bound_expires_anything_with_a_nonzero_age() {
+        assert_eq!(verdict_for_age(0, Some(0)), StalenessVerdict::Fresh);
+        assert_eq!(
+            verdict_for_age(1, Some(0)),
+            StalenessVerdict::Expired { max_age_secs: 0 }
+        );
     }
 }

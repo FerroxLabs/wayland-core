@@ -1,0 +1,279 @@
+F20 PRE-NATIVE FOUR-WAY CROSS-AUDIT (plan 20-52) — RE-SEALED FURTHER-REPAIRED SUCCESSOR
+
+You are an INDEPENDENT (non-author) adversarial code auditor. Prosecute the candidate at EVERY
+severity. Default to REFUTE: if you are uncertain a fix is correct, treat it as a FINDING, not a pass.
+Your job is to find any reason this candidate should NOT be admitted to the scarce native-hardware run.
+
+== CANDIDATE UNDER AUDIT (exact, re-sealed) ==
+- source_sha (SEALED):  f0dd5b6d312af616f268f96f34c3bc9fc962c4d2
+- source_tree (SEALED): ac76c87b318ee4ba8c34927dea23e40e63fd0776
+- predecessor (sealed-but-RED, BLOCKED by the 20-45 panel): 3f839309574d6741eed416cd3820f56447f74eba
+- repo: wayland-core (multi-provider AI agent CLI, Rust workspace). Branch plan/f20-unified-audit-repair.
+- The ONLY deferred checks are native_macos / native_windows (proven at 20-53). EVERYTHING else —
+  static code review of the delta, all-severity findings, evidence integrity, integration authority —
+  is prosecuted NOW.
+
+== WHAT THIS DELTA IS ==
+The 20-45 four-way pre-native panel returned BLOCK on predecessor 3f839309 with TWO real,
+statically-provable findings. The 20-50 fix (this delta, 3f839309 -> f0dd5b6d) closes both, touching
+ONLY the two Windows-only files the findings name — NO Cargo.toml, NO other source, NO workflow.
+
+--- FINDING 1 (was Codex HIGH / Claude MEDIUM): vacuous post-close reap assertion ---
+File: crates/wcore-sandbox/tests/hard_process_containment_windows.rs, test active_process_cap_is_enforced.
+The OLD post-close check was `wait_until(|| tagged_choice_descendant_count(&tag) == 0, ...)`. That helper
+scoped choice.exe by whose ParentProcessId is a LIVE tagged cmd.exe. After run.await returns, the
+AppContainer Job Object has closed and the tagged parent cmd is dead, so the parent-scoped CIM query is
+structurally empty and the count is 0 whether or not a choice.exe leaked — VACUOUS.
+
+The 20-50 fix ("threads the needle"):
+  * tagged_choice_descendant_count(-> usize) becomes tagged_choice_descendant_pids(-> Vec<u32>): the SAME
+    ParentProcessId-scoped CIM query, but returns the choice.exe children's ProcessId LIST.
+  * NEW surviving_captured_choice_pids(pids: &[u32]) -> usize: counts choice.exe whose ProcessId is in the
+    captured set ($pids -contains $_.ProcessId); empty slice short-circuits to 0.
+  * The peak-sampling loop now captures the peak PID set (captured_pids) alongside peak.
+  * NEW belt-and-braces assert!(!captured_pids.is_empty(), ...) guards against silent re-vacuity.
+  * The post-close reap check is now surviving_captured_choice_pids(&captured_pids) == 0 — fixed PID.
+Claim: non-vacuous (a leaked/orphaned captured choice, same PID, still choice.exe, is counted) AND NOT
+host-wide-flaky (a concurrent live_fs_acl choice.exe carries a different, non-captured PID -> excluded);
+does NOT revert to the host-wide image_count("choice.exe") baseline that the 20-43 Task-3 flake fix removed.
+The other containment assertions (peak>0, peak<=SANDBOX_ACTIVE_PROCESS_LIMIT=512, peak<attempts,
+exit_code==0) are preserved VERBATIM, as is the sibling test
+job_close_reaps_detached_descendant_with_no_residue (whose grandchild carries `rem {tag}` on its OWN
+cmdline so tagged_cmd_count survives parent death).
+
+--- FINDING 2 (was Codex MEDIUM / Claude LOW): loose cmd classifier ---
+File: crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs, fn resolved_program_is_cmd.
+OLD: `.to_ascii_lowercase().ends_with("cmd.exe")` — suffix-matches notcmd.exe/foocmd.exe, which would then
+route their /c|/k payload through the cmd-specific quote_cmd_payload instead of the general quote_arg.
+NEW: decode + lowercase, then `std::path::Path::new(&decoded).file_name().and_then(to_str)
+.is_some_and(|name| name == "cmd.exe")` — exact FINAL PATH COMPONENT match (Windows Path treats both
+`\` and `/` as separators). Claim: quote_cmd_payload / quote_arg / classify_bare_shell / resolve_program /
+is_unc_or_device_path are byte-identical; ONLY the cmd/non-cmd classification is tightened.
+
+== YOUR ADVERSARIAL MANDATE (prosecute all, refute-by-default) ==
+1. Finding 1 non-vacuous WITHOUT the host-wide flake: Does the post-close check catch a leaked/orphaned
+   captured choice survivor by fixed PID? Does it avoid the host-wide-image-count flake (match ONLY the
+   test's own captured PIDs)? Is !captured_pids.is_empty() a real guard against re-vacuity? Are peak>0,
+   peak<=512, peak<attempts, exit_code==0 and the sibling reap test ALL preserved verbatim? Any NEW defect
+   introduced by the two-phase rewrite (PID-reuse false-fail, malformed PowerShell filter, race)?
+2. Finding 2 exact-final-component: Does file_name()==cmd.exe correctly reject notcmd.exe/foocmd.exe and
+   accept System32\cmd.exe? Is the #B quoting behavior (quote_cmd_payload/quote_arg) otherwise identical?
+   Any regression where a real cmd.exe is now MISCLASSIFIED as non-cmd (would break isolation quoting)?
+3. Isolation guardrails still hold: #A DispatchAdmission budget preserved (no catch-to-unlimited — but note
+   this delta does NOT touch worktree_manager.rs at all); #B quoting-layer ONLY — is_unc_or_device_path,
+   Low-IL restricted token, Job-Object limits, ACL lease untouched; argv discipline kept; 20-36 `exit /b 0`
+   normalization intact.
+4. Any NEW defect the fix introduces at any severity.
+
+== OUTPUT CONTRACT (MANDATORY — emit EXACTLY this JSON, nothing else) ==
+Emit a single JSON object and NOTHING else (no prose, no markdown fences):
+{
+  "schema": "<your assigned schema key>",
+  "source_sha": "f0dd5b6d312af616f268f96f34c3bc9fc962c4d2",
+  "source_tree": "ac76c87b318ee4ba8c34927dea23e40e63fd0776",
+  "reviewer_id": "<your model id>",
+  "reviewer_kind": "external-cli",
+  "checks": { "all_severity": "PASS|FAIL", "evidence_integrity": "PASS|FAIL", "integration_authority": "PASS|FAIL" },
+  "deferred": ["native_macos", "native_windows"],
+  "findings": { "blocker": 0, "critical": 0, "high": 0, "medium": 0, "low": 0 },
+  "finding_1_reap_nonvacuous": "PASS|FAIL",
+  "finding_2_cmd_exact_component": "PASS|FAIL",
+  "guardrail_A_admission_budget": "PASS|FAIL",
+  "guardrail_B_quoting_layer_only": "PASS|FAIL",
+  "evidence": [ { "claim": "<what you checked>", "severity": "high|medium|low|none", "result": "PASS|FAIL" } ],
+  "disposition": "PASS|BLOCK"
+}
+PASS disposition ONLY if you find ZERO findings at any non-deferred severity. Any real finding => BLOCK.
+
+== THE EXACT REPAIR DELTA (git diff 3f839309..f0dd5b6d, the two source files) ==
+diff --git a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs
+index afb9e356..7c162fe0 100644
+--- a/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs
++++ b/crates/wcore-sandbox/src/backends/appcontainer/windows_impl/command.rs
+@@ -135,7 +135,9 @@ pub(super) fn quote_cmd_payload(payload: &str) -> String {
+ }
+ 
+ /// True when a resolved `lpApplicationName` (NUL-terminated UTF-16, as
+-/// returned by [`resolve_program`]) names `cmd.exe`. Used to decide whether the
++/// returned by [`resolve_program`]) has `cmd.exe` as its exact FINAL PATH
++/// COMPONENT (case-insensitive) — NOT a bare suffix, so a name like
++/// `notcmd.exe`/`foocmd.exe` does not match. Used to decide whether the
+ /// `/c`/`/k` payload needs the cmd-aware quoting above rather than the general
+ /// CRT [`quote_arg`] rules. Matching the RESOLVED program (not the raw
+ /// `argv[0]`) is deliberate: bare `cmd`/`cmd.exe` is pinned to
+@@ -146,9 +148,15 @@ pub(super) fn resolved_program_is_cmd(app_name_w: &[u16]) -> bool {
+         .iter()
+         .position(|&c| c == 0)
+         .unwrap_or(app_name_w.len());
+-    String::from_utf16_lossy(&app_name_w[..end])
+-        .to_ascii_lowercase()
+-        .ends_with("cmd.exe")
++    // Windows `Path` treats both `\` and `/` as separators, so `file_name`
++    // isolates the true final component of the `System32\cmd.exe` resolution or
++    // any absolute path the caller passed; equality (not a suffix) rejects
++    // `notcmd.exe`.
++    let decoded = String::from_utf16_lossy(&app_name_w[..end]).to_ascii_lowercase();
++    std::path::Path::new(&decoded)
++        .file_name()
++        .and_then(|name| name.to_str())
++        .is_some_and(|name| name == "cmd.exe")
+ }
+ 
+ /// Classification of a bare (non-absolute) `argv[0]`. Only `cmd` is
+diff --git a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+index c8a59997..1455271d 100644
+--- a/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
++++ b/crates/wcore-sandbox/tests/hard_process_containment_windows.rs
+@@ -125,19 +125,28 @@ fn tagged_cmd_count(tag: &str) -> usize {
+         .unwrap_or(0)
+ }
+ 
+-/// Count the `choice.exe` idlers spawned by THIS test's fan-out, scoped to the
+-/// test's own tagged process tree rather than host-wide by image name.
++/// Return the ProcessIds of the `choice.exe` idlers spawned by THIS test's
++/// fan-out, scoped to the test's own tagged process tree rather than host-wide
++/// by image name.
+ ///
+ /// A bare `choice.exe` idler cannot carry an injected tag on its own command
+ /// line (choice rejects the extra argument), but the top-level sandbox `cmd`
+ /// that runs the fan-out script DOES carry a unique `rem {tag}` — and every
+ /// `start "" /b choice` idler is a direct child of that cmd, so its
+-/// `ParentProcessId` is the tagged cmd's `ProcessId`. Counting only choice
++/// `ParentProcessId` is the tagged cmd's `ProcessId`. Selecting only choice
+ /// processes whose parent is this test's tagged cmd means a concurrent
+ /// `choice`-spawning target on the same runner (e.g. `live_fs_acl`) cannot
+-/// pollute the count — closing the host-wide-image-count flake (watch-item d2)
+-/// without weakening any containment assertion.
+-fn tagged_choice_descendant_count(tag: &str) -> usize {
++/// pollute the capture.
++///
++/// This is the ALIVE-phase half of a two-phase reap check: the returned PIDs
++/// are captured WHILE the tagged parent cmd is still alive (during the
++/// peak-sampling window), and the `ParentProcessId` scope is what makes that
++/// capture immune to a concurrent `choice`-spawning target. Once the job closes
++/// the tagged parent is dead, so this parent-scoped query would go structurally
++/// empty regardless of a leaked survivor — the post-close survivor check is
++/// therefore done by fixed ProcessId via [`surviving_captured_choice_pids`],
++/// NOT by re-running this parent-scoped query.
++fn tagged_choice_descendant_pids(tag: &str) -> Vec<u32> {
+     let out = Command::new("powershell")
+         .args([
+             "-NoProfile",
+@@ -148,11 +157,52 @@ fn tagged_choice_descendant_count(tag: &str) -> usize {
+                  Where-Object {{ $_.CommandLine -like '*{tag}*' }} | \
+                  Select-Object -ExpandProperty ProcessId); \
+                  @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
+-                 Where-Object {{ $parents -contains $_.ParentProcessId }}).Count"
++                 Where-Object {{ $parents -contains $_.ParentProcessId }} | \
++                 Select-Object -ExpandProperty ProcessId)"
++            ),
++        ])
++        .output()
++        .expect("query this test's tagged choice descendant PIDs via CIM");
++    String::from_utf8_lossy(&out.stdout)
++        .split_whitespace()
++        .filter_map(|s| s.parse::<u32>().ok())
++        .collect()
++}
++
++/// Count how many of the `pids` fan-out `choice.exe` ProcessIds are STILL alive,
++/// matched by fixed `ProcessId` intersected with image `choice.exe`.
++///
++/// This is the POST-CLOSE half of the two-phase reap check. Because it filters
++/// on the exact PIDs captured while the tagged parent was alive — not on the
++/// now-dead tagged parent, and not host-wide by image name — it is:
++///   * non-vacuous — a leaked/orphaned captured `choice` (same PID, still
++///     `choice.exe`) is counted, so a survivor stays detectable; and
++///   * not host-wide-flaky — a concurrent target's `choice.exe` carries a
++///     different, non-captured PID and is excluded.
++///
++/// An empty `pids` slice yields 0 without issuing a malformed filter.
++fn surviving_captured_choice_pids(pids: &[u32]) -> usize {
++    if pids.is_empty() {
++        return 0;
++    }
++    let pid_list = pids
++        .iter()
++        .map(u32::to_string)
++        .collect::<Vec<_>>()
++        .join(",");
++    let out = Command::new("powershell")
++        .args([
++            "-NoProfile",
++            "-NonInteractive",
++            "-Command",
++            &format!(
++                "$pids=@({pid_list}); \
++                 @(Get-CimInstance Win32_Process -Filter \"Name='choice.exe'\" | \
++                 Where-Object {{ $pids -contains $_.ProcessId }}).Count"
+             ),
+         ])
+         .output()
+-        .expect("query this test's tagged choice descendants via CIM");
++        .expect("query survival of captured choice PIDs via CIM");
+     String::from_utf8_lossy(&out.stdout)
+         .trim()
+         .parse()
+@@ -321,18 +371,29 @@ async fn active_process_cap_is_enforced() {
+             .await
+     });
+ 
+-    // Sample the live count (already scoped to this test's tagged tree) while
+-    // the fan-out is held, tracking its peak.
++    // Sample the live PID set (already scoped to this test's tagged tree) while
++    // the fan-out is held, tracking its peak and capturing the peak PID set so
++    // the post-close reap check can re-verify those exact ProcessIds by fixed
++    // PID — the parent-scoped query goes structurally empty once the tagged
++    // parent dies at job close.
+     let mut peak = 0usize;
++    let mut captured_pids: Vec<u32> = Vec::new();
+     let watch_deadline = Instant::now() + Duration::from_secs(30);
+     while Instant::now() < watch_deadline {
+-        let delta = tagged_choice_descendant_count(&tag);
+-        peak = peak.max(delta);
++        let pids = tagged_choice_descendant_pids(&tag);
++        if pids.len() > peak {
++            peak = pids.len();
++            captured_pids = pids.clone();
++        }
+         // Once we have clearly observed a large admitted set we can stop early.
+-        if delta >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
++        if pids.len() >= SANDBOX_ACTIVE_PROCESS_LIMIT / 2 {
+             // keep sampling briefly to catch any overshoot past the cap
+             std::thread::sleep(Duration::from_millis(500));
+-            peak = peak.max(tagged_choice_descendant_count(&tag));
++            let overshoot = tagged_choice_descendant_pids(&tag);
++            if overshoot.len() > peak {
++                peak = overshoot.len();
++                captured_pids = overshoot;
++            }
+             break;
+         }
+         std::thread::sleep(Duration::from_millis(250));
+@@ -361,13 +422,22 @@ async fn active_process_cap_is_enforced() {
+         "fan-out was not capped: observed {peak} of {attempts} attempted — the limit \
+          admitted every spawn"
+     );
++    assert!(
++        !captured_pids.is_empty(),
++        "peak PID set was not captured — the post-close reap check would be vacuous"
++    );
+ 
+-    // Everything this test spawned is reaped once the job closes (the count is
+-    // already scoped to this test's tagged tree, so "back to baseline" is zero).
++    // After the job closes, re-check the EXACT fan-out `choice` PIDs captured
++    // while the tagged parent was alive, by fixed ProcessId intersected with
++    // image `choice.exe`. This is non-vacuous (a leaked/orphaned captured
++    // survivor is still counted) and not host-wide-flaky (a concurrent target's
++    // `choice.exe` carries a different, non-captured PID). The parent-scoped
++    // query cannot be reused — the tagged parent is dead once `run.await`
++    // returned.
+     wait_until(
+-        || tagged_choice_descendant_count(&tag) == 0,
++        || surviving_captured_choice_pids(&captured_pids) == 0,
+         30,
+-        "fan-out descendants reaped after job close",
++        "fan-out descendants reaped after job close (by captured PID)",
+     );
+     reap_stray_choice();
+ }

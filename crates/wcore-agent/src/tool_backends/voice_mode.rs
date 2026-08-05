@@ -551,15 +551,120 @@ impl AudioRecorder for CpalAudioRecorder {
 // Audio player — cpal primary + OS-shell fallback
 // ---------------------------------------------------------------------------
 
+/// Handle to one in-flight playback, held by [`CpalAudioPlayer`] so
+/// [`AudioPlayer::stop`] can reach a process that is already running.
+struct Playback {
+    /// Distinguishes generations: a later `play()` replaces the slot, and
+    /// the earlier task must not then clear its successor's handle.
+    id: u64,
+    /// Fires the interrupt. `play()`'s select arm kills the child. A
+    /// *dropped* sender resolves the receiver too, so superseding the
+    /// handle also interrupts — playback never outlives its own slot.
+    stop_tx: tokio::sync::oneshot::Sender<()>,
+    /// Flips true once the child has been reaped, so `stop()` returns
+    /// only when the audio has actually ceased rather than when the
+    /// signal was merely sent.
+    done: tokio::sync::watch::Receiver<bool>,
+}
+
+/// How long [`AudioPlayer::stop`] waits for the player process to die
+/// before giving up and returning. Barge-in must never wedge the caller.
+const PLAYBACK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Production audio player. Tries to play through the OS native player
 /// (`afplay` / `aplay` / `powershell`) first because cpal output of
 /// arbitrary file formats requires its own decoder; the shell tools
 /// already understand WAV / MP3 / OGG without a Rust audio-codec dep.
-pub struct CpalAudioPlayer;
+///
+/// The player process is spawned (not `status()`-ed) and its handle is
+/// retained, so [`AudioPlayer::stop`] can kill it mid-playback. That is
+/// the barge-in path: a user starting capture while the agent is
+/// talking cuts the audio (see `VoiceMode::start_capture`).
+#[derive(Default)]
+pub struct CpalAudioPlayer {
+    current: Mutex<Option<Playback>>,
+    next_id: std::sync::atomic::AtomicU64,
+}
 
 impl CpalAudioPlayer {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Spawn `cmd args`, publish an interrupt handle, and wait for
+    /// whichever comes first: the process exiting, or `stop()`.
+    ///
+    /// The command is a parameter rather than resolved inline so the
+    /// cancellation machinery can be exercised on hosts with no audio
+    /// tool installed — the code path under test is the production one,
+    /// only the program differs.
+    async fn spawn_and_wait(&self, cmd: &str, args: &[String]) -> bool {
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // `kill_on_drop` so that cancelling the `play()` future itself
+        // (host shutdown, task abort) also stops the audio — otherwise
+        // the child outlives every handle we have to it.
+        let mut child = match tokio::process::Command::new(cmd)
+            .args(args)
+            .kill_on_drop(true)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("voice_mode: failed to spawn {cmd}: {e}");
+                return false;
+            }
+        };
+
+        // Publish BEFORE awaiting: a `stop()` racing this call must find
+        // a handle, not an empty slot.
+        *self.current.lock() = Some(Playback {
+            id,
+            stop_tx,
+            done: done_rx,
+        });
+
+        // `Child::wait` is cancel-safe, so dropping it in the interrupt
+        // arm cannot lose the child; we kill and reap explicitly below.
+        let exited = tokio::select! {
+            status = child.wait() => Some(status),
+            _ = stop_rx => None,
+        };
+
+        let played = match exited {
+            Some(Ok(s)) if s.success() => true,
+            Some(Ok(s)) => {
+                tracing::warn!("voice_mode: {cmd} exited non-zero {:?}", s.code());
+                false
+            }
+            Some(Err(e)) => {
+                tracing::warn!("voice_mode: failed to wait for {cmd}: {e}");
+                false
+            }
+            None => {
+                // Barge-in. `kill()` = start_kill + wait, so the child is
+                // reaped here and leaves no zombie holding the device.
+                if let Err(e) = child.kill().await {
+                    tracing::warn!("voice_mode: failed to kill {cmd} on interrupt: {e}");
+                }
+                tracing::debug!("voice_mode: playback interrupted by stop()");
+                false
+            }
+        };
+
+        {
+            let mut slot = self.current.lock();
+            if slot.as_ref().is_some_and(|p| p.id == id) {
+                *slot = None;
+            }
+        }
+        // Only now is the process genuinely gone — release `stop()`.
+        let _ = done_tx.send(true);
+        played
     }
 
     fn os_shell_command(file_path: &Path) -> Option<(&'static str, Vec<String>)> {
@@ -582,12 +687,6 @@ impl CpalAudioPlayer {
     }
 }
 
-impl Default for CpalAudioPlayer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[async_trait]
 impl AudioPlayer for CpalAudioPlayer {
     async fn play(&self, file_path: &Path) -> bool {
@@ -598,37 +697,38 @@ impl AudioPlayer for CpalAudioPlayer {
             );
             return false;
         };
-        // Run in a blocking task so we don't park the tokio runtime on
-        // the synchronous Command wait.
-        let file_path_owned = file_path.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            match std::process::Command::new(cmd).args(&args).status() {
-                Ok(s) if s.success() => true,
-                Ok(s) => {
-                    tracing::warn!(
-                        "voice_mode: {cmd} exited non-zero {:?} for {}",
-                        s.code(),
-                        file_path_owned.display()
-                    );
-                    false
+        self.spawn_and_wait(cmd, &args).await
+    }
+
+    /// Interrupt in-flight playback. Kills the player process and waits
+    /// (bounded by [`PLAYBACK_STOP_TIMEOUT`]) until it has been reaped,
+    /// so a caller that returns from `stop()` can rely on the audio
+    /// having actually stopped. Idempotent and safe when nothing plays.
+    async fn stop(&self) {
+        let Some(playback) = self.current.lock().take() else {
+            return;
+        };
+        let _ = playback.stop_tx.send(());
+        let mut done = playback.done;
+        let reaped = tokio::time::timeout(PLAYBACK_STOP_TIMEOUT, async move {
+            loop {
+                if *done.borrow_and_update() {
+                    return;
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "voice_mode: failed to spawn {cmd} for {}: {e}",
-                        file_path_owned.display()
-                    );
-                    false
+                if done.changed().await.is_err() {
+                    // Sender dropped without flipping the flag — the
+                    // playback task is gone, which is what we wanted.
+                    return;
                 }
             }
         })
-        .await
-        .unwrap_or(false)
-    }
-
-    async fn stop(&self) {
-        // The OS shell player is a one-shot subprocess. We let it finish
-        // naturally — there is no cross-platform "stop a SoundPlayer"
-        // signal that's worth the complexity vs the rare interrupt need.
+        .await;
+        if reaped.is_err() {
+            tracing::warn!(
+                "voice_mode: audio player did not exit within {:?} of stop()",
+                PLAYBACK_STOP_TIMEOUT
+            );
+        }
     }
 }
 
@@ -715,7 +815,7 @@ pub async fn transcribe_with_timeout(
 /// [`VoiceMode::check_requirements`] rather than a silent hide. The
 /// `VoiceModeTool` still hides because *capture* is not available
 /// without a recorder; the STT layer is checked at probe-time.
-pub fn build_voice_mode_backend() -> Option<Arc<VoiceMode>> {
+pub fn build_voice_mode_backend(config: &wcore_config::config::Config) -> Option<Arc<VoiceMode>> {
     let recorder: Arc<dyn AudioRecorder> = match CpalAudioRecorder::try_default() {
         Some(r) => Arc::new(r),
         None => {
@@ -727,16 +827,18 @@ pub fn build_voice_mode_backend() -> Option<Arc<VoiceMode>> {
         }
     };
     let player: Arc<dyn AudioPlayer> = Arc::new(CpalAudioPlayer::new());
-    let transcriber: Arc<dyn TranscriptionBackend> = match super::build_transcription_backend() {
-        Some(external) => Arc::new(TranscriptionAdapter { inner: external }),
-        None => {
-            tracing::info!(
-                "voice_mode: no STT backend configured — capture works, transcribe will error \
-                 (set GROQ_API_KEY or OPENAI_API_KEY)"
-            );
-            Arc::new(wcore_tools::voice_mode::NullTranscriptionBackend)
-        }
-    };
+    let transcriber: Arc<dyn TranscriptionBackend> =
+        match super::build_transcription_backend(config) {
+            Some(external) => Arc::new(TranscriptionAdapter { inner: external }),
+            None => {
+                tracing::info!(
+                    "voice_mode: no STT backend configured — capture works, transcribe will error \
+                 (set GROQ_API_KEY, OPENAI_API_KEY or FLUX_API_KEY, or configure an \
+                 OpenAI-wire provider)"
+                );
+                Arc::new(wcore_tools::voice_mode::NullTranscriptionBackend)
+            }
+        };
     let env_probe = Arc::new(OsAudioEnvironmentProbe);
     Some(Arc::new(VoiceMode::new(
         recorder,
@@ -755,6 +857,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Arc as StdArc;
+    use std::time::Instant;
     use wcore_tools::voice_mode::{
         AudioEnvironment, CapturingAudioPlayer, CapturingAudioRecorder,
         CapturingTranscriptionBackend, NullTranscriptionBackend, RecordingOutcome,
@@ -816,7 +919,7 @@ mod tests {
         // outcomes are valid; what matters is that we report cleanly.
         let detected = CpalAudioRecorder::try_default().is_some();
         eprintln!("voice_mode: input device detected on this host: {detected}");
-        let backend = build_voice_mode_backend();
+        let backend = build_voice_mode_backend(&wcore_config::config::Config::default());
         if detected {
             assert!(
                 backend.is_some(),
@@ -839,7 +942,7 @@ mod tests {
         // wiring is B13's job).
         // We don't unset env vars here — the resolver hides based on the
         // cpal device probe, not on env state.
-        let backend = build_voice_mode_backend();
+        let backend = build_voice_mode_backend(&wcore_config::config::Config::default());
         let detected = CpalAudioRecorder::try_default().is_some();
         assert_eq!(
             backend.is_some(),
@@ -947,6 +1050,184 @@ mod tests {
         assert!(
             !player.play(&bogus).await,
             "play should return false when the OS player can't read the file"
+        );
+    }
+
+    // ----- barge-in (C4 `interruption`) -----
+    //
+    // These drive the PRODUCTION `CpalAudioPlayer` — not
+    // `CapturingAudioPlayer`. The pre-existing `stop_count` assertions
+    // in `wcore-tools` both run against the mock, which is why an empty
+    // `stop()` body sat in production for a release with a green suite.
+
+    /// Build a command that sleeps `secs` and THEN creates `marker`, so
+    /// the marker's absence is evidence the process was actually killed
+    /// rather than merely detached.
+    ///
+    /// Unix goes through the centralized shell helper — never
+    /// `Command::new("sh")` (AGENTS.md §Forbidden).
+    ///
+    /// Windows deliberately does NOT. `spawn_and_wait` is an argv-mode
+    /// spawner, and the Windows arm previously handed it a `cmd /C` payload
+    /// containing double quotes. `Command::args` then applies
+    /// `CommandLineToArgvW` quoting on top (inner `"` becomes `\"`), which
+    /// cmd.exe does not understand: the redirect target arrived as literal
+    /// backslash-quotes and the child died with "The filename, directory
+    /// name, or volume label syntax is incorrect" without ever writing the
+    /// control marker. So the Windows arm mirrors the production Windows
+    /// player in `os_shell_command` instead — same program, same flags, same
+    /// single-quote convention — which is argv-safe and, unlike the cmd form,
+    /// also survives a path containing spaces. `Start-Sleep` is in-process,
+    /// so killing the child really does cut the delay rather than orphaning a
+    /// grandchild that outlives it.
+    fn delayed_marker_command(secs: u32, marker: &Path) -> (String, Vec<String>) {
+        let m = marker.display().to_string();
+        // No `return`: after cfg-stripping this block IS the tail expression
+        // on Windows, exactly as the `not(windows)` arm below is on Unix.
+        // Writing it as an early return tripped `clippy::needless_return`,
+        // which only a Windows clippy can see.
+        #[cfg(windows)]
+        {
+            (
+                "powershell".to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    format!(
+                        "Start-Sleep -Seconds {secs}; Set-Content -LiteralPath '{m}' -Value done"
+                    ),
+                ],
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let script = format!("sleep {secs}; : > \"{m}\"");
+            let cmd = wcore_config::shell::shell_command_builder(&script);
+            let std_cmd = cmd.as_std();
+            (
+                std_cmd.get_program().to_string_lossy().into_owned(),
+                std_cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect(),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_cuts_in_flight_playback_and_kills_the_player_process() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Control / known-positive. Left alone, the command runs to
+        // completion, reports success and writes its marker. Without
+        // this arm "marker absent" below would pass just as happily on
+        // a command that never ran at all (LANE-BRIEF §3b-i: a broken
+        // instrument confirms a negative for free).
+        let control_marker = dir.path().join("control.marker");
+        let (c, a) = delayed_marker_command(1, &control_marker);
+        let control_player = CpalAudioPlayer::new();
+        assert!(
+            control_player.spawn_and_wait(&c, &a).await,
+            "control: an uninterrupted player must report success"
+        );
+        assert!(
+            control_marker.exists(),
+            "control: an uninterrupted command must reach its marker — instrument alive"
+        );
+
+        // Interrupt arm.
+        let marker = dir.path().join("interrupted.marker");
+        let (c, a) = delayed_marker_command(5, &marker);
+        let player = StdArc::new(CpalAudioPlayer::new());
+        let bg = player.clone();
+        let started = Instant::now();
+        let handle = tokio::spawn(async move { bg.spawn_and_wait(&c, &a).await });
+        // Let it get properly under way, then barge in.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        player.stop().await;
+        let played = handle.await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            !played,
+            "an interrupted playback must not report success — the audio did not finish"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stop() must cut playback in flight: a 5s player took {elapsed:?}. \
+             With a no-op stop() (or a blocking Command::status()) this is ~5s"
+        );
+        // Dead, not detached: wait past the program's natural end and
+        // confirm it never reached its post-sleep side effect.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        assert!(
+            !marker.exists(),
+            "a killed player must never reach its post-sleep side effect \
+             (the control arm proves that side effect is reachable)"
+        );
+    }
+
+    /// macOS only, deliberately: `afplay` is the program the PRODUCTION
+    /// player resolves to on Darwin and it exists on no other platform,
+    /// so this is the one arm that exercises the shipped macOS playback
+    /// path itself rather than the same machinery driving a stand-in.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn darwin_real_afplay_playback_is_cut_by_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("bargein-tone.wav");
+        // 6 s of quiet 440 Hz so an interrupt is unmistakable against it.
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: SAMPLE_RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&wav, spec).unwrap();
+        for n in 0..(SAMPLE_RATE as usize * 6) {
+            let t = n as f32 / SAMPLE_RATE as f32;
+            w.write_sample((2000.0 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()) as i16)
+                .unwrap();
+        }
+        w.finalize().unwrap();
+
+        // Control: confirm this host really does resolve to afplay, so a
+        // pass cannot come from silently having taken another branch.
+        assert_eq!(
+            CpalAudioPlayer::os_shell_command(&wav).unwrap().0,
+            "afplay",
+            "control: Darwin must resolve to afplay"
+        );
+
+        let player = StdArc::new(CpalAudioPlayer::new());
+        let bg = player.clone();
+        let path = wav.clone();
+        let started = Instant::now();
+        let handle = tokio::spawn(async move { bg.play(&path).await });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        player.stop().await;
+        let played = handle.await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            !played,
+            "an interrupted afplay must not report playback success"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stop() must cut a 6s afplay in flight; it took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_is_idempotent_and_prompt_when_nothing_is_playing() {
+        let player = CpalAudioPlayer::new();
+        let started = Instant::now();
+        player.stop().await;
+        player.stop().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stop() with no playback must return immediately, not wait out a timeout"
         );
     }
 

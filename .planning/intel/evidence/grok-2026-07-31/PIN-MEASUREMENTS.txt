@@ -1,0 +1,94 @@
+PIN MEASUREMENTS - grok-build - 2026-07-31 - lane/grok
+Read-only. Every command verbatim with its output. Peer tree never mutated.
+
+$ /usr/bin/git -C $R cat-file -t c68e39f60462f28d9be5e683d9cbe2c57b1a5027
+commit
+
+$ /usr/bin/git -C $R merge-base --is-ancestor c68e39f6 origin/main ; echo $?
+exit=0  (0 = is an ancestor)
+
+$ /usr/bin/git -C $R show c68e39f6:crates/codegen/xai-grok-version/Cargo.toml   # BASELINE
+[package]
+license = "Apache-2.0"
+name = "xai-grok-version"
+version = "0.2.0-dev"
+edition.workspace = true
+description = "Lockstepped grok CLI version."
+
+[dependencies]
+semver = { workspace = true }
+
+[lints]
+workspace = true
+
+$ /usr/bin/git -C $R show origin/main:crates/codegen/xai-grok-version/Cargo.toml   # HEAD
+[package]
+license = "Apache-2.0"
+name = "xai-grok-version"
+version = "0.2.102"
+edition.workspace = true
+description = "Lockstepped grok CLI version."
+
+[dependencies]
+semver = { workspace = true }
+
+[lints]
+workspace = true
+
+$ /usr/bin/git -C $R rev-parse origin/main
+98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce
+$ /usr/bin/git -C $R log -1 --format='%H %cI %s' c68e39f6
+c68e39f60462f28d9be5e683d9cbe2c57b1a5027 2026-07-16T06:46:02+01:00 Publish harness and TUI open-source
+$ /usr/bin/git -C $R log -1 --format='%H %cI %s' origin/main
+98c3b2438aa922fbbe6178a5c0a4c48f85edc8ce 2026-07-17T14:19:50+01:00 Synced from monorepo
+$ /usr/bin/git -C $R rev-list --count c68e39f6..origin/main
+2
+$ /usr/bin/git -C $R describe --tags origin/main
+fatal: No names found, cannot describe anything.
+
+$ /usr/bin/git -C $R rev-parse HEAD ; --abbrev-ref HEAD ; status --porcelain | wc -l
+a7d0968fe027b0e1f8e54c54d14e2ecba719a882
+research/wayland-integration-audit
+       0
+
+--- scale (distinct Cargo.lock package names) ---
+grok    entries=1271  distinct=1125
+wayland entries=1029  distinct=900  (Core SHA f9b404f9)
+shared distinct names = 610
+
+--- workspace members array ---
+grok=79 (62 crates/codegen, 11 crates/common, 1 crates/build, 1 prod/mc, 4 third_party)
+wayland=57
+
+--- peer tree non-mutation ---
+git status --porcelain -> 0 lines
+/Users/seandonahoe/dev/resources/grok-build/.git/index  size=358388  mtime=Jul 16 16:36:43 2026
+worktree meta-digest (python os.walk, excludes .git): 75c3e71ff4c08d70ce2977fda54583e480a31897fc0e8f963449896d8d198a5b
+  taken twice around all reads above -> STABLE
+
+--- real install (a DIFFERENT object from the source repo) ---
+~/.grok version.json:
+{
+  "version": "0.2.103",
+  "stable_version": "0.2.103",
+  "checked_at": "2026-07-18T02:27:53.358405Z"
+}~/.grok file count: 4009
+~/.grok meta-digest before ANY work today and after the live drive:
+  34ffd94f25ef6093b263f8b1bfb0115d49d679eb5c0ae1356d6f68b79943c23a (identical)
+
+--- local checkout provenance (caveats 1 and 2) ---
+$ git -C $R rev-parse a7d0968^
+c68e39f60462f28d9be5e683d9cbe2c57b1a5027
+$ git -C $R show --name-status --format='%an <%ae>' a7d0968
+ci <REDACTED-MAINTAINER@redacted.invalid>
+
+A	WAYLAND-INTEGRATION-AUDIT.md
+
+--- NOTE on one false alarm, recorded rather than hidden ---
+An early non-mutation check of the peer tree used
+  find . -print0 | sort -z | xargs -0 stat -f '%N %z %m' | shasum -a 256
+and reported MUTATED. That pipeline silently produced ZERO lines on the
+second invocation, so the comparison was between a real digest and the
+digest of empty input. Re-checked with a python os.walk snapshot taken
+twice: STABLE, and .git/index mtime is unmoved from 2026-07-16. The peer
+tree was never mutated. The shell pipeline was the defect, not the tree.

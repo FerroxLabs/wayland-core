@@ -10,24 +10,60 @@
 #     genuinely irreducible without a regression or a pre-release dep. (A 6th,
 #     lru, was eliminated at source via the ratatui 0.30 upgrade — see below.)
 #
+# Update 2026-07-29 (F29-02-H1): the two quick-xml entries that lived at the
+# bottom of this file are DELETED — RUSTSEC-2026-0194 / RUSTSEC-2026-0195 were
+# eliminated at source by bumping quick-xml to 0.41 and calamine to 0.36 (see
+# the block at the end for the full account, including the three errors in the
+# justification those entries carried). Measured with `cargo audit` against
+# the post-bump lockfile and NO ignore list: 4 vulnerabilities before, 0 after.
+# That run is cargo-audit's; `osv-scanner scan source -r ./` has NOT been
+# re-run since, so the warning-class counts quoted above are as of 2026-06-02
+# and may understate newer ambient advisories (cargo audit currently sees 7).
+#
 # Every entry below is a PUBLIC, DATED, REASONED disposition — not a silent
 # mute. `ignoreUntil` forces a re-evaluation; on each dependency bump, re-run
 # `osv-scanner scan source -r ./` and delete any entry whose advisory has
 # cleared. An empty IgnoredVulns list is the goal whenever the ecosystem
 # allows it.
 #
-# Parent trace recipe: `cargo tree -i <crate>@<ver> --all-features --target all`.
+# Parent trace recipe: run `cargo tree -i <crate>@<ver> --all-features --target
+# all` ONCE PER RESOLVED VERSION of the crate — a crate can appear in the tree
+# at several semver-incompatible versions at once, and an ignore entry that
+# traces only one of them is a blind spot, not a disposition.
 
 # ── paste 1.0.15 (unmaintained) ──────────────────────────────────────────
-# Multi-parent and irreducible: pulled by the candle ML SIMD stack
-# (gemm/gemm-common/pulp <- candle-core <- candle-transformers, used by
-# wcore-memory for local embeddings) AND by ratatui. No maintained drop-in
-# replacement exists; the macro is build-time only (proc-macro, no runtime
-# surface). Re-evaluate when candle or ratatui drop it.
+# TRACE CORRECTED 2026-07-29 (lane 29-deny). The previous text here read:
+#
+#   "pulled by the candle ML SIMD stack (gemm/gemm-common/pulp <- candle-core
+#    <- candle-transformers, used by wcore-memory for local embeddings) AND by
+#    ratatui"
+#
+# **`ratatui` does not pull `paste` at all.** Measured:
+# `cargo tree -p ratatui --all-features -e normal | grep -c paste` -> 0. The
+# entry named a parent that does not exist and omitted one that does. This is
+# the same defect class as the quick-xml entry documented at the foot of this
+# file, and it was found only because the trace was RE-DERIVED from the tool
+# rather than carried forward on trust. That is now the required practice.
+#
+# Measured trace, `cargo tree -i paste@1.0.15 --all-features --target all
+# --edges normal,build,dev`:
+#   DIRECT PARENTS: 10 — gemm, gemm-c32, gemm-c64, gemm-common, gemm-f16,
+#   gemm-f32, gemm-f64, pulp, macro_rules_attribute, tokenizers.
+#   They collapse to TWO roots, both terminating at wcore-memory:
+#     (a) {gemm*, pulp} <- candle-core 0.9.2 <- candle-nn/candle-transformers
+#         <- wcore-memory
+#     (b) macro_rules_attribute 0.2.2 <- tokenizers 0.21.4 <- wcore-memory
+#         (paste is also a direct dep of tokenizers)
+#
+# Both roots sit behind wcore-memory's OPTIONAL, default-OFF `bge-local`
+# feature, so paste is absent from the default-feature graph entirely
+# (`cargo tree -i paste@1.0.15` without --all-features -> "did not match any
+# packages"). Build-time proc-macro; no runtime surface; no maintained drop-in
+# replacement. Re-evaluate when candle or tokenizers drop it.
 [[IgnoredVulns]]
 id = "RUSTSEC-2024-0436"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "paste: build-time proc-macro, no runtime surface; multi-parent (candle SIMD stack + ratatui), no maintained replacement. Tracked; revisit on candle/ratatui bump."
+reason = "paste: build-time proc-macro, no runtime surface. 10 direct parents collapsing to TWO roots, both via wcore-memory's optional default-OFF bge-local feature: (a) candle SIMD stack (gemm*/pulp <- candle-core <- candle-nn/candle-transformers); (b) macro_rules_attribute <- tokenizers. Absent from the default-feature graph. Trace corrected 2026-07-29 — the previous text named ratatui as a puller, which is measurably false, and omitted the tokenizers root. No maintained replacement. Tracked; revisit on candle/tokenizers bump. [trace crate=paste@1.0.15 parents=gemm,gemm-c32,gemm-c64,gemm-common,gemm-f16,gemm-f32,gemm-f64,macro_rules_attribute,pulp,tokenizers expires=2026-09-02]"
 
 # ── bincode 1.3.3 (unmaintained) ─────────────────────────────────────────
 # Transitive solely via syntect 5.3.0, which is the LATEST published syntect.
@@ -37,7 +73,7 @@ reason = "paste: build-time proc-macro, no runtime surface; multi-parent (candle
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0141"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "bincode 1.x: syntect 5.3.0 (latest) dump-format dep; no newer syntect exists. Tracked; revisit on syntect release."
+reason = "bincode 1.x: syntect 5.3.0 (latest) dump-format dep; no newer syntect exists. Tracked; revisit on syntect release. [trace crate=bincode@1.3.3 parents=syntect expires=2026-09-02]"
 
 # ── number_prefix 0.4.0 (unmaintained) ───────────────────────────────────
 # indicatif depends on number_prefix at EVERY published version (incl 0.18);
@@ -47,18 +83,35 @@ reason = "bincode 1.x: syntect 5.3.0 (latest) dump-format dep; no newer syntect 
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0119"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "number_prefix: indicatif pulls it at all versions; indicatif arrives via optional default-off hf-hub. Tracked; revisit if hf-hub drops indicatif."
+reason = "number_prefix: indicatif pulls it at all versions; indicatif arrives via optional default-off hf-hub. Tracked; revisit if hf-hub drops indicatif. [trace crate=number_prefix@0.4.0 parents=indicatif expires=2026-09-02]"
 
 # ── rustls-pemfile 2.2.0 (unmaintained) ──────────────────────────────────
-# Deprecated (folded into rustls). Transitive ONLY via bollard, which is an
-# OPTIONAL, default-OFF dependency of wcore-sandbox (Docker sandbox backend).
-# Does NOT compile into the default/shipped binary. A bollard 0.17 -> 0.21
-# bump (4 breaking majors) to clear a non-shipping warning is not worth the
-# regression risk on the sandbox path.
+# TRACE CORRECTED 2026-07-29 (lane 29-deny). The previous text said
+# "Transitive ONLY via bollard". The CONCLUSION survives, but the trace did
+# not: there are **TWO** direct parents, not one.
+#
+# Measured, `cargo tree -i rustls-pemfile@2.2.0 --all-features --target all
+# --edges normal,build,dev --depth 1`:
+#   rustls-pemfile v2.2.0
+#   ├── bollard v0.17.1
+#   └── rustls-native-certs v0.7.3
+#
+# The second edge is benign ONLY because rustls-native-certs 0.7.3 itself has
+# exactly one parent, and it is bollard — verified separately, not assumed. So
+# two edges, one root. "Only via X" was an assertion where "two edges, one
+# root" is the fact, and the difference is exactly what the quick-xml entry got
+# wrong. State the edge count, not a convenient summary.
+#
+# Deprecated (folded into rustls). bollard is OPTIONAL and default-OFF behind
+# wcore-sandbox's `live-docker` feature (`live-docker = ["dep:bollard",
+# "dep:futures"]`), so this does NOT compile into the shipped binary and is
+# absent from the default-feature graph. A bollard 0.17 -> 0.21 bump (4
+# breaking majors) to clear a non-shipping warning is not worth the regression
+# risk on the sandbox path.
 [[IgnoredVulns]]
 id = "RUSTSEC-2025-0134"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "rustls-pemfile: only via optional default-OFF bollard; not in shipped binary. Tracked; revisit on bollard bump."
+reason = "rustls-pemfile: TWO direct parents (bollard 0.17.1 AND rustls-native-certs 0.7.3), converging on ONE root because rustls-native-certs' sole parent is also bollard. bollard is optional and default-OFF behind wcore-sandbox/live-docker; absent from the default-feature graph, not in the shipped binary. Trace corrected 2026-07-29 — the previous text asserted 'only via bollard', naming one of two edges. Tracked; revisit on bollard bump. [trace crate=rustls-pemfile@2.2.0 parents=bollard,rustls-native-certs expires=2026-09-02]"
 
 # ── lexical-core 0.7.6 (unsound) ─────────────────────────────────────────
 # Transitive via nom 5 <- imap 2.4.1, which is the latest STABLE imap. The
@@ -69,20 +122,36 @@ reason = "rustls-pemfile: only via optional default-OFF bollard; not in shipped 
 [[IgnoredVulns]]
 id = "RUSTSEC-2023-0086"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "lexical-core: via nom5 <- imap 2.4.1 (latest stable); only imap 3.0-alpha drops it. Pre-release email dep is worse than the warning. Tracked; revisit on stable imap 3.x."
+reason = "lexical-core: via nom5 <- imap 2.4.1 (latest stable); only imap 3.0-alpha drops it. Pre-release email dep is worse than the warning. Tracked; revisit on stable imap 3.x. [trace crate=lexical-core@0.7.6 parents=nom expires=2026-09-02]"
 
-# ── proc-macro-error 1.0.4 (unmaintained) ────────────────────────────────
-# Build-time proc-macro with NO runtime surface (expands only during compile).
-# Transitive via utoipa-gen 4.3.1 <- utoipa 4.2.3 <- wcore-acp (the ACP REST
-# OpenAPI layer). utoipa 5.x drops proc-macro-error but is a breaking major;
-# chasing it to clear a compile-time-only "unmaintained" warning is not worth
-# the REST-surface regression risk. Already accepted in the cargo-audit ignore
-# set — this entry aligns OSV with audit. Surfaced on main's 2026-06-07 scan
-# (pre-existing, not a code change). Revisit on a utoipa 5.x upgrade.
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0370"
-ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "proc-macro-error: build-time proc-macro, no runtime surface; transitive via utoipa-gen <- utoipa <- wcore-acp. Already accepted by cargo-audit. Tracked; revisit on utoipa 5.x."
+# ── proc-macro-error 1.0.4 — REMOVED 2026-07-29, ELIMINATED AT SOURCE ────
+# RUSTSEC-2024-0370 carried an `[[IgnoredVulns]]` entry here until lane
+# 29-deny. It is DELETED rather than re-justified: `cargo tree -i
+# proc-macro-error@1.0.4` now reports "did not match any packages".
+#
+# The entry it replaces said the fix "is a breaking major; chasing it to clear
+# a compile-time-only warning is not worth the REST-surface regression risk",
+# echoing the workspace pin comment that claimed "utoipa 5 requires axum 0.8
+# (a repo-wide bump)". Both were wrong, and cheaply checkable:
+#   * Neither utoipa 4.2.3 nor utoipa 5.5.0 declares `axum` as a dependency,
+#     optional or otherwise. `axum_extras` is a codegen-behaviour flag
+#     forwarded to `utoipa-gen?/axum_extras`; the axum-0.8 coupling is
+#     SEMANTIC (param inference from axum extractors), not a dependency.
+#   * `wcore-acp/src/transport/rest.rs` does not rely on that inference — it
+#     declares every path param explicitly and already used `{id}` syntax.
+#   * Result: `cargo update -p utoipa` moved 2 packages and left 203 unchanged,
+#     axum stayed at 0.7.9, and `cargo check -p wcore-acp --all-targets`
+#     passed with ZERO source changes.
+# The only real cost was wire-visible and small: `GET /openapi.json` now emits
+# OpenAPI 3.1.0 instead of 3.0.3, and two assertions pinning "3.0" were updated
+# to "3.1". Side benefit: the syn 1.x/2.x duplicate left the tree with it.
+#
+# Lesson, and it is the second one on this page: an "it would be a breaking
+# major" cost estimate is a claim about the dependency graph, and claims about
+# the graph must be READ OUT OF the graph. This one had been carried forward
+# unverified across at least two files.
+#
+# Do NOT float `utoipa` back below 5 — it reintroduces this advisory.
 
 # NOTE: RUSTSEC-2023-0071 (rsa 0.9.x, Marvin Attack) was ELIMINATED AT THE
 # SOURCE, not ignored: jsonwebtoken migrated rust_crypto -> aws_lc_rs in
@@ -116,7 +185,7 @@ reason = "proc-macro-error: build-time proc-macro, no runtime surface; transitiv
 [[IgnoredVulns]]
 id = "GHSA-w9wp-h8wv-79jx"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "opentelemetry_sdk baggage-extract DoS: receiving-side only; wayland-core is an OTLP exporter, otlp feature default-off, only trace feature enabled, no BaggagePropagator usage (0 grep hits). Not reachable. Tracked; revisit on opentelemetry 0.32 bump."
+reason = "opentelemetry_sdk baggage-extract DoS: receiving-side only; wayland-core is an OTLP exporter, otlp feature default-off, only trace feature enabled, no BaggagePropagator usage (0 grep hits). Not reachable. Tracked; revisit on opentelemetry 0.32 bump. [trace crate=opentelemetry_sdk@0.27.1 parents=opentelemetry-otlp,opentelemetry-proto,wcore-observability expires=2026-09-02]"
 
 # ── ttf-parser 0.25.1 (unmaintained) ─────────────────────────────────────
 # The author has declared ttf-parser unmaintained (no further fixes;
@@ -132,26 +201,37 @@ reason = "opentelemetry_sdk baggage-extract DoS: receiving-side only; wayland-co
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0192"
 ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "ttf-parser unmaintained (patched=[]); transitive only via lopdf <- pdf-extract <- wcore-tools PDF text extraction. Informational, no patch exists; successor skrifa is an upstream pdf-extract/lopdf decision. Tracked; revisit on pdf-extract/lopdf bump."
+reason = "ttf-parser unmaintained (patched=[]); transitive only via lopdf <- pdf-extract <- wcore-tools PDF text extraction. Informational, no patch exists; successor skrifa is an upstream pdf-extract/lopdf decision. Tracked; revisit on pdf-extract/lopdf bump. [trace crate=ttf-parser@0.25.1 parents=lopdf expires=2026-09-02]"
 
-# ── quick-xml 0.39.4 DoS pair ────────────────────────────────────────────
+# ── quick-xml DoS pair — REMOVED 2026-07-29, ELIMINATED AT SOURCE ────────
 # RUSTSEC-2026-0194 (quadratic duplicate-attribute check) and
 # RUSTSEC-2026-0195 (unbounded NsReader namespace-declaration allocation),
-# both published 2026-06-29, fixed only in quick-xml >= 0.41.0. Sole parent
-# trace: plist 1.9.0 <- syntect 5.3.0 <- wcore-cli. syntect is used solely by
-# the TUI diff widget with load_defaults() EMBEDDED binary theme/syntax dumps
-# (crates/wcore-cli/src/tui/widgets/diff.rs:332-333); no from_folder(), no
-# user-supplied .tmTheme/plist XML is ever parsed, so the vulnerable XML
-# reader never receives input. No patched 0.39.x exists and plist 1.9.0 (the
-# latest) still pins ^0.39.2 — nothing to bump. Ambient advisory (not a code
-# change in this PR). Tracked: FerroxLabs/wayland-core#142; lift on a plist
-# release carrying quick-xml >= 0.41.
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0194"
-ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "quick-xml quadratic dup-attribute DoS: unreachable — sole path plist<-syntect<-wcore-cli TUI diff widget using embedded load_defaults() dumps; no XML parsing of any input. No patched 0.39.x; plist latest pins ^0.39.2. Tracked #142."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0195"
-ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "quick-xml NsReader namespace-allocation DoS: unreachable — same sole embedded-dump path, no XML input reaches NsReader. No patched 0.39.x; plist latest pins ^0.39.2. Tracked #142."
+# both published 2026-06-29, both fixed only in quick-xml >= 0.41.0.
+#
+# These two carried `[[IgnoredVulns]]` entries here until F29-02-H1. Those
+# entries are DELETED rather than re-justified, because the advisories are now
+# absent from the tree — and because the justification they carried was wrong:
+#
+#   * It named a "sole parent trace" of plist <- syntect <- wcore-cli. There
+#     were THREE paths. `cargo tree -i` at the base commit also showed
+#     quick-xml 0.39.4 as a DIRECT dependency of wcore-tools (default-on
+#     `doc-extract` feature) and quick-xml 0.31.0 via calamine 0.26.1.
+#   * Its "unreachable / embedded dumps only" argument was true of the syntect
+#     path but said nothing about the two it omitted — `DocExtractTool`, which
+#     parses docx/pptx and xlsx/ods from USER-SUPPLIED files, i.e. exactly the
+#     untrusted input both advisories are about.
+#   * It claimed nothing patched existed to bump to. Both advisories declare
+#     `patched = [">= 0.41.0"]` with no `unaffected` range (so 0.31.0 counted
+#     too, and the true finding count was FOUR, not two), and quick-xml
+#     0.41.0 / plist 1.10.0 / calamine 0.36.1 were all published already.
+#
+# Fix: workspace pins moved to quick-xml "0.41" and calamine "0.36"; plist
+# resolved 1.9.0 -> 1.10.0. quick-xml 0.31.0 and 0.39.4 are gone from
+# Cargo.lock (`cargo tree -i quick-xml@0.39.4` -> "did not match any
+# packages"). Verified by `cargo audit` with NO ignore list: 4 vulnerabilities
+# before, 0 after. Do NOT float quick-xml below 0.41 or calamine below 0.36.
+#
+# Lesson for future entries in this file: a parent trace must be READ OUT of
+# `cargo tree -i <crate>@<ver>` for EVERY resolved version of the crate, and
+# the count of paths stated explicitly. A reachability argument that covers
+# one path of three is not a disposition, it is a blind spot.

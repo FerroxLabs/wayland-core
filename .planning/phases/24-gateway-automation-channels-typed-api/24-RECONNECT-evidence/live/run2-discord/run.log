@@ -1,0 +1,21 @@
+  · fixture up on http://127.0.0.1:37171 (ephemeral port — no cross-lane collision)
+  · preflight correlation: minted=f24c3-rc-4c1de3-preflight-0 echoed=true | wrong-shape=f24rc-4c1de3-wrongshape-0 echoed=false (must be false)
+  · IDENTIFYed after ~750ms (tcp=5 live=1)
+  · sent f24c3-rc-4c1de3-before-1 (phase=before expect=reply) -> 1 socket(s)
+  · sent f24c3-rc-4c1de3-before-2 (phase=before expect=reply) -> 1 socket(s)
+  · pre-drop control: 2/2 replied after ~1500ms
+PASS pre-drop-control — 2/2 replied; each dispatch reached 1/1 socket(s). KNOWN-POSITIVE: if this is not full, no zero anywhere else in this run is readable.
+PASS upstream-drop-really-happened — destroyed 1 socket(s) with no WS close frame; live_gateway_connections 1 -> 0. Confirmed from the fixture journal, not assumed — a probe that grades a disconnect it cannot confirm grades an event that may never have occurred.
+  · sent f24c3-rc-4c1de3-during-3 (phase=during expect=reply) -> 0 socket(s)
+  · sent f24c3-rc-4c1de3-during-4 (phase=during expect=reply) -> 0 socket(s)
+  · sent f24c3-rc-4c1de3-during-decoy-5 (phase=during-decoy expect=silence) -> 0 socket(s)
+PASS adapter-reconnected — back after ~750ms via RESUME (+1); total gateway connections 1 -> 2
+  · gap messages: 2/2 replied after ~1000ms
+  · sent f24c3-rc-4c1de3-after-6 (phase=after expect=reply) -> 1 socket(s)
+  · post-reconnect control: 1/1 replied after ~1000ms
+PASS post-reconnect-control — 1/1 replied. KNOWN-POSITIVE #2: proves the adapter is ALIVE after the drop, so a zero on the gap messages cannot be explained by a dead adapter.
+PASS gap-messages-survive-the-upstream-drop — 2/2 of the messages delivered DURING the disconnect window produced a turn. Each reached 0/0 live socket(s) at dispatch time (0 = there really was no connection). fixture replayed 3 message(s) on RESUME. lost=[]
+PASS no-duplicate-turns-around-the-window — duplicated=[] over 5 expected-reply tokens. Fixture-side raw deliveries 6 vs 6 dispatches (a raw duplicate the product deduped is visible here even when the turn count is 1).
+PASS decoy-and-phantom-score-zero — decoy (non-allowlisted sender, dispatched INSIDE the window) and phantom (never dispatched) both scored zero: leaked=[]. This is what makes the zeros above measurements rather than free.
+
+F24RECONNECT PASS legs=7/7 lost=0 duplicated=0 leaked=0 mode=measurement

@@ -1,0 +1,46 @@
+diff --git a/crates/wcore-cron/src/lease.rs b/crates/wcore-cron/src/lease.rs
+index 37bf25c2..c88774b2 100644
+--- a/crates/wcore-cron/src/lease.rs
++++ b/crates/wcore-cron/src/lease.rs
+@@ -227,6 +227,9 @@ pub struct ScheduleLease {
+     record_file: String,
+     handle: LeaseHandle,
+     _sentinel: File,
++    /// KNOWN-NEGATIVE MUTATION support. Never populated unless
++    /// `WL_LEASE_LOCK_THE_RECORD` is set. Never commit this.
++    _record_lock: Option<File>,
+ }
+ 
+ impl ScheduleLease {
+@@ -321,6 +324,23 @@ impl ScheduleLease {
+         };
+         write_record(&dir, &record, record_file).map_err(LeaseError::Record)?;
+ 
++        // KNOWN-NEGATIVE MUTATION. Additionally lock the freely readable owner
++        // RECORD. On Windows LockFileEx is MANDATORY, so this must make the
++        // record unreadable to every other handle; on Unix flock is advisory
++        // and nothing observable changes. That asymmetry is the entire reason
++        // the one-byte sentinel is a separate file. Never commit this.
++        let _record_lock = if std::env::var_os("WL_LEASE_LOCK_THE_RECORD").is_some() {
++            let f = File::options()
++                .read(true)
++                .write(true)
++                .open(dir.join(record_file))
++                .map_err(LeaseError::Lock)?;
++            let _ = try_lock_exclusive(&f);
++            Some(f)
++        } else {
++            None
++        };
++
+         Ok(LeaseAttempt::Owner(Self {
+             dir,
+             record_file: record_file.to_string(),
+@@ -329,6 +349,7 @@ impl ScheduleLease {
+                 owner_pid: std::process::id(),
+             },
+             _sentinel: sentinel,
++            _record_lock,
+         }))
+     }
+ 

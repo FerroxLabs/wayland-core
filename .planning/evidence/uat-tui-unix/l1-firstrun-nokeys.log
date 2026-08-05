@@ -1,0 +1,60 @@
+########## UAT RUN: l1-firstrun-nokeys
+host=Ubuntu-2404-noble-amd64-base uname=Linux 6.8.0-101-generic x86_64 date=2026-07-30T10:13:24Z
+ASSERT_BIN=OK path=/root/wayland-uat-tui-unix/target/release/wayland-core size=98435048
+BIN_SHA256=fae1287ac591e16c4d1595e49378ae69ce4515f752c1247cb8b96e8d959d059a
+BIN_BUILDINFO=wayland-core 0.12.25 (source e9bed1af931f02aea094469d44eed291af0c4c96)
+PTY_OUTSIDE_ISATTY=False
+PTY_INSIDE=ISATTY=True
+PTY_CONTROL=OK (discriminates: False outside pty, True inside pty)
+CMD= env -u FLUX_API_KEY -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GROQ_API_KEY -u OPENROUTER_API_KEY -u FAL_API_KEY -u HF_API_KEY -u API_KEY -u PROVIDER -u BASE_URL -u MODEL HOME=/root/uat-lane-home-l1 /root/wayland-uat-tui-unix/target/release/wayland-core; echo "WLRC=$?" > /root/uat-lane-caps/l1-firstrun-nokeys.rc; echo WLDONE >> /root/uat-lane-caps/l1-firstrun-nokeys.rc; sleep 300
+LAUNCHED settle=10s
+----- CAPTURE 0 (what the user sees on arrival) -----
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                      WAYLAND CORE
+
+                                  ⠋  starting engine · connecting tools & MCP servers…
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+----- PANE ALIVE? -----
+pane_dead=0 pid=3925571
+----- EXIT STATUS FILE (written by the child, read separately) -----
+cat: /root/uat-lane-caps/l1-firstrun-nokeys.rc: No such file or directory
+NO_RC_FILE (process still running or killed)
+ORPHAN_SWEEP=argv0_exact_match pattern=/root/wayland-uat-tui-unix/target/release/wayland-core
+PROCS_BEFORE_KILL=1
+ORPHANS_AFTER_KILL=0
+ORPHAN_DETECTOR=ALIVE (known-positive = the pre-kill scan; DEAD means ORPHANS_AFTER_KILL proves nothing)

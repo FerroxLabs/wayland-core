@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ijfw-memory": {
+      "args": [],
+      "command": "/Users/seandonahoe/dev/ijfw/mcp-server/bin/ijfw-memory",
+      "env": {
+        "PATH": "/opt/homebrew/Cellar/node/25.8.1_1/bin:/opt/homebrew/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

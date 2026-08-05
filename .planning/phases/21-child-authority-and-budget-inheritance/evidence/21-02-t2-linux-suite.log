@@ -1,0 +1,41 @@
+RUN_SHA=a39854c276d4bfea0c5d1fcd5e01cf7b31e21431
+   Compiling wcore-cli v0.12.25 (/root/wayland-p21/crates/wcore-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.27s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+   Compiling wcore-cli v0.12.25 (/root/wayland-p21/crates/wcore-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.73s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+   Compiling wcore-cli v0.12.25 (/root/wayland-p21/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.82s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 050c76d0-d926-42dc-806d-17e27b6bbbf8 with nextest profile: default
+    Starting 23 tests across 1 binary
+        PASS [   0.008s] ( 1/23) wcore-cli::child_authority_corpus support::proving_ground::record::tests::redact_xai_key
+        PASS [   0.008s] ( 2/23) wcore-cli::child_authority_corpus the_combination_set_is_the_full_cross_product_and_declares_its_unavailability
+        PASS [   0.023s] ( 3/23) wcore-cli::child_authority_corpus support::proving_ground::record::tests::redact_multiple_keys_in_one_string
+        PASS [   0.023s] ( 4/23) wcore-cli::child_authority_corpus every_entry_states_a_request_and_an_invariant_and_names_no_error_shape
+        PASS [   0.023s] ( 5/23) wcore-cli::child_authority_corpus corpus_table_covers_every_census_dimension
+        PASS [   0.023s] ( 6/23) wcore-cli::child_authority_corpus support::mock_llm::self_tests::truncated_stream_is_detected
+        PASS [   0.024s] ( 7/23) wcore-cli::child_authority_corpus support::mock_llm::self_tests::every_builder_body_is_parser_conformant
+        PASS [   0.024s] ( 8/23) wcore-cli::child_authority_corpus support::mock_llm::self_tests::tool_use_fixture_is_parser_conformant
+        PASS [   0.024s] ( 9/23) wcore-cli::child_authority_corpus support::proving_ground::record::tests::redact_openai_key
+        PASS [   0.026s] (10/23) wcore-cli::child_authority_corpus support::mock_llm::self_tests::text_fixture_is_parser_conformant
+        PASS [   0.026s] (11/23) wcore-cli::child_authority_corpus support::proving_ground::record::tests::redact_leaves_normal_text_alone
+        PASS [   0.026s] (12/23) wcore-cli::child_authority_corpus every_vacuous_dimension_carries_a_no_channel_canary
+        PASS [   4.587s] (13/23) wcore-cli::child_authority_corpus corpus_time
+        PASS [   4.857s] (14/23) wcore-cli::child_authority_corpus corpus_fan_out
+        PASS [   4.935s] (15/23) wcore-cli::child_authority_corpus corpus_cost
+        PASS [   4.941s] (16/23) wcore-cli::child_authority_corpus corpus_tool
+        PASS [   4.942s] (17/23) wcore-cli::child_authority_corpus corpus_token
+        PASS [   5.052s] (18/23) wcore-cli::child_authority_corpus corpus_secret
+        PASS [   5.113s] (19/23) wcore-cli::child_authority_corpus corpus_provider
+        PASS [   5.205s] (20/23) wcore-cli::child_authority_corpus corpus_filesystem
+        PASS [   5.223s] (21/23) wcore-cli::child_authority_corpus corpus_egress
+        PASS [   5.346s] (22/23) wcore-cli::child_authority_corpus corpus_depth
+        PASS [  19.354s] (23/23) wcore-cli::child_authority_corpus corpus_approval
+────────────
+     Summary [  19.354s] 23 tests run: 23 passed, 0 skipped

@@ -31,6 +31,9 @@ pub struct SkillRef {
     /// Canonical filesystem path of the SKILL.md (or .md) file. Used by
     /// `resolve()` to read the body on first activation.
     pub file_path: PathBuf,
+    /// Root directory for bundled reference files. Kept separately because
+    /// bundled bodies resolve from `inline_content`, not from `file_path`.
+    pub skill_root: Option<PathBuf>,
     /// Approximate body byte count from the loader pass. Used by audit
     /// to flag huge skills; never used for budgeting.
     pub content_length_hint: usize,
@@ -232,7 +235,11 @@ impl SkillCatalog {
         let skill_root: Option<String>;
         if let Some(inline) = &r.inline_content {
             raw = inline.clone();
-            skill_root = None;
+            skill_root = r
+                .skill_root
+                .as_deref()
+                .and_then(|root| root.to_str())
+                .map(str::to_owned);
         } else {
             // Read body off disk (async).
             let bytes = tokio::fs::read(&r.file_path)
@@ -243,9 +250,10 @@ impl SkillCatalog {
                 })?;
             raw = String::from_utf8_lossy(&bytes).into_owned();
             skill_root = r
-                .file_path
-                .parent()
-                .and_then(|p| p.to_str())
+                .skill_root
+                .as_deref()
+                .or_else(|| r.file_path.parent())
+                .and_then(|root| root.to_str())
                 .map(str::to_owned);
         }
 
@@ -272,6 +280,65 @@ impl SkillCatalog {
             cache.put(normalized.to_string(), Arc::clone(&arc));
         }
 
+        Ok(arc)
+    }
+
+    /// Resolve a skill on behalf of the model. Unlike [`Self::resolve`], this
+    /// treats model-hidden skills as absent, including guessed names and
+    /// cross-project matches. Operator-facing inspection paths may continue
+    /// to use the unrestricted resolver.
+    pub async fn resolve_for_model(&self, name: &str) -> Result<Arc<SkillMetadata>, ResolveError> {
+        let normalized = name.trim_start_matches('/');
+
+        if let Some(local) = self.refs.iter().find(|r| r.name == normalized) {
+            if local.disable_model_invocation {
+                return Err(ResolveError::NotFound(normalized.to_string()));
+            }
+            let resolved = self.resolve(normalized).await?;
+            let generated = if local.inline_content.is_none() {
+                match local.file_path.parent() {
+                    Some(skill_dir) => {
+                        crate::loader::is_generated_draft(
+                            skill_dir,
+                            &resolved.name,
+                            &resolved.content,
+                        )
+                        .await
+                    }
+                    None => false,
+                }
+            } else {
+                false
+            };
+            if resolved.disable_model_invocation || generated {
+                return Err(ResolveError::NotFound(normalized.to_string()));
+            }
+            return Ok(resolved);
+        }
+
+        // An unrestricted operator lookup may already have cached a sibling
+        // project skill. Re-check its resolved metadata before returning it to
+        // the model rather than treating the cache as an authority boundary.
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(hit) = cache.get(normalized) {
+                if hit.disable_model_invocation {
+                    return Err(ResolveError::NotFound(normalized.to_string()));
+                }
+                return Ok(Arc::clone(hit));
+            }
+        }
+
+        let Some(meta) = self.resolve_cross_project(normalized).await else {
+            return Err(ResolveError::NotFound(normalized.to_string()));
+        };
+        if meta.disable_model_invocation {
+            return Err(ResolveError::NotFound(normalized.to_string()));
+        }
+
+        let arc = Arc::new(meta);
+        let mut cache = self.cache.lock().await;
+        cache.put(normalized.to_string(), Arc::clone(&arc));
         Ok(arc)
     }
 
@@ -307,6 +374,18 @@ impl SkillCatalog {
             )
             .await;
             if let Some(hit) = loaded.into_iter().find(|s| s.metadata.name == name) {
+                // The current workspace fingerprint cannot authorize executable
+                // content from an independently discovered sibling repository.
+                // Preserve the useful prompt-only sharing path, but require an
+                // explicit session rooted in that sibling for capabilities.
+                if !crate::permissions::skill_is_prompt_only(&hit.metadata) {
+                    tracing::warn!(
+                        skill = name,
+                        project = %project.project_id,
+                        "ignored executable sibling-project skill without independent workspace trust"
+                    );
+                    continue;
+                }
                 tracing::debug!(
                     skill = name,
                     project = %project.project_id,
@@ -328,6 +407,7 @@ impl SkillCatalog {
 /// `inline_content` so `resolve()` can return it directly without attempting
 /// any disk read against the virtual `<virtual:name>` path.
 pub fn metadata_to_ref(m: &SkillMetadata) -> SkillRef {
+    let skill_root = m.skill_root.as_deref().map(std::path::PathBuf::from);
     let file_path = m
         .skill_root
         .as_deref()
@@ -352,6 +432,7 @@ pub fn metadata_to_ref(m: &SkillMetadata) -> SkillRef {
         source: m.source,
         loaded_from: m.loaded_from,
         file_path,
+        skill_root,
         content_length_hint: m.content_length,
         user_invocable: m.user_invocable,
         disable_model_invocation: m.disable_model_invocation,
@@ -391,6 +472,7 @@ mod tests {
             source: SkillSource::Project,
             loaded_from: LoadedFrom::Skills,
             file_path: std::path::PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            skill_root: None,
             content_length_hint: 0,
             user_invocable: true,
             disable_model_invocation: false,
@@ -465,6 +547,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_resolver_rejects_hidden_eager_skill() {
+        let mut hidden = make_ref("hidden", "generated");
+        hidden.disable_model_invocation = true;
+        let cat = SkillCatalog::from_refs(vec![hidden]);
+
+        assert!(matches!(
+            cat.resolve_for_model("hidden").await,
+            Err(ResolveError::NotFound(name)) if name == "hidden"
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_resolver_rechecks_lazily_loaded_local_visibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("late-hidden");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: late-hidden\ndescription: hidden\n\
+             hide-from-slash-command-tool: true\n---\n\nSECRET BODY\n",
+        )
+        .unwrap();
+
+        let mut stale_visible = make_ref("late-hidden", "stale visible listing");
+        stale_visible.file_path = skill_path;
+        let cat = SkillCatalog::from_refs(vec![stale_visible]);
+
+        let operator = cat.resolve("late-hidden").await.expect("operator lookup");
+        assert!(operator.disable_model_invocation);
+        assert!(matches!(
+            cat.resolve_for_model("late-hidden").await,
+            Err(ResolveError::NotFound(name)) if name == "late-hidden"
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_resolver_rechecks_lazy_local_generated_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("auto-late-generated");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: auto-late-generated\ndescription: generated\n---\n\nSECRET BODY\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("manifest.json"),
+            r#"{"auto_drafted":true,"needs_review":false}"#,
+        )
+        .unwrap();
+
+        let mut stale_visible = make_ref("auto-late-generated", "stale visible listing");
+        stale_visible.file_path = skill_path;
+        let cat = SkillCatalog::from_refs(vec![stale_visible]);
+
+        assert!(cat.resolve("auto-late-generated").await.is_ok());
+        assert!(matches!(
+            cat.resolve_for_model("auto-late-generated").await,
+            Err(ResolveError::NotFound(name)) if name == "auto-late-generated"
+        ));
+    }
+
+    #[tokio::test]
     async fn resolve_io_error_surfaces_typed_error() {
         let mut r = make_ref("ghost", "");
         r.file_path = std::path::PathBuf::from("/nonexistent/ghost/SKILL.md");
@@ -512,6 +659,48 @@ mod tests {
             .expect("skill resolves from sibling project");
         assert_eq!(m.name, "shared");
         assert!(m.content.contains("sibling body for shared"));
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_executable_sibling_project_skill() {
+        let root = tempfile::tempdir().unwrap();
+        make_sibling_project(root.path(), "other-project", "sibling-exec");
+        let skill = root
+            .path()
+            .join("other-project/.wayland-core/skills/sibling-exec/SKILL.md");
+        std::fs::write(
+            skill,
+            "---\nname: sibling-exec\ndescription: executable sibling\nallowed-tools: [Bash]\n---\n\ndo work\n",
+        )
+        .unwrap();
+
+        let cat =
+            SkillCatalog::from_refs(vec![]).with_cross_project_root(root.path().to_path_buf());
+        assert!(matches!(
+            cat.resolve("sibling-exec").await,
+            Err(ResolveError::NotFound(name)) if name == "sibling-exec"
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_resolver_rejects_generated_sibling_project_skill() {
+        let root = tempfile::tempdir().unwrap();
+        make_sibling_project(root.path(), "other-project", "auto-shared");
+        let manifest = root
+            .path()
+            .join("other-project/.wayland-core/skills/auto-shared/manifest.json");
+        std::fs::write(manifest, r#"{"auto_drafted":true,"needs_review":false}"#).unwrap();
+
+        let cat =
+            SkillCatalog::from_refs(vec![]).with_cross_project_root(root.path().to_path_buf());
+        assert!(matches!(
+            cat.resolve_for_model("auto-shared").await,
+            Err(ResolveError::NotFound(name)) if name == "auto-shared"
+        ));
+        assert!(
+            cat.resolve("auto-shared").await.is_ok(),
+            "operator-facing resolution remains available for inspection"
+        );
     }
 
     #[tokio::test]

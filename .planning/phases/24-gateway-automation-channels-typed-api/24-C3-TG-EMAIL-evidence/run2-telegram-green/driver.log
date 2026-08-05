@@ -1,0 +1,229 @@
+[inbound] sink http://127.0.0.1:46249 journal=/root/f24tg-run2/arrivals.jsonl
+[inbound] llm fixture http://127.0.0.1:34815 journal=/root/f24tg-run2/turns.jsonl
+[inbound] telegram fixture http://127.0.0.1:34939 journal=/root/f24tg-run2/telegram.jsonl
+[inbound] binary /root/wayland-24-c3-tg-email/target/release/wayland-core
+[inbound] build-info wayland-core 0.12.25 (source ddc7cfe069e333946665eae9568e5e82a67d9a92)
+[inbound] sha256 0e5468a23ea23a447178a23b9cba937e2b4f634588feed973343c8f2f26c724b
+[inbound] runtime=json-stream argv=["--json-stream"]
+[inbound] waiting for webhook host: 0s 2026-07-28T19:36:14.614Z
+[inbound] waiting for webhook host: 1s 2026-07-28T19:36:15.659Z
+[inbound] webhook host up after 2s: HEALTHZ 200 ok
+[inbound] matrix slack transport=webhook tag=67f40549
+[inbound] awaiting f24c3-slack-admit-67f40549: 0/1 after 1s 2026-07-28T19:36:16.767Z
+[inbound] PASS slack/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS slack/route — reply_text="F24C3-REPLY f24c3-slack-admit-67f40549" carries_correlation=true conversation_id="D24C3ONE" want="D24C3ONE"
+[inbound] settling: 1s 2026-07-28T19:36:17.823Z
+[inbound] settling: 2s 2026-07-28T19:36:18.823Z
+[inbound] settling: 3s 2026-07-28T19:36:19.823Z
+[inbound] settling: 4s 2026-07-28T19:36:20.823Z
+[inbound] settling: 5s 2026-07-28T19:36:21.824Z
+[inbound] settling: 6s 2026-07-28T19:36:22.824Z
+[inbound] settling: 7s 2026-07-28T19:36:23.824Z
+[inbound] settling: 8s 2026-07-28T19:36:24.824Z
+[inbound] settling: 9s 2026-07-28T19:36:25.825Z
+[inbound] settling: 10s 2026-07-28T19:36:26.825Z
+[inbound] settling: 11s 2026-07-28T19:36:27.825Z
+[inbound] settling: 12s 2026-07-28T19:36:28.825Z
+[inbound] settling: 13s 2026-07-28T19:36:29.825Z
+[inbound] settling: 14s 2026-07-28T19:36:30.826Z
+[inbound] settling: 15s 2026-07-28T19:36:31.826Z
+[inbound] settling: 16s 2026-07-28T19:36:32.826Z
+[inbound] settling: 17s 2026-07-28T19:36:33.826Z
+[inbound] settling: 18s 2026-07-28T19:36:34.826Z
+[inbound] settling: 19s 2026-07-28T19:36:35.827Z
+[inbound] settling: 20s 2026-07-28T19:36:36.827Z
+[inbound] awaiting f24c3-slack-dedupe-control-67f40549: 0/1 after 1s 2026-07-28T19:36:37.885Z
+[inbound] PASS slack/dedupe — replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T19:36:38.940Z
+[inbound] settling: 2s 2026-07-28T19:36:39.940Z
+[inbound] settling: 3s 2026-07-28T19:36:40.940Z
+[inbound] settling: 4s 2026-07-28T19:36:41.940Z
+[inbound] settling: 5s 2026-07-28T19:36:42.940Z
+[inbound] settling: 6s 2026-07-28T19:36:43.940Z
+[inbound] settling: 7s 2026-07-28T19:36:44.941Z
+[inbound] settling: 8s 2026-07-28T19:36:45.941Z
+[inbound] settling: 9s 2026-07-28T19:36:46.941Z
+[inbound] settling: 10s 2026-07-28T19:36:47.941Z
+[inbound] settling: 11s 2026-07-28T19:36:48.942Z
+[inbound] settling: 12s 2026-07-28T19:36:49.942Z
+[inbound] settling: 13s 2026-07-28T19:36:50.942Z
+[inbound] settling: 14s 2026-07-28T19:36:51.942Z
+[inbound] settling: 15s 2026-07-28T19:36:52.942Z
+[inbound] settling: 16s 2026-07-28T19:36:53.942Z
+[inbound] settling: 17s 2026-07-28T19:36:54.943Z
+[inbound] settling: 18s 2026-07-28T19:36:55.943Z
+[inbound] settling: 19s 2026-07-28T19:36:56.943Z
+[inbound] settling: 20s 2026-07-28T19:36:57.943Z
+[inbound] PASS slack/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-slack-bind-67f40549: 0/1 after 1s 2026-07-28T19:36:58.998Z
+[inbound] PASS slack/bind — conv1="D24C3ONE" conv2="D24C3TWO" want2="D24C3TWO" distinct=true
+[inbound] matrix whatsapp transport=webhook tag=0af62500
+[inbound] awaiting f24c3-whatsapp-admit-0af62500: 0/1 after 1s 2026-07-28T19:37:00.052Z
+[inbound] PASS whatsapp/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS whatsapp/route — reply_text="F24C3-REPLY f24c3-whatsapp-admit-0af62500" carries_correlation=true conversation_id="15552220000" want="15552220000"
+[inbound] settling: 1s 2026-07-28T19:37:01.108Z
+[inbound] settling: 2s 2026-07-28T19:37:02.109Z
+[inbound] settling: 3s 2026-07-28T19:37:03.109Z
+[inbound] settling: 4s 2026-07-28T19:37:04.109Z
+[inbound] settling: 5s 2026-07-28T19:37:05.109Z
+[inbound] settling: 6s 2026-07-28T19:37:06.110Z
+[inbound] settling: 7s 2026-07-28T19:37:07.110Z
+[inbound] settling: 8s 2026-07-28T19:37:08.110Z
+[inbound] settling: 9s 2026-07-28T19:37:09.110Z
+[inbound] settling: 10s 2026-07-28T19:37:10.110Z
+[inbound] settling: 11s 2026-07-28T19:37:11.111Z
+[inbound] settling: 12s 2026-07-28T19:37:12.111Z
+[inbound] settling: 13s 2026-07-28T19:37:13.111Z
+[inbound] settling: 14s 2026-07-28T19:37:14.111Z
+[inbound] settling: 15s 2026-07-28T19:37:15.112Z
+[inbound] settling: 16s 2026-07-28T19:37:16.112Z
+[inbound] settling: 17s 2026-07-28T19:37:17.112Z
+[inbound] settling: 18s 2026-07-28T19:37:18.112Z
+[inbound] settling: 19s 2026-07-28T19:37:19.112Z
+[inbound] settling: 20s 2026-07-28T19:37:20.112Z
+[inbound] awaiting f24c3-whatsapp-dedupe-control-0af62500: 0/1 after 1s 2026-07-28T19:37:21.167Z
+[inbound] PASS whatsapp/dedupe — replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T19:37:22.221Z
+[inbound] settling: 2s 2026-07-28T19:37:23.221Z
+[inbound] settling: 3s 2026-07-28T19:37:24.221Z
+[inbound] settling: 4s 2026-07-28T19:37:25.221Z
+[inbound] settling: 5s 2026-07-28T19:37:26.222Z
+[inbound] settling: 6s 2026-07-28T19:37:27.222Z
+[inbound] settling: 7s 2026-07-28T19:37:28.222Z
+[inbound] settling: 8s 2026-07-28T19:37:29.222Z
+[inbound] settling: 9s 2026-07-28T19:37:30.222Z
+[inbound] settling: 10s 2026-07-28T19:37:31.222Z
+[inbound] settling: 11s 2026-07-28T19:37:32.223Z
+[inbound] settling: 12s 2026-07-28T19:37:33.223Z
+[inbound] settling: 13s 2026-07-28T19:37:34.223Z
+[inbound] settling: 14s 2026-07-28T19:37:35.223Z
+[inbound] settling: 15s 2026-07-28T19:37:36.224Z
+[inbound] settling: 16s 2026-07-28T19:37:37.224Z
+[inbound] settling: 17s 2026-07-28T19:37:38.224Z
+[inbound] settling: 18s 2026-07-28T19:37:39.224Z
+[inbound] settling: 19s 2026-07-28T19:37:40.224Z
+[inbound] settling: 20s 2026-07-28T19:37:41.225Z
+[inbound] PASS whatsapp/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-whatsapp-bind-0af62500: 0/1 after 1s 2026-07-28T19:37:42.278Z
+[inbound] PASS whatsapp/bind — conv1="15552220000" conv2="15552221111" want2="15552221111" distinct=true
+[inbound] matrix sms transport=webhook tag=d9bfc7ca
+[inbound] awaiting f24c3-sms-admit-d9bfc7ca: 0/1 after 1s 2026-07-28T19:37:43.334Z
+[inbound] PASS sms/admit — POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS sms/route — reply_text="F24C3-REPLY f24c3-sms-admit-d9bfc7ca" carries_correlation=true conversation_id="+15553330000" want="+15553330000"
+[inbound] settling: 1s 2026-07-28T19:37:44.389Z
+[inbound] settling: 2s 2026-07-28T19:37:45.389Z
+[inbound] settling: 3s 2026-07-28T19:37:46.389Z
+[inbound] settling: 4s 2026-07-28T19:37:47.389Z
+[inbound] settling: 5s 2026-07-28T19:37:48.389Z
+[inbound] settling: 6s 2026-07-28T19:37:49.390Z
+[inbound] settling: 7s 2026-07-28T19:37:50.390Z
+[inbound] settling: 8s 2026-07-28T19:37:51.390Z
+[inbound] settling: 9s 2026-07-28T19:37:52.390Z
+[inbound] settling: 10s 2026-07-28T19:37:53.390Z
+[inbound] settling: 11s 2026-07-28T19:37:54.391Z
+[inbound] settling: 12s 2026-07-28T19:37:55.391Z
+[inbound] settling: 13s 2026-07-28T19:37:56.391Z
+[inbound] settling: 14s 2026-07-28T19:37:57.391Z
+[inbound] settling: 15s 2026-07-28T19:37:58.391Z
+[inbound] settling: 16s 2026-07-28T19:37:59.392Z
+[inbound] settling: 17s 2026-07-28T19:38:00.392Z
+[inbound] settling: 18s 2026-07-28T19:38:01.392Z
+[inbound] settling: 19s 2026-07-28T19:38:02.392Z
+[inbound] settling: 20s 2026-07-28T19:38:03.393Z
+[inbound] awaiting f24c3-sms-dedupe-control-d9bfc7ca: 0/1 after 1s 2026-07-28T19:38:04.449Z
+[inbound] PASS sms/dedupe — replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T19:38:05.502Z
+[inbound] settling: 2s 2026-07-28T19:38:06.502Z
+[inbound] settling: 3s 2026-07-28T19:38:07.502Z
+[inbound] settling: 4s 2026-07-28T19:38:08.503Z
+[inbound] settling: 5s 2026-07-28T19:38:09.503Z
+[inbound] settling: 6s 2026-07-28T19:38:10.503Z
+[inbound] settling: 7s 2026-07-28T19:38:11.503Z
+[inbound] settling: 8s 2026-07-28T19:38:12.504Z
+[inbound] settling: 9s 2026-07-28T19:38:13.504Z
+[inbound] settling: 10s 2026-07-28T19:38:14.504Z
+[inbound] settling: 11s 2026-07-28T19:38:15.504Z
+[inbound] settling: 12s 2026-07-28T19:38:16.505Z
+[inbound] settling: 13s 2026-07-28T19:38:17.505Z
+[inbound] settling: 14s 2026-07-28T19:38:18.505Z
+[inbound] settling: 15s 2026-07-28T19:38:19.505Z
+[inbound] settling: 16s 2026-07-28T19:38:20.505Z
+[inbound] settling: 17s 2026-07-28T19:38:21.505Z
+[inbound] settling: 18s 2026-07-28T19:38:22.506Z
+[inbound] settling: 19s 2026-07-28T19:38:23.506Z
+[inbound] settling: 20s 2026-07-28T19:38:24.506Z
+[inbound] PASS sms/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-sms-bind-d9bfc7ca: 0/1 after 1s 2026-07-28T19:38:25.561Z
+[inbound] PASS sms/bind — conv1="+15553330000" conv2="+15553331111" want2="+15553331111" distinct=true
+[inbound] matrix telegram transport=poll tag=3e7f85e6
+[inbound] awaiting f24c3-telegram-admit-3e7f85e6: 0/1 after 1s 2026-07-28T19:38:26.618Z
+[inbound] PASS telegram/admit — POST rc=0 SUBMIT 200 {"ok":true,"update_id":1} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+[inbound] PASS telegram/route — reply_text="F24C3\\-REPLY f24c3\\-telegram\\-admit\\-3e7f85e6" carries_correlation=true conversation_id="24030001" want="24030001"
+[inbound] settling: 1s 2026-07-28T19:38:27.673Z
+[inbound] settling: 2s 2026-07-28T19:38:28.673Z
+[inbound] settling: 3s 2026-07-28T19:38:29.673Z
+[inbound] settling: 4s 2026-07-28T19:38:30.674Z
+[inbound] settling: 5s 2026-07-28T19:38:31.674Z
+[inbound] settling: 6s 2026-07-28T19:38:32.674Z
+[inbound] settling: 7s 2026-07-28T19:38:33.674Z
+[inbound] settling: 8s 2026-07-28T19:38:34.674Z
+[inbound] settling: 9s 2026-07-28T19:38:35.675Z
+[inbound] settling: 10s 2026-07-28T19:38:36.675Z
+[inbound] settling: 11s 2026-07-28T19:38:37.675Z
+[inbound] settling: 12s 2026-07-28T19:38:38.675Z
+[inbound] settling: 13s 2026-07-28T19:38:39.675Z
+[inbound] settling: 14s 2026-07-28T19:38:40.676Z
+[inbound] settling: 15s 2026-07-28T19:38:41.676Z
+[inbound] settling: 16s 2026-07-28T19:38:42.676Z
+[inbound] settling: 17s 2026-07-28T19:38:43.676Z
+[inbound] settling: 18s 2026-07-28T19:38:44.676Z
+[inbound] settling: 19s 2026-07-28T19:38:45.677Z
+[inbound] settling: 20s 2026-07-28T19:38:46.677Z
+[inbound] awaiting f24c3-telegram-dedupe-control-3e7f85e6: 0/1 after 1s 2026-07-28T19:38:47.732Z
+[inbound] PASS telegram/dedupe — replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+[inbound] settling: 1s 2026-07-28T19:38:48.784Z
+[inbound] settling: 2s 2026-07-28T19:38:49.784Z
+[inbound] settling: 3s 2026-07-28T19:38:50.785Z
+[inbound] settling: 4s 2026-07-28T19:38:51.785Z
+[inbound] settling: 5s 2026-07-28T19:38:52.785Z
+[inbound] settling: 6s 2026-07-28T19:38:53.785Z
+[inbound] settling: 7s 2026-07-28T19:38:54.785Z
+[inbound] settling: 8s 2026-07-28T19:38:55.786Z
+[inbound] settling: 9s 2026-07-28T19:38:56.786Z
+[inbound] settling: 10s 2026-07-28T19:38:57.786Z
+[inbound] settling: 11s 2026-07-28T19:38:58.786Z
+[inbound] settling: 12s 2026-07-28T19:38:59.786Z
+[inbound] settling: 13s 2026-07-28T19:39:00.787Z
+[inbound] settling: 14s 2026-07-28T19:39:01.787Z
+[inbound] settling: 15s 2026-07-28T19:39:02.787Z
+[inbound] settling: 16s 2026-07-28T19:39:03.787Z
+[inbound] settling: 17s 2026-07-28T19:39:04.788Z
+[inbound] settling: 18s 2026-07-28T19:39:05.788Z
+[inbound] settling: 19s 2026-07-28T19:39:06.788Z
+[inbound] settling: 20s 2026-07-28T19:39:07.788Z
+[inbound] PASS telegram/access — denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+[inbound] awaiting f24c3-telegram-bind-3e7f85e6: 0/1 after 1s 2026-07-28T19:39:08.844Z
+[inbound] PASS telegram/bind — conv1="24030001" conv2="24030002" want2="24030002" distinct=true
+
+INBOUND MATRIX GREEN platform=linux runtime=json-stream legs=20/20 failed=0 arrivals_total=9 telegram_arrivals=3 turns_total=12 instrument_fault=false
+  telegram fixture: submitted=5 still_pending=[] polls=176 max_concurrent_getupdates=1
+  PASS slack/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS slack/route: reply_text="F24C3-REPLY f24c3-slack-admit-67f40549" carries_correlation=true conversation_id="D24C3ONE" want="D24C3ONE"
+  PASS slack/dedupe: replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS slack/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS slack/bind: conv1="D24C3ONE" conv2="D24C3TWO" want2="D24C3TWO" distinct=true
+  PASS whatsapp/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS whatsapp/route: reply_text="F24C3-REPLY f24c3-whatsapp-admit-0af62500" carries_correlation=true conversation_id="15552220000" want="15552220000"
+  PASS whatsapp/dedupe: replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS whatsapp/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS whatsapp/bind: conv1="15552220000" conv2="15552221111" want2="15552221111" distinct=true
+  PASS sms/admit: POST rc=0 HTTP 200 | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS sms/route: reply_text="F24C3-REPLY f24c3-sms-admit-d9bfc7ca" carries_correlation=true conversation_id="+15553330000" want="+15553330000"
+  PASS sms/dedupe: replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS sms/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS sms/bind: conv1="+15553330000" conv2="+15553331111" want2="+15553331111" distinct=true
+  PASS telegram/admit: POST rc=0 SUBMIT 200 {"ok":true,"update_id":1} | arrivals(journal)=1 want=1 | turns(fixture-journal)=1
+  PASS telegram/route: reply_text="F24C3\\-REPLY f24c3\\-telegram\\-admit\\-3e7f85e6" carries_correlation=true conversation_id="24030001" want="24030001"
+  PASS telegram/dedupe: replay POST rc=0 | arrivals before=1 after=1 (want equal) | positive-control fresh-id arrivals=1 want=1
+  PASS telegram/access: denied-sender POST rc=0 | arrivals=0 want=0 | turns=0 want=0 | CONTROL admit-leg-arrived=1 want=1 (control held)
+  PASS telegram/bind: conv1="24030001" conv2="24030002" want2="24030002" distinct=true

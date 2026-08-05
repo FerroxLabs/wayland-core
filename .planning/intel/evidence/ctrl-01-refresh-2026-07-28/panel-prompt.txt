@@ -1,0 +1,74 @@
+You are grading capability-maturity levels for a software program's competitive ledger. Be adversarial and terse. Do NOT be generous.
+
+THE ENUM (a ladder of EVIDENCE, not of effort):
+ABSENT -> SOURCE -> CONFIGURED -> CONSTRUCTED -> REACHED -> EFFECTIVE -> OPERATOR_COMPLETE -> PACKAGED_PROVEN
+
+Binding rules of this ledger:
+R1. "Source presence alone never earns effectiveness or parity." Code existing is at most SOURCE.
+R2. A phase HAVING EXECUTED is not a promotion. What promotes a row is evidence OF THE KIND THE NEXT LEVEL NAMES.
+R3. REACHED means: the runtime path was reached on the real shipped product and produced an observable real side effect, measured out-of-process. Not "tests pass".
+R4. EFFECTIVE means: REACHED plus proven aggregate/native outcome across the family's declared scope.
+R5. OPERATOR_COMPLETE means an operator-facing supervision surface exists end to end. PACKAGED_PROVEN means certified on the packaged artifact.
+R6. Contradictory live evidence REOPENS a row rather than silently retaining its level.
+R7. A family's maturity is the FAMILY's, not its strongest member's.
+R8. Several of the phases below closed their own Success Criteria as NOT MET. That must not be laundered into a level-up.
+
+For EACH row give exactly one line:
+ROW=<name> VERDICT=<enum value> and then 1-3 sentences of reasoning. If you think the row must be marked REOPENED under R6, say so.
+
+=== ROW 1: AUTH (posture, approval, policy, sandbox, secrets, egress) ===
+Currently CONSTRUCTED. Since last refresh:
+- Phase 21 graded its goal NOT ACHIEVED three times. Final state at SHA ac94b1d5: Criterion 1 MET-WITH-STATED-EXCEPTIONS (upgraded from NOT MET after repair), Criterion 2 MET-WITH-STATED-EXCEPTIONS, Criterion 3 (standalone and host-protocol corpora prove EQUIVALENT enforcement) still NOT MET.
+- REPAIRED AND LIVE-PROVEN on the shipped binary (Linux): tool-authority intersection now computed unconditionally at all six production spawner sites against a narrow-only ParentToolAuthority, with a dispatch-time PolicyGate installed from the same snapshot and a source-derived guard that fails if a seventh site appears. Previously the guard was CONFIRMED ABSENT and PolicyGate had ZERO callers and was fail-open. Requirement F21-01 marked COMPLETE.
+- Filesystem, egress and secret restrictions REFUSED live on both surfaces with a delegated child that demonstrably took its own provider turn.
+- Two prior HIGH defects closed: parallel-sibling journal-CAS collision repaired (6/6 clean live runs); "reservation does not survive restart" DISPROVED with executable counter-evidence.
+- Phase 25 hostile matrix: all five hostile compromise cases fail closed on both hosts.
+- Phase 28 measured Windows AppContainer: a wedged sandbox lease makes the product REFUSE to execute (fail-closed denial of service), it does NOT proceed unsandboxed.
+AGAINST:
+- Linux only. NO Windows evidence at the repaired SHA. Windows equivalence asserted by nobody.
+- Four of six budget dimensions (fan-out, time, token, cost) hold only by ABSENCE OF A REQUEST CHANNEL, not by enforcement; no shipped surface carries a child-fillable budget field. Requirement F21-02 OPEN, F21-04 OPEN.
+- The product's own capability-activation stream STILL emits `delegate_isolation -> unavailable, reason: isolation_not_enforced` at SHA 2ecdfdf5, which is AFTER the Phase 20 seal. The old negative is confirmed persisting, not cleared.
+- No per-child observable on the host protocol for four of six lifecycle events (fenced seam, deferred).
+
+=== ROW 2: TXN (delegated workspace, journal, gates, parent CAS) ===
+Currently EFFECTIVE (earned by a Linux aggregate 11519/11519 plus native Windows 6/6 and macOS 8/8 lifecycle proof at one sealed SHA).
+Since last refresh, CONTRADICTORY LIVE EVIDENCE arrived and was then repaired:
+- Two parallel delegated siblings collided on the journal-head compare-and-swap against the SHIPPED BINARY; the loser's budget authority was left PERMANENTLY FAULTED and the parent session left with a nonterminal tool execution. Measured 3 of 8 live runs on Linux and 6 of 6 on Windows. SINCE REPAIRED, re-proved 6/6 on Linux only.
+- Session journals already on disk carrying an explicit "effect_receipt":null failed their checksum on read: silent, permanent user data loss in the product whose durability claim rests on journals surviving. SINCE FIXED and content recovered on Linux, macOS and Windows.
+- Journal-compatibility determination is Linux-only; the Windows legs were never taken.
+- Phase 28 ran a 651-cell native hostile matrix on all three families against digest-bound CI release binaries: 627 pass, 24 red, 0 skipped, 147/147 critical cells ran.
+AGAINST a promotion: no soak, no signed certification receipt, no operator supervision surface.
+
+=== ROW 3: GOAL (Goal, Task, Wait, Fleet, loop ownership) ===
+Currently SOURCE. Since last refresh:
+- Phase 22 goal graded NOT ACHIEVED, twice. Criterion 1 FAILED (one surface of three), Criterion 3 FAILED (unchanged: five engines still terminate five different ways, the adapter surface was never built), Criterion 4 PARTIAL, Criterion 5 PARTIAL.
+- Criterion 2 PASSED ON BOTH PLATFORMS against the shipped release binary driving only shipped verbs: kill -9 on the process group mid-wave (7 members -> 0), restart exit 0, 2 claims revoked on lease expiry, 4 completions drained from the outbox the dead parent never observed, effects 12 total / 12 distinct / 12 expected, 0 unresolved. The counting gate was FALSIFIED in the same run (a duplicated effect took it to 13 and exit 1). Same numbers reproduced on Windows with taskkill /T /F.
+- `wayland-core goal` CLI exists and emits a canonical projection. LoopPolicy::Fixed is enforced by the reducer at the durable boundary and the bound survives restart.
+- Phase 24 added persistent scheduling: single-owner schedule lease over OS locks, seven trigger types, bounded retry and history, driven from the shipped binary.
+AGAINST: every F22 requirement is OPEN. Two F05-audited capabilities in this family (mid-flight monitor, learned policy) are still "Unavailable: runtime path unwired".
+
+=== ROW 4: GATEWAY (service, automation, channels, typed API) ===
+Currently ABSENT ("no persistent gateway runtime exists").
+Since last refresh, Phase 24 (phase NOT closed):
+- A wcore-gateway crate with a lifecycle state machine, single-instance lock, ordered drain and an exactly-once delivery ledger.
+- LIVE on Linux against real systemd with the real release binary: install wrote a real unit and is-enabled reported enabled; status --json reported running with pid/uptime/profile/pending; kill -9 was recorded by systemd itself and the service RECOVERED after 5s with a new pid (the platform's own restart counter, nothing in the run restarted it); drain with 12 pending went Draining(12) -> Drained(0) with all 12 abandoned BY NAME and recorded durably; uninstall removed the unit with no residual process.
+- Delivery ARRIVAL proved at an INDEPENDENT sink: 10 deliveries, 10 distinct messages at the destination, none arrived twice; the one delivery whose outcome was UNKNOWN across a kill -9 and a platform restart produced exactly one message. BEFORE the fix that same delivery produced two. So the gate failed first, then passed.
+- Typed authenticated client: a client that severed its connection having received ZERO bytes recovered, 12 seconds later, an event the server produced entirely after it had gone. Over HTTP/SSE, on Linux, through the shipped binary. 11 mutations each reddened their named test.
+AGAINST: Linux only. The macOS CI binary provably does not carry this code. Windows gateway path unexercised. Criterion 5 (setup-to-recovery journeys on macOS, Linux AND Windows) untouched. The phase's own journey plan was never started and the phase is NOT closed. Nine channel adapters still inherit supports_outbound_idempotency() == false.
+
+=== ROW 5: NATIVE (macOS/Linux/Windows packaged certification) ===
+Currently SOURCE. Since last refresh, Phase 28 plans 01 and 02 landed (03 and 04 did NOT):
+- A candidate was resolved and DIGEST-BOUND 6 of 6 per-target CI release artifacts.
+- Every family ran THE CI RELEASE ARTIFACT ITSELF, sha256-asserted on the host before the run. The claim "no macOS binary is obtainable" was refuted by downloading and executing one.
+- The hostile matrix: 651 of 651 cells have a recorded outcome, ZERO skipped; 147 of 147 unskippable critical cells ran; 627 pass / 24 red. Linux 216-0-0, Windows 219-0-0, macOS 192-24-0.
+- Sandbox greens carry a differential ACTIVENESS observation (the same probe outside the product and inside a worker it spawned); absence of a violation is not expressible as a green.
+AGAINST: the 24 macOS reds were an observability gap that has SINCE been fixed — but the matrix has NOT been re-run at any candidate carrying that fix, so those 24 cells are still RED at the certified candidate. No 1,000-session soak. No signed platform-binding receipt. No finding adjudication. Phase not closed. The certification explicitly covers one commit and NOT the current tip.
+
+=== ROW 6: SUPPLY (provenance, SBOM, signing, update, rollback) ===
+Currently SOURCE. Since last refresh, Phase 29 plans 01 and 02 landed (03 and 04 did NOT):
+- A census of the real shipped chain found, as a NEGATIVE result recorded as prominently as the gaps, that the release path ALREADY carries real keyless Sigstore SLSA provenance over the distributed archives, npm publishes with --provenance, and the self-updater refuses to extract or swap unless attestation verification exits zero.
+- A byte-deterministic CycloneDX SBOM now exists: 865 components, derived purely from the locked graph, proved byte-identical when generated from checkouts at DIFFERENT absolute paths (a real defect was found and fixed in getting there).
+- `cargo deny check` executed for the FIRST TIME in the repository's history against the real 1,017-crate graph. Verdict: advisories FAILED, bans ok, licenses FAILED, exit 5. Recorded verbatim; deny.toml was not weakened by one character; deliberately NOT chained into the build's check-all recipe because the verdict is red.
+- Reproducibility measured for the first time on two real 320-second release builds: DOCUMENTED-VARIANCE, class path_prefix. The shipped release is reproducible only ACCIDENTALLY, because CI runners always check out at the same absolute path.
+- A signed release manifest, a role-scoped trust root and a closed four-state release ledger exist and are proved end to end — but ONLY against a throwaway Ed25519 key generated at run time into a temp directory. No real trust root is bound. No release has ever gone through them.
+AGAINST: nine HIGH census findings. An OPEN HIGH: the audit-suppression file silences two advisories on a stated "sole path" when the real graph has three, two of them through a crate that parses user-supplied office documents, and one advisory is reachable. Install/update identity, revocation, key rotation, tamper corpus and rollback rehearsal are all unbuilt. Rollback rehearsal does not exist anywhere in CI.

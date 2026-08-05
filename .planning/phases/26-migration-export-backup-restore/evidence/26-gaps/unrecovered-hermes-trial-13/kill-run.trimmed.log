@@ -1,0 +1,14 @@
+# TRIMMED. Original      470 lines.
+Migration plan: hermes → wayland-core
+Source: /tmp/tmp.4g3D0SMCpK/peer-home
+
+Profiles (9):
+  • hermes/root
+      provider=anthropic model=claude-opus-4
+[464 more lines]# ... ...
+  • skill:skills/skill0437 — skill body carries a shell directive
+  • skill:skills/skill0438 — skill body carries a shell directive
+  • skill:skills/skill0439 — skill body carries a shell directive
+  Quarantined content is written outside every directory the agent loads skills from,
+  so it cannot run. Review it, then promote what you want with:
+    wayland-core migrate promote --id <identity>

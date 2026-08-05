@@ -1,0 +1,3 @@
+COMMAND: wayland-core backend receipt verify receipt-attestation.json
+wayland-core backend: receipt is invalid: task_accepted names a different backend than the receipt
+EXIT: 1

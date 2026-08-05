@@ -12,12 +12,17 @@ rust-version.workspace = true
 # bollard transitive graph stay out of the default workspace build.
 
 [dependencies]
+wcore-types.workspace = true
 serde       = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 toml.workspace        = true
 thiserror.workspace   = true
 tokio       = { workspace = true, features = ["rt", "macros", "time", "process", "io-util"] }
+tokio-util.workspace  = true
 tracing.workspace     = true
+uuid.workspace        = true
 async-trait.workspace = true
+cap-std = "=3.4.5"
 bollard = { version = "0.17", optional = true, default-features = false, features = ["ssl"] }
 futures = { workspace = true, optional = true }
 which = "6"
@@ -26,34 +31,37 @@ which = "6"
 # to disk; tiny cross-platform dep so it stays unconditional rather than
 # behind a cfg.
 tempfile.workspace = true
+tar.workspace = true
 
 [features]
 default = []
 live-docker = ["dep:bollard", "dep:futures"]
 # S3 — Landlock LSM ruleset applied to bwrap child via `pre_exec` (Linux-only).
 # Gated so macOS/Windows CI does not need to depend on the Linux-only crate.
-landlock = ["dep:landlock", "dep:libc"]
+landlock = ["dep:landlock"]
 # S4 — seccomp-bpf filter compiled in-process and handed to bwrap via
 # `--seccomp <fd>` (Linux-only). Gated because libseccomp-sys requires the
 # system libseccomp C library at link time which is not available on macOS/
 # Windows runners.
-seccomp = ["dep:libseccomp", "dep:libc"]
+seccomp = ["dep:libseccomp"]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock   = { version = "0.4", optional = true }
 libseccomp = { version = "0.4", optional = true }
-# Used by the seccomp wiring to clear FD_CLOEXEC on the BPF tempfile so it
-# survives the spawn into bwrap. Pulled in only when the `seccomp` feature
-# is enabled.
-libc       = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Isolation",
   "Win32_System_IO",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Threading",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",

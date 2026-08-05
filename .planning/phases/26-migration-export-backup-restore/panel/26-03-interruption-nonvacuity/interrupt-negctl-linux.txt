@@ -1,0 +1,14 @@
+INTERRUPT-PLATFORM: linux
+KILL-MECHANISM: SIGKILL CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 2
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=61 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-POST: 0422e58f46c2378bdef16c58aada8d18348c91dbb5aaf592aaaf172e23ce72cc
+DIGEST-EQUAL: no
+NEGATIVE-CONTROL: late-kill-detected
+NEGCTL-EXIT: 9
+PROOF-FAIL: the operation completed before the kill landed, so this run proves nothing about rollback

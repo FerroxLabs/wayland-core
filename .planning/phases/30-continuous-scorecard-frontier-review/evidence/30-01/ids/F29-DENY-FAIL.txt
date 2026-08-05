@@ -1,0 +1,19 @@
+EVIDENCE ID : F29-DENY-FAIL
+LEDGER ROW  : 39
+ARTIFACT    : `phases/29-supply-chain-release-integrity/29-02-SUMMARY.md` §The measurements — **first execution of `cargo deny check` in the repository's history**, `cargo-deny 0.20.2`, 1,017 crates: `advisories FAILED, bans ok, licenses FAILED`, `F29-DENY-STATUS::FAIL::exit=5`. `deny.toml` unweakened by one character; deliberately NOT chained into `check-all` because the verdict is red
+
+== PATH RESOLUTION ==
+[OK]   stat phases/29-supply-chain-release-integrity/29-02-SUMMARY.md
+       -> .planning/phases/29-supply-chain-release-integrity/29-02-SUMMARY.md  size=15756
+       head:
+---
+phase: 29-supply-chain-release-integrity
+plan: "02"
+subsystem: supply-chain / SBOM, dependency policy, reproducibility
+status: complete
+termination_state: 2 (Complete with a red policy verdict)
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

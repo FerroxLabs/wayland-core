@@ -1,0 +1,20 @@
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+
+failures:
+
+---- checked_corpus_matches_real_serializers_byte_for_byte stdout ----
+
+thread 'checked_corpus_matches_real_serializers_byte_for_byte' (2517433) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\"]; run `wcore-contract generate`" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    checked_corpus_matches_real_serializers_byte_for_byte
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+
+error: test failed, to rerun pass `-p wcore-protocol --test desktop_contract_corpus`
+WLRC=101
+WLDONE

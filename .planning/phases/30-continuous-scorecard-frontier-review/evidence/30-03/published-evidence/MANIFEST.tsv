@@ -1,0 +1,6 @@
+# published-evidence bundle. secrets_held=0 projections=5
+30-03-CLAIMS-ALLOWED.md::sha256=5a61c4e6440a99dbe07b2185a5ffeb2e03cebc083bd7037b78a0bc008b47a6a3::bytes=5379
+30-03-CLAIMS-PROHIBITED.md::sha256=dd3517fa6d5f24a44e95f0445640e961586bf4954f1da2ec33640f696cf653f3::bytes=5553
+30-03-LIMITATIONS.md::sha256=7f500a1a7159cd8e39da51c4346ee4ad36c6a7e33d2d1c93e14bd191278a98ba::bytes=16151
+limitations.tsv::sha256=edf28caa9e1ccc50f414eb685424f4e6c80b769c91d04f1ff17b0b08c48db323::bytes=7184
+claims-register.json::sha256=6e60102cf284c3115615bbca1176eb705c3d06fd2588445bd99689bf69cbadb3::bytes=33192

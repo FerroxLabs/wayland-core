@@ -1,0 +1,54 @@
+
+=== crates/wcore-protocol/contracts/desktop/v1/manifest.json
+    bytes 19326 -> 19326
+    sha256 5fcb39661f6cba8f -> 15c977b5ba08e999
+    VERDICT DIGEST-ONLY  (2 digest leaves, 0 shape leaves)
+      digest [line0].fixture_digest
+         sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa
+      -> sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8
+      digest [line0].source_inputs_digest
+         sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336
+      -> sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562
+
+=== crates/wcore-protocol/contracts/desktop/v1/events/ready.json
+    bytes 1757 -> 1757
+    sha256 d5eb3fb105fdd539 -> d7c231b62bd344b1
+    VERDICT DIGEST-ONLY  (2 digest leaves, 0 shape leaves)
+      digest [line0].contract.fixture_digest
+         sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa
+      -> sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8
+      digest [line0].contract.source_inputs_digest
+         sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336
+      -> sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562
+
+=== crates/wcore-protocol/contracts/desktop/v1/adversarial/events/fixture-mismatch.jsonl
+    bytes 1757 -> 1757
+    sha256 4746b4fbbd6ee3f4 -> 90ebf84822377758
+    VERDICT DIGEST-ONLY  (1 digest leaves, 0 shape leaves)
+      digest [line0].contract.source_inputs_digest
+         sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336
+      -> sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562
+
+=== crates/wcore-protocol/contracts/desktop/v1/adversarial/events/schema-mismatch.jsonl
+    bytes 1757 -> 1757
+    sha256 3689cbc01f577986 -> cc2f7de8154925dc
+    VERDICT DIGEST-ONLY  (2 digest leaves, 0 shape leaves)
+      digest [line0].contract.fixture_digest
+         sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa
+      -> sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8
+      digest [line0].contract.source_inputs_digest
+         sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336
+      -> sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562
+
+=== crates/wcore-protocol/contracts/desktop/v1/adversarial/events/version-mismatch.jsonl
+    bytes 1757 -> 1757
+    sha256 766d3caf394ff310 -> 5f112e3e0fa7a66d
+    VERDICT DIGEST-ONLY  (2 digest leaves, 0 shape leaves)
+      digest [line0].contract.fixture_digest
+         sha256:634bbbe96bc8c0fce173165841360c7eab1f5e9d0f33a8006c99e7d71f9f30fa
+      -> sha256:de2b19bdf52ea9ef2934a4b0fa43d5cd54befb6f1e0d7b4b2e2af60154723bb8
+      digest [line0].contract.source_inputs_digest
+         sha256:251709961fcc5c30c72b04fa1e7965ed472ef24c134a216df2db196b66679336
+      -> sha256:c99443599a273e00c72900b12f32aa371d27b83f30e8a0f5a13f0c2191380562
+
+OVERALL DIGEST-ONLY

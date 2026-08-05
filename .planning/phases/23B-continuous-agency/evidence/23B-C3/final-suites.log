@@ -1,0 +1,5 @@
+COMMIT=488dd9ff
+        PASS [  30.043s] (3608/3609) wcore-agent tool_backends::image_gen::tests::gemini_imagen_send_error_omits_api_key
+        PASS [  64.972s] (3609/3609) wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+────────────
+     Summary [  67.218s] 3609 tests run: 3609 passed (2 slow), 13 skipped

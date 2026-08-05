@@ -267,12 +267,10 @@ pub(crate) fn is_sensitive(text: &str) -> bool {
     if t.is_empty() {
         return false;
     }
-    // Email — at-sign with non-whitespace flanking + dot in domain.
-    if let Some(at) = t.find('@') {
-        let (lhs, rhs) = t.split_at(at);
-        if !lhs.is_empty() && rhs[1..].contains('.') && !rhs[1..].contains(' ') {
-            return true;
-        }
+    // Email — inspect whitespace-bounded candidates so a full OCR page can
+    // contain ordinary text after the address without hiding the match.
+    if t.split_whitespace().any(is_email_candidate) {
+        return true;
     }
     // SSN: XXX-XX-XXXX (digits + literal dashes).
     if t.len() >= 11 {
@@ -289,50 +287,95 @@ pub(crate) fn is_sensitive(text: &str) -> bool {
             }
         }
     }
-    // Credit card: 13-19 contiguous digits (allowing spaces/dashes).
-    let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() >= 13 && digits.len() <= 19 {
-        // Reject if there's a long alphanumeric run mixed in
-        // (heuristic — avoids matching SHAs/hashes).
-        let stripped: String = t
-            .chars()
-            .filter(|c| c.is_ascii_digit() || matches!(*c, ' ' | '-'))
-            .collect();
-        if stripped.chars().filter(|c| c.is_ascii_digit()).count() == digits.len()
-            && digits.len() >= 13
-        {
-            return true;
-        }
+    // Credit card: a bounded run of 13-19 digits allowing spaces/dashes.
+    // Scan individual runs rather than aggregating unrelated page numbers.
+    if contains_card_candidate(t) {
+        return true;
     }
     // API key prefixes (OpenAI / Anthropic / GitHub / AWS / generic).
     let lc = t.to_ascii_lowercase();
-    if lc.starts_with("sk-")
-        || lc.starts_with("sk_live_")
-        || lc.starts_with("sk_test_")
-        || lc.starts_with("pk_live_")
-        || lc.starts_with("pk_test_")
-        || lc.starts_with("ghp_")
-        || lc.starts_with("github_pat_")
-        || lc.starts_with("aws_secret_")
-        || lc.starts_with("xoxp-")
-        || lc.starts_with("xoxb-")
+    if [
+        "sk-",
+        "sk_live_",
+        "sk_test_",
+        "pk_live_",
+        "pk_test_",
+        "ghp_",
+        "github_pat_",
+        "aws_secret_",
+        "xoxp-",
+        "xoxb-",
+    ]
+    .iter()
+    .any(|prefix| contains_prefixed_candidate(&lc, prefix))
     {
         return true;
     }
     // `<NAME>_API_KEY=...` or `<NAME>_TOKEN=...` literal envvar-looking
     // strings.
-    if let Some(eq) = t.find('=') {
-        let key = &t[..eq];
-        let val = &t[eq + 1..].trim();
-        if (key.to_ascii_uppercase().contains("API_KEY")
-            || key.to_ascii_uppercase().contains("SECRET")
-            || key.to_ascii_uppercase().contains("TOKEN"))
-            && val.len() >= 16
-        {
-            return true;
+    if t.split_whitespace().any(is_secret_assignment) {
+        return true;
+    }
+    false
+}
+
+fn is_email_candidate(candidate: &str) -> bool {
+    let candidate = candidate.trim_matches(|c: char| {
+        matches!(
+            c,
+            ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\''
+        )
+    });
+    let Some(at) = candidate.find('@') else {
+        return false;
+    };
+    let (lhs, rhs) = candidate.split_at(at);
+    let domain = rhs[1..].trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+    !lhs.is_empty() && domain.contains('.')
+}
+
+fn contains_card_candidate(text: &str) -> bool {
+    let mut digit_count = 0usize;
+    let mut in_candidate = false;
+
+    for c in text.chars().chain(std::iter::once('\0')) {
+        if c.is_ascii_digit() {
+            digit_count += 1;
+            in_candidate = true;
+        } else if in_candidate && matches!(c, ' ' | '-') {
+            continue;
+        } else if in_candidate {
+            if (13..=19).contains(&digit_count) {
+                return true;
+            }
+            digit_count = 0;
+            in_candidate = false;
         }
     }
     false
+}
+
+fn contains_prefixed_candidate(text: &str, prefix: &str) -> bool {
+    text.match_indices(prefix).any(|(index, _)| {
+        index == 0
+            || text[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+    })
+}
+
+fn is_secret_assignment(candidate: &str) -> bool {
+    let Some(eq) = candidate.find('=') else {
+        return false;
+    };
+    let key = &candidate[..eq];
+    let value = candidate[eq + 1..]
+        .trim()
+        .trim_end_matches([',', ';', ')', ']', '}', '"', '\'']);
+    let key = key.to_ascii_uppercase();
+    (key.contains("API_KEY") || key.contains("SECRET") || key.contains("TOKEN"))
+        && value.len() >= 16
 }
 
 #[cfg(test)]

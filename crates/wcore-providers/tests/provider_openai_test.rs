@@ -672,6 +672,46 @@ async fn test_openai_retries_without_tools_on_unsupported_400() {
     );
 }
 
+#[tokio::test]
+async fn scoped_zero_suppresses_tools_unsupported_fallback_send() {
+    use wcore_types::tool::ToolDef;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"model does not support tools","type":"invalid_request_error"}}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+        DebugConfig::default(),
+    );
+    let mut request = make_request();
+    request.tools = vec![ToolDef {
+        name: "Read".into(),
+        description: "Read a file".into(),
+        input_schema: json!({"type": "object"}),
+        deferred: false,
+        server: None,
+    }];
+
+    let result = wcore_providers::retry::scope_max_retries(0, provider.stream(&request)).await;
+    assert!(
+        matches!(
+            result,
+            Err(wcore_providers::ProviderError::Api { status: 400, .. })
+        ),
+        "the first error must surface for engine-governed retry admission"
+    );
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1, "zero-retry scope permits one send");
+}
+
 /// 403 Forbidden → ProviderError::Api{status:403}, not Ok.
 #[tokio::test]
 async fn test_openai_403_forbidden_surfaces_as_api_error() {
@@ -1197,6 +1237,58 @@ async fn openai_region_failover_retries_alternate_host_on_401() {
             .iter()
             .any(|e| matches!(e, LlmEvent::TextDelta(t) if t == "from fallback")),
         "expected the fallback host's response; got: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn scoped_zero_suppresses_auth_host_fallback_send() {
+    let primary = MockServer::start().await;
+    let fallback = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("denied"))
+        .mount(&primary)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&fallback)
+        .await;
+
+    let mut compat = ProviderCompat::openai_defaults();
+    compat.auth_fallback_base_url = Some(fallback.uri());
+    let provider = OpenAIProvider::new(
+        "region-locked-key",
+        &primary.uri(),
+        compat,
+        DebugConfig::default(),
+    );
+
+    let result =
+        wcore_providers::retry::scope_max_retries(0, provider.stream(&make_request())).await;
+    assert!(
+        matches!(
+            result,
+            Err(wcore_providers::ProviderError::Api { status: 401, .. })
+        ),
+        "the first auth error must surface for engine-governed retry admission"
+    );
+    assert_eq!(
+        primary
+            .received_requests()
+            .await
+            .expect("primary requests")
+            .len(),
+        1
+    );
+    assert!(
+        fallback
+            .received_requests()
+            .await
+            .expect("fallback requests")
+            .is_empty(),
+        "zero-retry scope must not send to the fallback host"
     );
 }
 

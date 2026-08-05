@@ -199,6 +199,10 @@ impl Tool for CuaTool {
         ToolCategory::Exec
     }
 
+    fn execution_class_for(&self, _input: &Value) -> wcore_tools::ToolExecutionClass {
+        wcore_tools::ToolExecutionClass::ProcessSpawning
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         self.execute_with_ctx(input, &ToolContext::test_default())
             .await

@@ -1,0 +1,35 @@
+=== C1: three surfaces, at MY base (not from a prior summary) ===
+-- protocol Goal symbols:
+crates/wcore-protocol/src/goal.rs:80
+-- ProtocolEvent Goal variants:
+       3
+-- TUI goal references:
+       4
+-- CLI goal verbs:
+      14
+-- host->core Goal COMMAND (the 'control' half):
+0
+-- KNOWN-POSITIVE control on the same file (Stop command exists):
+1
+-- producer fixtures on disk:
+ls: contracts/desktop/v1/events/goal_snapshot.json: No such file or directory
+ls: contracts/desktop/v1/events/goal_transition.json: No such file or directory
+-- KNOWN-POSITIVE: an existing fixture:
+ls: contracts/desktop/v1/events/ready.json: No such file or directory
+
+=== C4: LoopPolicy enforcement ===
+crates/wcore-agent/src/goal/strategy.rs:854:                loop_policy: LoopPolicy::Once,
+crates/wcore-agent/src/goal/record.rs:145:            LoopPolicy::Once => Some(1),
+crates/wcore-agent/src/goal/record.rs:146:            LoopPolicy::Fixed { iterations } => Some(*iterations),
+crates/wcore-agent/src/goal/record.rs:147:            LoopPolicy::Dynamic { max_iterations, .. } => Some(*max_iterations),
+crates/wcore-agent/src/goal/record.rs:148:            LoopPolicy::EventDriven { max_deliveries } => Some(*max_deliveries),
+crates/wcore-agent/src/goal/record.rs:149:            LoopPolicy::Manual => None,
+crates/wcore-agent/src/goal/record.rs:163:            loop_policy: LoopPolicy::Once,
+crates/wcore-agent/src/goal/record.rs:206:            (LoopPolicy::Once, Some(1)),
+crates/wcore-agent/src/goal/record.rs:207:            (LoopPolicy::Fixed { iterations: 7 }, Some(7)),
+crates/wcore-agent/src/goal/record.rs:209:                LoopPolicy::Dynamic {
+crates/wcore-agent/src/goal/record.rs:215:            (LoopPolicy::EventDriven { max_deliveries: 5 }, Some(5)),
+crates/wcore-agent/src/goal/record.rs:216:            (LoopPolicy::Manual, None),
+crates/wcore-agent/src/goal/wire.rs:321:            authority: authority(LoopPolicy::Fixed { iterations: 8 }),
+crates/wcore-agent/src/goal/wire.rs:534:        state.authority = authority(LoopPolicy::Manual);
+crates/wcore-agent/src/goal/wire.rs:537:        state.authority = authority(LoopPolicy::Fixed { iterations: 8 });

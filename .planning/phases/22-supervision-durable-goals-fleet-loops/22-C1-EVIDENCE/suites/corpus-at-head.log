@@ -1,0 +1,44 @@
+   Compiling wcore-protocol v0.12.25 (/root/wayland-22-c1/crates/wcore-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running tests/desktop_contract_corpus.rs (target/debug/deps/desktop_contract_corpus-04e9f042133619dd)
+
+running 15 tests
+test contradictory_budget_grant_results_cannot_cross_the_wire ... ok
+test authority_fixtures_pin_correlated_current_shapes ... ok
+test inventory_is_exactly_eighteen_commands_and_fifty_one_events ... ok
+test every_command_fixture_deserializes_through_protocol_command ... ok
+test manifest_criticality_uses_only_the_normative_typed_vocabulary ... ok
+test manifest_pins_generator_and_all_three_digests ... FAILED
+test event_schema_distinguishes_correlated_and_legacy_child_shapes ... ok
+test budget_grant_adversarial_fixtures_fail_closed ... ok
+test checked_corpus_matches_real_serializers_byte_for_byte ... FAILED
+test every_json_artifact_is_canonical_and_lf_terminated ... ok
+test malformed_durable_child_fixtures_are_rejected ... ok
+test durable_child_type_fixtures_round_trip_without_a_parallel_model ... ok
+test producer_complete_schema_keeps_current_and_non_desktop_variants_visible ... ok
+test manifest_ready_and_schema_titles_share_one_contract_identity ... ok
+test generated_schemas_reject_malformed_authority_types_and_enums ... ok
+
+failures:
+
+---- manifest_pins_generator_and_all_three_digests stdout ----
+
+thread 'manifest_pins_generator_and_all_three_digests' (3510491) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:317:5:
+assertion `left == right` failed
+  left: Number(8)
+ right: 9
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- checked_corpus_matches_real_serializers_byte_for_byte stdout ----
+
+thread 'checked_corpus_matches_real_serializers_byte_for_byte' (3510481) panicked at crates/wcore-protocol/tests/desktop_contract_corpus.rs:203:22:
+checked-in Desktop contract corpus must match the generator: Custom { kind: Other, error: "Desktop contract corpus drift: missing=[\"events/goal_snapshot.json\", \"events/goal_transition.json\"], extra=[], drifted=[\"adversarial/events/fixture-mismatch.jsonl\", \"adversarial/events/schema-mismatch.jsonl\", \"adversarial/events/version-mismatch.jsonl\", \"events/ready.json\", \"manifest.json\", \"schema/core-event.schema.json\", \"schema/host-command.schema.json\", \"schema/producer-complete.schema.json\"]; run `wcore-contract generate`" }
+
+
+failures:
+    checked_corpus_matches_real_serializers_byte_for_byte
+    manifest_pins_generator_and_all_three_digests
+
+test result: FAILED. 13 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+error: test failed, to rerun pass `-p wcore-protocol --test desktop_contract_corpus`

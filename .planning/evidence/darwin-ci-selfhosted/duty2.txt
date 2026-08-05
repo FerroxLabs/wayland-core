@@ -1,0 +1,12 @@
+unique runner-34 job records (2 pages, 200 runs): 39
+EXECUTED to completion: 37
+
+window     : 07-30 01:35..07-30 07:23 = 348.2 min (5.80 h)
+busy       : 295.3 min
+DUTY CYCLE : 84.8 %   <-- previous single-page estimate was 44.5%
+throughput : 6.38 jobs/hr
+duration   : median 7.92 min  max 10.58
+
+gaps > 10 min between consecutive executed jobs:
+  07-30 06:02 -> 07-30 06:17  = 14.3 min
+count of >10min gaps: 1

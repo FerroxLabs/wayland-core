@@ -8,12 +8,9 @@
 #[cfg(test)]
 #[allow(clippy::module_inception)]
 mod bundled_supplemental_tests {
-    use crate::bundled::{
-        BundledSkillDefinition, clear_bundled_skills, get_bundled_skills, register_bundled_skill,
-    };
-    use crate::loader::load_all_skills;
+    use crate::bundled::{BundledSkillCatalog, BundledSkillDefinition, register_bundled_skill};
+    use crate::loader::{load_all_skills, load_all_skills_with_bundled};
     use crate::types::SkillSource;
-    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -42,13 +39,12 @@ mod bundled_supplemental_tests {
 
     // TC-10.20: bundled skill appears in load_all_skills (normal mode)
     #[tokio::test]
-    #[serial]
     async fn tc_10_20_bundled_in_load_all_skills_normal() {
-        clear_bundled_skills();
-        register_bundled_skill(minimal_def("bundled-only"));
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("bundled-only"));
 
         let tmp = TempDir::new().unwrap();
-        let result = load_all_skills(tmp.path(), &[], false, None).await;
+        let result = load_all_skills_with_bundled(tmp.path(), &[], false, None, &catalog).await;
 
         let found = result
             .iter()
@@ -59,21 +55,25 @@ mod bundled_supplemental_tests {
             SkillSource::Bundled,
             "bundled skill source should be Bundled"
         );
-
-        clear_bundled_skills();
     }
 
     // TC-10.21: bundled skill wins deduplication over same-named filesystem skill
     #[tokio::test]
-    #[serial]
     async fn tc_10_21_bundled_wins_dedup_over_filesystem() {
-        clear_bundled_skills();
-        register_bundled_skill(minimal_def("shared-name"));
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("shared-name"));
 
         let tmp = TempDir::new().unwrap();
         write_skill_dir(tmp.path(), "shared-name");
 
-        let result = load_all_skills(tmp.path(), &[tmp.path().to_path_buf()], false, None).await;
+        let result = load_all_skills_with_bundled(
+            tmp.path(),
+            &[tmp.path().to_path_buf()],
+            false,
+            None,
+            &catalog,
+        )
+        .await;
 
         let matches: Vec<_> = result.iter().filter(|s| s.name == "shared-name").collect();
         assert_eq!(
@@ -86,8 +86,6 @@ mod bundled_supplemental_tests {
             SkillSource::Bundled,
             "bundled skill should win deduplication"
         );
-
-        clear_bundled_skills();
     }
 
     // TC-10.22: bundled skill virtual path format
@@ -99,13 +97,12 @@ mod bundled_supplemental_tests {
 
     // TC-10.26: bare mode also includes bundled skills (AC-14, C-6 decision)
     #[tokio::test]
-    #[serial]
     async fn tc_10_26_bare_mode_includes_bundled() {
-        clear_bundled_skills();
-        register_bundled_skill(minimal_def("bundled-bare"));
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("bundled-bare"));
 
         let tmp = TempDir::new().unwrap();
-        let result = load_all_skills(tmp.path(), &[], true, None).await;
+        let result = load_all_skills_with_bundled(tmp.path(), &[], true, None, &catalog).await;
 
         let found = result
             .iter()
@@ -116,11 +113,19 @@ mod bundled_supplemental_tests {
             SkillSource::Bundled,
             "bundled skill source should be Bundled in bare mode"
         );
+    }
 
-        // Verify total registry is accessible after test
-        let reg = get_bundled_skills();
-        assert!(!reg.is_empty());
+    #[tokio::test]
+    async fn legacy_wrapper_is_embedded_only() {
+        let mut session_catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut session_catalog, minimal_def("plugin-only"));
 
-        clear_bundled_skills();
+        let tmp = TempDir::new().unwrap();
+        let result = load_all_skills(tmp.path(), &[], true, None).await;
+
+        assert!(
+            result.iter().all(|skill| skill.name != "plugin-only"),
+            "the embedded-only wrapper must not observe a session catalog"
+        );
     }
 }

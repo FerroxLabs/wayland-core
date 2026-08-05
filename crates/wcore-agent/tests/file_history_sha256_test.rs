@@ -6,10 +6,8 @@
 //!     `DefaultHasher::finish()`).
 //!   * Identical inputs produce identical digests.
 //!   * Distinct inputs produce distinct digests.
-//!   * The rollback guard's `last_engine_write_digest` round-trips
-//!     through `record_post_write_digest` and matches `byte_digest`.
+//!   * The SHA-256 helper remains stable for content receipts.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use wcore_agent::file_history::{ByteDigest, FileHistory, byte_digest};
@@ -48,36 +46,6 @@ fn byte_digest_is_stable() {
 fn byte_digest_is_distinct_for_distinct_input() {
     assert_ne!(byte_digest(b"foo"), byte_digest(b"bar"));
     assert_ne!(byte_digest(b"a"), byte_digest(b"b"));
-}
-
-#[test]
-fn record_post_write_digest_round_trips() {
-    let (history, _dir) = make_history();
-    let path = PathBuf::from("/tmp/wcore-sd-test.txt");
-    let bytes = b"engine just wrote this";
-
-    assert!(
-        history.last_engine_write_digest(&path).is_none(),
-        "no engine write yet → None"
-    );
-
-    history.record_post_write_digest(&path, bytes);
-    let got = history
-        .last_engine_write_digest(&path)
-        .expect("digest recorded");
-    assert_eq!(got, byte_digest(bytes));
-}
-
-#[test]
-fn distinct_writes_record_distinct_digests() {
-    let (history, _dir) = make_history();
-    let a = PathBuf::from("/tmp/sd-a.txt");
-    let b = PathBuf::from("/tmp/sd-b.txt");
-    history.record_post_write_digest(&a, b"alpha");
-    history.record_post_write_digest(&b, b"beta");
-    let da = history.last_engine_write_digest(&a).unwrap();
-    let db = history.last_engine_write_digest(&b).unwrap();
-    assert_ne!(da, db);
 }
 
 #[tokio::test]

@@ -1,0 +1,26 @@
+waiting for mock: iteration 1
+=== 0. binary alive ===
+MC_LIVE=PASS  binary reports its version (found 'wayland-core')
+=== 1. plant a fact THROUGH the product ===
+MC_LIVE_RC=0 session=plant sid=c3dc1fee0001
+MC_LIVE=PASS  plant turn really invoked the assert_fact tool (found 'assert_fact')
+=== 2. the ORIGINAL text reaches the outbound provider body ===
+MC_LIVE_RC=0 session=recall1 sid=c3dc1fee0002
+MC_LIVE=PASS  outbound body carries THIS turn's user message (not a stale capture) (found 'what is my recorded deployment region')
+MC_LIVE=PASS  the ORIGINAL fact text is on the wire BEFORE the correction (found 'QK7MCOLD')
+MC_LIVE=PASS  the corrected text is absent before any correction is made ('QK7MCNEW' absent from a proven-non-empty capture)
+=== 3. address the fact via /memory why ===
+MC_LIVE_RC=0 session=why sid=c3dc1fee0003
+MC_LIVE=PASS  /memory why surfaces the planted fact itself (found 'QK7MCOLD')
+MC_LIVE_FACT_ID=019faea1-2535-7e00-b810-413b5d59739b
+MC_LIVE=PASS  provenance output carries an addressable fact id
+=== 4. correct it through the shipped /memory correct surface ===
+MC_LIVE_RC=0 session=correct sid=c3dc1fee0004
+MC_LIVE=PASS  /memory correct echoes the new text (found 'QK7MCNEW')
+=== 5. THE WIRE CLAIM: new text arrives, old text does not ===
+MC_LIVE_RC=0 session=recall2 sid=c3dc1fee0005
+MC_LIVE=PASS  post-correction outbound body carries THIS turn's user message (found 'what is my recorded deployment region')
+MC_LIVE=PASS  THE CORRECTED TEXT IS IN THE OUTBOUND PROVIDER REQUEST BODY (found 'QK7MCNEW')
+MC_LIVE=PASS  the SUPERSEDED text is gone from the outbound provider request body ('QK7MCOLD' absent from a proven-non-empty capture)
+MC_LIVE_TOTALS pass=11 fail=0 total=11 expected=11
+MC_LIVE_RESULT=GREEN 11/11

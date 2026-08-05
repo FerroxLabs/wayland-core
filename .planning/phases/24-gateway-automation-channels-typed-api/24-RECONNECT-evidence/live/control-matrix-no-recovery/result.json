@@ -1,0 +1,284 @@
+{
+  "schema": "wayland.reconnect.upstream-drop.poll/1",
+  "adapter": "matrix",
+  "mode": "CONTROL-no-recovery",
+  "binary": "/root/wayland-24-reconnect/target/release/wayland-core",
+  "legs_total": 7,
+  "legs_failed": 0,
+  "verdict": "PASS",
+  "census": {
+    "rows": [
+      {
+        "token": "f24c3-rc-70fb19-phantom-never",
+        "phase": "phantom",
+        "expect": "silence",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-70fb19-before-1",
+        "phase": "before",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-70fb19-before-2",
+        "phase": "before",
+        "expect": "reply",
+        "replies": 1
+      },
+      {
+        "token": "f24c3-rc-70fb19-during-3",
+        "phase": "during",
+        "expect": "reply",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-70fb19-during-4",
+        "phase": "during",
+        "expect": "reply",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-70fb19-during-decoy-5",
+        "phase": "during-decoy",
+        "expect": "silence",
+        "replies": 0
+      },
+      {
+        "token": "f24c3-rc-70fb19-after-6",
+        "phase": "after",
+        "expect": "reply",
+        "replies": 0
+      }
+    ],
+    "lost": [
+      "f24c3-rc-70fb19-during-3",
+      "f24c3-rc-70fb19-during-4",
+      "f24c3-rc-70fb19-after-6"
+    ],
+    "duplicated": [],
+    "leaked": []
+  },
+  "plan": [
+    {
+      "token": "f24c3-rc-70fb19-phantom-never",
+      "phase": "phantom",
+      "expect": "silence"
+    },
+    {
+      "token": "f24c3-rc-70fb19-before-1",
+      "phase": "before",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-70fb19-before-2",
+      "phase": "before",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-70fb19-during-3",
+      "phase": "during",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-70fb19-during-4",
+      "phase": "during",
+      "expect": "reply"
+    },
+    {
+      "token": "f24c3-rc-70fb19-during-decoy-5",
+      "phase": "during-decoy",
+      "expect": "silence"
+    },
+    {
+      "token": "f24c3-rc-70fb19-after-6",
+      "phase": "after",
+      "expect": "reply"
+    }
+  ],
+  "phantom": "f24c3-rc-70fb19-phantom-never",
+  "proxy": {
+    "up": false,
+    "accepted": 3,
+    "refused": 12,
+    "killed": 2,
+    "bytesToUpstream": 1539,
+    "bytesToClient": 2130,
+    "live": 0
+  },
+  "killed_connections": 2,
+  "matrix_report": {
+    "ok": true,
+    "submitted_total": 6,
+    "cursor": 8,
+    "sync_total": 4,
+    "max_concurrent_sync": 1,
+    "concurrency_trace": [
+      {
+        "at": "2026-07-29T06:04:02.880Z",
+        "open": 1,
+        "sync": 1
+      },
+      {
+        "at": "2026-07-29T06:04:02.882Z",
+        "open": 0,
+        "sync": 1
+      },
+      {
+        "at": "2026-07-29T06:04:02.883Z",
+        "open": 1,
+        "sync": 2
+      },
+      {
+        "at": "2026-07-29T06:04:04.900Z",
+        "open": 0,
+        "sync": 2
+      },
+      {
+        "at": "2026-07-29T06:04:04.902Z",
+        "open": 1,
+        "sync": 3
+      },
+      {
+        "at": "2026-07-29T06:04:05.105Z",
+        "open": 0,
+        "sync": 3
+      },
+      {
+        "at": "2026-07-29T06:04:05.106Z",
+        "open": 1,
+        "sync": 4
+      },
+      {
+        "at": "2026-07-29T06:04:06.138Z",
+        "open": 0,
+        "sync": 4
+      }
+    ],
+    "initial_sync_total": 1,
+    "initial_syncs": [
+      {
+        "sync": 1,
+        "at": "2026-07-29T06:04:02.881Z",
+        "served": [],
+        "cursor_at_open": 0
+      }
+    ],
+    "syncs": [
+      {
+        "sync": 1,
+        "initial": true,
+        "since": null,
+        "served": [],
+        "next_batch": "s0",
+        "at": "2026-07-29T06:04:02.881Z"
+      },
+      {
+        "sync": 2,
+        "initial": false,
+        "since": "s0",
+        "served": [],
+        "next_batch": "s0",
+        "at": "2026-07-29T06:04:04.899Z"
+      },
+      {
+        "sync": 3,
+        "initial": false,
+        "since": "s0",
+        "served": [
+          "$f24rc70fb191",
+          "$f24rc70fb192"
+        ],
+        "next_batch": "s2",
+        "at": "2026-07-29T06:04:05.104Z"
+      },
+      {
+        "sync": 4,
+        "initial": false,
+        "since": "s2",
+        "served": [
+          "$f24rc70fb193",
+          "$f24rc70fb194"
+        ],
+        "next_batch": "s6",
+        "at": "2026-07-29T06:04:06.138Z"
+      }
+    ],
+    "replies": [
+      {
+        "seq": 10,
+        "room": "!f24room1:f24.invalid",
+        "text": "F24C3-REPLY f24c3-rc-70fb19-before-1",
+        "txn_id": "wl-u19fac791aec-1",
+        "at": "2026-07-29T06:04:05.742Z"
+      },
+      {
+        "seq": 11,
+        "room": "!f24room1:f24.invalid",
+        "text": "F24C3-REPLY f24c3-rc-70fb19-before-2",
+        "txn_id": "wl-u19fac791b18-2",
+        "at": "2026-07-29T06:04:05.785Z"
+      }
+    ],
+    "rooms": [
+      {
+        "id": "!f24room1:f24.invalid",
+        "members": 2
+      }
+    ]
+  },
+  "results": [
+    {
+      "leg": "pre-drop-control",
+      "ok": true,
+      "detail": "2/2 produced a turn. KNOWN-POSITIVE: if this is not full, no zero elsewhere is readable."
+    },
+    {
+      "leg": "upstream-drop-really-happened",
+      "ok": true,
+      "detail": "destroyed 2 connection(s); proxy refused 3 reconnect attempt(s) during a 12000ms outage; homeserver sync_total FROZE at 4 -> 4 (the adapter really could not reach it). The refusal count is what proves the adapter kept TRYING rather than having quietly died."
+    },
+    {
+      "leg": "adapter-reconnected",
+      "ok": true,
+      "detail": "homeserver sync_total 4 -> 4; proxy {\"up\":false,\"accepted\":3,\"refused\":8,\"killed\":2,\"bytesToUpstream\":1539,\"bytesToClient\":2130,\"live\":0}. CONTROL MODE: expected NO recovery."
+    },
+    {
+      "leg": "post-reconnect-control",
+      "ok": true,
+      "detail": "0/1 produced a turn. CONTROL MODE: expected zero, because the link was never restored."
+    },
+    {
+      "leg": "gap-messages-survive-the-upstream-drop",
+      "ok": true,
+      "detail": "0/2 of the messages the HOMESERVER received while our link was dead produced a turn. lost=[f24c3-rc-70fb19-during-3,f24c3-rc-70fb19-during-4,f24c3-rc-70fb19-after-6]. CONTROL MODE: a loss here is the REQUIRED result."
+    },
+    {
+      "leg": "no-duplicate-turns-around-the-window",
+      "ok": true,
+      "detail": "duplicated=[] over 5 expected-reply tokens. Matrix re-serves an event under the SAME event_id in a later batch, so a cursor that rewinds too far shows here."
+    },
+    {
+      "leg": "decoy-and-phantom-score-zero",
+      "ok": true,
+      "detail": "decoy (denied mxid, submitted INSIDE the window) and phantom (never submitted) both scored zero: leaked=[]."
+    }
+  ],
+  "notes": [
+    "homeserver fixture http://127.0.0.1:34521; binary will talk to the KILL PROXY at http://127.0.0.1:35807",
+    "proxy forwards: reached the homeserver report through it (sync_total=0)",
+    "preflight correlation: echoed=true wrong-shape-echoed=false (must be false)",
+    "adapter syncing: sync_total=3 proxy={\"up\":true,\"accepted\":2,\"refused\":0,\"killed\":0,\"bytesToUpstream\":652,\"bytesToClient\":1031,\"live\":1}",
+    "submitted f24c3-rc-70fb19-before-1 (phase=before expect=reply) to the homeserver",
+    "submitted f24c3-rc-70fb19-before-2 (phase=before expect=reply) to the homeserver",
+    "pre-drop control: 2/2 after ~1500ms",
+    "upstream KILLED: destroyed 2 live connection(s); new connections will be refused",
+    "submitted f24c3-rc-70fb19-during-3 (phase=during expect=reply) to the homeserver",
+    "submitted f24c3-rc-70fb19-during-4 (phase=during expect=reply) to the homeserver",
+    "submitted f24c3-rc-70fb19-during-decoy-5 (phase=during-decoy expect=silence) to the homeserver",
+    "CONTROL MODE: the upstream is NOT restored — the gap must be reported LOST",
+    "gap messages: 0/2 — BUDGET EXPIRED after 40000ms",
+    "submitted f24c3-rc-70fb19-after-6 (phase=after expect=reply) to the homeserver",
+    "post-recovery control: 0/1 — BUDGET EXPIRED after 40000ms"
+  ]
+}

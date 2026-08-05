@@ -1,0 +1,681 @@
+wcore-sandbox live macOS acceptance	Set up job	﻿2026-07-28T13:50:24.2711640Z Current runner version: '2.336.0'
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2729190Z ##[group]Runner Image Provisioner
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2729780Z Hosted Compute Agent
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2730140Z Version: 20260707.563
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2730530Z Commit: 02667638d2b423fbc733a8e32a88b44996a3ba6e
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2731000Z Build Date: 2026-07-07T19:33:50Z
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2731460Z Worker ID: {ef3bfd46-8ef2-48ea-9f17-2ea27c56c832}
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2731910Z Azure Region: westus
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2732300Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2733230Z ##[group]Operating System
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2733630Z macOS
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2733960Z 26.4
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2734290Z 25E246
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2734640Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2734990Z ##[group]Runner Image
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2735370Z Image: macos-26-arm64
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2735740Z Version: 20260720.0258.1
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2736640Z Included Software: https://github.com/actions/runner-images/blob/macos-26-arm64/20260720.0258/images/macos/macos-26-arm64-Readme.md
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2737790Z Image Release: https://github.com/actions/runner-images/releases/tag/macos-26-arm64%2F20260720.0258
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2738520Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2739270Z ##[group]GITHUB_TOKEN Permissions
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2740370Z Contents: read
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2740730Z Metadata: read
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2741090Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2742450Z Secret source: Actions
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.2743080Z Prepare workflow directory
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.3232750Z Prepare all required actions
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.3275280Z Getting action download info
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:24.7941070Z Download action repository 'actions/checkout@v6' (SHA:d23441a48e516b6c34aea4fa41551a30e30af803)
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:25.4418380Z Download action repository 'loonghao/vx@v0.9.17' (SHA:38bbaba29737cb282225dfb4b024bcaa86f6de7c)
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:26.5680380Z Download action repository 'actions/upload-artifact@v4' (SHA:ea165f8d65b6e75b540449e92b4886f43607fa02)
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:26.8120060Z Getting action download info
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:26.9937980Z Download action repository 'actions/cache@v5' (SHA:caa296126883cff596d87d8935842f9db880ef25)
+wcore-sandbox live macOS acceptance	Set up job	2026-07-28T13:50:27.1518150Z Complete job name: wcore-sandbox live macOS acceptance
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	﻿2026-07-28T13:50:27.2618030Z ##[group]Run actions/checkout@v6
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2620340Z with:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2622670Z   repository: FerroxLabs/wayland-core
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2637230Z   token: ***
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2638640Z   ssh-strict: true
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2639970Z   ssh-user: git
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2641340Z   persist-credentials: true
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2642810Z   clean: true
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2644180Z   sparse-checkout-cone-mode: true
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2645860Z   fetch-depth: 1
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2647170Z   fetch-tags: false
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2648540Z   show-progress: true
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2650010Z   lfs: false
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2651290Z   submodules: false
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2652700Z   set-safe-directory: true
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2654340Z   allow-unsafe-pr-checkout: false
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2658040Z env:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2659380Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2661000Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2661890Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.2662730Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.8463010Z Syncing repository: FerroxLabs/wayland-core
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.8465820Z ##[group]Getting Git version info
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.8467080Z Working directory is '/Users/runner/work/wayland-core/wayland-core'
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.8468560Z [command]/opt/homebrew/bin/git version
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.8910370Z git version 2.55.0
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.8950600Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9018790Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/5b69fd2f-fb19-4a92-9646-f72af6be5012/.gitconfig'
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9042800Z Temporarily overriding HOME='/Users/runner/work/_temp/5b69fd2f-fb19-4a92-9646-f72af6be5012' before making global git config changes
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9048710Z Adding repository directory to the temporary git global config as a safe directory
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9055480Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/wayland-core/wayland-core
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9464480Z Deleting the contents of '/Users/runner/work/wayland-core/wayland-core'
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9478890Z ##[group]Determining repository object format
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9484380Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9488620Z ##[group]Initializing the repository
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:27.9491480Z [command]/opt/homebrew/bin/git init /Users/runner/work/wayland-core/wayland-core
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0111940Z hint: Using 'master' as the name for the initial branch. This default branch name
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0213360Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0316920Z hint: to use in all of your new repositories, which will suppress this warning,
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0419120Z hint: call:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0521220Z hint:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0623050Z hint: 	git config --global init.defaultBranch <name>
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0716670Z hint:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0726510Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0730280Z hint: 'development'. The just-created branch can be renamed via this command:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0738840Z hint:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0742240Z hint: 	git branch -m <name>
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0762670Z hint:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0765180Z hint: Disable this message with "git config set advice.defaultBranchName false"
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0870220Z Initialized empty Git repository in /Users/runner/work/wayland-core/wayland-core/.git/
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0954010Z [command]/opt/homebrew/bin/git remote add origin https://github.com/FerroxLabs/wayland-core
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0995050Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0996230Z ##[group]Disabling automatic garbage collection
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0997290Z [command]/opt/homebrew/bin/git config --local gc.auto 0
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.0999660Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.1000690Z ##[group]Setting up auth
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.1001380Z Removing SSH command configuration
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.1002380Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.1006040Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.2208440Z Removing HTTP extra header
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.2217860Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.2334110Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.3357410Z Removing includeIf entries pointing to credentials config files
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.3360950Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.3430800Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.4779080Z [command]/opt/homebrew/bin/git config --file /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.4858240Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/Users/runner/work/wayland-core/wayland-core/.git.path /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.5193620Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/Users/runner/work/wayland-core/wayland-core/.git/worktrees/*.path /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.5283560Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.5475420Z [command]/opt/homebrew/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.5628100Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.5629630Z ##[group]Fetching the repository
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:28.5648480Z [command]/opt/homebrew/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +cf48b349d3aa84f85168511431b0a248fd50ded9:refs/remotes/origin/plan/f20-unified-audit-repair
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9523230Z From https://github.com/FerroxLabs/wayland-core
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9525200Z  * [new ref]         cf48b349d3aa84f85168511431b0a248fd50ded9 -> origin/plan/f20-unified-audit-repair
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9534790Z [command]/opt/homebrew/bin/git branch --list --remote origin/plan/f20-unified-audit-repair
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9653640Z   origin/plan/f20-unified-audit-repair
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9666760Z [command]/opt/homebrew/bin/git rev-parse refs/remotes/origin/plan/f20-unified-audit-repair
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9781030Z cf48b349d3aa84f85168511431b0a248fd50ded9
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9792550Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9835740Z ##[group]Determining the checkout info
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9836730Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9837310Z [command]/opt/homebrew/bin/git sparse-checkout disable
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:30.9989410Z [command]/opt/homebrew/bin/git config --local --unset-all extensions.worktreeConfig
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.0049320Z ##[group]Checking out the ref
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.0050230Z [command]/opt/homebrew/bin/git checkout --progress --force -B plan/f20-unified-audit-repair refs/remotes/origin/plan/f20-unified-audit-repair
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.8027720Z Switched to a new branch 'plan/f20-unified-audit-repair'
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.8032990Z branch 'plan/f20-unified-audit-repair' set up to track 'origin/plan/f20-unified-audit-repair'.
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.8061600Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.8192480Z [command]/opt/homebrew/bin/git log -1 --format=%H
+wcore-sandbox live macOS acceptance	Run actions/checkout@v6	2026-07-28T13:50:31.8322260Z cf48b349d3aa84f85168511431b0a248fd50ded9
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	﻿2026-07-28T13:50:31.8677190Z ##[group]Run loonghao/vx@v0.9.17
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8677560Z with:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8677730Z   setup: true
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8678060Z   cache: true
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8678230Z   version: latest
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8680180Z   github-token: ***
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8680340Z   cache-key-prefix: vx-tools
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8680510Z env:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8680660Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8680910Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8681180Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:31.8681450Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3040620Z ##[group]Run actions/cache@v5
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3040870Z with:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3041070Z   path: ~/.vx
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	~/.local/bin/vx
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	~/.local/bin/vx.exe
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3041500Z   key: vx-tools-macOS-latest--667c187788fa70bf5066985a27bbe2ef28df6c34e7b11a4029b1da449076bfaf
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3042060Z   restore-keys: vx-tools-macOS-latest-
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	vx-tools-macOS-
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3042370Z   enableCrossOsArchive: false
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3042630Z   fail-on-cache-miss: false
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3042820Z   lookup-only: false
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3042990Z   save-always: false
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3043150Z env:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3043290Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3043490Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3043750Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.3043990Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:32.7615910Z Cache hit for: vx-tools-macOS-latest--667c187788fa70bf5066985a27bbe2ef28df6c34e7b11a4029b1da449076bfaf
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.0869850Z Received 0 of 12296453 (0.0%), 0.0 MBs/sec
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.6826840Z Received 12296453 of 12296453 (100.0%), 7.4 MBs/sec
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.6928090Z Cache Size: ~12 MB (12296453 B)
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.7030470Z [command]/opt/homebrew/bin/gtar -xf /Users/runner/work/_temp/3cf2a495-7e6c-4af7-b515-cf0e9f00b0d0/cache.tzst -P -C /Users/runner/work/wayland-core/wayland-core --delay-directory-restore --use-compress-program unzstd
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.7743390Z Cache restored successfully
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8117540Z Cache restored from key: vx-tools-macOS-latest--667c187788fa70bf5066985a27bbe2ef28df6c34e7b11a4029b1da449076bfaf
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8250610Z ##[group]Run set -e
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8250960Z ^[[36;1mset -e^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8251140Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8251310Z ^[[36;1mINSTALL_DIR="$HOME/.local/bin"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8251560Z ^[[36;1mmkdir -p "$INSTALL_DIR"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8251830Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8252210Z ^[[36;1m# Add to PATH immediately for current step and subsequent steps^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8252630Z ^[[36;1mecho "$INSTALL_DIR" >> $GITHUB_PATH^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8252890Z ^[[36;1mexport PATH="$INSTALL_DIR:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8253120Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8253570Z ^[[36;1m# Add vx managed tools bin directory to PATH^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8253830Z ^[[36;1mVX_BIN_DIR="$HOME/.vx/bin"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8254050Z ^[[36;1mmkdir -p "$VX_BIN_DIR"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8254300Z ^[[36;1mecho "$VX_BIN_DIR" >> $GITHUB_PATH^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8254560Z ^[[36;1mexport PATH="$VX_BIN_DIR:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8254770Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8254930Z ^[[36;1m# Skip download if already cached^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8255220Z ^[[36;1mif [ -f "$INSTALL_DIR/vx" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8255500Z ^[[36;1m  echo "vx already installed (from cache)"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8255770Z ^[[36;1melse^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8256020Z ^[[36;1m  echo "Installing vx via install.sh..."^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8256280Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8256460Z ^[[36;1m  # Use the bundled install.sh script^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8256760Z ^[[36;1m  # VX_INSTALL_DIR controls where the binary is placed^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8257070Z ^[[36;1m  export VX_INSTALL_DIR="$INSTALL_DIR"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8257350Z ^[[36;1m  export GITHUB_TOKEN="$GH_TOKEN"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8257600Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8257810Z ^[[36;1m  # install.sh is bundled with the action^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8258880Z ^[[36;1m  bash "/Users/runner/work/_actions/loonghao/vx/v0.9.17/install.sh"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8259220Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8259370Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8259520Z ^[[36;1m# Verify installation^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8259730Z ^[[36;1m"$INSTALL_DIR/vx" --version^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8259930Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8260090Z ^[[36;1m# Export for subsequent steps^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8260340Z ^[[36;1mecho "VX_INSTALL_DIR=$INSTALL_DIR" >> $GITHUB_ENV^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8260610Z ^[[36;1mif [ -n "$GH_TOKEN" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8260860Z ^[[36;1m  echo "GITHUB_TOKEN=$GH_TOKEN" >> $GITHUB_ENV^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8261090Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8313400Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8313720Z env:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8313940Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8314180Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8314440Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8314680Z   VX_VERSION: latest
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8316790Z   GH_TOKEN: ***
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8317000Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.8870430Z vx already installed (from cache)
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9012030Z vx 0.9.26
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9101610Z ##[group]Run # Ensure PATH includes vx install directory
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9101990Z ^[[36;1m# Ensure PATH includes vx install directory^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9103210Z ^[[36;1mif [ -n "$VX_INSTALL_DIR" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9103500Z ^[[36;1m  export PATH="$VX_INSTALL_DIR:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9103730Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9131780Z ^[[36;1mif [ -f "$HOME/.local/bin/vx" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9132260Z ^[[36;1m  export PATH="$HOME/.local/bin:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9132480Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9133130Z ^[[36;1mexport PATH="$HOME/.vx/bin:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9133340Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9133540Z ^[[36;1mVERSION=$(vx --version | head -1 | awk '{print $2}')^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9133840Z ^[[36;1mecho "version=$VERSION" >> $GITHUB_OUTPUT^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9134140Z ^[[36;1mecho "vx version: $VERSION"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9171700Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9172020Z env:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9172170Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9172380Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9172610Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9172810Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9175020Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9175220Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9734650Z vx version: 0.9.26
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9880960Z ##[group]Run if [ -n "$VX_INSTALL_DIR" ]; then
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9881740Z ^[[36;1mif [ -n "$VX_INSTALL_DIR" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9882630Z ^[[36;1m  export PATH="$VX_INSTALL_DIR:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9883250Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9883730Z ^[[36;1mif [ -f "$HOME/.local/bin/vx" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9884470Z ^[[36;1m  export PATH="$HOME/.local/bin:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9885190Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9885640Z ^[[36;1mexport PATH="$HOME/.vx/bin:$PATH"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9886240Z ^[[36;1m^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9886750Z ^[[36;1mif [ -f "vx.toml" ] || [ -f ".vx.toml" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9887640Z ^[[36;1m  echo "Found vx configuration, setting up vx environment..."^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9888470Z ^[[36;1m  if [ "$VX_SETUP" = "true" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9889110Z ^[[36;1m    echo "Running vx setup --ci..."^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9890070Z ^[[36;1m    vx setup --ci || echo "Warning: vx setup failed"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9890410Z ^[[36;1m    echo "$HOME/.vx/bin" >> $GITHUB_PATH^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9890660Z ^[[36;1m  else^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9890890Z ^[[36;1m    echo "Skipping vx setup (set setup: 'true' to enable)"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9891190Z ^[[36;1m  fi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9891340Z ^[[36;1melse^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9891530Z ^[[36;1m  echo "No vx.toml found, skipping vx setup"^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9892150Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9925350Z shell: /bin/bash --noprofile --norc -e -o pipefail {0}
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9925640Z env:
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9925800Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9926010Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9926240Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9926470Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9928640Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9928820Z   VX_SETUP: true
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:34.9929010Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:35.0365640Z Found vx configuration, setting up vx environment...
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:35.0368190Z Running vx setup --ci...
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:35.0470580Z 
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:35.0572860Z 🚀 VX Development Environment Setup
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:35.0663100Z 
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:42.6858360Z ✓ All tools are synchronized
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:42.6864490Z ℹ CI mode: GitHub Actions detected
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:42.6865270Z ⚠ Tool 'rust' not found in store
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:42.6866060Z   just -> /Users/runner/.vx/store/just/1.48.1
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:42.6866760Z   vx bin -> /Users/runner/.vx/bin
+wcore-sandbox live macOS acceptance	Setup vx (installs Rust from vx.toml)	2026-07-28T13:50:42.6874450Z ✓ Exported 2 paths to /Users/runner/work/_temp/_runner_file_commands/add_path_983a8390-a9b0-49e1-b08d-86254d6c6ca8 (GitHub Actions)
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	﻿2026-07-28T13:50:42.8268020Z ##[group]Run set -euo pipefail
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8268320Z ^[[36;1mset -euo pipefail^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8268510Z ^[[36;1mecho "sw_vers:"; sw_vers^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8268730Z ^[[36;1mecho "uname: $(uname -a)"^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8269100Z ^[[36;1mecho "sandbox-exec: $(command -v sandbox-exec || echo MISSING)"^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8269570Z ^[[36;1m# A trivial deny-default profile that permits only process-exec.^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8269960Z ^[[36;1mprintf '(version 1)(allow default)' > /tmp/probe.sb^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8272100Z ^[[36;1mif sandbox-exec -f /tmp/probe.sb /bin/echo "sandbox-exec probe ok"; then^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8273030Z ^[[36;1m  echo "PROBE_RESULT=usable"^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8273260Z ^[[36;1melse^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8273440Z ^[[36;1m  echo "PROBE_RESULT=unusable (rc=$?)"^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8273700Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8308490Z shell: /bin/bash -e {0}
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8308710Z env:
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8308920Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8309190Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8309460Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8309670Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8312040Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8312230Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8816200Z sw_vers:
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8954940Z ProductName:		macOS
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8956100Z ProductVersion:		26.4
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8956420Z BuildVersion:		25E246
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8990070Z uname: Darwin sjc20-bb711-6c204559-be31-49cf-bb83-a1dfc2efc875-1A40953A0F55.local 25.4.0 Darwin Kernel Version 25.4.0: Thu Mar 19 19:29:33 PDT 2026; root:xnu-12377.101.15~1/RELEASE_ARM64_VMAPPLE arm64
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.8997270Z sandbox-exec: /usr/bin/sandbox-exec
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.9141000Z sandbox-exec probe ok
+wcore-sandbox live macOS acceptance	Probe the host sandbox facility	2026-07-28T13:50:42.9141920Z PROBE_RESULT=usable
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	﻿2026-07-28T13:50:42.9175280Z ##[group]Run set -uo pipefail
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9175600Z ^[[36;1mset -uo pipefail^[[0m
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9175930Z ^[[36;1mvx cargo test -p wcore-sandbox --test hard_process_containment_macos \^[[0m
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9176360Z ^[[36;1m  -- --ignored --test-threads=1 2>&1 | tee /tmp/containment.log^[[0m
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9176710Z ^[[36;1mecho "rc=${PIPESTATUS[0]}" | tee -a /tmp/containment.rc^[[0m
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9210280Z shell: /bin/bash -e {0}
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9210560Z env:
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9210730Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9210930Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9211180Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9211420Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9213830Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:42.9214050Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.0553380Z ⬇  Installing rust@1.29.0...
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2170720Z warn: It looks like you have an existing rustup settings file at:
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2171300Z warn: /Users/runner/.vx/store/rust/1.29.0/rustup/settings.toml
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2171870Z warn: Rustup will install the default toolchain as specified in the settings file,
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2172270Z warn: instead of the one inferred from the default host triple.
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2255510Z info: profile set to default
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2256340Z info: default host triple is aarch64-apple-darwin
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.2270640Z info: syncing channel updates for stable-aarch64-apple-darwin
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.3162760Z info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:50:44.3167580Z info: downloading 6 components
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3638110Z info: default toolchain set to stable-aarch64-apple-darwin
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3639750Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3949870Z   stable-aarch64-apple-darwin installed - rustc 1.97.1 (8bab26f4f 2026-07-14)
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3950700Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3952910Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3954440Z Rust is installed now. Great!
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3956160Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3956890Z To get started you need Cargo's bin directory 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3957770Z (/Users/runner/.vx/store/rust/1.29.0/cargo/bin) in your PATH
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3958970Z environment variable. This has not been done automatically.
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3959400Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3959600Z To configure your current shell, you need to source
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3960330Z the corresponding env file under /Users/runner/.vx/store/rust/1.29.0/cargo.
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3961320Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3961760Z This is usually done by running one of the following (note the leading DOT):
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3974440Z . "/Users/runner/.vx/store/rust/1.29.0/cargo/env"            # For 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3975150Z sh/bash/zsh/ash/dash/pdksh
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3975570Z source "/Users/runner/.vx/store/rust/1.29.0/cargo/env.fish"  # For fish
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3976240Z source "/Users/runner/.vx/store/rust/1.29.0/cargo/env.nu"  # For nushell
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3978240Z source "/Users/runner/.vx/store/rust/1.29.0/cargo/env.tcsh"  # For tcsh
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3978850Z . "/Users/runner/.vx/store/rust/1.29.0/cargo/env.ps1"        # For pwsh
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.3979720Z source "/Users/runner/.vx/store/rust/1.29.0/cargo/env.xsh"   # For xonsh
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:04.7912190Z     Updating crates.io index
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.2868540Z  Downloading crates ...
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.3260440Z   Downloaded errno v0.3.14
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.3371940Z   Downloaded sha1_smol v1.0.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.3481340Z   Downloaded zmij v1.0.21
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.3622090Z   Downloaded sha2 v0.10.9
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.3741260Z   Downloaded xattr v1.6.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.3846750Z   Downloaded winnow v1.0.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4088970Z   Downloaded unicode-ident v1.0.24
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4157520Z   Downloaded serde_json v1.0.150
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4593850Z   Downloaded tar v0.4.46
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4653770Z   Downloaded typenum v1.20.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4725960Z   Downloaded indexmap v2.14.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4806010Z   Downloaded hashbrown v0.17.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.4911320Z   Downloaded tokio-util v0.7.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5088910Z   Downloaded syn v2.0.117
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5294900Z   Downloaded serde v1.0.228
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5381460Z   Downloaded mio v1.2.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5499440Z   Downloaded chrono v0.4.44
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5620080Z   Downloaded tracing-attributes v0.1.31
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5674020Z   Downloaded toml_parser v1.1.2+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5738700Z   Downloaded once_cell v1.21.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.5790810Z   Downloaded rustix v0.38.44
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.6331570Z   Downloaded toml_datetime v1.1.1+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.6357280Z   Downloaded rustix v1.1.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.6911720Z   Downloaded thiserror-impl v2.0.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.6941370Z   Downloaded thiserror v2.0.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7112760Z   Downloaded socket2 v0.6.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7148280Z   Downloaded home v0.5.12
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7166540Z   Downloaded futures-task v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7198450Z   Downloaded tracing v0.1.44
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7562590Z   Downloaded futures-core v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7597450Z   Downloaded bytes v1.11.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7691180Z   Downloaded which v6.0.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7722130Z   Downloaded tokio-macros v2.7.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7743090Z   Downloaded proc-macro2 v1.0.106
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7799260Z   Downloaded maybe-owned v0.3.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7823330Z   Downloaded itoa v1.0.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7866640Z   Downloaded generic-array v0.14.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7891940Z   Downloaded futures-macro v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7912920Z   Downloaded filetime v0.2.29
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.7945950Z   Downloaded cap-primitives v3.4.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.8206400Z   Downloaded version_check v0.9.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.8241940Z   Downloaded smallvec v1.15.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.8291770Z   Downloaded signal-hook-registry v1.4.8
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.8316120Z   Downloaded tokio v1.52.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:06.9329070Z   Downloaded libc v0.2.186
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.0769250Z   Downloaded serde_spanned v1.1.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.0791030Z   Downloaded serde_core v1.0.228
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.0843290Z   Downloaded pin-project-lite v0.2.17
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.1285480Z   Downloaded parking_lot v0.12.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.1334350Z   Downloaded num-traits v0.2.19
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.1384810Z   Downloaded ipnet v2.12.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.1414410Z   Downloaded io-lifetimes v2.0.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.1442340Z   Downloaded futures-util v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2094810Z   Downloaded digest v0.10.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2125430Z   Downloaded cfg-if v1.0.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2148320Z   Downloaded cap-std v3.4.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2202220Z   Downloaded memchr v2.8.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2319490Z   Downloaded lock_api v0.4.14
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2339510Z   Downloaded io-extras v0.18.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2379200Z   Downloaded getrandom v0.4.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2889080Z   Downloaded fastrand v2.4.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2913670Z   Downloaded either v1.16.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2939790Z   Downloaded cpufeatures v0.2.17
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.2981350Z   Downloaded core-foundation-sys v0.8.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3040050Z   Downloaded bitflags v2.11.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3121050Z   Downloaded uuid v1.23.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3169830Z   Downloaded tracing-core v0.1.36
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3223360Z   Downloaded toml_writer v1.1.1+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3553800Z   Downloaded toml v1.1.2+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3646370Z   Downloaded tempfile v3.27.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3690870Z   Downloaded slab v0.4.12
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3711260Z   Downloaded serde_derive v1.0.228
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3773600Z   Downloaded quote v1.0.45
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3823950Z   Downloaded parking_lot_core v0.9.12
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3862190Z   Downloaded iana-time-zone v0.1.65
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3930980Z   Downloaded crypto-common v0.1.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.3946350Z   Downloaded autocfg v1.5.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4273490Z   Downloaded async-trait v0.1.89
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4351480Z   Downloaded ambient-authority v0.0.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4377880Z   Downloaded scopeguard v1.2.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4398360Z   Downloaded futures-sink v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4414230Z   Downloaded fs-set-times v0.20.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4441520Z   Downloaded equivalent v1.0.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4456480Z   Downloaded block-buffer v0.10.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4817570Z    Compiling libc v0.2.186
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4818320Z    Compiling proc-macro2 v1.0.106
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:07.4818690Z    Compiling quote v1.0.45
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:11.8959530Z    Compiling unicode-ident v1.0.24
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:12.0103280Z    Compiling cfg-if v1.0.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:12.0413330Z    Compiling serde_core v1.0.228
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:12.2837820Z    Compiling bitflags v2.11.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:12.6690970Z    Compiling syn v2.0.117
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:12.6834290Z    Compiling errno v0.3.14
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:12.7798640Z    Compiling version_check v0.9.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:13.0066740Z    Compiling rustix v1.1.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:13.4456730Z    Compiling generic-array v0.14.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:14.9649840Z    Compiling io-lifetimes v2.0.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:15.2404380Z    Compiling typenum v1.20.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:15.3987450Z    Compiling parking_lot_core v0.9.12
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:15.6009230Z    Compiling autocfg v1.5.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:15.9540830Z    Compiling num-traits v0.2.19
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.1797040Z    Compiling serde v1.0.228
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.3971650Z    Compiling smallvec v1.15.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.4185250Z    Compiling pin-project-lite v0.2.17
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.4565790Z    Compiling io-extras v0.18.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.5371420Z    Compiling scopeguard v1.2.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.6978850Z    Compiling zmij v1.0.21
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:16.7847670Z    Compiling getrandom v0.4.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.0223210Z    Compiling lock_api v0.4.14
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.2259420Z    Compiling block-buffer v0.10.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.2506140Z    Compiling crypto-common v0.1.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.3106620Z    Compiling once_cell v1.21.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.4019650Z    Compiling serde_json v1.0.150
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.4869820Z    Compiling cap-primitives v3.4.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.5527810Z    Compiling serde_derive v1.0.228
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.5722110Z    Compiling core-foundation-sys v0.8.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.7216800Z    Compiling rustix v0.38.44
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:17.7306570Z    Compiling thiserror v2.0.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:18.0242820Z    Compiling iana-time-zone v0.1.65
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:18.1095970Z    Compiling tokio-macros v2.7.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:18.1395230Z    Compiling thiserror-impl v2.0.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:18.5728500Z    Compiling futures-macro v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:19.1214860Z    Compiling digest v0.10.7
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:19.2459420Z    Compiling parking_lot v0.12.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:19.6207980Z    Compiling fs-set-times v0.20.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:19.6908790Z    Compiling signal-hook-registry v1.4.8
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:19.7568510Z    Compiling socket2 v0.6.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:19.8838890Z    Compiling mio v1.2.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.0812980Z    Compiling cpufeatures v0.2.17
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.1307370Z    Compiling futures-core v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.1973340Z    Compiling winnow v1.0.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.3849190Z    Compiling maybe-owned v0.3.4
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.4752210Z    Compiling ambient-authority v0.0.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.5004820Z    Compiling cap-std v3.4.5
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.5596680Z    Compiling slab v0.4.12
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.6930170Z    Compiling ipnet v2.12.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.7266170Z    Compiling bytes v1.11.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:20.8615360Z    Compiling futures-task v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:21.0022310Z    Compiling memchr v2.8.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:21.1330740Z    Compiling itoa v1.0.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:21.4929740Z    Compiling tokio v1.52.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:21.7549680Z    Compiling futures-util v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:22.5934270Z    Compiling chrono v0.4.44
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:23.5932000Z    Compiling toml_parser v1.1.2+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:24.1799410Z    Compiling sha2 v0.10.9
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:24.4192560Z    Compiling tracing-attributes v0.1.31
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:25.4250490Z    Compiling async-trait v0.1.89
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:25.6435980Z    Compiling tracing-core v0.1.36
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.1024570Z    Compiling xattr v1.6.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.3525820Z    Compiling serde_spanned v1.1.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.3756080Z    Compiling toml_datetime v1.1.1+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.4202980Z    Compiling filetime v0.2.29
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.5270690Z    Compiling toml_writer v1.1.1+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.5775430Z    Compiling sha1_smol v1.0.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.6691190Z    Compiling futures-sink v0.3.32
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.6915700Z    Compiling fastrand v2.4.1
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.7127030Z    Compiling home v0.5.12
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.7607400Z    Compiling either v1.16.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.8084690Z    Compiling tempfile v3.27.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:26.8778440Z    Compiling which v6.0.3
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:27.0050730Z    Compiling tokio-util v0.7.18
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:27.0103170Z    Compiling uuid v1.23.2
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:27.1932830Z    Compiling toml v1.1.2+spec-1.1.0
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:27.3096800Z    Compiling tar v0.4.46
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:27.4171670Z    Compiling wcore-types v0.12.25 (/Users/runner/work/wayland-core/wayland-core/crates/wcore-types)
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:27.9560340Z    Compiling tracing v0.1.44
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:28.9623320Z    Compiling wcore-sandbox v0.12.25 (/Users/runner/work/wayland-core/wayland-core/crates/wcore-sandbox)
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:30.8721610Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 26.37s
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1151950Z      Running tests/hard_process_containment_macos.rs (target/debug/deps/hard_process_containment_macos-3362c428b5b0fe49)
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1204060Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1204560Z running 1 test
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1691950Z test required_live_macos_process_tree_contains_descendants ... ok
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1692430Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1692860Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.1693230Z 
+wcore-sandbox live macOS acceptance	Run hard_process_containment_macos	2026-07-28T13:51:31.2209510Z rc=0
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	﻿2026-07-28T13:51:31.2526880Z ##[group]Run set -uo pipefail
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.2527490Z ^[[36;1mset -uo pipefail^[[0m
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.2527870Z ^[[36;1mvx cargo test -p wcore-sandbox --test live_integrity_macos \^[[0m
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.2528290Z ^[[36;1m  -- --ignored --test-threads=1 2>&1 | tee /tmp/integrity.log^[[0m
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.2528910Z ^[[36;1mecho "rc=${PIPESTATUS[0]}" | tee -a /tmp/integrity.rc^[[0m
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4029140Z shell: /bin/bash -e {0}
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4029460Z env:
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4029750Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4030000Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4030860Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4031270Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4033530Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:31.4033820Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:32.9488950Z    Compiling wcore-sandbox v0.12.25 (/Users/runner/work/wayland-core/wayland-core/crates/wcore-sandbox)
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2102050Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.93s
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2185790Z      Running tests/live_integrity_macos.rs (target/debug/deps/live_integrity_macos-b6802c51b17ce709)
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2233820Z 
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2234310Z running 1 test
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2655910Z test required_live_macos_retained_directory_confines_writes ... ok
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2656490Z 
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2656810Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2657200Z 
+wcore-sandbox live macOS acceptance	Run live_integrity_macos	2026-07-28T13:51:33.2742250Z rc=0
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	﻿2026-07-28T13:51:33.3067650Z ##[group]Run set -uo pipefail
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3068130Z ^[[36;1mset -uo pipefail^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3068380Z ^[[36;1mfail=0^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3068610Z ^[[36;1mcheck_suite() {^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3068900Z ^[[36;1m  local name="$1" log="$2" want_tests="$3"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3069260Z ^[[36;1m  echo "=== ${name} ==="^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3069590Z ^[[36;1m  if [ ! -s "${log}" ]; then^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3070050Z ^[[36;1m    echo "FAIL(${name}): no log produced — the suite never ran"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3070530Z ^[[36;1m    fail=1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3070780Z ^[[36;1m    return^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3071060Z ^[[36;1m  fi^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3071440Z ^[[36;1m  if ! grep -q "running ${want_tests} test" "${log}"; then^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3072330Z ^[[36;1m    echo "FAIL(${name}): expected 'running ${want_tests} test' — suite collected the wrong number of cases (flavour A/C: zero executed)"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3073140Z ^[[36;1m    grep -E "running [0-9]+ test|test result" "${log}" || true^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3073590Z ^[[36;1m    fail=1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3073880Z ^[[36;1m  fi^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3074240Z ^[[36;1m  if ! grep -qE "test result: ok\. ${want_tests} passed; 0 failed" "${log}"; then^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3074820Z ^[[36;1m    echo "FAIL(${name}): expected '${want_tests} passed; 0 failed'"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3075340Z ^[[36;1m    grep -E "test result" "${log}" || true^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3075640Z ^[[36;1m    fail=1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3075930Z ^[[36;1m  fi^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3076170Z ^[[36;1m  if grep -q "^skip:" "${log}"; then^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3076700Z ^[[36;1m    echo "FAIL(${name}): the test took an early return and asserted NOTHING (flavour B):"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3077100Z ^[[36;1m    grep "^skip:" "${log}"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3077430Z ^[[36;1m    fail=1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3077730Z ^[[36;1m  fi^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3077950Z ^[[36;1m  echo "--- ${name} verdict lines ---"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3078470Z ^[[36;1m  grep -E "running [0-9]+ test|test result|^skip:" "${log}" || true^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3078810Z ^[[36;1m}^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3079170Z ^[[36;1mcheck_suite hard_process_containment_macos /tmp/containment.log 1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3079590Z ^[[36;1mcheck_suite live_integrity_macos /tmp/integrity.log 1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3080030Z ^[[36;1mecho "=== recorded cargo exit codes ==="^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3080500Z ^[[36;1mcat /tmp/containment.rc /tmp/integrity.rc 2>/dev/null || echo "(none recorded)"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3080880Z ^[[36;1mif [ "${fail}" -ne 0 ]; then^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3081240Z ^[[36;1m  echo "GATE: FAILED"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3081490Z ^[[36;1m  exit 1^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3081790Z ^[[36;1mfi^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3082240Z ^[[36;1mecho "GATE: PASSED — both required_live_macos_* cases executed on a real macOS host"^[[0m
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3121250Z shell: /bin/bash -e {0}
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3121610Z env:
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3121830Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3122160Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3123280Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3123580Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3125870Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3126160Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3512880Z === hard_process_containment_macos ===
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3650520Z --- hard_process_containment_macos verdict lines ---
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3686670Z running 1 test
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3687830Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.05s
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3688870Z === live_integrity_macos ===
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3838770Z --- live_integrity_macos verdict lines ---
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3894220Z running 1 test
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3895150Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.04s
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3895760Z === recorded cargo exit codes ===
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3932840Z rc=0
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3933180Z rc=0
+wcore-sandbox live macOS acceptance	Assert both suites executed their case and did not skip	2026-07-28T13:51:33.3936890Z GATE: PASSED — both required_live_macos_* cases executed on a real macOS host
+wcore-sandbox live macOS acceptance	Upload logs	﻿2026-07-28T13:51:33.4013700Z Node 20 is being deprecated. This workflow is running with Node 24 by default. If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4014750Z ##[group]Run actions/upload-artifact@v4
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4014990Z with:
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4015210Z   name: macos-native-suites-logs
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4015580Z   path: /tmp/containment.log
+wcore-sandbox live macOS acceptance	Upload logs	/tmp/integrity.log
+wcore-sandbox live macOS acceptance	Upload logs	/tmp/containment.rc
+wcore-sandbox live macOS acceptance	Upload logs	/tmp/integrity.rc
+wcore-sandbox live macOS acceptance	Upload logs	
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4015930Z   if-no-files-found: warn
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4016150Z   compression-level: 6
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4016320Z   overwrite: false
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4016530Z   include-hidden-files: false
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4016730Z env:
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4016920Z   CARGO_INCREMENTAL: 0
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4017110Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4017360Z   WAYLAND_SANDBOX_LIVE_MACOS: 1
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4017630Z   VX_INSTALL_DIR: /Users/runner/.local/bin
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4019720Z   GITHUB_TOKEN: ***
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.4019880Z ##[endgroup]
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8495070Z (node:6074) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8495820Z (Use `node --trace-deprecation ...` to show where the warning was created)
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8546550Z Multiple search paths detected. Calculating the least common ancestor of all paths
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8548280Z The least common ancestor is /tmp. This will be the root directory of the artifact
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8548750Z With the provided path, there will be 4 files uploaded
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8551250Z Artifact name is valid!
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:33.8551900Z Root directory input is valid!
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.2935850Z (node:6074) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.2979820Z Beginning upload of artifact content to blob storage
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.6030660Z Uploaded bytes 2932
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.6777120Z Finished uploading artifact content to blob storage!
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.6777650Z SHA256 digest of uploaded artifact zip is 09d9c2d24a635a1062e5e431c2fb57495924d3361204022850efbb5c41bd38dd
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.6778530Z Finalizing artifact upload
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.9448300Z Artifact macos-native-suites-logs.zip successfully finalized. Artifact ID 8690575322
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.9450450Z Artifact macos-native-suites-logs has been successfully uploaded! Final size is 2932 bytes. Artifact ID is 8690575322
+wcore-sandbox live macOS acceptance	Upload logs	2026-07-28T13:51:34.9458140Z Artifact download URL: https://github.com/FerroxLabs/wayland-core/actions/runs/30364529551/artifacts/8690575322
+wcore-sandbox live macOS acceptance	Post Setup vx (installs Rust from vx.toml)	﻿2026-07-28T13:51:35.0090390Z Post job cleanup.
+wcore-sandbox live macOS acceptance	Post Setup vx (installs Rust from vx.toml)	2026-07-28T13:51:35.4840980Z Post job cleanup.
+wcore-sandbox live macOS acceptance	Post Setup vx (installs Rust from vx.toml)	2026-07-28T13:51:35.7534340Z Cache hit occurred on the primary key vx-tools-macOS-latest--667c187788fa70bf5066985a27bbe2ef28df6c34e7b11a4029b1da449076bfaf, not saving cache.
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	﻿2026-07-28T13:51:35.7666570Z Post job cleanup.
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:35.9747080Z [command]/opt/homebrew/bin/git version
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1120190Z git version 2.55.0
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1140410Z Copying '/Users/runner/.gitconfig' to '/Users/runner/work/_temp/c7771dbd-cd79-4f15-8e1f-038ee56f8734/.gitconfig'
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1148290Z Temporarily overriding HOME='/Users/runner/work/_temp/c7771dbd-cd79-4f15-8e1f-038ee56f8734' before making global git config changes
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1149080Z Adding repository directory to the temporary git global config as a safe directory
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1151640Z [command]/opt/homebrew/bin/git config --global --add safe.directory /Users/runner/work/wayland-core/wayland-core
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1312290Z Removing SSH command configuration
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1323820Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp core\.sshCommand
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.1437280Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.3472780Z Removing HTTP extra header
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.3575830Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.3603530Z [command]/opt/homebrew/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5170310Z Removing includeIf entries pointing to credentials config files
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5205850Z [command]/opt/homebrew/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5207580Z includeif.gitdir:/Users/runner/work/wayland-core/wayland-core/.git.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5209100Z includeif.gitdir:/Users/runner/work/wayland-core/wayland-core/.git/worktrees/*.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5210300Z includeif.gitdir:/github/workspace/.git.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5211340Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5215300Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/Users/runner/work/wayland-core/wayland-core/.git.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5398990Z /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5420930Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/Users/runner/work/wayland-core/wayland-core/.git.path /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.5962410Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/Users/runner/work/wayland-core/wayland-core/.git/worktrees/*.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6252480Z /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6336010Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/Users/runner/work/wayland-core/wayland-core/.git/worktrees/*.path /Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6394080Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6486490Z /github/runner_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6499470Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6584230Z [command]/opt/homebrew/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6658820Z /github/runner_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6667860Z [command]/opt/homebrew/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.6755930Z [command]/opt/homebrew/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+wcore-sandbox live macOS acceptance	Post Run actions/checkout@v6	2026-07-28T13:51:36.7884960Z Removing credentials config '/Users/runner/work/_temp/git-credentials-b4a3b6e0-7a9f-4f92-afe3-0b7b4160b887.config'
+wcore-sandbox live macOS acceptance	Complete job	﻿2026-07-28T13:51:36.8295820Z Cleaning up orphan processes
+wcore-sandbox live macOS acceptance	Complete job	2026-07-28T13:51:38.8448930Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

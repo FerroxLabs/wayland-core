@@ -36,6 +36,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use wcore_agent::health::{self, HealthStatus, ProviderHealth as AgentProviderHealth};
+use wcore_protocol::events::{
+    CapabilityActivation, CapabilityId, CapabilityReasonCode, CapabilityStage,
+};
 
 use crate::doctor;
 use crate::tui::app::{App, TurnRole};
@@ -143,6 +146,47 @@ impl HealthState {
             HealthState::Warn => t.warning,
             HealthState::Fail => t.error,
         }
+    }
+}
+
+fn capability_label(capability: CapabilityId) -> &'static str {
+    match capability {
+        CapabilityId::PricingRefresher => "pricing refresher",
+        CapabilityId::MidFlightMonitor => "mid-flight monitor",
+        CapabilityId::CooldownTracker => "cooldown tracker",
+        CapabilityId::LearnedPolicy => "learned policy",
+        CapabilityId::SmartHandoff => "smart handoff",
+        CapabilityId::DelegateIsolation => "delegate isolation",
+        CapabilityId::ProcedureSkillDrafting => "procedure drafting",
+        CapabilityId::LegacyAutoSkillDrafting => "legacy skill drafting",
+    }
+}
+
+fn capability_health(activation: &CapabilityActivation) -> (HealthState, &'static str) {
+    match (activation.stage, activation.reason) {
+        (CapabilityStage::Ready, None) => (HealthState::Ok, "ready"),
+        (CapabilityStage::Observed, None) => (HealthState::Ok, "verified outcome observed"),
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::DisabledByConfig)) => {
+            (HealthState::Warn, "disabled by configuration")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::DependencyUnavailable)) => {
+            (HealthState::Fail, "required dependency unavailable")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::NoProductionConstructor)) => {
+            (HealthState::Fail, "no production constructor")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::RuntimePathUnwired)) => {
+            (HealthState::Fail, "runtime path not wired")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::IsolationNotEnforced)) => {
+            (HealthState::Fail, "isolation not enforced")
+        }
+        (CapabilityStage::Declared, None) => (HealthState::Warn, "declared"),
+        (CapabilityStage::Configured, None) => (HealthState::Warn, "configured"),
+        (CapabilityStage::Constructed, None) => (HealthState::Warn, "constructed"),
+        (CapabilityStage::Reached, None) => (HealthState::Warn, "runtime path reached"),
+        (CapabilityStage::OutcomeChanged, None) => (HealthState::Warn, "outcome changed"),
+        _ => (HealthState::Fail, "invalid activation evidence"),
     }
 }
 
@@ -1611,7 +1655,29 @@ impl DiagnosticsSurface {
             );
         }
 
-        // ── 4. Per-tool backend status ──────────────────────────────
+        // ── 4. Audited capability activation ───────────────────────
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "CAPABILITIES");
+        if app.capability_status.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  activation evidence not received",
+                Style::default().fg(t.warning),
+            )));
+        } else {
+            for (capability, activation) in &app.capability_status {
+                let (state, detail) = capability_health(activation);
+                push_wrapped_status_rows(
+                    &mut lines,
+                    state,
+                    capability_label(*capability),
+                    detail,
+                    t,
+                    avail_status,
+                );
+            }
+        }
+
+        // ── 5. Per-tool backend status ──────────────────────────────
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "TOOLS");
         for row in &self.tool_status {
@@ -1689,14 +1755,22 @@ impl DiagnosticsSurface {
                     } else {
                         format!(" · opts: {}", ch.option_keys.join(", "))
                     };
-                    let secrets = if ch.secret_keys.is_empty() {
+                    // Handles, not secret key names: the handle is what the
+                    // operator has to have stored for this channel to work,
+                    // and it is not itself a secret.
+                    let creds = if ch.credential_handles.is_empty() {
                         String::new()
                     } else {
-                        format!(" · secrets: {}", ch.secret_keys.join(", "))
+                        let names: Vec<&str> = ch
+                            .credential_handles
+                            .iter()
+                            .map(|(_, handle)| handle.as_str())
+                            .collect();
+                        format!(" · creds: {}", names.join(", "))
                     };
                     (
                         HealthState::Ok,
-                        format!("{} · enabled{opts}{secrets}", ch.platform),
+                        format!("{} · enabled{opts}{creds}", ch.platform),
                     )
                 };
                 push_wrapped_status_rows(&mut lines, state, &ch.name, &detail, t, avail_status);
@@ -1867,7 +1941,7 @@ impl DiagnosticsSurface {
         lines.push(Line::from(vec![
             Span::styled("  total    ", Style::default().fg(t.text_dim)),
             Span::styled(
-                format!("${:.4}", cost.total_cost_usd),
+                cost.formatted_total_cost(),
                 Style::default().fg(t.orange).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1900,7 +1974,7 @@ impl DiagnosticsSurface {
                         format!("{:<24}", format!("{} · {}", row.provider, row.model)),
                         Style::default().fg(t.text_dim),
                     ),
-                    Span::styled(format!("${:.4}", row.cost_usd), Style::default().fg(t.text)),
+                    Span::styled(row.formatted_cost(), Style::default().fg(t.text)),
                 ]));
             }
         }
@@ -2410,12 +2484,14 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0412,
+                    priced: true,
                 },
                 TurnCostView {
                     turn: 2,
                     model: "claude-sonnet-4-6".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0319,
+                    priced: true,
                 },
             ],
         });
@@ -2425,6 +2501,49 @@ mod tests {
         assert!(out.contains("turn   1"), "turn 1 row missing");
         assert!(out.contains("turn   2"), "turn 2 row missing");
         assert!(out.contains("anthropic"), "provider missing");
+    }
+
+    #[test]
+    fn cost_renders_unpriced_and_known_free_turns_distinctly() {
+        use crate::tui::app::{SessionCostView, TurnCostView};
+        let mut surface = DiagnosticsSurface::new();
+        surface.handle_key(key(KeyCode::Char('2')), &mut App::new());
+
+        let mut app = App::new();
+        app.cost = Some(SessionCostView {
+            session_id: "pricing-status".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![
+                TurnCostView {
+                    turn: 1,
+                    model: "unknown-model".into(),
+                    provider: "custom".into(),
+                    cost_usd: 0.0,
+                    priced: false,
+                },
+                TurnCostView {
+                    turn: 2,
+                    model: "local-model".into(),
+                    provider: "ollama".into(),
+                    cost_usd: 0.0,
+                    priced: true,
+                },
+            ],
+        });
+
+        let out = render_with_app(&mut surface, &app);
+        assert!(
+            out.contains("$0.0000 + unpriced"),
+            "aggregate must disclose its unpriced component: {out}"
+        );
+        assert!(
+            out.contains("custom · unknown-model") && out.contains("unpriced"),
+            "unknown price must not render as free: {out}"
+        );
+        assert!(
+            out.contains("ollama · local-model") && out.contains("$0.0000"),
+            "known-free turn must remain a priced zero: {out}"
+        );
     }
 
     // -- /memory screen ----------------------------------------------------
@@ -2818,6 +2937,41 @@ mod tests {
     }
 
     #[test]
+    fn doctor_shows_typed_capability_truth() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        app.capability_status.insert(
+            CapabilityId::SmartHandoff,
+            CapabilityActivation::stage(CapabilityId::SmartHandoff, CapabilityStage::Ready),
+        );
+        app.capability_status.insert(
+            CapabilityId::DelegateIsolation,
+            CapabilityActivation::unavailable(
+                CapabilityId::DelegateIsolation,
+                CapabilityReasonCode::IsolationNotEnforced,
+            ),
+        );
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(
+            out.contains("CAPABILITIES"),
+            "section header missing:\n{out}"
+        );
+        assert!(
+            out.contains("smart handoff"),
+            "ready capability missing:\n{out}"
+        );
+        assert!(
+            out.contains("delegate isolation"),
+            "unavailable capability missing:\n{out}"
+        );
+        assert!(
+            out.contains("isolation not enforced"),
+            "reason missing:\n{out}"
+        );
+    }
+
+    #[test]
     fn doctor_mcp_section_reads_none_configured_when_empty() {
         let mut s = DiagnosticsSurface::new();
         let mut app = App::new(); // empty mcp_status
@@ -2932,7 +3086,10 @@ mod tests {
                 enabled: true,
                 known_platform: true,
                 option_keys: vec!["channel".to_string()],
-                secret_keys: vec!["bot_token".to_string()],
+                credential_handles: vec![(
+                    "credential_handle_bot_token".to_string(),
+                    "slack.myslack.bot_token".to_string(),
+                )],
                 parse_error: None,
             },
             wcore_channels_registry::ChannelSummary {
@@ -2941,7 +3098,7 @@ mod tests {
                 enabled: true,
                 known_platform: false,
                 option_keys: vec![],
-                secret_keys: vec![],
+                credential_handles: vec![],
                 parse_error: None,
             },
         ];

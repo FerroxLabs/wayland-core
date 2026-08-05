@@ -1,20 +1,24 @@
-//! FailoverReason taxonomy ported from openclaw MIT © Peter Steinberger 2025.
+//! Failover reason taxonomy.
+//!
+//! The variant names and their order derive from OpenClaw — see
+//! THIRD-PARTY-NOTICES.md. Nothing else in this module does.
 //!
 //! 11-variant enum describes WHY a provider call failed in a way the failover
 //! state machine can act on. Wraps the existing ProviderError as a `source`
 //! so this addition is purely additive and does not break the ABI.
 //!
 //! `ContextOverflow` is distinct from `Format`: recovery for ContextOverflow is
-//! "compact history or pick a larger-context model" rather than "swap provider"
-//! (matches openclaw's separate `context_overflow` classification).
+//! compaction or a policy-admitted model with a proven larger context window,
+//! never an arbitrary provider swap.
 
 use crate::ProviderError;
 use serde::{Deserialize, Serialize};
 
 /// Why a provider call failed, taxonomized for failover decisions.
 ///
-/// String representations match openclaw's TS string-union for cross-language
-/// log/telemetry compatibility.
+/// String representations match OpenClaw's TypeScript string-union so logs and
+/// telemetry correlate across the two implementations. See
+/// THIRD-PARTY-NOTICES.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailoverReason {
@@ -28,7 +32,7 @@ pub enum FailoverReason {
     ModelNotFound,
     SessionExpired,
     /// Prompt/context exceeded the model's window. Recovery is to compact or
-    /// route to a larger-context model — NOT to swap providers.
+    /// route only to a candidate with a proven larger context window.
     ContextOverflow,
     Unknown,
 }

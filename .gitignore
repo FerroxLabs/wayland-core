@@ -75,7 +75,6 @@ ijfw/
 
 # Internal working artifacts — never publish
 .blackboard/
-.planning/
 .ijfw/
 .session*
 STATE.md
@@ -83,3 +82,12 @@ PLAN-AMENDMENTS.md
 .codex/
 .cursor/
 .windsurfrules
+
+# F26-01: the portability corpora are structure clones of real peer state
+# trees, so a profile dotenv must keep its real NAME to preserve the shape the
+# fixture exists to reproduce. These carry canary tokens, never real secrets
+# (proven by scripts/portability-corpus-gen.py + its gate).
+!crates/wcore-cli/tests/fixtures/portability/**/.env
+
+# Python bytecode from the proof harnesses under scripts/.
+__pycache__/

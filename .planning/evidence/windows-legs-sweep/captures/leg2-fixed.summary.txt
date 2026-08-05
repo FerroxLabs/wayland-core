@@ -1,0 +1,22 @@
+637:running 20 tests
+638:test budget_authority::tests::active_turn_rollups_survive_restore_and_finish ... ok
+639:test budget_authority::tests::authority_free_bind_rejects_non_pristine_imported_session ... ok
+640:test budget_authority::tests::budget_grant_request_survives_durable_reopen_without_double_extension ... ok
+641:test budget_authority::tests::concurrent_journal_writer_never_faults_budget_authority ... ok
+642:test budget_authority::tests::create_and_transaction_commit_complete_authority ... ok
+643:test budget_authority::tests::detached_coordinator_does_not_claim_a_durable_epoch ... ok
+644:test budget_authority::tests::fallback_can_reuse_dispatch_after_proved_no_send_release ... ok
+645:test budget_authority::tests::fallback_reservation_ignores_prior_attempts_under_same_dispatch ... ok
+646:test budget_authority::tests::journal_failure_permanently_latches_runtime_authority ... ok
+647:test budget_authority::tests::managed_restore_clamps_prior_interactive_budget_extension ... ok
+648:test budget_authority::tests::restart_reconciliation_posts_each_siblings_outcome_to_that_sibling_alone ... ok
+649:test budget_authority::tests::restart_releases_dispatch_reservation_when_no_send_started ... ok
+650:test budget_authority::tests::restart_settles_successful_dispatch_once_before_runtime_settlement ... ok
+651:test budget_authority::tests::restore_intersects_caps_and_conservatively_settles_reservations ... ok
+652:test budget_authority::tests::restore_reconciles_active_budget_when_durable_turn_is_terminal ... ok
+653:test budget_authority::tests::restore_repairs_turn_started_before_active_budget_commit ... ok
+654:test budget_authority::tests::shared_detached_seed_rebinds_in_place_to_durable_authority ... ok
+655:test budget_authority::tests::shared_rebind_rejects_an_already_durable_authority ... ok
+656:test budget_authority::tests::shared_session_bind_is_idempotent_but_rejects_cross_session_switch ... ok
+657:test spawner::posture_inheritance_tests::routed_seat_preserves_canonical_policy_and_budget_authority ... ok
+659:test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 2194 filtered out; finished in 4.18s

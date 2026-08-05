@@ -1,0 +1,22 @@
+EVIDENCE ID : F24-01-GATEWAY
+LEDGER ROW  : 21
+ARTIFACT    : `phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md` + `24-01-GATEWAY-CONTRACT.md` — `wcore-gateway` lifecycle state machine, single-instance lock, ordered drain, exactly-once delivery ledger; one HIGH Windows detach defect measured and fixed. **No live operator journey at this plan**
+
+== PATH RESOLUTION ==
+[OK]   stat phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md
+       -> .planning/phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md  size=13786
+       head:
+---
+phase: 24-gateway-automation-channels-typed-api
+plan: "01"
+subsystem: gateway
+tags: [gateway, lifecycle, delivery-ledger, drain, windows-service, pidlock]
+status: partial
+
+== SIBLING (bare-filename) RESOLUTION ==
+[OK]   sibling 24-01-GATEWAY-CONTRACT.md -> .planning/phases/24-gateway-automation-channels-typed-api/24-01-GATEWAY-CONTRACT.md
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

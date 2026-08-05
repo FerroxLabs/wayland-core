@@ -44,11 +44,13 @@ fn anthropic_config(api_key: &str) -> Config {
             env_passthrough: Vec::new(),
             sandbox: None,
             allow_no_sandbox: None,
+            media_pricing: Default::default(),
         },
         session: SessionConfig {
             enabled: false,
             directory: "/tmp".to_string(),
             max_sessions: 1,
+            ..Default::default()
         },
         ..Default::default()
     }

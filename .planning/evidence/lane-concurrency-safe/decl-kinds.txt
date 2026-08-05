@@ -1,0 +1,70 @@
+BODILESS       lib.rs:342
+OTHER          archive_tool.rs:329
+OTHER          discord_tool.rs:508
+OTHER          git.rs:132
+OTHER          github_tool.rs:755
+OTHER          gitlab_tool.rs:453
+OTHER          homeassistant_tool.rs:415
+OTHER          lib.rs:576
+OTHER          notion_tool.rs:538
+OTHER          spotify_tool.rs:774
+OTHER          spotify_tool.rs:873
+OTHER          spotify_tool.rs:1104
+OTHER          spotify_tool.rs:1369
+OTHER          yuanbao_tools.rs:671
+UNCOND_FALSE   assert_fact.rs:96
+UNCOND_FALSE   bash.rs:281
+UNCOND_FALSE   cronjob_tools.rs:827
+UNCOND_FALSE   delegate.rs:357
+UNCOND_FALSE   edit.rs:185
+UNCOND_FALSE   google_meet_tool.rs:581
+UNCOND_FALSE   google_meet_tool.rs:923
+UNCOND_FALSE   google_meet_tool.rs:1016
+UNCOND_FALSE   record_episode.rs:98
+UNCOND_FALSE   script.rs:324
+UNCOND_FALSE   send_message.rs:305
+UNCOND_FALSE   spotify_tool.rs:567
+UNCOND_FALSE   todo.rs:312
+UNCOND_FALSE   tts_tool.rs:520
+UNCOND_FALSE   voice_mode.rs:1034
+UNCOND_FALSE   web_fetch.rs:295
+UNCOND_FALSE   write.rs:66
+UNCOND_TRUE    ask_user_question.rs:92
+UNCOND_TRUE    aws_cli_tool.rs:355
+UNCOND_TRUE    clarify.rs:87
+UNCOND_TRUE    doc_tool.rs:215
+UNCOND_TRUE    email_parse_tool.rs:261
+UNCOND_TRUE    gcloud_tool.rs:309
+UNCOND_TRUE    glob.rs:48
+UNCOND_TRUE    google_meet_tool.rs:733
+UNCOND_TRUE    google_meet_tool.rs:829
+UNCOND_TRUE    grep.rs:56
+UNCOND_TRUE    image_generation_tool.rs:463
+UNCOND_TRUE    image_inspect_tool.rs:250
+UNCOND_TRUE    jsonl_tool.rs:143
+UNCOND_TRUE    kubectl_tool.rs:296
+UNCOND_TRUE    linear_tool.rs:427
+UNCOND_TRUE    markdown_tool.rs:371
+UNCOND_TRUE    osv_check.rs:442
+UNCOND_TRUE    pdf_tool.rs:194
+UNCOND_TRUE    postgres_schema_tool.rs:366
+UNCOND_TRUE    read.rs:155
+UNCOND_TRUE    repomap.rs:72
+UNCOND_TRUE    session_search.rs:96
+UNCOND_TRUE    spotify_tool.rs:988
+UNCOND_TRUE    spotify_tool.rs:1267
+UNCOND_TRUE    sql_query_tool.rs:297
+UNCOND_TRUE    tool_search.rs:53
+UNCOND_TRUE    transcription_tools.rs:457
+UNCOND_TRUE    video_analyze_tool.rs:339
+UNCOND_TRUE    vision_tools.rs:473
+UNCOND_TRUE    wayland_introspection.rs:373
+UNCOND_TRUE    wayland_introspection.rs:435
+UNCOND_TRUE    web_tools.rs:753
+
+read.rs    structs=['ReadTool']  new=[('ReadTool', 'file_cache: Option<Arc<RwLock<FileStateC')]
+write.rs   structs=['WriteTool']  new=[('WriteTool', 'file_cache: Option<Arc<RwLock<FileStateC')]
+glob.rs    structs=['GlobTool']  new=[]
+grep.rs    structs=['GrepTool']  new=[]
+bash.rs    structs=['BashTool']  new=[]
+edit.rs    structs=['EditTool']  new=[('EditTool', 'file_cache: Option<Arc<RwLock<FileStateC')]

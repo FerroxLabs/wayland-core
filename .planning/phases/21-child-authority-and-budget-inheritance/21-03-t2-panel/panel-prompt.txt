@@ -1,0 +1,434 @@
+BUNDLE-ID=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+
+You are one of four independent members of a technical decision panel on the
+Wayland Core codebase (a multi-provider AI agent CLI in Rust). Read this bundle
+and commit to ONE position. You are not being asked to hedge.
+
+================================================================================
+THE QUESTION
+================================================================================
+
+Which of the corpus's CRITICAL and HIGH findings are repaired in this plan,
+which are disproved by correcting the case, and which are declined and left
+honestly open?
+
+================================================================================
+BACKGROUND
+================================================================================
+
+Phase 21's property: every delegated actor stays inside the parent's authority
+and resource envelope. Success Criterion 1 is that a child cannot widen ANY of
+provider, tool, filesystem, egress, secret, approval, depth, fan-out, time,
+token or cost restriction.
+
+Plan 21-01 produced an authority census. Plan 21-02 built a dual-surface hostile
+child corpus and measured it INDEPENDENTLY, forbidden from fixing anything: 11
+dimensions x 4 combinations (standalone/host-protocol crossed with
+in-process/live-against-the-real-binary) x 2 platforms (Linux, Windows) = 88
+executions. It recorded ZERO widenings but was explicit that three of the four
+census HIGH findings are NOT disproved by that zero.
+
+Plan 21-03 (this one) triages those findings, takes ONE authorization, repairs
+ONCE within a hard cap of TWO edit-build-run iterations on real hardware, and
+re-measures ONCE. It may not create a further plan. Phase 21 is capped at four
+plans total because the previous phase metastasised to seventy-four when its
+finding rules had no fixed point.
+
+The amended phase rules, verbatim:
+  - Findings at CRITICAL or HIGH must be FIXED or DISPROVED. MEDIUM and below
+    are logged to BACKLOG and do not block execution.
+  - A REPORTED RED IS WORTH FAR MORE THAN AN ENGINEERED GREEN. Never weaken an
+    assertion, #[ignore], #[allow], re-gate, delete a test, or raise a timeout
+    to reach a gate.
+  - A repair is not CLOSED until the shipped `wayland-core` binary is observed
+    refusing the actual widening at a surface a user touches. An in-process
+    green against a live red is NOT closed.
+
+DISPROVE means the corpus case asked a question production cannot actually be
+asked, so the CASE is corrected and no production code changes. It is a
+first-class outcome with equal standing to FIX, and it is the cheapest correct
+outcome when it is the true one.
+
+DECLINED means the panel has seen a real finding, weighed it against a measured
+cost, and chosen to leave it honestly open with its evidence. It is a decision
+on the record, not an oversight.
+
+================================================================================
+THE INDEPENDENT MEASUREMENT: what 21-02 found
+================================================================================
+
+CRITICAL findings: 0.  HIGH findings: 3.  MEDIUM: 4.  LOW: 3.
+
+FINDING F21-02-01 :: HIGH :: HIGH-1 (tool) is NOT disproved by this corpus.
+  Every tool combination recorded REFUSED, but none reached build_tool_registry
+  with a live child: a toolsets ["Bash"] request forces IsolatedMutation and
+  durable workspace preparation refuses first in a non-repository hermetic
+  workspace. Carried forward from the census unchanged. 21-03 must reach the
+  registry construction path directly, in a workspace where an isolated worktree
+  can be prepared, or disprove the finding with executable evidence at that seam.
+
+FINDING F21-02-02 :: HIGH :: HIGH-4 (approval) is CONFIRMED executably. The
+  non-managed branch of with_requested_approvals accepts a child-sourced Bypass
+  verbatim. It cannot be reached from production today, which is why the corpus
+  records the approval dimension NO-CHANNEL rather than ALLOWED, and why the
+  structural canary matters more than the current behaviour.
+
+FINDING F21-02-03 :: HIGH :: HIGH-3 (PolicyGate) is confirmed UNREACHABLE on the
+  agent path and is NOT carried by the corpus. set_policy_gate has zero callers
+  and every agent-path initialiser is None. The measurement is a one-off, not a
+  regression guard.
+
+The four MEDIUM and three LOW findings have exactly one disposition available
+under the amended rules (BACKLOG) and are not part of this decision.
+
+================================================================================
+THE TRIAGE: what plan 21-03 proposes, per finding
+================================================================================
+
+--- F21-02-01 :: HIGH :: proposed FIX
+Seam (census-assigned): crates/wcore-agent/src/spawner.rs :: build_tool_registry
+
+CONFIRMED at the seam, and NOT disprovable. build_tool_registry
+(spawner.rs:2396-2445) grants from a fixed six-tool array whatever the child's
+`allowed` list names. Neither it nor the AgentSpawner struct (spawner.rs:719-800)
+carries any representation of the parent's own tool authority. The permit
+expression is:
+
+    let permitted = if allowed.is_empty() { SHARED_READ_ONLY_CHILD_TOOLS.contains(name) }
+                    else { allowed.iter().any(|a| a.as_str() == *name) };
+    let permitted = permitted
+        && (requested_workspace == RequestedChildWorkspace::IsolatedMutation
+            || SHARED_READ_ONLY_CHILD_TOOLS.contains(name));
+
+The codebase's OWN existing unit test proves the widening without any new
+harness: spawner.rs:4357 tc_7_42_build_tool_registry_destructive_requires_opt_in
+calls build_tool_registry(&["Bash","Write"], IsolatedMutation, ...) and asserts
+registry.get("Bash").is_some(). A parent restricted to Delegate + Read/Grep/Glob
+therefore hands its child Bash whenever an isolated worktree can be prepared.
+
+Concrete change: add parent_tool_authority: Option<Arc<BTreeSet<String>>> to
+AgentSpawner with a builder, propagate it in clone_for_spawn, pass it into
+build_tool_registry as a new final parameter, and intersect INSIDE that function
+so no route into the seam can skip it:
+
+    let permitted = permitted
+        && parent_tool_authority.is_none_or(|authority| authority.contains(*name));
+
+Wire it at the single production construction site, bootstrap.rs:2202, where the
+parent's own registry is already in scope and ToolRegistry::tool_names() already
+exists. Five in-file test call sites gain a trailing None.
+
+FLAGS: not a behaviour change for a correctly-configured session (a parent that
+holds Bash still delegates Bash). It IS a behaviour change for any session whose
+parent registry is narrower than the child's request -- which is exactly the
+amplification. Not an architecture change.
+
+KNOWN RESIDUAL, stated up front: None means "no parent authority recorded" and
+applies no intersection, so legacy and test spawners are unaffected. That is
+FAIL-OPEN BY DEFAULT -- structurally the same shape as the PolicyGate defect in
+F21-02-03. It is chosen because a fail-closed default would deny every tool to
+every non-bootstrap spawner, and it is mitigated by a reachability test on the
+production bootstrap path. A panel member who thinks this residual disqualifies
+the fix should say so.
+
+KNOWN LIVE-CLOSURE PROBLEM, stated up front: the corpus could not reach this
+seam live because a hermetic non-repository workspace refuses isolated-worktree
+preparation before the child launches. After the fix, the live tool leg would
+still read REFUSED -- for the OLD reason. Under this plan's own rule ("a repair
+is not closed until the real product refuses the widening"), F21-02-01 may end
+NOT-CLOSED on its live leg even when the seam is genuinely repaired, unless the
+live fixture is rebuilt as a real git repository with a non-overlapping worktree
+root, which is itself a material amount of work inside a two-iteration cap.
+
+--- F21-02-02 :: HIGH :: proposed FIX
+Seam (census-assigned): crates/wcore-types/src/execution_policy.rs :: with_requested_approvals
+
+CONFIRMED executably by the independent corpus on both platforms and both
+surfaces: BaselineExecutionPolicy::smart(Prompt, LocalCliLaunch)
+.with_requested_approvals(Bypass, PolicySource::Child) => posture Smart,
+approvals Bypass, source Child, managed false. The managed branch ratchets via
+stricter_approval_policy; the non-managed branch is a bare
+Self::smart(requested, source) -- a replacement.
+
+Concrete change: insert a child-sourced ratchet between the two existing
+branches, leaving every other source byte-identical:
+
+    } else if matches!(source, PolicySource::Child) {
+        Self::smart(stricter_approval_policy(self.approvals, requested), source)
+    } else {
+        Self::smart(requested, source)
+    }
+
+stricter_approval_policy is already a const fn, so the enclosing const fn still
+compiles.
+
+FLAGS: not an architecture change. Behaviour change ONLY for PolicySource::Child,
+which has no production constructor today, so no existing session's posture
+moves -- the corpus's own NO-CHANNEL measurement is the evidence. This is the
+change that best matches the phase's purpose: it converts a property that holds
+BY ABSENCE OF A CHANNEL into one that holds BY ENFORCEMENT.
+
+--- F21-02-03 :: HIGH :: proposed FIX
+Seam: crates/wcore-agent/src/engine.rs :: policy_gate (census seam S3 is
+policy_gate.rs + wcore-permissions/policy.rs; the reachability defect is at the
+engine's field initialisers, which is where a repair would land).
+
+CONFIRMED and re-measured: `git grep -nF 'set_policy_gate' -- crates/` returns
+exactly two hits, both in engine.rs -- the doc comment at :2679 and the
+definition at :4064. ZERO CALLERS. Every agent-path initialiser is None (:3147,
+:3381 production; :15307 :16986 :17300 :18688 :19135 :19992 :21042 test
+constructors; orchestration/node_executor.rs:418).
+
+Concrete change: replace policy_gate: None at the two PRODUCTION constructors,
+engine.rs:3147 and engine.rs:3381, with a constructed PolicyGate.
+
+FLAGS -- BEHAVIOUR CHANGE and ARCHITECTURE CHANGE, both. PolicyEngine::check
+(wcore-permissions/src/policy.rs:120-157) is DENY-BY-DEFAULT: it walks its grant
+list and returns Err(DenyReason::NoMatchingGrant) when nothing matches. A gate
+constructed over a fresh PolicyEngine::new() therefore DENIES EVERY TOOL FOR
+EVERY EXISTING SESSION. Making it useful rather than catastrophic requires
+populating grants from the parent's registry -- an inheritance model, in a crate
+whose own header says it deliberately has none.
+
+Also note: the census is explicit that build_tool_registry (F21-02-01's seam) is
+the mechanism that ACTUALLY RUNS for the tool dimension. HIGH-3 is "the policy
+layer that would express parent/child intersection is not consulted", not "tools
+are ungated". If F21-02-01 lands, the intersection exists at the seam that runs,
+and HIGH-3's remaining content is a second, unused expression of the same
+property.
+
+================================================================================
+THE TWO CRATE-HEADER STATEMENTS, QUOTED VERBATIM FROM SOURCE
+================================================================================
+
+These are the exact sentences that make these architecture decisions rather than
+patches.
+
+crates/wcore-agent/src/policy_gate.rs, lines 1-16:
+
+    //! v0.6.1 hardening (CRIT-1) - gate tool dispatch through the M5.8
+    //! `PolicyEngine`.
+    //!
+    //! v0.6.0 shipped `wcore-permissions` as orphan code: the crate compiled,
+    //! tests passed in isolation, but **no consumer in the engine called
+    //! `PolicyEngine::check`**. ACL grants existed only on paper. v0.6.1
+    //! installs this gate at the orchestration boundary so a configured
+    //! `PolicyEngine` is consulted before any tool runs.
+    //!
+    //! ## Backwards compatibility
+    //!
+    //! `PolicyGate` is **opt-in**. Sessions that do not configure one see
+    //! identical behaviour to v0.6.0 - every tool runs. The dispatch path
+    //! treats `Option<&PolicyGate>` as the canonical "is there a policy"
+    //! signal, so the cost on the unconfigured fast path is one `Option`
+    //! match per tool call.
+
+crates/wcore-permissions/src/policy.rs, lines 1-5:
+
+    //! Wave B2 - `PolicyEngine`: explicit ACL over `(Actor, Resource, Action)`.
+    //!
+    //! v0.3 scope: explicit grants only. No role hierarchy, no inheritance, no
+    //! OAuth/OIDC. `Actor::System` is the single hard-coded bypass - it represents
+    //! the engine itself making internal calls, not a user-facing identity.
+
+The second is exactly what Success Criterion 1's "intersection of parent and
+requested authority" asks for. Adding inheritance to that crate is an
+architecture change to its declared scope. The census already routed that
+question OUT of Phase 21 as item OOP-2.
+
+================================================================================
+A CONSTRAINT THE TRIAGE DISCOVERED THAT THE PLAN DID NOT ANTICIPATE
+================================================================================
+
+Phase 21's admission gate (21-01) carries a BINDING CONSTRAINT, quoted verbatim:
+
+    "No repair may land a change to the 40 generator source inputs or the
+    156-file Desktop contract corpus without re-running wcore-contract digest
+    and check, recording the new digests, and re-pinning D1 section 3 as an
+    explicit contract bump. HIGH-4 sits directly on this surface so the
+    constraint is live, not hypothetical."
+
+crates/wcore-protocol/src/contract/spec.rs:833-874 lists those 40 inputs
+verbatim, and source_digest() hashes their CONTENTS. THREE of the 40 are the
+edit sites of the three proposed repairs:
+
+    F21-02-01 -> crates/wcore-agent/src/bootstrap.rs       (a SOURCE_INPUT)
+    F21-02-02 -> crates/wcore-types/src/execution_policy.rs (a SOURCE_INPUT)
+    F21-02-03 -> crates/wcore-agent/src/engine.rs           (a SOURCE_INPUT)
+    (crates/wcore-agent/src/spawner.rs is NOT a SOURCE_INPUT)
+
+So any of these repairs moves source_inputs_digest, which moves the `ready`
+contract descriptor the shipped binary emits, which the linked Desktop
+checkpoint document (D1) records as a HARD RENEGOTIATION ERROR rather than a
+tolerated upgrade. The Desktop consumer half of that contract is in a different
+repository and cannot be closed from this checkout. The blast-radius probe below
+measures the digest effect of each candidate rather than assuming it.
+
+================================================================================
+DELIVERABILITY AGAINST THE HARD TWO-ITERATION CAP
+================================================================================
+
+The triage's own estimate, recorded before the probe ran:
+
+DELIVERABILITY :: EXCEEDS :: 3 :: The full proposed set does not fit. F21-02-01
+and F21-02-02 are each a contained edit at a named seam and together plausibly
+fit one edit-build-run iteration with a second in reserve. F21-02-03 does not fit
+at any iteration count: PolicyEngine is deny-by-default over an empty grant list,
+so the only change that makes the gate reachable denies every tool for every
+existing session, and the only change that makes it useful is a grant-inheritance
+model in a crate whose header states it deliberately has none.
+
+DELIVERABILITY-SUBSET :: FITS :: 2 :: F21-02-01 and F21-02-02 only, with
+F21-02-03 declined and left honestly open for the phase verdict plan to state as
+an exception.
+
+================================================================================
+THE FOUR OPTIONS -- choose exactly one id
+================================================================================
+
+Presented in a rotated order. Pros and cons are copied verbatim from the plan.
+
+OPTION id: disprove-and-correct
+  Name: Authorize corpus corrections only - the findings are artifacts of invalid
+    cases, so the cases are corrected and no production code changes
+  Pros: Cheapest correct outcome when it is the true one: the system was right
+    and the corpus was slightly wrong, and changing production to satisfy an
+    invalid question would have shipped a real behaviour change to fix an
+    imaginary defect
+  Cons: Available only where Task 1 produced a DISPROVE proposal with evidence;
+    selecting it for a finding triaged FIX would be editing the case instead of
+    the defect, which is the exact forgery the RED-over-GREEN rule forbids
+
+OPTION id: decline-all
+  Name: Decline the whole set - leave every finding open and escalate the phase's
+    position
+  Pros: Appropriate when the repair set does not fit the plan, when the required
+    changes are larger than Phase 21's scope, or when the findings suggest the
+    seam design itself needs rethinking rather than patching; the reds stay
+    honestly red, which is worth more than an engineered green
+  Cons: Phase 21 cannot claim Success Criterion 1; 21-04 records the phase as
+    incomplete against its own criteria; phases 22 and 23, which are serial
+    behind this one, inherit the open authority questions
+
+OPTION id: authorize-partial
+  Name: Authorize a named subset - repair the findings whose fix is contained,
+    decline the behaviour or architecture changes and leave those findings open
+  Pros: Takes the contained wins now without shipping a default-behaviour change
+    or a crate-scope change under time pressure; the declined findings stay
+    honestly open with evidence, which is a decision on the record rather than a
+    silent gap; keeps the repair inside the two-iteration cap
+  Cons: Phase 21 closes with known-open CRITICAL or HIGH findings, so Success
+    Criterion 1 cannot be claimed unconditionally and 21-04 must state the
+    exception explicitly; the declined work has to be scheduled somewhere, and
+    phases 22 and 23 are serial behind this one
+
+OPTION id: authorize-full
+  Name: Authorize the full proposed repair set - every CRITICAL and HIGH is fixed
+    or disproved as triaged
+  Pros: Phase 21's Success Criterion 1 can close on a repaired and re-measured
+    state; nothing is left open to be rediscovered by a later phase or by a
+    customer; the repair lands at the census-named seams while the measurement
+    that justified it is still fresh
+  Cons: Available only if Task 1's deliverability estimate says the set fits
+    inside two repair iterations; if it includes a behaviour change or an
+    architecture change, authorizing the set authorizes those too, and their
+    blast radius is every existing session rather than the child path alone
+
+================================================================================
+THE BLAST-RADIUS MEASUREMENT
+================================================================================
+
+Each candidate change was applied ALONE, at the exact file and symbol named
+above and nothing else, in a throwaway git worktree on the project's Linux build
+host, created from the triage commit. Between candidates the tree was reverted so
+each is measured alone. Baseline and post-change passing-test counts were taken
+over the five crates the three seams touch: wcore-agent, wcore-types,
+wcore-permissions, wcore-protocol, wcore-budget. The contract digest was
+recomputed after each candidate. The script emitted its own verdict lines.
+
+CONTAINED = compiles and no existing test changes verdict.
+WIDE       = compiles but existing tests change verdict.
+BREAKS-BUILD = the candidate change does not compile. A BREAKS-BUILD candidate
+               CANNOT be authorized FIX under this plan's rules -- a change that
+               does not build is a proposal, not a repair.
+
+Measured verdict lines, emitted by the probe's own corrected verdict script:
+
+BLAST-RADIUS F21-02-01 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3420 RC=101
+BLAST-RADIUS F21-02-02 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3420 RC=101
+BLAST-RADIUS F21-02-03 RESULT=WIDE TESTS_BEFORE=3421 TESTS_AFTER=3398 RC=101
+
+Nothing returned BREAKS-BUILD, so no candidate is disqualified on that ground.
+
+WHAT THE THREE "WIDE" VERDICTS ACTUALLY CONSIST OF -- read this, because the
+label alone is misleading and the composition is the whole decision.
+
+Baseline: 3421 passed. One pre-existing non-passing test, present before any
+candidate was applied and unrelated to all three:
+  wcore-agent::workflow_limits_test fix1_dispatch_budget_aborts_with_partial_result
+  (a 60s timeout under concurrent build load; it passed on a separate quiet run)
+
+F21-02-01 -- verdict-changing tests: 1. Exactly one, and it is:
+  wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  source_inputs_digest moved d8b1a8b5... -> 9c7b98e2...
+  NO functional test changed verdict. The tool-intersection fix breaks nothing.
+
+F21-02-02 -- verdict-changing tests: 1. Exactly one, and it is the same test:
+  wcore-protocol::desktop_contract_corpus checked_corpus_matches_real_serializers_byte_for_byte
+  source_inputs_digest moved d8b1a8b5... -> 5b0263bc...
+  NO functional test changed verdict. This CORROBORATES the corpus's NO-CHANNEL
+  measurement: no production caller constructs PolicySource::Child, so ratcheting
+  it moves no existing session's posture.
+
+F21-02-03 -- verdict-changing tests: 23. The contract pin, PLUS 22 functional
+tests across six suites:
+  dangerous_lease_e2e_test          (2) incl. dangerous_expiry_reaches_bootstrapped_spawn_child
+  engine::audit_2026_05_22_tests    (4) dispatch crash, approval repair, cancellation, unknown-tool
+  execution_posture_e2e_test        (1) approval_bypass_retains_required_sandbox_and_tool_function
+  json_stream_approval_test         (3) incl. non_askuser_answer_falls_through_to_execute
+  output_compaction_test            (2)
+  runaway_loop_test                 (5)
+  typed_execution_policy_e2e_test   (3) incl. typed_bypass_executes_bash_inside_required_sandbox
+  w9_1_skill_drafting_per_turn      (2)
+  This is the deny-by-default catastrophe arriving as a number: turning the gate
+  on with an empty grant list stops tool dispatch across the engine.
+
+A FACT ABOUT THE CONTRACT PIN THAT BEARS DIRECTLY ON HOW HEAVY THAT COST IS.
+`git log -- crates/wcore-protocol/contracts/desktop/v1/` shows the corpus has
+been regenerated 16 times, and THREE of the most recent commits are literally
+titled "chore(protocol): re-pin Desktop contract provenance digests". Commit
+b6936299's own message documents this exact situation -- two edited SOURCE_INPUTS
+moved the digest, CI's contract-drift step failed, and the resolution was to
+regenerate and re-pin. The repo has a `just desktop-contract-check` target and a
+`wcore-contract generate` subcommand for precisely this. So the pin failure is a
+KNOWN ROUTINE MAINTENANCE STEP with an established procedure and commit
+convention -- not a wire-schema break. `schema_digest` does NOT move for any of
+the three candidates; only the source-provenance fingerprint does.
+
+Counterpoint a member should weigh rather than wave away: the phase's admission
+gate nonetheless bound 21-03 with "no repair may land a change to the 40
+generator source inputs ... without re-running wcore-contract digest and check,
+recording the new digests, and re-pinning D1 section 3 as an explicit contract
+bump", and the linked Desktop consumer that would renegotiate lives in a
+different repository and cannot be reached from this checkout. Note also, as a
+fact rather than an argument: the D1 document
+(.planning/intel/DESKTOP-PROTOCOL-CHECKPOINT.md) is four paragraphs long, HAS NO
+SECTION 3, and pins no digests at all -- so that clause of the constraint names
+a thing that does not exist, while the digests it is about actually live in the
+repo's own contract corpus. D1's closing sentence reads: "Both receipts are
+required for a whole-Wayland claim; neither blocks Core-only engine claims
+outside the shared contract."
+
+================================================================================
+YOUR TASK
+================================================================================
+
+Weigh the three findings, their measured blast radii, the crate-header
+statements, the contract-pin cost, and the two-iteration cap. Reason briefly and
+concretely. Engage with at least two option ids by name, including at least one
+you are rejecting and why.
+
+Then end your response with EXACTLY these two lines and NOTHING after them:
+
+BUNDLE=2d5a3d550dcd1e117b03249f6a5e20b66360f64b
+PANEL_POSITION=<one of: authorize-full, authorize-partial, disprove-and-correct, decline-all>

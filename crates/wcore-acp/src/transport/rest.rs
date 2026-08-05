@@ -208,9 +208,11 @@ impl<H: HttpHandler> RestTransport<H> {
             .with_state(self.handler.clone());
 
         let api = if let Some(v) = self.verifier.clone() {
+            let h = self.handler.clone();
             api.layer(middleware::from_fn(move |req: Request, next: Next| {
                 let v = Arc::clone(&v);
-                async move { auth_middleware(v, req, next).await }
+                let h = Arc::clone(&h);
+                async move { auth_middleware(v, h, req, next).await }
             }))
         } else {
             api
@@ -273,10 +275,19 @@ pub struct ApiDoc;
 
 /// `GET /openapi.json` — the OpenAPI document as JSON.
 ///
-/// utoipa 4.x emits OpenAPI 3.0.3. The mainstream SDK generators
-/// (`openapi-generator`, Speakeasy, `openapi-typescript`) consume it as-is;
-/// a strict 3.1 consumer requires the repo-wide axum-0.8 + utoipa-5 bump,
-/// tracked as a separate decision.
+/// Emits **OpenAPI 3.1.0** (utoipa 5). It emitted 3.0.3 under utoipa 4 until
+/// 2026-07-29, when the workspace moved to utoipa 5 to drop the unmaintained
+/// `proc-macro-error` (RUSTSEC-2024-0370) from the dependency tree at source.
+///
+/// The bump did NOT require the axum 0.8 migration the old pin comment
+/// predicted: utoipa declares no axum dependency at either major, and every
+/// path parameter below is declared explicitly via `params((...))` rather than
+/// inferred from an axum extractor. axum remains 0.7.
+///
+/// Consumer note: 3.1.0 is a wire-visible change to a public endpoint. The
+/// mainstream SDK generators (`openapi-generator`, Speakeasy,
+/// `openapi-typescript`) all support 3.1; a consumer pinned strictly to 3.0.x
+/// must be updated.
 async fn openapi_json() -> impl IntoResponse {
     Json(ApiDoc::openapi())
 }
@@ -356,9 +367,52 @@ const DOC_HTML: &str = r##"<!doctype html>
 </body>
 </html>"##;
 
-// ── Auth middleware (mirrors super::http) ─────────────────────────────────
+// ── Method resolution + auth/authz middleware (mirrors super::http) ───────
 
-async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) -> Response {
+/// The ACP method name a `/v1` route+verb pair stands for.
+///
+/// # This surface must classify its OWN routes
+///
+/// F24-E-H1, measured live: with role gating ENABLED at `--role viewer`, the
+/// same key on the same server was refused `POST /sessions` with 403 and
+/// ACCEPTED at `POST /v1/sessions` with 200. Authentication was shared between
+/// the two surfaces and authorization was not, so a control the operator had
+/// switched on protected exactly one of the two doors into the same
+/// `AcpServer`.
+///
+/// The method NAMES are deliberately the same strings `super::http` resolves,
+/// so both surfaces consult one role table. Two tables would drift, and the
+/// drift would look exactly like this defect again.
+///
+/// An unmatched route resolves to its own path and therefore inherits the
+/// role table's Admin default — a `/v1` route added without being classified
+/// fails loudly for ordinary principals instead of quietly becoming reachable.
+pub(crate) fn rest_method_for(path: &str, verb: &axum::http::Method) -> String {
+    use axum::http::Method;
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (verb, segments.as_slice()) {
+        (&Method::POST, ["v1", "sessions"]) => "session/create".to_string(),
+        (&Method::GET, ["v1", "sessions"]) => "session/list".to_string(),
+        (&Method::GET, ["v1", "sessions", _]) => "session/get".to_string(),
+        (&Method::DELETE, ["v1", "sessions", _]) => "session/delete".to_string(),
+        (&Method::POST, ["v1", "sessions", _, "prompt"]) => "message/send".to_string(),
+        (&Method::POST, ["v1", "sessions", _, "approvals", _, "resolve"]) => {
+            "session/approval/resolve".to_string()
+        }
+        (&Method::GET, ["v1", "tools"]) => "tools/list".to_string(),
+        (&Method::GET, ["v1", "agents"]) => "agents/list".to_string(),
+        (&Method::GET, ["v1", "initialize"]) => "initialize".to_string(),
+        (&Method::GET, ["v1", "health"]) => "health".to_string(),
+        _ => path.to_string(),
+    }
+}
+
+async fn auth_middleware(
+    verifier: Arc<dyn Verifier>,
+    handler: Arc<dyn super::http::AuthorizesMethods>,
+    req: Request,
+    next: Next,
+) -> Response {
     let headers: Vec<(String, String)> = req
         .headers()
         .iter()
@@ -367,17 +421,35 @@ async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) 
             v.to_str().ok().map(|val| (name, val.to_string()))
         })
         .collect();
-    match verifier.verify(&headers) {
-        Ok(_) => next.run(req).await,
+    let principal = match verifier.verify(&headers) {
+        Ok(p) => p,
         Err(e) => {
             let body = JsonRpcError {
                 code: ErrorCode::AuthRequired.code(),
                 message: e.to_string(),
                 data: None,
             };
-            (StatusCode::UNAUTHORIZED, Json(body)).into_response()
+            return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
         }
+    };
+    // F24-E-H1: authorize as well as authenticate. Sharing the verifier between
+    // the two surfaces while gating only one of them left the `/v1` door open to
+    // a principal the `/sessions` door had just refused.
+    let method = rest_method_for(req.uri().path(), req.method());
+    if let Err(e) = handler.authorize_method_dyn(&principal, &method).await {
+        let status = if matches!(e, AcpError::Forbidden(_)) {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        let body = JsonRpcError {
+            code: ErrorCode::Forbidden.code(),
+            message: e.to_string(),
+            data: None,
+        };
+        return (status, Json(body)).into_response();
     }
+    next.run(req).await
 }
 
 // ── Handlers ───────────────────────────────────────────────────────────────
@@ -882,8 +954,15 @@ mod tests {
         let doc: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         // Version + the two keystone paths are registered.
+        //
+        // 2026-07-29: was `starts_with("3.0")`. utoipa 5 emits OpenAPI 3.1.0
+        // where utoipa 4 emitted 3.0.3, so this is an updated FACT about the
+        // document, not a relaxed assertion — it is exactly as strict as
+        // before and still fails on an absent, malformed or wrong version.
+        // The bump itself was taken to remove `proc-macro-error`
+        // (RUSTSEC-2024-0370) from the dependency tree at source.
         assert!(
-            doc["openapi"].as_str().unwrap().starts_with("3.0"),
+            doc["openapi"].as_str().unwrap().starts_with("3.1"),
             "openapi version: {}",
             doc["openapi"]
         );

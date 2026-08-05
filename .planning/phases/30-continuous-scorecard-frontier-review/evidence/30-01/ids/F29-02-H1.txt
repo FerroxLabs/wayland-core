@@ -1,0 +1,37 @@
+EVIDENCE ID : F29-02-H1
+LEDGER ROW  : 41
+ARTIFACT    : `phases/29-supply-chain-release-integrity/29-02-SUMMARY.md` §4 + `.planning/SEAM-REQUESTS/29.md` SR-29-6 — **OPEN HIGH.** `.cargo/audit.toml` silences `RUSTSEC-2026-0194`/`0195` on a stated "sole path"; the real graph has **three** consumer paths and the two through `wcore-tools` — which reads **user-supplied** docx/pptx/xlsx — are absent from the justification. calamine 0.26.1 has 25 `.attributes()` sites and zero `with_checks(false)`, so **0194 is reachable**; 0195 is not. Panel 2-1 HIGH (codex HIGH, kimi HIGH, gemini MEDIUM)
+
+== PATH RESOLUTION ==
+[OK]   stat phases/29-supply-chain-release-integrity/29-02-SUMMARY.md
+       -> .planning/phases/29-supply-chain-release-integrity/29-02-SUMMARY.md  size=15756
+       head:
+---
+phase: 29-supply-chain-release-integrity
+plan: "02"
+subsystem: supply-chain / SBOM, dependency policy, reproducibility
+status: complete
+termination_state: 2 (Complete with a red policy verdict)
+[OK]   stat .planning/SEAM-REQUESTS/29.md
+       -> .planning/SEAM-REQUESTS/29.md  size=30182
+       head:
+# Seam requests — Phase 29
+
+Every entry below is a change to a **fenced** file owned by **Phase 28**. None of them was made
+in this worktree. Phase 29 consumes `receipt.rs`, `receipt_policy.rs` and `bin/wayland-receipt.rs`
+read-only and did not touch them — gate-checked in `29-01-SUMMARY.md`.
+
+[OK]   stat .cargo/audit.toml
+       -> .cargo/audit.toml  size=3160
+       head:
+# cargo-audit configuration.
+#
+# Posture (verified 2026-06-02): `cargo audit` reports 0 vulnerabilities and
+# 5 warning-class advisories (4 "unmaintained", 1 "unsound"). CI runs plain
+# `cargo audit`, which does NOT fail on warning-class advisories — so the gate
+# is green WITHOUT ignoring anything. (A 6th, the lru "unsound" advisory, was
+
+== GIT OBJECT RESOLUTION ==
+(no hex object token in the artifact cell)
+
+== VERDICT == CONFIRMED

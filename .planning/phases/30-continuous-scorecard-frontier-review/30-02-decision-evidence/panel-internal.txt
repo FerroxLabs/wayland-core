@@ -1,0 +1,91 @@
+# Panel member: internal adversarial pass (this lane), 2026-07-28
+#
+# Role: argue AGAINST the emerging consensus, not for it. The three external members all
+# returned CONFIRM_WITH_AMENDMENT within eleven minutes of each other on the same evidence
+# packet. Three-way agreement reached that fast is a correlation signal as much as a
+# correctness signal — they were all handed the same recommendation with its reasoning
+# attached, which is what the plan asked for and is also exactly the condition under which
+# a panel confirms rather than thinks. So this pass takes the losing side seriously.
+
+## The case AGAINST running the scripted loopback benchmark at all
+
+Steelman of the consensus first, so this argues with the real thing: a credential-free
+shared meter is the only design that executes today, byte-identical scripted turns remove
+model variance, and a fixture that counts tokens on the wire is the only cost measure that
+is comparable across three programs whose self-reports are not.
+
+Now the objection, which is structural rather than statistical.
+
+**1. Every member independently named the same fatal confound, and this plan is forbidden
+from fixing it.** Codex's Q7 is "protocol and task affinity masquerading as product
+superiority." Gemini's Q7 is "a rigid FIFO script — if OpenClaw naturally requests B then A
+it gets a 409 and fails." Kimi's Q7 is "fixture-dialect home-field advantage: the fixture
+already serves Wayland's contract tests, so its SSE dialect, usage-frame placement, error
+body shape and tool-call encoding are literally the dialect Wayland was built against."
+Three independent members converged on one defect. Gemini's countermeasure is explicit: the
+fixture must route on request CONTENT, not on a FIFO cursor.
+
+That countermeasure is unavailable. `crates/wcore-eval-scenarios/src/fixtures/openai.rs` is
+a hard scope fence in this plan — read-only, gate-checked untouched, because editing the
+meter mid-phase changes what every earlier measurement meant. So the panel has identified
+the single largest bias in the design and simultaneously the plan forbids the fix. A
+methodology whose own reviewers name a bias it cannot remove is not obviously better than no
+methodology.
+
+**2. The expected yield is the exact artifact this phase exists to prevent.** Compose the
+known facts. The fixture speaks Wayland's dialect. Wayland is already wired to it and is
+already exercised by it in this crate's contract tests. Both peers must be provisioned from
+source on a shared build host under an absolute credential ban — Hermes from a uv lockfile,
+OpenClaw from a monorepo with a multi-stage tsdown/tsgo/pnpm build. The realistic
+distribution of outcomes is heavily weighted toward: Wayland's legs RUN, one or both peers'
+legs UNPROVEN. The resulting document is a page of Wayland numbers next to peers marked
+"could not be provisioned." A reader converts that to "we won" in one step, and no sentence
+in the document has to be false for that to happen. This is the "we could not run the
+competitor, so we win" failure the plan names — and note that the plan's countermeasure
+(`ComparativeResultV1` refuses construction without both peers) prevents a false COMPARATIVE
+number while doing nothing at all about the impression left by a one-sided RESULTS PAGE.
+
+**3. Therefore option (c) — extend the existing static structural comparison — is the safer
+choice on a risk-weighted basis.** It makes no measurement, so it cannot be misread as one.
+The ledger's structural probes already exist. Nothing that reads as a benchmark gets
+published from an instrument whose reviewers named an unfixable home-field bias in it.
+
+## Why the consensus nevertheless survives this — stated as conditions, not as concession
+
+The objection is right about the risk and wrong about the remedy.
+
+Option (c) is disqualified on a fact, not a preference: F30-03 names *trials*, *repeated
+trials* and *confidence bounds*. A structural probe has no trials and no bounds. Choosing it
+is choosing not to do the requirement, and this program has an established finding that a
+phase which declares its goal NOT ACHIEVED is worth more than one that redefines the goal to
+something it can reach. Option (c) is that redefinition wearing a risk argument.
+
+Objection 1 is downgraded but not dismissed by a countermeasure that IS available inside the
+fence: a 409 `unexpected_request` must be classified as HARNESS_INCOMPATIBLE and scored as
+neither a pass nor a task failure. Codex's amendment says the same thing in its own words —
+"protocol incompatibility must be distinguished from scored task failure." That converts the
+FIFO bias from a silent penalty against the peers into a visible, reported observation about
+the meter. It does not remove the bias. It makes it impossible to bank.
+
+Objection 2 is not answered by any type. It is answered only by the RESULTS DOCUMENT, and so
+it becomes a binding requirement on task 3 rather than an argument against task 1:
+
+  - the leg accounting leads the document, before any number;
+  - the document states in plain words that an UNPROVEN peer leg is NOT a Wayland win and
+    that no comparison exists for that dimension at all;
+  - every provisioning failure is quoted verbatim, so a reader sees the peer failed to
+    BUILD rather than failed to PERFORM.
+
+## Verdict
+
+Proceed with the consensus, with objection 2's three requirements binding on task 3 and the
+409 reclassification binding on task 2. Record objection 1 as an open limitation that this
+plan cannot close and that a seam request must carry forward: closing it needs a
+content-routing fixture, which is a change to the shared meter and therefore not this
+plan's to make.
+
+PANEL_POSITION=CONFIRM_WITH_AMENDMENT
+The consensus design is the only one that satisfies F30-03 at all, but it survives only if a
+409 is scored as harness-incompatible rather than as peer failure and the results document
+states outright that an unproven peer leg is not a win — and even then its home-field bias
+stays open, because the fix is a change to the shared meter that this plan is fenced from.

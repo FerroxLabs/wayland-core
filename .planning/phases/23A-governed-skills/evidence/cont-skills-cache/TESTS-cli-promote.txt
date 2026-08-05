@@ -1,0 +1,25 @@
+   Compiling wcore-channels-registry v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-channels-registry)
+   Compiling wcore-mcp v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-mcp)
+   Compiling wcore-cua v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-cua)
+   Compiling wcore-browser v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-browser)
+   Compiling wcore-skills v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-skills)
+   Compiling wcore-plugin-subprocess v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-plugin-subprocess)
+   Compiling wayland-ollama v0.12.25 (/root/wayland-cont-skills-cache/crates/wayland-ollama)
+   Compiling wcore-eval v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-eval)
+   Compiling wcore-evolve v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-evolve)
+   Compiling wcore-agent v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-agent)
+   Compiling wcore-cli v0.12.25 (/root/wayland-cont-skills-cache/crates/wcore-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 24s
+warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running tests/skills_promote_advertised_and_works.rs (target/debug/deps/skills_promote_advertised_and_works-1cd8f5e84daf0971)
+
+running 5 tests
+test status_field_matcher_self_test ... ok
+test help_advertises_skills_promote_and_the_governance_verbs ... ok
+test advertised_skills_promote_actually_promotes_and_records_provenance ... ok
+test editing_a_promoted_skill_breaks_its_grant ... ok
+test promoting_a_revoked_skill_is_refused ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+

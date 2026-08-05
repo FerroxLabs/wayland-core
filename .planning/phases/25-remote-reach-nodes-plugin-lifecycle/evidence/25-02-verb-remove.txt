@@ -1,0 +1,40 @@
+STATE: recursive diff against the pre-update snapshot: BYTE-IDENTICAL to the pre-update snapshot
+STATE: installed entry artifact now reads:     print(json.dumps(out), flush=True)
+###         recover on a SOUND store (must report nothing to repair)
+$ /root/wayland-25/target/release/wayland-core plugin recover --install-root /root/f25-02-lab/home/plugins
+plugin store is sound — nothing to repair
+quarantine    absent
+  lifecycle-demo: approved at c564afd22804
+[exit=0]
+
+STATE (damage induced):
+  removed the live install directory /root/f25-02-lab/home/plugins/lifecycle-demo@market
+  left an interrupted staging directory .generations/lifecycle-demo/.staging-deadbeef
+### VERB 11/12 recover
+$ /root/wayland-25/target/release/wayland-core plugin recover --install-root /root/f25-02-lab/home/plugins
+repaired 2 item(s):
+  + removed interrupted staging directory .staging-deadbeef
+  + lifecycle-demo: install directory did not match live generation c564afd22804 — restored it
+quarantine    absent
+  lifecycle-demo: approved at c564afd22804
+[exit=0]
+
+STATE: install dir restored = YES
+STATE: staging dir swept    = YES
+STATE: recover on a sound store had said: plugin store is sound — nothing to repair
+### VERB 12/12 remove
+$ /root/wayland-25/target/release/wayland-core plugin remove lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+removed lifecycle-demo
+[exit=0]
+
+STATE: install dir present = NO
+STATE: approvals.json now: {
+  "approvals": {},
+  "revoked": []
+}
+###         inspect after remove (must be non-zero)
+$ /root/wayland-25/target/release/wayland-core plugin inspect lifecycle-demo --install-root /root/f25-02-lab/home/plugins
+error: plugin not installed: lifecycle-demo
+[exit=1]
+
+STATE: inspect after remove exited 1 (non-zero required)

@@ -131,28 +131,118 @@ pub fn resolve_server_headers(
     Ok(())
 }
 
+/// Whether one server declaration requires credentials-store resolution.
+pub fn server_has_credential_references(server: &McpServerConfig) -> bool {
+    server
+        .headers
+        .as_ref()
+        .is_some_and(|headers| headers.values().any(|value| value.contains(CRED_PREFIX)))
+}
+
+/// Secret-free reason a configured server was excluded before transport
+/// creation. The referenced key and backend error are deliberately omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpCredentialSkipReason {
+    MissingCredential,
+    CredentialStoreUnavailable,
+    MalformedReference,
+}
+
+impl McpCredentialSkipReason {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MissingCredential => "required MCP credential is missing",
+            Self::CredentialStoreUnavailable => "MCP credential store is unavailable",
+            Self::MalformedReference => "MCP credential reference is malformed",
+        }
+    }
+}
+
+/// Connectable declarations plus explicit, redacted omissions. Callers that
+/// advertise capabilities or diagnostics must use both halves.
+#[derive(Debug, Default)]
+pub struct McpServerResolution {
+    pub connectable: HashMap<String, McpServerConfig>,
+    pub skipped: Vec<(String, McpCredentialSkipReason)>,
+}
+
 /// Build a connect-ready clone of a server map with all `${cred:KEY}` header
-/// references resolved. Best-effort per server: a server whose reference cannot
-/// be resolved is left with its literal header (a warning is logged) so it fails
-/// its own connect in isolation instead of blocking every other server at boot.
-/// The input map (the long-lived `Config`) is never mutated.
+/// references resolved. A server whose reference cannot be resolved is omitted:
+/// sending the literal placeholder is both an authority error and a potential
+/// credential-reference disclosure. Other servers continue independently. The
+/// input map (the long-lived `Config`) is never mutated.
 pub fn resolve_servers_for_connect(
     servers: &HashMap<String, McpServerConfig>,
     store: &dyn CredentialsStore,
 ) -> HashMap<String, McpServerConfig> {
-    let mut out = servers.clone();
-    for (name, server) in out.iter_mut() {
-        if let Err(e) = resolve_server_headers(server, store) {
-            tracing::warn!(
-                server = %name,
-                error = %e,
-                "MCP server credential reference did not resolve; \
-                 connecting with the literal header (its own connect will fail \
-                 if the header is required)"
-            );
+    resolve_servers_for_connect_with_report(servers, store).connectable
+}
+
+pub fn resolve_servers_for_connect_with_report(
+    servers: &HashMap<String, McpServerConfig>,
+    store: &dyn CredentialsStore,
+) -> McpServerResolution {
+    let mut resolution = McpServerResolution::default();
+    for (name, server) in servers {
+        let mut resolved = server.clone();
+        match resolve_server_headers(&mut resolved, store) {
+            Ok(()) => {
+                resolution.connectable.insert(name.clone(), resolved);
+            }
+            Err(error) => {
+                let reason = match error {
+                    CredRefError::Missing { .. } => McpCredentialSkipReason::MissingCredential,
+                    CredRefError::Store { .. } => {
+                        McpCredentialSkipReason::CredentialStoreUnavailable
+                    }
+                    CredRefError::Malformed => McpCredentialSkipReason::MalformedReference,
+                };
+                tracing::warn!(
+                    server = %name,
+                    reason = reason.message(),
+                    "MCP server skipped because its credential reference did not resolve"
+                );
+                resolution.skipped.push((name.clone(), reason));
+            }
         }
     }
-    out
+    resolution
+        .skipped
+        .sort_by(|left, right| left.0.cmp(&right.0));
+    resolution
+}
+
+/// Keep only servers that do not require credential lookup. Used when the
+/// credentials store itself cannot be opened; literal-header servers remain
+/// usable while reference-bearing servers fail closed before transport spawn.
+pub fn without_credential_references(
+    servers: &HashMap<String, McpServerConfig>,
+) -> HashMap<String, McpServerConfig> {
+    without_credential_references_with_report(servers).connectable
+}
+
+pub fn without_credential_references_with_report(
+    servers: &HashMap<String, McpServerConfig>,
+) -> McpServerResolution {
+    let mut resolution = McpServerResolution::default();
+    for (name, server) in servers {
+        if server_has_credential_references(server) {
+            tracing::warn!(
+                server = %name,
+                "MCP server skipped because the credentials store is unavailable"
+            );
+            resolution.skipped.push((
+                name.clone(),
+                McpCredentialSkipReason::CredentialStoreUnavailable,
+            ));
+        } else {
+            resolution.connectable.insert(name.clone(), server.clone());
+        }
+    }
+    resolution
+        .skipped
+        .sort_by(|left, right| left.0.cmp(&right.0));
+    resolution
 }
 
 #[cfg(test)]
@@ -268,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn map_resolver_is_best_effort_and_leaves_input_untouched() {
+    fn map_resolver_skips_unresolved_servers_and_leaves_input_untouched() {
         let store = MapStore::with("mcp:ok:token", "good");
         let mut servers = HashMap::new();
         servers.insert("ok".to_string(), http_server("Bearer ${cred:mcp:ok:token}"));
@@ -277,22 +367,49 @@ mod tests {
             http_server("Bearer ${cred:mcp:broken:token}"),
         );
 
-        let resolved = resolve_servers_for_connect(&servers, &store);
+        let report = resolve_servers_for_connect_with_report(&servers, &store);
+        let resolved = report.connectable;
 
         // The resolvable server is concrete...
         assert_eq!(
             resolved["ok"].headers.as_ref().unwrap()["Authorization"],
             "Bearer good"
         );
-        // ...the broken one keeps its literal (fails its own connect later)...
+        // ...the broken one is omitted before any transport can see a literal
+        // credential reference...
+        assert!(!resolved.contains_key("broken"));
         assert_eq!(
-            resolved["broken"].headers.as_ref().unwrap()["Authorization"],
-            "Bearer ${cred:mcp:broken:token}"
+            report.skipped,
+            vec![(
+                "broken".to_string(),
+                McpCredentialSkipReason::MissingCredential
+            )]
         );
         // ...and the input map was never mutated.
         assert_eq!(
             servers["ok"].headers.as_ref().unwrap()["Authorization"],
             "Bearer ${cred:mcp:ok:token}"
+        );
+    }
+
+    #[test]
+    fn unavailable_store_path_keeps_only_literal_header_servers() {
+        let servers = HashMap::from([
+            ("literal".into(), http_server("Bearer static")),
+            (
+                "referenced".into(),
+                http_server("Bearer ${cred:mcp:referenced:token}"),
+            ),
+        ]);
+        let report = without_credential_references_with_report(&servers);
+        assert!(report.connectable.contains_key("literal"));
+        assert!(!report.connectable.contains_key("referenced"));
+        assert_eq!(
+            report.skipped,
+            vec![(
+                "referenced".to_string(),
+                McpCredentialSkipReason::CredentialStoreUnavailable
+            )]
         );
     }
 

@@ -1,0 +1,132 @@
+F25-C4 EGRESS DENIAL — WINDOWS LEG
+host=SeanDesktop   date=2026-07-29T16:34:46Z   transport=ssh+PowerShell
+exit codes read from a STATUS FILE (WLRC_* first, WLDONE last), read back by a
+SEPARATE ssh call, because every non-zero collapses to 1 over this transport.
+
+FIXED_BINARY=D:\lane-25c4-win\target\debug\wayland-core.exe
+FIXED_SHA256=B05FD40BB8938940E76D80612A89D13AADFD17A1BD1E25FABA560A77175264F8
+FIXED_COMMIT=fa16cb53c87cf84602424559570ae858f049c2bb
+BASE_BINARY=C:\ferrox-25h\wayland-core.exe   BASE_VERSION=wayland-core 0.12.25
+BASE_SHA256=96E29E5252D711E669361D5611A4636A91D19B712E5A14F62F93660234C25751
+NONCE_LEN=32   (generated on the box, inside a script file, so it is in ZERO argvs)
+PROVIDER_KEY_SET=False   (no ANTHROPIC_API_KEY / OPENAI_API_KEY / API_KEY anywhere in the run)
+URL_SHAPE=/apps/wayland-f25-proof/machines?metadata.wayland_task_nonce=<32-hex>
+
+ONE command in legs 1-3:  wayland-core backend orphans --nonce <32-hex>
+ONE variable between leg 1 and leg 2:  the egress allowlist in the config.
+
+  cfg\allow\config.toml                 cfg\deny\config.toml
+  [security]                            [security]
+  enabled = true                        enabled = true
+  egress_allow = ["api.machines.dev"]   egress_allow = []
+
+
+=== LEG 1 — FIXED binary, ALLOW config  (POSITIVE CONTROL) ===
+INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=38
+local      enumerated=true  found=0 via live-task registry UNION a real enumeration of the host process table
+container  enumerated=false found=0 via docker ps failed: error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/containers/json?all=1&filters=...": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+cloud      enumerated=false found=0 via vendor machine listing failed: machine listing returned HTTP 401: {"error":"Authenticate: token validation error"}
+0 orphan(s) found; 3 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+WLRC_FIXED-allow=0
+
+  ^ THE REQUEST PHYSICALLY LEFT SeanDesktop. `{"error":"Authenticate: token
+    validation error"}` is Fly's own body, reachable in the source ONLY after
+    client.get(..).send().await returned and response.status() was read
+    (wcore-exec-backend/src/backends/cloud.rs::api_get). A broken build, an
+    absent policy or a no-op cannot produce a vendor HTTP status.
+
+
+=== LEG 2 — FIXED binary, DENY config  (THE DENIAL) ===
+INFO egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked allowlisted=36
+local      enumerated=true  found=0 via live-task registry UNION a real enumeration of the host process table
+container  enumerated=false found=0 via docker ps failed: ... open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+cloud      enumerated=false found=0 via vendor machine listing failed: egress denied: GET with a long or high-entropy path/query to a non-allowlisted host. Egress to `api.machines.dev` is blocked by the security policy. Add it under `[security] egress_allow = [..]` in your config, or disable the policy entirely with `[security] enabled = false` if you accept the exfiltration risk.
+0 orphan(s) found; 3 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+WLRC_FIXED-deny=0
+
+
+=== LEG 3 — BASE binary (pre-fix 0.12.25), DENY config  (ANTI-VACUITY CONTROL) ===
+local      enumerated=true  found=0 via live-task registry UNION a real enumeration of the host process table
+container  enumerated=false found=0 via docker ps failed: ... open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.
+ssh        enumerated=false found=0 via WAYLAND_EXEC_SSH_TARGET is not set, so no remote host could be scanned
+cloud      enumerated=false found=0 via vendor machine listing failed: machine listing returned HTTP 401: {"error":"Authenticate: token validation error"}
+0 orphan(s) found; 3 surface(s) could NOT be enumerated. An un-enumerated surface is not a clean surface — a scan that could not run must never be read as zero orphans.
+WLRC_BASE-deny=0
+
+  ^ SAME deny config, SAME command, older binary: no "egress security ENFORCING"
+    line at all, and the request went out anyway. This is the fail-open the fix
+    closes, demonstrated on Windows. It also proves leg 2's denial is caused by
+    the fix and not by the network, an unreadable config file, or the host being
+    offline — i.e. the gate CAN fail.
+
+
+=== LEGS 4 & 5 — `backend list` with NO provider API key ===
+FIXED (fa16cb53):
+  INFO egress security ENFORCING — ... allowlisted=38
+  BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+  local      local      yes          sandbox_backend_probe  platform containment backend 'appcontainer' probed available
+  container  container  NO           daemon_ping            docker daemon refused the version ping: ...
+  ssh        ssh        NO           credential_absent      WAYLAND_EXEC_SSH_TARGET is not set
+  cloud      cloud      NO           vendor_api_call        vendor API answered HTTP 401: {"error":"Authenticate: token validation error"}
+  WLRC_FIXED-list-nokey=0
+
+BASE (0.12.25):
+  no ENFORCING line — boundary unarmed
+  WLRC_BASE-list-nokey=0
+
+  ^ allowlisted=38 in leg 4 is the point: the operator's own
+    `egress_allow = ["api.machines.dev"]` is in effect even though no provider
+    credential exists. The intermediate cut of this lane's fix collapsed that to
+    the default empty allowlist and leg 1 DENIED — see the SUMMARY.
+
+
+=== SUMMARY TABLE ===
+| leg | binary        | egress_allow           | ENFORCING | cloud row                        |
+|-----|---------------|------------------------|-----------|----------------------------------|
+| 1   | fixed fa16cb5 | ["api.machines.dev"]   | yes (38)  | HTTP 401 from Fly — LEFT THE BOX |
+| 2   | fixed fa16cb5 | []                     | yes (36)  | egress denied by policy          |
+| 3   | base 0.12.25  | []                     | NO        | HTTP 401 from Fly — LEFT THE BOX |
+| 4   | fixed fa16cb5 | ["api.machines.dev"]   | yes (38)  | `backend list`, exit 0           |
+| 5   | base 0.12.25  | ["api.machines.dev"]   | NO        | `backend list`, exit 0           |
+
+allowlisted=38 vs 36 is the identical delta the Linux proof recorded at
+b64695df on hetzner, from the identical pair of configs.
+
+
+=== INDEPENDENT NETWORK CONTROL (does not go through the product) ===
+NET_CONTROL_HTTP=401
+  Invoke-WebRequest to https://api.machines.dev/v1/apps/wayland-f25-proof/machines
+  from the same host in the same script. api.machines.dev was reachable at the
+  moment of the run, so leg 2's denial cannot be explained by a dead network.
+
+
+=== EXTRACTION (unproxied /usr/bin/grep, on the pulled UTF-8 captures) ===
+$ /usr/bin/grep -c "egress security ENFORCING" leg-*.txt
+leg-FIXED-allow.txt:1         <- known-POSITIVE, proves the matcher is alive
+leg-FIXED-deny.txt:1          <- known-POSITIVE, proves the matcher is alive
+leg-FIXED-list-nokey.txt:1    <- known-POSITIVE, proves the matcher is alive
+leg-BASE-deny.txt:0           <- absence claim, instrument shown alive in the SAME invocation
+leg-BASE-list-nokey.txt:0     <- absence claim, same invocation
+
+
+=== THE CREDENTIAL, STATED PLAINLY ===
+No real cloud credential exists on SeanDesktop and none was moved there:
+
+  WAYLAND_F25_CLOUD_TOKEN user_len=0 machine_len=0
+  WAYLAND_F25_CLOUD_ORG   user_len=0 machine_len=0
+  FLY_API_TOKEN           user_len=0 machine_len=0
+  C:\Users\seand\.wayland-f25-cloud.env exists=False
+
+Every leg used the string
+"INVALID-PLACEHOLDER-NOT-A-CREDENTIAL-25c4-windows" — deliberately invalid, and
+disclosed here rather than dressed up. CloudCredential::from_env
+(cloud.rs:124) rejects only the EMPTY string, so a present-but-invalid value is
+enough to get past the CredentialAbsent short-circuit and make the product open
+a real socket. hetzner, holding a VALID token against an unknown app, got 404;
+this host, holding an invalid token, got 401. Both are Fly's servers answering
+over TLS, which is the property the positive control exists to establish.
+
+No secret value was read, printed, transmitted, written to disk or committed by
+this lane.

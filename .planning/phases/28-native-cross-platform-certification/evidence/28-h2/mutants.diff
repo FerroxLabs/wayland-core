@@ -1,0 +1,26 @@
+# Mutants used to prove the F-28-02-002 tests can fail (diff vs the committed acl_lease.rs).
+
+## M1 - remove the quarantine-directory allow-list
+@@ -632,11 +632,6 @@
+         // would itself wedge the sandbox permanently on the very next
+         // acquisition — reproducing the exact defect this quarantine path
+         // exists to remove.
+-        if file_type.is_dir()
+-            && path.file_name().and_then(OsStr::to_str) == Some(QUARANTINE_DIRECTORY)
+-        {
+-            continue;
+-        }
+         if !file_type.is_file() || path.extension().and_then(OsStr::to_str) != Some("toml") {
+             return Err(exec_error(format!(
+                 "unknown entry in AppContainer ACL lease directory: {}",
+
+## M2 - reclaim regardless of owner liveness
+@@ -649,7 +649,7 @@
+ 
+     for path in paths {
+         let lease = read_validated_lease(&path)?;
+-        if owner_is_live(&lease)? {
++        if false {
+             continue;
+         }
+         if matches!(

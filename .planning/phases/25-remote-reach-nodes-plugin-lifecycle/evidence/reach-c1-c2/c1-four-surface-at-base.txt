@@ -1,0 +1,160 @@
+=== REACH-C1 FOUR SURFACES, ONE COMMIT ===
+2026-07-30T02:59:58Z
+controller: Ubuntu-2404-noble-amd64-base
+tree HEAD:  0d48b5515b816e8930456fcda7c91c0ec9a46ebd
+binary sha: 1621393b713f7c81835b8ca3a94cfcbe9fcdc355923951ab9e3900e2c357f1a3
+
+--- availability, read back FROM THE PRODUCT (not inferred from my env)
+[2m2026-07-30T02:59:59.033092Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+BACKEND    KIND       AVAILABLE    PROBE BASIS            DETAIL
+local      local      yes          sandbox_backend_probe  platform containment backend 'bubblewrap' probed available
+container  container  yes          daemon_ping            container daemon answered a version ping: server 29.2.1
+ssh        ssh        yes          ssh_handshake          ssh handshake to reachc1c2-far reached the far end
+cloud      cloud      yes          vendor_api_call        vendor API answered 200 for app wayland-f25-test machine listing
+
+Availability is answered from a real probe in every row — the container backend from a daemon ping rather than socket presence, the ssh backend from a real handshake, the cloud backend from an authenticated API call. A backend with no credential reports NO and names what is missing; it never falls back to another backend.
+LIST_EXIT=0
+
+=== RUN local ===
+[2m2026-07-30T02:59:59.616987Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+task:        f25-reference
+backend:     local
+transport:   Local via localhost
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     1
+receipt:     /root/reachc1c2-ev/four-receipt-local.json
+RUN_local_EXIT=0
+
+=== RUN container ===
+[2m2026-07-30T02:59:59.754497Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+task:        f25-reference
+backend:     container
+transport:   Container via wayland-f25-f25-reference
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     417
+receipt:     /root/reachc1c2-ev/four-receipt-container.json
+RUN_container_EXIT=0
+
+=== RUN ssh ===
+[2m2026-07-30T03:00:00.379937Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+task:        f25-reference
+backend:     ssh
+transport:   Ssh via reachc1c2-far
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: NotApplicable
+wall ms:     207
+receipt:     /root/reachc1c2-ev/four-receipt-ssh.json
+RUN_ssh_EXIT=0
+
+=== RUN cloud ===
+[2m2026-07-30T03:00:00.924817Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+task:        f25-reference
+backend:     cloud
+transport:   Cloud via 82d1457a7266d8
+terminal:    Success
+input sha:   55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6
+workspace:   9c743b3c399187d9e7e69ddc8fe44e1a459e59104b99f9df927a9717436084e4
+artifact:    stdout.bin 55eae7c64c240e93548c7cadec48d40903540671602393cf82851e5a2058c1c6 (32 bytes)
+hibernation: Observed { transitions: ["created:created", "started:started", "suspended:suspended", "resumed:started previous_state=suspended", "ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=0d1964a6-0822-4397-acff-3aae5bcd6dd8 uptime=2s / after=f25-ram-witness-f25-reference-nonce boot_id=0d1964a6-0822-4397-acff-3aae5bcd6dd8 uptime=3s"] }
+wall ms:     11214
+receipt:     /root/reachc1c2-ev/four-receipt-cloud.json
+RUN_cloud_EXIT=0
+
+=== NORMALIZED EQUIVALENCE DIFF -- all four, ONE invocation ===
+[2m2026-07-30T03:00:12.535813Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+receipts compared: 4
+  local      transport=local      endpoint=localhost wall_ms=1
+  container  transport=container  endpoint=wayland-f25-f25-reference wall_ms=417
+  ssh        transport=ssh        endpoint=reachc1c2-far wall_ms=207
+  cloud      transport=cloud      endpoint=82d1457a7266d8 wall_ms=11214
+
+EXPECTED-DIVERGENT fields (excluded from the normalized body by design):
+  local      backend.backend_id     local
+  local      backend.instance_id    11cd6a7246884491bae4e9c46ca1f1de
+  local      backend.version        0.12.25
+  local      backend.key_id         542f4d59563b41681650e9deb83cf3eac42fc06aaee20ef81ba4babc68f4b9fc
+  local      transport.kind         local
+  local      transport.endpoint     localhost
+  local      timing.wall_ms         1
+  local      hibernation            {"kind":"not_applicable"}
+  container  backend.backend_id     container
+  container  backend.instance_id    11cd6a7246884491bae4e9c46ca1f1de
+  container  backend.version        0.12.25
+  container  backend.key_id         412350559c3bc6070fbfe6db5cacda5f4319483f933114f2dd71ca2872aac05e
+  container  transport.kind         container
+  container  transport.endpoint     wayland-f25-f25-reference
+  container  timing.wall_ms         417
+  container  hibernation            {"kind":"not_applicable"}
+  ssh        backend.backend_id     ssh
+  ssh        backend.instance_id    11cd6a7246884491bae4e9c46ca1f1de
+  ssh        backend.version        0.12.25
+  ssh        backend.key_id         0c9f29f7652aa179ebf92403ccfd27a0baa6b40b57471ebd70cac4d13c9704c0
+  ssh        transport.kind         ssh
+  ssh        transport.endpoint     reachc1c2-far
+  ssh        timing.wall_ms         207
+  ssh        hibernation            {"kind":"not_applicable"}
+  cloud      backend.backend_id     cloud
+  cloud      backend.instance_id    11cd6a7246884491bae4e9c46ca1f1de
+  cloud      backend.version        0.12.25
+  cloud      backend.key_id         9189304c1d5b867139cfb1f189485cc260343029f8e5cd3829947ca1e0a1880b
+  cloud      transport.kind         cloud
+  cloud      transport.endpoint     82d1457a7266d8
+  cloud      timing.wall_ms         11214
+  cloud      hibernation            {"kind":"observed","transitions":["created:created","started:started","suspended:suspended","resumed:started previous_state=suspended","ram-witness before=f25-ram-witness-f25-reference-nonce boot_id=0d1964a6-0822-4397-acff-3aae5bcd6dd8 uptime=2s / after=f25-ram-witness-f25-reference-nonce boot_id=0d1964a6-0822-4397-acff-3aae5bcd6dd8 uptime=3s"]}
+
+NORMALIZED DIFF: EQUIVALENT
+The four normalized bodies agree on task digests, resource budget, backend ceiling, event ordering and content digests, artifact digest, terminal status, exposed-secret names and egress decision.
+DIFF_EXIT=0
+
+=== orphan scan after all four ===
+[2m2026-07-30T03:00:12.608392Z[0m [33m WARN[0m egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated
+orphan scan for task f25-reference (nonce f25-reference-nonce)
+
+  backend    cloud
+  mechanism  NONE: stopping a cloud machine is a vendor API call, not a kernel mechanism. ProcessTreeMechanism has no variant for it, and if the API call does not land the machine keeps running
+  method     GET /apps/<app>/machines?metadata.wayland_task_nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    container
+  mechanism  kernel-backed: ProcessTreeMechanism::DockerContainerReap — the container daemon force-removing the container and its whole tree
+  method     docker ps -a --filter label=wayland.task.nonce=<nonce>
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    local
+  mechanism  kernel-backed: ProcessTreeMechanism::LinuxPidNamespaceReap — the platform sandbox backend's PID namespace, with /proc descendant discovery
+  method     live-task registry UNION a real enumeration of the host process table
+  count      0 (MEASURED)
+  rows       (none)
+
+  backend    ssh
+  mechanism  BEST-EFFORT: a remote process group killed over the same ssh transport. ProcessTreeMechanism has NO variant that crosses an ssh connection, so nothing kernel-backed on the controller reaps the far end; a remote child that calls setsid survives
+  method     remote `ps -eo pid,args` filtered on the task nonce
+  count      0 (MEASURED)
+  rows       (none)
+
+TOTAL: 0 orphan(s) measured across 4 backend(s); 0 surface(s) NOT measured
+SCAN_EXIT=0
+
+=== REACH-C1 LEDGER ===
+RC1-ONE-COMMIT: 0d48b5515b816e8930456fcda7c91c0ec9a46ebd
+RC1-LOCAL: exit=0
+RC1-CONTAINER: exit=0
+RC1-SSH: exit=0 target=reachc1c2-far (containerised sshd, own netns, same physical host)
+RC1-CLOUD: exit=0 app=wayland-f25-test
+RC1-DIFF: exit=0 (0 = EQUIVALENT)
+RC1-ORPHANS: exit=0
+2026-07-30T03:00:13Z
+RC1DONE

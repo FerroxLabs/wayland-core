@@ -1,0 +1,84 @@
+{
+  "schema": "wayland.execution-backend-receipt",
+  "schema_version": 1,
+  "body_sha256": "00a4b0345674206689e2e183072486ccc8fa361f95ec7b3f9b7c9d613c64d0d6",
+  "body": {
+    "protocol_version": 1,
+    "backend": {
+      "backend_id": "local",
+      "instance_id": "89485cccb5044869a604b6e9d6afcbf8",
+      "version": "0.12.25",
+      "key_id": "734fdfe33de0727253404f3f63b3041733a90a1ed085af2d64a16a9d0a454322"
+    },
+    "transport": {
+      "kind": "local",
+      "endpoint": "localhost"
+    },
+    "task": {
+      "task_id": "f25-provenance",
+      "workspace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "input_sha256": "0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370",
+      "resources": {
+        "cpu_millis": 30000,
+        "memory_bytes": 268435456,
+        "wall_time_ms": 60000,
+        "output_bytes": 1048576
+      }
+    },
+    "limits": {
+      "cpu_millis": 30000,
+      "memory_bytes": 268435456,
+      "wall_time_ms": 60000,
+      "output_bytes": 1048576
+    },
+    "events_sha256": "724be270594deb9abc2d62179adb505fb17f10dd37064150f67096535820cd5b",
+    "events": [
+      {
+        "sequence": 1,
+        "event": {
+          "kind": "task_accepted",
+          "task_id": "f25-provenance",
+          "backend_id": "local",
+          "workspace_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "input_sha256": "0f7545d631dd44c993749b9ba2f66684427ca7eb761223e1adeccde7713c2370"
+        }
+      },
+      {
+        "sequence": 2,
+        "event": {
+          "kind": "output",
+          "channel": "stderr",
+          "text_sha256": "9567f45f7e6183a020aa9596bf2dec2577a7db77c4c801626704b1cd70c14b56",
+          "bytes": 52
+        }
+      },
+      {
+        "sequence": 3,
+        "event": {
+          "kind": "failed",
+          "code": "exit-1"
+        }
+      }
+    ],
+    "artifact": null,
+    "terminal": {
+      "kind": "failure",
+      "code": "exit-1"
+    },
+    "timing": {
+      "started_unix_ms": 1785226362386,
+      "finished_unix_ms": 1785226362388,
+      "wall_ms": 2
+    },
+    "hibernation": {
+      "kind": "not_applicable"
+    },
+    "secrets_exposed": [],
+    "egress_decision": "allow-all-default-no-policy-installed"
+  },
+  "attestation": {
+    "algorithm": "ed25519",
+    "key_id": "734fdfe33de0727253404f3f63b3041733a90a1ed085af2d64a16a9d0a454322",
+    "signature_base64": "dMTRmcfM8wEO4mThCiSbB6WwSyWxWyQ1pa5bO4j7ubMgVTaWbVk2li0cvzL0XFf3jC8S4vGvtYcK1SedehD1BA=="
+  }
+}

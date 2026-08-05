@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::anvil::{AnvilReceipt, AnvilReceiptInvalidation};
+use crate::diagnostics::{RuntimeDiagnosticsSnapshotV1, RuntimeDiagnosticsUnavailableReason};
+
 pub use wcore_types::message::FinishReason;
 
 /// Serde helper: skip serializing a `bool` field when it is `false`.
@@ -14,6 +17,612 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Stable identities for capabilities whose production activation must be
+/// proved rather than inferred from registration or source presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityId {
+    PricingRefresher,
+    MidFlightMonitor,
+    CooldownTracker,
+    LearnedPolicy,
+    SmartHandoff,
+    DelegateIsolation,
+    ProcedureSkillDrafting,
+    LegacyAutoSkillDrafting,
+}
+
+/// Append-only activation stages. A ready capability may be reached more than
+/// once; every successful occurrence completes the
+/// `reached -> outcome_changed -> observed` cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStage {
+    Declared,
+    Configured,
+    Constructed,
+    Ready,
+    Reached,
+    OutcomeChanged,
+    Observed,
+    Unavailable,
+}
+
+impl CapabilityStage {
+    /// Whether `next` is a legal next event for one capability within a
+    /// session. `Observed -> Reached` starts another successful occurrence.
+    pub fn allows(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Declared, Self::Configured | Self::Unavailable)
+                | (Self::Configured, Self::Constructed | Self::Unavailable)
+                | (Self::Constructed, Self::Ready | Self::Unavailable)
+                | (Self::Ready | Self::Observed, Self::Reached)
+                | (Self::Reached, Self::OutcomeChanged)
+                | (Self::OutcomeChanged, Self::Observed)
+        )
+    }
+}
+
+/// Stable reasons why an activation chain ended before readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityReasonCode {
+    DisabledByConfig,
+    DependencyUnavailable,
+    NoProductionConstructor,
+    RuntimePathUnwired,
+    IsolationNotEnforced,
+}
+
+/// One typed claim in a capability's activation chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityActivation {
+    pub capability: CapabilityId,
+    pub stage: CapabilityStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<CapabilityReasonCode>,
+}
+
+impl CapabilityActivation {
+    pub const fn stage(capability: CapabilityId, stage: CapabilityStage) -> Self {
+        Self {
+            capability,
+            stage,
+            reason: None,
+        }
+    }
+
+    pub const fn unavailable(capability: CapabilityId, reason: CapabilityReasonCode) -> Self {
+        Self {
+            capability,
+            stage: CapabilityStage::Unavailable,
+            reason: Some(reason),
+        }
+    }
+
+    /// Reject reason-bearing live stages and reason-less unavailability.
+    pub const fn is_well_formed(&self) -> bool {
+        matches!(
+            (self.stage, self.reason),
+            (CapabilityStage::Unavailable, Some(_))
+                | (
+                    CapabilityStage::Declared
+                        | CapabilityStage::Configured
+                        | CapabilityStage::Constructed
+                        | CapabilityStage::Ready
+                        | CapabilityStage::Reached
+                        | CapabilityStage::OutcomeChanged
+                        | CapabilityStage::Observed,
+                    None
+                )
+        )
+    }
+}
+
+/// Typed control-flow directive emitted by the mid-flight monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorDirective {
+    Replan,
+    Stop,
+}
+
+/// Stable reason classes for monitor control-flow decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorReason {
+    OutputStall,
+    RepeatedError,
+    RepeatedToolRoute,
+    BudgetExceeded,
+}
+
+/// Stable workflow-node lifecycle states exported to host control planes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowNodeState {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Blocked,
+}
+
+/// Stable terminal states for one workflow execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTerminalState {
+    Succeeded,
+    Failed,
+}
+
+/// Stable terminal disposition for one child run within a workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowChildTerminalState {
+    Succeeded,
+    Failed,
+}
+
+/// Typed, provider-neutral failure evidence for workflow lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowFailure {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+/// Correlation metadata attached to a workflow child-agent relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowChildCorrelation {
+    pub run_id: String,
+    pub child_run_id: String,
+    pub parent_child_run_id: Option<String>,
+    pub child_sequence: u64,
+    pub event_id: String,
+    pub terminal_state: Option<WorkflowChildTerminalState>,
+}
+
+/// Complete producer payload for a correlated workflow start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRunStarted {
+    pub workflow_id: String,
+    pub name: String,
+    pub node_count: usize,
+    pub run_id: String,
+    pub event_id: String,
+    pub sequence: u64,
+    pub parent_run_id: Option<String>,
+}
+
+/// Complete producer payload for one workflow-node lifecycle transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowNodeLifecycle {
+    pub run_id: String,
+    pub node_id: String,
+    pub child_run_id: Option<String>,
+    pub event_id: String,
+    pub sequence: u64,
+    pub state: WorkflowNodeState,
+    pub failure: Option<WorkflowFailure>,
+}
+
+/// Complete producer payload for a correlated workflow terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRunFinished {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub event_id: String,
+    pub sequence: u64,
+    pub terminal_state: WorkflowTerminalState,
+    pub failure: Option<WorkflowFailure>,
+}
+
+/// Opaque, content-bound position in the durable session journal.
+///
+/// `journal_sequence = None` is the unambiguous genesis position. The digest
+/// is required even at genesis so a host cannot advance recovery using an
+/// unbound numeric offset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryCursor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_sequence: Option<u64>,
+    pub journal_digest: String,
+}
+
+/// Operator-observed result for a tool effect whose authoritative outcome
+/// cannot be reconstructed by a Core reconciler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorToolEffectOutcome {
+    Succeeded,
+    Failed,
+    NotStarted,
+}
+
+/// Closed vocabulary for the external record an operator used to resolve an
+/// otherwise unknown tool effect. Unknown sources are authority-critical and
+/// fail deserialization rather than degrading to an untyped label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorResolutionEvidenceSource {
+    ToolReceipt,
+    ProviderReceipt,
+    ProcessObservation,
+    ExternalSystemRecord,
+}
+
+/// Content-bound evidence for an operator resolution. Evidence contains only
+/// an opaque reference and digest; it never carries tool arguments, output,
+/// credentials, or free-form authority claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorResolutionEvidence {
+    pub source: OperatorResolutionEvidenceSource,
+    pub reference_id: String,
+    pub observed_at_unix_ms: u64,
+    pub digest: String,
+}
+
+/// Cursor-bound authority claim shared by the host command and Core receipt.
+/// The closed shape makes unknown authority-bearing additions fail closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorToolEffectResolution {
+    pub recovery_version: u16,
+    pub session_id: String,
+    pub turn_id: String,
+    pub cursor: RecoveryCursor,
+    pub tool_execution_id: String,
+    pub outcome: OperatorToolEffectOutcome,
+    pub operator_id: String,
+    pub evidence: OperatorResolutionEvidence,
+}
+
+/// Stable recovery lifecycle exposed to both standalone and hosted clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryLifecycle {
+    Ready,
+    Streaming,
+    AwaitingApproval,
+    ToolInFlight,
+    ReconciliationRequired,
+    Suspended,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+/// Fail-closed reasons why Core cannot produce a trustworthy recovery view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryUnavailableReason {
+    SessionNotFound,
+    UnsupportedVersion,
+    CursorInvalid,
+    CursorAhead,
+    CursorDigestMismatch,
+    HistoryGap,
+    JournalCorrupt,
+    SnapshotUnavailable,
+    UnknownCriticalState,
+}
+
+/// Typed reasons why an interrupted turn cannot be continued directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryReconcileReason {
+    ApprovalExpired,
+    ProviderOutcomeUnknown,
+    ToolOutcomeUnknown,
+    EffectRequiresOperator,
+    BudgetExhausted,
+    ContextUnrestorable,
+    CancellationAmbiguous,
+    UnknownCriticalState,
+}
+
+/// Sanitized interrupted-turn projection. It deliberately contains only
+/// opaque identifiers and typed state: never transcript text, prompts, tool
+/// arguments or output, paths, approval secrets, or provider payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryTurnSnapshot {
+    pub turn_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_id: Option<String>,
+    pub lifecycle: RecoveryLifecycle,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile_reason: Option<RecoveryReconcileReason>,
+}
+
+/// Sanitized budget projection needed to make a safe resume decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryBudgetSnapshot {
+    pub tokens_used: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_limit: Option<u64>,
+    pub cost_used_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_limit_usd: Option<f64>,
+}
+
+/// Terminal disposition for one correlated provider-budget grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetGrantOutcome {
+    /// The budget mutation was applied exactly once.
+    Granted,
+    Refused,
+}
+
+/// Closed refusal vocabulary for budget grants. Hosts must not infer policy
+/// state from human-readable strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetGrantRefusalReason {
+    HostNotAuthorized,
+    ManagedPolicy,
+    NoExhaustedBudget,
+    InvalidGrant,
+    BudgetTrackerUnavailable,
+    PersistenceFailure,
+    RequestIdConflict,
+    LedgerCapacityExceeded,
+    /// A grant cannot be accepted while its turn is still executing. After
+    /// the terminal turn event, retry with a fresh request id; replaying the
+    /// refused id returns the same terminal refusal.
+    TurnInProgress,
+}
+
+/// Content-bound result cached by Core for at-most-once grant application.
+/// Identical `request_id` replay emits the exact stored value; conflicting
+/// reuse emits a refusal and never mutates the stored result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetGrantResult {
+    pub request_id: String,
+    pub additional_tokens: u64,
+    pub additional_cost_usd: f64,
+    pub outcome: BudgetGrantOutcome,
+    pub refusal_reason: Option<BudgetGrantRefusalReason>,
+}
+
+impl Serialize for BudgetGrantResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !crate::commands::is_valid_budget_grant_request_id(&self.request_id) {
+            return Err(serde::ser::Error::custom(
+                "budget grant result has an invalid request_id",
+            ));
+        }
+        if !self.additional_cost_usd.is_finite() || self.additional_cost_usd < 0.0 {
+            return Err(serde::ser::Error::custom(
+                "budget grant result cost must be finite and non-negative",
+            ));
+        }
+        match (self.outcome, self.refusal_reason) {
+            (BudgetGrantOutcome::Granted, None) | (BudgetGrantOutcome::Refused, Some(_)) => {}
+            (BudgetGrantOutcome::Granted, Some(_)) => {
+                return Err(serde::ser::Error::custom(
+                    "granted budget result must omit refusal_reason",
+                ));
+            }
+            (BudgetGrantOutcome::Refused, None) => {
+                return Err(serde::ser::Error::custom(
+                    "refused budget result must include refusal_reason",
+                ));
+            }
+        }
+
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            request_id: &'a str,
+            additional_tokens: u64,
+            additional_cost_usd: f64,
+            outcome: BudgetGrantOutcome,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            refusal_reason: Option<BudgetGrantRefusalReason>,
+        }
+
+        Wire {
+            request_id: &self.request_id,
+            additional_tokens: self.additional_tokens,
+            additional_cost_usd: self.additional_cost_usd,
+            outcome: self.outcome,
+            refusal_reason: self.refusal_reason,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl BudgetGrantResult {
+    pub fn granted(request_id: String, additional_tokens: u64, additional_cost_usd: f64) -> Self {
+        Self {
+            request_id,
+            additional_tokens,
+            additional_cost_usd,
+            outcome: BudgetGrantOutcome::Granted,
+            refusal_reason: None,
+        }
+    }
+
+    pub fn refused(
+        request_id: String,
+        additional_tokens: u64,
+        additional_cost_usd: f64,
+        refusal_reason: BudgetGrantRefusalReason,
+    ) -> Self {
+        Self {
+            request_id,
+            additional_tokens,
+            additional_cost_usd,
+            outcome: BudgetGrantOutcome::Refused,
+            refusal_reason: Some(refusal_reason),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BudgetGrantResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            request_id: String,
+            additional_tokens: u64,
+            additional_cost_usd: f64,
+            outcome: BudgetGrantOutcome,
+            refusal_reason: Option<BudgetGrantRefusalReason>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if !crate::commands::is_valid_budget_grant_request_id(&wire.request_id) {
+            return Err(serde::de::Error::custom(
+                "budget grant result has an invalid request_id",
+            ));
+        }
+        if !wire.additional_cost_usd.is_finite() || wire.additional_cost_usd < 0.0 {
+            return Err(serde::de::Error::custom(
+                "budget grant result cost must be finite and non-negative",
+            ));
+        }
+        match (wire.outcome, wire.refusal_reason) {
+            (BudgetGrantOutcome::Granted, None) => Ok(Self::granted(
+                wire.request_id,
+                wire.additional_tokens,
+                wire.additional_cost_usd,
+            )),
+            (BudgetGrantOutcome::Refused, Some(reason)) => Ok(Self::refused(
+                wire.request_id,
+                wire.additional_tokens,
+                wire.additional_cost_usd,
+                reason,
+            )),
+            (BudgetGrantOutcome::Granted, Some(_)) => Err(serde::de::Error::custom(
+                "granted budget result must omit refusal_reason",
+            )),
+            (BudgetGrantOutcome::Refused, None) => Err(serde::de::Error::custom(
+                "refused budget result must include refusal_reason",
+            )),
+        }
+    }
+}
+
+/// Content-free milestone kinds that may be replayed to reconstruct recovery
+/// UI without exposing journal payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryReplayKind {
+    /// A committed journal transition with no more-specific public milestone.
+    /// This keeps replay cursors contiguous without exposing event payloads.
+    StateAdvanced,
+    TurnStarted,
+    StreamStarted,
+    StreamCommitted,
+    ApprovalRequested,
+    ApprovalResolved,
+    ToolStarted,
+    ToolCommitted,
+    EffectUncertain,
+    CancellationRequested,
+    TurnCompleted,
+    TurnCancelled,
+    TurnFailed,
+}
+
+/// One ordered, sanitized recovery milestone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryReplayItem {
+    pub cursor: RecoveryCursor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub kind: RecoveryReplayKind,
+}
+
+/// Why `Ready.session_id` holds what it holds.
+///
+/// `ready` publishes `session_id` as its correlation key, and a host keys its
+/// own session tracking on it. It can legitimately be absent — a run with no
+/// durable session has no id to give — and until this type existed the
+/// producer expressed that by dropping the key off the wire entirely. A host
+/// then received `undefined` with no accompanying signal and could not tell
+/// "degraded" from "malformed frame" from "an older Core". That passes schema
+/// validation, because the field is optional, while breaking the consumer.
+///
+/// So the absence is now stated rather than implied: `session_id` is always
+/// serialized (`null` when there is none) and this field says which cause
+/// produced the value it holds. The causes are NOT interchangeable — one is the
+/// operator's choice, the others are host limitations the operator may want to
+/// fix — and collapsing them is the same mistake as omitting the key.
+///
+/// # The fourth value, and why a three-value enum was not enough
+///
+/// This type shipped with three values, on the premise that a host which cannot
+/// protect a durable session turns durable sessions OFF. That premise stopped
+/// being true the same night: the session journal is not encrypted, and the
+/// confidential store protects exactly one field — the sealed copy of the exact
+/// provider request that makes AUTOMATIC replay possible. A keyless host now
+/// journals without it.
+///
+/// That produced a state none of the three values described. `session_id` is a
+/// real, resumable id, so `disabled_by_*` is plainly wrong; but the session
+/// cannot recover an interrupted dispatch by itself, so `durable` over-claims
+/// to precisely the consumer that most needs to know — one deciding whether to
+/// wait for auto-recovery or ask its operator. Reporting it as `durable` would
+/// have been the same defect this type was introduced to fix, one layer up: a
+/// wire value that cannot express a state the product reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPersistence {
+    /// `session_id` names a durable, journaled session with crash replay. It
+    /// survives a restart, can be resumed, and a turn interrupted mid-dispatch
+    /// resumes itself from the sealed provider request.
+    Durable,
+    /// `session_id` names a durable, journaled session WITHOUT crash replay.
+    ///
+    /// The journal is complete — every turn, provider attempt, tool call,
+    /// approval and delivery boundary is recorded, so nothing executes
+    /// unrecorded and history survives a restart. What is missing is the sealed
+    /// copy of the exact provider request, because this host has no usable OS
+    /// keyring and no unlocked credentials vault.
+    ///
+    /// **What a host should do.** Treat the session as durable for history and
+    /// audit: list it, offer resume, keep it. Do NOT show auto-recovery
+    /// affordances or wait on one. If a turn is interrupted mid-dispatch, the
+    /// next message on that session is refused with a reconciliation error
+    /// naming the interrupted turn — surface a resume / reconcile / cancel
+    /// choice to the operator rather than a retry spinner. And if a resume is
+    /// refused with `init_failed` naming the session, that session is LOCKED
+    /// pending a key, not corrupt: leave its journal alone, because restoring
+    /// `WAYLAND_VAULT_PASSPHRASE_FD` and resuming again recovers it.
+    JournaledWithoutReplay,
+    /// `session_id` is null: the operator turned durable sessions off
+    /// (`[session] enabled = false`). Nothing is journaled and nothing is
+    /// resumable, by request.
+    DisabledByOperator,
+    /// DECODE-ONLY. `session_id` is null because a host that could not protect
+    /// a durable session turned durable sessions off.
+    ///
+    /// **This producer can no longer emit it**, and that is not an oversight —
+    /// see [`SessionPersistence`]'s own docs. It is retained because the value
+    /// was published on the wire, so an older Core still sends it and a host
+    /// may have stored it against a session it is still tracking. Removing a
+    /// value we once sent breaks those consumers for no gain.
+    ///
+    /// A host meeting it should read it as "an older Core, on a keyless host,
+    /// which journaled nothing" — historical, and not something a current Core
+    /// will ever say again.
+    DisabledByHost,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -25,9 +634,89 @@ fn is_false(b: &bool) -> bool {
 pub enum ProtocolEvent {
     Ready {
         version: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// ALWAYS serialized, `null` when this run has no durable session.
+        /// Deliberately NOT `skip_serializing_if`: this is the wire type's
+        /// declared correlation key (`EVENT_SPECS`), and a correlation key
+        /// that can vanish is indistinguishable from a bug at the consumer.
+        /// [`SessionPersistence`] carries the reason for a null.
         session_id: Option<String>,
+        /// Why `session_id` holds what it holds. Never omitted.
+        session_persistence: SessionPersistence,
         capabilities: Capabilities,
+        /// Pinned producer contract for contract-aware hosts. This remains
+        /// optional on the Rust type so legacy fixtures can prove their old
+        /// shape, while production Ready emission always supplies it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        contract: Option<crate::contract::ContractDescriptor>,
+        /// Initial complete policy snapshot for contract-aware hosts. Legacy
+        /// producers/tests may omit it; the JSON-stream producer always sets
+        /// it before accepting a turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution_policy: Option<crate::execution_policy::ExecutionPolicySnapshot>,
+    },
+    /// Complete effective execution-policy snapshot. This is output-only:
+    /// wire peers cannot deserialize it into authority.
+    ExecutionPolicy {
+        #[serde(flatten)]
+        snapshot: crate::execution_policy::ExecutionPolicySnapshot,
+    },
+    /// Effective repository trust and sandbox grants. Output-only authority
+    /// receipt; hosts cannot submit this shape to widen a session.
+    WorkspacePolicy {
+        policy: wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    },
+    /// Complete sanitized recovery projection at one durable journal cursor.
+    SessionRecoverySnapshot {
+        recovery_version: u16,
+        request_id: String,
+        session_id: String,
+        cursor: RecoveryCursor,
+        state_digest: String,
+        lifecycle: RecoveryLifecycle,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pending_turn: Option<RecoveryTurnSnapshot>,
+        budget: RecoveryBudgetSnapshot,
+    },
+    /// Ordered, content-free milestones after a host-provided cursor.
+    SessionRecoveryReplay {
+        recovery_version: u16,
+        request_id: String,
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<RecoveryCursor>,
+        through: RecoveryCursor,
+        items: Vec<RecoveryReplayItem>,
+    },
+    /// Typed refusal to recover when Core cannot prove a trustworthy view.
+    SessionRecoveryUnavailable {
+        recovery_version: u16,
+        request_id: String,
+        session_id: String,
+        reason: RecoveryUnavailableReason,
+    },
+    /// Durable lifecycle transition for one recoverable turn.
+    TurnRecoveryLifecycle {
+        recovery_version: u16,
+        session_id: String,
+        turn_id: String,
+        cursor: RecoveryCursor,
+        lifecycle: RecoveryLifecycle,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reconcile_reason: Option<RecoveryReconcileReason>,
+    },
+    /// Durable receipt for a validated operator resolution of an otherwise
+    /// unknown tool effect. This event echoes the exact authority-bound input
+    /// so hosts can replay it without inventing state.
+    UnknownToolEffectResolved {
+        #[serde(flatten)]
+        resolution: OperatorToolEffectResolution,
+    },
+    /// Typed capability construction/runtime evidence. Startup events are
+    /// emitted after `Ready`; runtime events are emitted at the real success
+    /// seam. Unknown hosts drop this additive event.
+    CapabilityActivation {
+        #[serde(flatten)]
+        activation: CapabilityActivation,
     },
     StreamStart {
         msg_id: String,
@@ -119,6 +808,30 @@ pub enum ProtocolEvent {
         name: String,
         reason: String,
     },
+    /// Terminal receipt for a correlated runtime-MCP removal request.
+    McpRemovalResult {
+        lifecycle_version: u16,
+        request_id: String,
+        name: String,
+        outcome: McpRemovalOutcome,
+        removed_tools: Vec<String>,
+    },
+    /// Correlated, versioned, redacted effective runtime state for local host
+    /// diagnostics. This contains no environment values, launch arguments,
+    /// request headers, credentials, or raw process errors.
+    RuntimeDiagnosticsSnapshot {
+        diagnostics_version: u16,
+        request_id: String,
+        snapshot: RuntimeDiagnosticsSnapshotV1,
+    },
+    /// Correlated rejection for a diagnostics request that this producer
+    /// cannot satisfy. Hosts must treat this as terminal for `request_id`.
+    RuntimeDiagnosticsUnavailable {
+        diagnostics_version: u16,
+        supported_version: u16,
+        request_id: String,
+        reason: RuntimeDiagnosticsUnavailableReason,
+    },
     /// W1: F9 structured trace for one turn. Gated by the W0-reserved
     /// `capabilities.structured_traces` flag — the engine only emits this
     /// variant when the corresponding ProtocolSink builder was configured
@@ -165,13 +878,31 @@ pub enum ProtocolEvent {
         agent_name: String,
         inner: Value,
     },
+    /// Correlated v1 form of `sub_agent_event`. It deliberately serializes
+    /// with the legacy wire tag while keeping the old Rust variant available
+    /// to in-process TUI consumers. Hosts therefore see one additive event
+    /// shape rather than a second event type.
+    #[serde(rename = "sub_agent_event")]
+    CorrelatedSubAgentEvent {
+        parent_call_id: String,
+        agent_name: String,
+        inner: Value,
+        run_id: String,
+        child_run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_child_run_id: Option<String>,
+        child_sequence: u64,
+        event_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_state: Option<WorkflowChildTerminalState>,
+    },
     /// ForgeFlows-Live: a workflow (ForgeFlows / Dynamic Workflows) run
     /// started. Emitted once, before the first node dispatches, so hosts
     /// (the TUI Workflows tab and the external `wayland` desktop app) get a
     /// clean lifecycle signal instead of inferring the run from the first
     /// `workflow:<node_id>`-prefixed `SubAgentEvent`. `workflow_id` is a
     /// stable correlation handle for the run; `name` is the author's display
-    /// name; `node_count` is the number of agent nodes the run will dispatch.
+    /// name; `node_count` is the number of lifecycle nodes in the run graph.
     /// Rides the existing W0-reserved `capabilities.sub_agent_traces` flag
     /// (the same observability surface as `SubAgentEvent`) — no dedicated
     /// capability is added. Hosts that don't recognise the `workflow_started`
@@ -180,6 +911,32 @@ pub enum ProtocolEvent {
         workflow_id: String,
         name: String,
         node_count: usize,
+    },
+    /// Correlated v1 form of `workflow_started`; see
+    /// [`ProtocolEvent::CorrelatedSubAgentEvent`] for the compatibility
+    /// rationale behind the shared wire tag.
+    #[serde(rename = "workflow_started")]
+    CorrelatedWorkflowStarted {
+        workflow_id: String,
+        name: String,
+        node_count: usize,
+        run_id: String,
+        event_id: String,
+        sequence: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_run_id: Option<String>,
+    },
+    /// One ordered transition for a node in a correlated workflow run.
+    WorkflowNodeEvent {
+        run_id: String,
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_run_id: Option<String>,
+        event_id: String,
+        sequence: u64,
+        state: WorkflowNodeState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<WorkflowFailure>,
     },
     /// ForgeFlows-Live: a workflow run finished. Emitted once, after the run
     /// completes (success or failure), as the terminal bookend to
@@ -191,6 +948,19 @@ pub enum ProtocolEvent {
     WorkflowFinished {
         workflow_id: String,
         succeeded: bool,
+    },
+    /// Correlated v1 form of `workflow_finished`. `succeeded` is retained for
+    /// legacy hosts and always agrees with `terminal_state`.
+    #[serde(rename = "workflow_finished")]
+    CorrelatedWorkflowFinished {
+        workflow_id: String,
+        succeeded: bool,
+        run_id: String,
+        event_id: String,
+        sequence: u64,
+        terminal_state: WorkflowTerminalState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<WorkflowFailure>,
     },
     /// W7: F4 streaming tool-result chunk. Long-running tools (e.g.
     /// `Bash` on a multi-minute build) emit one of these per chunk of
@@ -231,6 +1001,39 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// F15: deterministic provider-failover decision evidence. The provider
+    /// crate owns the typed receipt; the protocol carries its serialized shape
+    /// opaquely to preserve crate layering and forward-compatible decoding.
+    ProviderFailoverReceipt {
+        receipt: serde_json::Value,
+    },
+    /// One physical provider request attempt. Always emitted so evaluators and
+    /// hosts can distinguish real recovery from a fixture-side request count.
+    /// Unknown hosts drop this additive event under the W0 decoder contract.
+    ProviderAttempt {
+        /// Stable failure class (`http_503`, `timeout`, `stream_truncated`, ...).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
+    },
+    /// Core scheduled another provider attempt after a typed failure. Kept
+    /// separate from `ProviderAttempt` so a retry decision never inflates the
+    /// physical-attempt count.
+    ProviderRetry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
+    },
+    /// A typed provider failure discovered after the physical send completed
+    /// (for example a truncated SSE body). It does not imply a retry.
+    ProviderFailure {
+        failure: String,
+    },
+    /// F10 always-on structured monitor decision. Hosts use this additive
+    /// event to distinguish a deliberate stop/replan from a generic engine
+    /// error or informational string.
+    MidFlightMonitorDecision {
+        directive: MonitorDirective,
+        reason: MonitorReason,
+    },
     /// W7: S4 approval requested — engine wants the host's permission
     /// before proceeding with `call_id`. `resume_token` echoes back in
     /// the host's `ApprovalResume` command. Gated by the W0-reserved
@@ -239,12 +1042,24 @@ pub enum ProtocolEvent {
     /// **Wave SC SECURITY MAJOR (correlation-id model).** The
     /// `correlation_id` field is the opaque public handle the host UI
     /// uses to match this `ApprovalRequired` against the eventual
-    /// `ApprovalResume`. `resume_token` carries the same opaque value
-    /// (kept for backwards-compat with existing hosts; new hosts
-    /// should prefer `correlation_id`). The actual bridge-side secret
-    /// never appears on the wire — `ProtocolSink::redact_tokens`
-    /// strips matching strings from streaming tool output as
-    /// defense-in-depth against tools that snoop stdout.
+    /// resolution. It always equals `call_id`.
+    ///
+    /// `resume_token` is NOT the same value, and is not always present:
+    ///
+    /// - **Bridge-backed** approvals (Crucible council, egress consent)
+    ///   carry the unguessable bridge SECRET, and are answered with
+    ///   `ProtocolCommand::ApprovalResume { resume_token }`. The secret
+    ///   is deliberately not the `call_id`, which the model can see —
+    ///   routing on it would let a tool approve itself (GHSA-8r7g).
+    /// - **Ordinary tool** gates have no bridge entry, so `resume_token`
+    ///   is the EMPTY STRING. They are answered with
+    ///   `ProtocolCommand::ToolApprove` / `ToolDeny`, keyed by `call_id`.
+    ///   A host that echoes the empty token back in `ApprovalResume`
+    ///   resolves nothing and the tool hangs until its TTL.
+    ///
+    /// `ProtocolSink::redact_tokens` strips in-flight secrets from
+    /// streaming tool output as defense-in-depth against tools that
+    /// snoop stdout.
     ApprovalRequired {
         call_id: String,
         resume_token: String,
@@ -281,7 +1096,7 @@ pub enum ProtocolEvent {
     /// W0 host decoder contract, so no dedicated capability flag is
     /// reserved. `reason` is one of the deterministic
     /// `ExecutionBudgetView::first_exceeded_reason()` strings
-    /// (`max_wall_time`, `max_tool_runtime`, `max_processes`,
+    /// (`max_wall_time`, `max_tool_runtime`, `max_concurrent_process_tools`,
     /// `max_agent_depth`, `max_tokens_in`, `max_tokens_out`,
     /// `max_cost_usd`); `observed` and `limit` are human-readable
     /// formatted strings (e.g. `"62.0s"` / `"60.0s"`, `"16384"` / `"4096"`).
@@ -289,6 +1104,13 @@ pub enum ProtocolEvent {
         reason: String,
         observed: String,
         limit: String,
+    },
+    /// Correlated result for `continue_with_budget`. This is the sole
+    /// authority-bearing acknowledgement; free-form `info` text is not a
+    /// grant receipt.
+    BudgetGrantResult {
+        #[serde(flatten)]
+        result: BudgetGrantResult,
     },
     /// Wave RB RELIABILITY MAJOR: a tool's `execute_with_ctx` panicked.
     /// The orchestration dispatcher caught the panic via
@@ -509,51 +1331,142 @@ pub enum ProtocolEvent {
     /// Like [`ProtocolEvent::BudgetExceeded`], it is an additive variant a
     /// v0.1.21 host drops silently (W0 forward-compat).
     AnvilReceipt {
-        /// Canonical terminal state (anvil §6.5): `verified` | `criteria_checked`
-        /// | `self_checked` | `needs_escalation` | `blocked` | `cancelled` |
-        /// `timed_out` | `permission_denied` | `crashed_recovered` | `superseded`.
-        terminal_state: String,
-        /// The trust-tier stamp actually earned (spec §2 honesty vocabulary):
-        /// `verified` (real Tier-1 gate only) | `criteria_checked` |
-        /// `self_checked` | `format_validated` | `consensus_only`. Distinct from
-        /// `terminal_state`; never `verified` unless a real gate passed.
-        stamp: String,
-        /// Checks passed / total on the final candidate.
-        checks_passed: u32,
-        checks_total: u32,
-        /// Coverage-scope note, e.g. "suite-passed; 2 files outside exercised
-        /// tests". Absent when the whole change-set was covered.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        coverage: Option<String>,
-        /// Climb iterations performed.
-        iterations: u32,
-        /// Escalation-valve fires during the climb (spec §6.4). `0` on the
-        /// happy path; defaulted for decoders of pre-valve receipts.
-        #[serde(default)]
-        valve_fires: u32,
-        /// Settled cost across the whole climb, in micro-cents. When `priced`
-        /// is false this is NOT a real price — the host renders "unpriced",
-        /// never $0 (spec §2).
-        cost_microcents: u64,
-        /// Whether `cost_microcents` is a real, metered price.
-        priced: bool,
-        /// Digest of the pinned gate closure (spec §5) — binds the receipt to
-        /// the exact gate invocation that produced it.
-        gate_closure_digest: String,
-        /// Digest of the verified artifact (spec §8 staleness) — any later
-        /// mutation of the verified files invalidates the chip.
-        artifact_digest: String,
-        /// Session this climb ran in.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        /// Task-lineage id the climb served.
-        task_id: String,
-        /// Engine version that produced the receipt.
-        engine_version: String,
-        /// Monotonic per-session sequence (receipt ordering / dedup).
-        sequence: u64,
+        /// Versioned, authoritative producer-owned receipt payload. Flattened
+        /// so existing top-level `type = "anvil_receipt"` dispatch remains
+        /// forward-additive while the contract gains stable identity,
+        /// correlation, content binding, and replay semantics.
+        #[serde(flatten)]
+        receipt: AnvilReceipt,
+    },
+    /// A previously authoritative receipt became stale, was revoked, or was
+    /// superseded. Only this top-level Core-origin event changes authority;
+    /// receipt-shaped tool text and opaque nested payloads remain inert.
+    AnvilReceiptInvalidated {
+        #[serde(flatten)]
+        invalidation: AnvilReceiptInvalidation,
+    },
+    /// Complete host-observable projection of one durable Goal at a cursor
+    /// (F22-C1).
+    ///
+    /// Additive. Before this event a host could not observe a Goal in any form
+    /// — durable Goals existed only on the CLI surface — so nothing about any
+    /// existing event's shape changes to carry it.
+    ///
+    /// The projection is derived from the reduced journal state, never from
+    /// anything held in memory beside it. `state_digest` is taken over the
+    /// canonical JSON of the FULL reduced `GoalState`, including the parts this
+    /// projection summarises, so a host can always establish which chain state
+    /// its view corresponds to.
+    GoalSnapshot {
+        goal_version: u16,
+        session_id: String,
+        goal_id: String,
+        cursor: RecoveryCursor,
+        state_digest: String,
+        goal: crate::goal::GoalProjection,
+    },
+    /// One durable Goal transition, as a content-free milestone (F22-C1).
+    ///
+    /// Carries the milestone and the cursor it landed at, not the payload —
+    /// the same split `turn_recovery_lifecycle` uses against
+    /// `session_recovery_snapshot`. A host that wants the state after a
+    /// transition reads the next `goal_snapshot`, which keeps the transition
+    /// stream cheap and keeps exactly one shape authoritative for Goal content.
+    GoalTransition {
+        goal_version: u16,
+        session_id: String,
+        goal_id: String,
+        cursor: RecoveryCursor,
+        transition: crate::goal::GoalTransitionKind,
+        /// The lifecycle the Goal is in AFTER the transition.
+        lifecycle: crate::goal::GoalLifecycleWire,
+    },
+    /// A host Goal CONTROL command was refused, with a typed reason (F22-C1).
+    ///
+    /// Additive, and mandatory rather than convenient. The five Goal commands
+    /// are answered in a command loop whose match ends in a catch-all that
+    /// merely logs (`wcore-cli/src/main.rs`), so without an explicit refusal
+    /// event every rejected command would be indistinguishable from one that
+    /// was accepted and did nothing — the advertised-but-dead shape this
+    /// surface exists to avoid. `session_recovery_unavailable` is the same
+    /// pattern for the recovery commands.
+    ///
+    /// Correlated by `request_id`, because a refusal has no cursor to correlate
+    /// on: the whole point of several reasons is that the Goal or the state the
+    /// host named does not exist.
+    GoalControlRefused {
+        goal_version: u16,
+        request_id: String,
+        session_id: String,
+        /// The Goal the refused command named. Carried even when no such Goal
+        /// exists, so a host can tell which of several in-flight requests was
+        /// refused without holding its own request table.
+        goal_id: String,
+        reason: GoalControlRefusalReason,
     },
     Pong,
+}
+
+/// Typed reasons a host Goal control command was refused (F22-C1).
+///
+/// Closed, and deliberately keeps causes apart that a host would otherwise be
+/// tempted to retry identically. `GoalNotFound` and `CursorStale` in particular
+/// settle differently: the first means the host named something that never
+/// existed, the second means the host's view is behind and a resync fixes it.
+/// Collapsing them is how a control plane builds a silent retry loop against a
+/// Goal that will never appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalControlRefusalReason {
+    /// `goal_version` is not the version this Core speaks.
+    UnsupportedVersion,
+    /// The command named a session that is not the live one.
+    SessionNotFound,
+    /// No durable Goal with that id exists in this session's journal.
+    GoalNotFound,
+    /// A Goal with that id already exists; `goal_open` is not an upsert.
+    GoalAlreadyExists,
+    /// The supplied cursor is not the Goal's current cursor — the host is
+    /// acting on a view that has since moved. Resync and re-issue.
+    CursorStale,
+    /// The Goal has already terminated, so it cannot advance or be cancelled.
+    GoalTerminated,
+    /// Advancing would exceed the loop bound the Goal was authorized for.
+    IterationCeilingReached,
+    /// A task with that id is already declared in this Goal's ledger.
+    TaskAlreadyDeclared,
+    /// The task named a dependency that is not declared in this Goal's ledger.
+    ///
+    /// Distinct from [`Self::Malformed`] and from [`Self::JournalError`] on
+    /// purpose. The ledger refuses an undeclared dependency because treating
+    /// one as satisfied would release a dependent on a task that never exists;
+    /// the host's fix is to declare the dependency FIRST and re-issue, which is
+    /// a different action from correcting a malformed field and a very
+    /// different one from retrying a failed disk write.
+    DependencyNotDeclared,
+    /// The command was structurally valid but a field was not usable —
+    /// an empty id, an out-of-range bound.
+    Malformed,
+    /// This process has no durable journal, so no Goal can be controlled.
+    JournalUnavailable,
+    /// The journal rejected the append.
+    JournalError,
+}
+
+/// Result of a session-scoped runtime MCP removal request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRemovalOutcome {
+    Removed,
+    AlreadyAbsent,
+    NotRuntimeManaged,
+    UnsupportedVersion,
+    InvalidRequest,
+    RequestIdConflict,
+    TurnInProgress,
+    CapacityExceeded,
+    CleanupUnverified,
+    RegistryBusy,
 }
 
 /// W6 F7 per-turn cost row carried by [`ProtocolEvent::SessionCost`].
@@ -565,6 +1478,10 @@ pub struct TurnCost {
     pub model: String,
     pub provider: String,
     pub cost_usd: f64,
+    /// Whether `cost_usd` is a real metered or known-free price. Missing on
+    /// legacy rows defaults to false so zero is not silently called free.
+    #[serde(default)]
+    pub priced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -792,6 +1709,36 @@ pub struct ErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_policy_event_is_typed_and_additive() {
+        use crate::execution_policy::ExecutionPolicySequence;
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
+        };
+
+        let snapshot = ExecutionPolicySequence::launch(
+            EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                ApprovalPolicy::Bypass,
+                PolicySource::LocalCliLaunch,
+            )),
+            1_700_000_000_000,
+        )
+        .current()
+        .clone();
+        let event = ProtocolEvent::ExecutionPolicy { snapshot };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "execution_policy");
+        assert_eq!(json["critical"], true);
+        assert_eq!(json["contract_version"], "1.0");
+        assert_eq!(json["revision"], 0);
+        assert_eq!(json["reason"], "launch");
+        assert_eq!(json["effective_at_unix_ms"], 1_700_000_000_000_u64);
+        assert_eq!(json["policy"]["posture"], "smart");
+        assert_eq!(json["policy"]["approvals"], "bypass");
+        assert_eq!(json["policy"]["sandbox"], "required");
+        assert_eq!(json["policy"]["source"], "local_cli_launch");
+    }
     use serde_json::json;
 
     #[test]
@@ -799,32 +1746,229 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.1.0".to_string(),
             session_id: Some("abc123".to_string()),
+            session_persistence: SessionPersistence::Durable,
             capabilities: Capabilities {
                 tool_approval: true,
                 thinking: true,
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            contract: None,
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "ready");
         assert_eq!(json["version"], "0.1.0");
         assert_eq!(json["session_id"], "abc123");
+        assert_eq!(json["session_persistence"], "durable");
         assert_eq!(json["capabilities"]["tool_approval"], true);
 
-        // session_id omitted when None
+        // A `None` session id is STATED, not implied by an absent key. The
+        // previous assertion here was `json2.get("session_id").is_none()` —
+        // it pinned the defect rather than the contract: a host reading
+        // `ready.session_id` got `undefined` and could not tell a degraded
+        // Core from a malformed frame from a Core too old to know.
         let event_no_sid = ProtocolEvent::Ready {
             version: "0.1.0".to_string(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: Capabilities {
                 tool_approval: true,
                 thinking: true,
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            contract: None,
+            execution_policy: None,
         };
         let json2 = serde_json::to_value(&event_no_sid).unwrap();
-        assert!(json2.get("session_id").is_none());
+        assert_eq!(
+            json2.get("session_id"),
+            Some(&Value::Null),
+            "session_id must be present and null, never absent: {json2}"
+        );
+        assert_eq!(json2["session_persistence"], "disabled_by_operator");
+    }
+
+    /// A consumer that reads ONLY the wire can tell every `ready` posture
+    /// apart, and each one carries a `session_id` key.
+    ///
+    /// This is the property the omit-the-key shape could not provide, written
+    /// the way a host actually reads a frame: no Rust types, just the JSON
+    /// object. The frames must be pairwise distinguishable on
+    /// `session_persistence` alone, and every one of them must publish the
+    /// correlation key `EVENT_SPECS` says `ready` correlates on.
+    ///
+    /// FOUR postures now, and the fourth is the one that makes the pairwise
+    /// requirement bite. `journaled_without_replay` and `durable` are the pair
+    /// a consumer is most likely to collapse — both name a session, both are
+    /// resumable, both survive a restart — and they differ on the single
+    /// question a consumer asks this field to decide: may I wait for this
+    /// session to recover itself?
+    #[test]
+    fn every_ready_posture_is_distinguishable_from_the_others_on_the_wire() {
+        fn ready(session_id: Option<&str>, persistence: SessionPersistence) -> Value {
+            serde_json::to_value(ProtocolEvent::Ready {
+                version: "0.12.25".to_string(),
+                session_id: session_id.map(str::to_string),
+                session_persistence: persistence,
+                capabilities: Capabilities::default(),
+                contract: None,
+                execution_policy: None,
+            })
+            .unwrap()
+        }
+
+        let durable = ready(Some("sess-durable"), SessionPersistence::Durable);
+        let unsealed = ready(
+            Some("sess-unsealed"),
+            SessionPersistence::JournaledWithoutReplay,
+        );
+        let by_operator = ready(None, SessionPersistence::DisabledByOperator);
+        let by_host = ready(None, SessionPersistence::DisabledByHost);
+
+        // Every posture publishes the correlation key. A host can always ask
+        // "is session_id present?" and get a truthful yes.
+        for frame in [&durable, &unsealed, &by_operator, &by_host] {
+            assert!(
+                frame.as_object().unwrap().contains_key("session_id"),
+                "ready dropped its declared correlation key: {frame}"
+            );
+        }
+
+        // The two nulls are NOT the same event, the two named sessions are NOT
+        // the same event, and no null is a string.
+        let postures = [&durable, &unsealed, &by_operator, &by_host]
+            .map(|frame| frame["session_persistence"].as_str().unwrap().to_string());
+        assert_eq!(
+            postures,
+            [
+                "durable",
+                "journaled_without_replay",
+                "disabled_by_operator",
+                "disabled_by_host"
+            ],
+            "the wire vocabulary drifted from the type"
+        );
+        assert_eq!(
+            postures
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4,
+            "two postures collapsed to one wire value: {postures:?}"
+        );
+
+        // Naming a session no longer implies replay, and that is the whole
+        // reason the fourth value exists. A consumer keying only on
+        // "is session_id non-null?" cannot tell these two apart.
+        assert_eq!(durable["session_id"], "sess-durable");
+        assert_eq!(unsealed["session_id"], "sess-unsealed");
+        assert_ne!(
+            durable["session_persistence"], unsealed["session_persistence"],
+            "a journaled session with no crash replay must not report as durable"
+        );
+        assert_eq!(by_operator["session_id"], Value::Null);
+        assert_eq!(by_host["session_id"], Value::Null);
+    }
+
+    #[test]
+    fn ready_can_expose_the_initial_effective_policy_snapshot() {
+        use crate::execution_policy::ExecutionPolicySequence;
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
+        };
+
+        let snapshot = ExecutionPolicySequence::launch(
+            EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                ApprovalPolicy::Prompt,
+                PolicySource::DesktopLocalLaunch,
+            )),
+            42,
+        )
+        .current()
+        .clone();
+        let json = serde_json::to_value(ProtocolEvent::Ready {
+            version: "0.12.25".to_owned(),
+            session_id: Some("session-1".to_owned()),
+            session_persistence: SessionPersistence::Durable,
+            capabilities: Capabilities::default(),
+            contract: None,
+            execution_policy: Some(snapshot),
+        })
+        .unwrap();
+
+        assert_eq!(json["execution_policy"]["revision"], 0);
+        assert_eq!(json["execution_policy"]["reason"], "launch");
+        assert_eq!(json["execution_policy"]["critical"], true);
+        assert_eq!(json["execution_policy"]["policy"]["approvals"], "prompt");
+    }
+
+    #[test]
+    fn capability_activation_serializes_as_a_flat_additive_event() {
+        let event = ProtocolEvent::CapabilityActivation {
+            activation: CapabilityActivation::unavailable(
+                CapabilityId::DelegateIsolation,
+                CapabilityReasonCode::IsolationNotEnforced,
+            ),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "capability_activation",
+                "capability": "delegate_isolation",
+                "stage": "unavailable",
+                "reason": "isolation_not_enforced"
+            })
+        );
+    }
+
+    #[test]
+    fn capability_activation_requires_reason_only_when_unavailable() {
+        assert!(
+            CapabilityActivation::unavailable(
+                CapabilityId::PricingRefresher,
+                CapabilityReasonCode::NoProductionConstructor,
+            )
+            .is_well_formed()
+        );
+        assert!(
+            CapabilityActivation::stage(CapabilityId::SmartHandoff, CapabilityStage::Ready)
+                .is_well_formed()
+        );
+        assert!(
+            !CapabilityActivation {
+                capability: CapabilityId::SmartHandoff,
+                stage: CapabilityStage::Unavailable,
+                reason: None,
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !CapabilityActivation {
+                capability: CapabilityId::SmartHandoff,
+                stage: CapabilityStage::Ready,
+                reason: Some(CapabilityReasonCode::DependencyUnavailable),
+            }
+            .is_well_formed()
+        );
+    }
+
+    #[test]
+    fn capability_activation_transition_cycle_is_explicit() {
+        use CapabilityStage as Stage;
+
+        assert!(Stage::Declared.allows(Stage::Configured));
+        assert!(Stage::Configured.allows(Stage::Constructed));
+        assert!(Stage::Constructed.allows(Stage::Ready));
+        assert!(Stage::Ready.allows(Stage::Reached));
+        assert!(Stage::Reached.allows(Stage::OutcomeChanged));
+        assert!(Stage::OutcomeChanged.allows(Stage::Observed));
+        assert!(Stage::Observed.allows(Stage::Reached));
+        assert!(Stage::Declared.allows(Stage::Unavailable));
+        assert!(!Stage::Unavailable.allows(Stage::Configured));
+        assert!(!Stage::Ready.allows(Stage::Observed));
     }
 
     #[test]
@@ -1087,6 +2231,7 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.2.0".to_string(),
             session_id: Some("abc".to_string()),
+            session_persistence: SessionPersistence::Durable,
             capabilities: Capabilities {
                 tool_approval: true,
                 thinking: true,
@@ -1095,6 +2240,8 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            contract: None,
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["capabilities"]["thinking"], true);
@@ -1123,6 +2270,26 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "pong");
         assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn midflight_monitor_decision_serializes_typed_control_flow() {
+        let event = ProtocolEvent::MidFlightMonitorDecision {
+            directive: MonitorDirective::Replan,
+            reason: MonitorReason::RepeatedToolRoute,
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "mid_flight_monitor_decision");
+        assert_eq!(json["directive"], "replan");
+        assert_eq!(json["reason"], "repeated_tool_route");
+
+        let stop = serde_json::to_value(ProtocolEvent::MidFlightMonitorDecision {
+            directive: MonitorDirective::Stop,
+            reason: MonitorReason::OutputStall,
+        })
+        .unwrap();
+        assert_eq!(stop["directive"], "stop");
+        assert_eq!(stop["reason"], "output_stall");
     }
 
     #[test]
@@ -1180,7 +2347,10 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.1.21".into(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: Capabilities::default(),
+            contract: None,
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         let caps_obj = &json["capabilities"];
@@ -1313,11 +2483,82 @@ mod tests {
         let event = ProtocolEvent::Ready {
             version: "0.2.0".into(),
             session_id: None,
+            session_persistence: SessionPersistence::DisabledByOperator,
             capabilities: caps,
+            contract: None,
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
 
         assert_eq!(json["capabilities"]["browser_suite"], true);
         assert!(json["capabilities"].get("computer_use").is_none());
+    }
+
+    #[test]
+    fn workspace_policy_receipt_serializes_as_output_only_effective_authority() {
+        use wcore_types::workspace_trust::{
+            WorkspacePolicyReceipt, WorkspaceSandboxProfile, resolve_workspace_trust,
+        };
+
+        let event = ProtocolEvent::WorkspacePolicy {
+            policy: WorkspacePolicyReceipt {
+                trust: resolve_workspace_trust("fingerprint", []),
+                profile: WorkspaceSandboxProfile::Strict,
+                backend: "bwrap".to_string(),
+                writable_roots: vec!["/workspace".to_string()],
+                readable_roots: vec!["/workspace".to_string()],
+                capabilities: Vec::new(),
+            },
+        };
+        let json = serde_json::to_value(event).unwrap();
+
+        assert_eq!(json["type"], "workspace_policy");
+        assert_eq!(json["policy"]["profile"], "strict");
+        assert_eq!(json["policy"]["trust"]["level"], "untrusted");
+        assert_eq!(json["policy"]["trust"]["fingerprint"], "fingerprint");
+        assert_eq!(json["policy"]["backend"], "bwrap");
+    }
+
+    #[test]
+    fn provider_failover_receipt_preserves_opaque_replay_shape() {
+        let receipt = serde_json::json!({
+            "reason": "rate_limit",
+            "failed_provider": "anthropic",
+            "failed_model": "claude-sonnet-4-6",
+            "candidates": [{
+                "provider": "openai",
+                "model": "gpt-5",
+                "disposition": { "Ok": null },
+                "pricing": {
+                    "source": "bundled",
+                    "stale": false,
+                    "priced": true,
+                    "estimated_microcents": 4242
+                }
+            }],
+            "selected_provider": "openai",
+            "selected_model": "gpt-5"
+        });
+        let event = ProtocolEvent::ProviderFailoverReceipt {
+            receipt: receipt.clone(),
+        };
+
+        let wire = serde_json::to_string(&event).unwrap();
+        let replayed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+
+        assert_eq!(replayed["type"], "provider_failover_receipt");
+        assert_eq!(replayed["receipt"], receipt);
+    }
+
+    #[test]
+    fn legacy_turn_cost_defaults_to_unpriced() {
+        let row: TurnCost = serde_json::from_value(serde_json::json!({
+            "turn": 1,
+            "model": "router-model",
+            "provider": "router",
+            "cost_usd": 0.0
+        }))
+        .unwrap();
+        assert!(!row.priced);
     }
 }

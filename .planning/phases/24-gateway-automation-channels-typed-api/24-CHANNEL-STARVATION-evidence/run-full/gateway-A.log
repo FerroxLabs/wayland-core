@@ -1,0 +1,65 @@
+[2m2026-07-28T20:56:32.404010Z[0m [32m INFO[0m channel auto-registered [3mchannel[0m[2m=[0mf24cstg [3mplatform[0m[2m=[0mtelegram
+[gateway] channels registered=1
+[2m2026-07-28T20:56:32.404477Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:56:32.404495Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[gateway] inbound: subscriber spawned, webhook host disabled policies=1
+[2m2026-07-28T20:56:32.404831Z[0m [33m WARN[0m F24_CHANNEL_LEASE=observer — another process owns inbound polling; this process will NOT poll (sending is unaffected) [3mholder[0m[2m=[0m"gateway" [3mowner_pid[0m[2m=[0m"3337956" [3mdir[0m[2m=[0m/root/f24cs-run-full/home/channels
+F24_CHANNEL_LEASE=observer owner_pid=3337956 holder=gateway: another wayland-core process is already receiving messages for this home; this one will not poll for inbound messages. Sending still works.
+[gateway] inbound polling is owned by another process (pid Some(3337956)); this gateway will send but not poll
+[2m2026-07-28T20:56:32.405231Z[0m [32m INFO[0m headless cron handler: using the caller's ChannelManager; not registering or starting a second one
+[gateway] started pid=3350595 role=Observer profile=default carried=0 (unattempted 0 / unknown-outcome 0) quarantined=0
+[2m2026-07-28T20:56:33.408061Z[0m [35mTRACE[0m F24_CHANNEL_LEASE=owner (supervisor re-attempt) [3mholder[0m[2m=[0m"gateway"
+[2m2026-07-28T20:56:33.408309Z[0m [33m WARN[0m WAYLAND_VAULT_PASSPHRASE provided via env var — visible via /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD to a file descriptor number to avoid this leak.
+[2m2026-07-28T20:56:37.266408Z[0m [32m INFO[0m F24_CHANNEL_LEASE=acquired — this process has taken over inbound polling [3mholder[0m[2m=[0m"gateway" [3mpid[0m[2m=[0m3350595
+F24_CHANNEL_LEASE=acquired holder=gateway pid=3350595: this process has taken over inbound message polling for this home.
+[2m2026-07-28T20:56:37.266470Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mAcquired
+[2m2026-07-28T20:56:37.266578Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:38.267431Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:39.268098Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:40.267209Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:41.268281Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:42.267331Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:43.268040Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:44.267645Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:45.268003Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:46.268050Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:47.267382Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:48.267661Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:49.267878Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:50.267838Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:51.267702Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:52.268085Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:53.268176Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:54.267455Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:55.267728Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:56.267449Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:57.267735Z[0m [35mTRACE[0m channel poll supervisor tick [3moutcome[0m[2m=[0mHeldOwner
+[2m2026-07-28T20:56:58.019295Z[0m [32m INFO[0m egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked [3mallowlisted[0m[2m=[0m37
+[2m2026-07-28T20:56:58.024959Z[0m [33m WARN[0m not advertising browser_suite: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"browser_suite" [3mreason[0m[2m=[0mno browser backend can start: `camofox-browser` does not resolve on PATH and no sidecar answered http://localhost:9377/health [3mremedy[0m[2m=[0minstall @askjo/camofox-browser, or set WAYLAND_CAMOUFOX_BIN to the executable, or start the Camoufox sidecar before the session
+[2m2026-07-28T20:56:58.025025Z[0m [33m WARN[0m not advertising computer_use: the plugin is loaded but no backend can start [3mcapability[0m[2m=[0m"computer_use" [3mreason[0m[2m=[0mneither DISPLAY nor WAYLAND_DISPLAY is set, so no display server is reachable and the X11 backend cannot connect [3mremedy[0m[2m=[0mrun inside a graphical session, or export DISPLAY for an available X server (e.g. an Xvfb instance) before starting
+[2m2026-07-28T20:56:58.025381Z[0m [32m INFO[0m postgres_schema: no DATABASE_URL / POSTGRES_URL / PG_CONN_STRING set — tool hidden
+[2m2026-07-28T20:56:58.026006Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playback
+[2m2026-07-28T20:56:58.026044Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_devices
+[2m2026-07-28T20:56:58.026062Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_queue
+[2m2026-07-28T20:56:58.026077Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_search
+[2m2026-07-28T20:56:58.026092Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_playlists
+[2m2026-07-28T20:56:58.026107Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_albums
+[2m2026-07-28T20:56:58.026123Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0mspotify_library
+[2m2026-07-28T20:56:58.026141Z[0m [32m INFO[0m skipping registration of tool whose backend is not configured [3mtool[0m[2m=[0myuanbao
+[2m2026-07-28T20:56:58.026269Z[0m [32m INFO[0m image_gen: using gpt-image-1 at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:56:58.026299Z[0m [32m INFO[0m web search: using Parallel.ai free search (anonymous). Your search queries are sent to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider.
+[2m2026-07-28T20:56:58.026520Z[0m [33m WARN[0m vision: no API key found (ANTHROPIC/OPENAI/GEMINI) — vision tool will be hidden
+[2m2026-07-28T20:56:58.026540Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-28T20:56:58.026652Z[0m [32m INFO[0m tts: using OpenAI TTS at http://127.0.0.1:39393 (active OpenAI-wire provider)
+[2m2026-07-28T20:56:58.027137Z[0m [33m WARN[0m video_analyze: ffmpeg not found on PATH — tool hidden (install ffmpeg to enable)
+[2m2026-07-28T20:56:58.027204Z[0m [32m INFO[0m cronjob: wiring WaylandCronScheduler over default FileCronStore
+[2m2026-07-28T20:56:58.028379Z[0m [33m WARN[0m plugin tool name collides with an already-registered tool (builtin wins) — skipping plugin tool [3mplugin[0m[2m=[0mwayland-cua [3mtool[0m[2m=[0mexecute [3mfq_name[0m[2m=[0mCua::execute
+[2m2026-07-28T20:56:58.033755Z[0m [33m WARN[0m semantic search degraded: using keyword-hash embedder; enable bge-local or configure a cloud embedder (openai/voyage) for real semantic similarity.
+[2m2026-07-28T20:56:58.033996Z[0m [32m INFO[0m W7 Pre-0: skills_lifecycle ON — real Memory wired (session-scope id='boot'; rebind on init_session)
+[2m2026-07-28T20:56:58.034037Z[0m [32m INFO[0m M3.2: memory.enabled ON — decay scheduler spawned [3minterval_secs[0m[2m=[0m3600
+[2m2026-07-28T20:56:58.034216Z[0m [34mDEBUG[0m bundled skill catalog initialised for session
+[2m2026-07-28T20:56:58.036921Z[0m [32m INFO[0m user-model: using local backend (set HONCHO_API_KEY or WAYLAND_USER_MODEL_BACKEND=honcho for deeper Honcho dialectic user modeling)
+[2m2026-07-28T20:56:58.037079Z[0m [34mDEBUG[0m skill_router: hydrated from GEPA `evolved_prompts` (bench scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:56:58.037102Z[0m [34mDEBUG[0m skill_router: hydrated auto-drafted skills (auto_drafter scorer) [3mseeded[0m[2m=[0m0
+[2m2026-07-28T20:56:58.040090Z[0m [32m INFO[0m channel engine tool posture applied [3mposture[0m[2m=[0mConversational [3msandbox_enforces_read_deny[0m[2m=[0mtrue
+[2m2026-07-28T20:56:58.040238Z[0m [34mDEBUG[0m child tool authority bound to the parent session registry

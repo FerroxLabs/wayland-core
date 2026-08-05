@@ -1,0 +1,6 @@
+F23_CACHE=session id=b5fb08db-7458-410b-8db1-90e195b88f96 round_trips=3 complete=true started=2026-07-29T15:30:03.671Z updated=2026-07-29T15:30:14.849Z path=/root/c4-live-s2/home-REVERT/cache-ledger/b5fb08db-7458-410b-8db1-90e195b88f96.json
+F23_CACHE=quality hit_ratio=0.3277 warm_hit_ratio=0.9681 hit_round_trips=1 miss_round_trips=2 warm_round_trips=1 cache_read=17006 cache_write=34873 uncached_input=9 output=336 total_input=51888
+F23_CACHE=invalidation distinct_causes=1 causes=history_rewritten:1
+F23_CACHE=invalidation_cause name=history_rewritten count=1
+F23_CACHE=pressure peak_watermark=17567 autocompact_threshold=8000 emergency_limit=29000 peak_pressure=2.1959 compactions=2 micro=0 auto=0 failed=2 tokens_reclaimed=0
+F23_CACHE=cost usd=0.046981 uncached_equivalent_usd=0.053568 saving_usd=0.006587 saving_ratio=0.1230 cost_truth=priced catalog_priced_round_trips=3 estimated_round_trips=0 unpriced_round_trips=0

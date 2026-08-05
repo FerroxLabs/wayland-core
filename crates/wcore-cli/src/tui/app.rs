@@ -11,7 +11,7 @@
 //! deliberately minimal-but-real — grounded in the mockup surfaces and the
 //! `ProtocolEvent` payloads — so later waves extend by adding, not reshaping.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -64,6 +64,11 @@ pub struct App {
     /// The session approval mode. Constructed only as `SessionMode::Default`
     /// in Wave 0; mode cycling is Wave 2.
     pub mode: wcore_protocol::commands::SessionMode,
+    /// Immutable launch authority emitted by Core after bootstrap. Approval
+    /// mode can change during a session; sandbox posture cannot.
+    pub execution_policy: Option<wcore_types::execution_policy::EffectiveExecutionPolicy>,
+    /// F08 workspace trust and concrete sandbox grants emitted by Core.
+    pub workspace_policy: Option<wcore_types::workspace_trust::WorkspacePolicyReceipt>,
     /// Context-window usage for the status-bar meter.
     pub context: ContextView,
     /// Set true to break the render loop and exit cleanly.
@@ -127,6 +132,13 @@ pub struct App {
     /// right-rail Activity panel can surface MCP status without a
     /// transcript-spamming system turn per server.
     pub mcp_status: HashMap<String, McpServerStatus>,
+    /// F05: latest typed activation fact for each audited capability. The
+    /// protocol bridge updates this without adding transcript turns or toasts;
+    /// `/doctor` is the operator-facing projection.
+    pub capability_status: BTreeMap<
+        wcore_protocol::events::CapabilityId,
+        wcore_protocol::events::CapabilityActivation,
+    >,
     /// Mouse capture toggle for transcript scroll vs native text selection.
     /// `true` (DEFAULT, 2026-05-31) — `EnableMouseCapture` is active, so the
     /// scroll wheel drives transcript scrollback out of the box. This reverts
@@ -258,6 +270,54 @@ pub struct App {
     /// `session.sub_agents` (the SubAgents tab is unchanged); read only by
     /// the Workflows surface. Empty until a workflow runs.
     pub workflows: Vec<WorkflowView>,
+    /// F22-C1 — durable Goals the host protocol has reported, keyed by goal id.
+    ///
+    /// Before this field the TUI had ZERO goal references: a user driving a
+    /// durable Goal from the terminal could not see one without shelling out to
+    /// `wayland-core goal status`. Written ONLY by the protocol bridge from
+    /// `goal_snapshot`, so the TUI never derives Goal state of its own — it
+    /// renders the projection the chain produced, and cannot disagree with it.
+    ///
+    /// `BTreeMap` rather than `Vec` because a Goal is keyed by identity and a
+    /// re-snapshot must REPLACE its predecessor; a Vec would accumulate stale
+    /// copies of the same Goal and the status line would show whichever one it
+    /// happened to scan first.
+    pub goals: std::collections::BTreeMap<String, wcore_protocol::goal::GoalProjection>,
+    /// F22-C1 — the most recent Goal transition observed, for the status line.
+    ///
+    /// Kept separately from [`Self::goals`] because a transition is a MILESTONE
+    /// and a projection is a STATE: a snapshot that has not arrived yet must not
+    /// make the last transition invisible, and a transition must not be mistaken
+    /// for Goal state that replay would reproduce.
+    pub goal_last_transition: Option<GoalTransitionView>,
+    /// F22-C1 — the most recent REFUSED Goal control command.
+    ///
+    /// The TUI can now issue Goal commands, not only render them, so it needs
+    /// somewhere to put a refusal. Without this a refused command would look
+    /// exactly like an accepted one that changed nothing, which is the failure
+    /// this whole surface exists to close — a control plane that cannot tell
+    /// "no" from "done" will retry forever against a Goal that will never move.
+    ///
+    /// Written ONLY by the protocol bridge from `goal_control_refused`, on the
+    /// same terms as [`Self::goals`]: the TUI renders the refusal Core sent and
+    /// never decides for itself that a command failed.
+    pub goal_last_refusal: Option<GoalRefusalView>,
+}
+
+/// F22-C1 — one observed durable Goal transition, as the status line shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalTransitionView {
+    pub goal_id: String,
+    pub transition: wcore_protocol::goal::GoalTransitionKind,
+    pub lifecycle: wcore_protocol::goal::GoalLifecycleWire,
+}
+
+/// F22-C1 — one refused Goal control command, as the status line shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalRefusalView {
+    pub request_id: String,
+    pub goal_id: String,
+    pub reason: wcore_protocol::events::GoalControlRefusalReason,
 }
 
 impl App {
@@ -297,6 +357,8 @@ impl App {
             session: SessionView::default(),
             config: ConfigView::default(),
             mode: wcore_protocol::commands::SessionMode::Default,
+            execution_policy: None,
+            workspace_policy: None,
             context: ContextView::default(),
             quit: false,
             path_map: TreeModel::default(),
@@ -313,6 +375,7 @@ impl App {
             // failed — `/config` shows the honest non-degraded copy.
             config_apply_failed: false,
             mcp_status: HashMap::new(),
+            capability_status: BTreeMap::new(),
             // v0.9.1.3 F13: mouse capture defaults OFF so native terminal
             // 2026-05-31: capture ON by default so the scroll wheel drives
             // the transcript out of the box (the off-default read as "I can't
@@ -349,6 +412,10 @@ impl App {
             pending_touch: HashMap::new(),
             // ForgeFlows-Live Phase 2: no workflows running at boot.
             workflows: Vec::new(),
+            // F22-C1: no durable Goals observed at boot.
+            goals: std::collections::BTreeMap::new(),
+            goal_last_transition: None,
+            goal_last_refusal: None,
         }
     }
 
@@ -545,6 +612,13 @@ impl App {
         // ForgeFlows-Live Phase 2: drop inferred workflows on /new alongside
         // the sub-agent state they are grouped from.
         self.workflows.clear();
+        // F22-C1: a durable Goal outlives the process, but the VIEW of one is
+        // session state fed by the event stream. Keeping a stale projection
+        // across /new would show a Goal nothing is reporting on any more —
+        // the next snapshot repopulates it if it is still live.
+        self.goals.clear();
+        self.goal_last_transition = None;
+        self.goal_last_refusal = None;
         // onboarding_state: intentionally NOT reset (once-per-session first-spawn hint).
     }
 
@@ -1132,6 +1206,24 @@ pub struct SessionCostView {
     pub per_turn: Vec<TurnCostView>,
 }
 
+impl SessionCostView {
+    /// Whether any recorded turn lacks a real metered or known-free price.
+    pub(crate) fn has_unpriced_turns(&self) -> bool {
+        self.per_turn.iter().any(|turn| !turn.priced)
+    }
+
+    /// Format the known session subtotal without hiding turns whose provider
+    /// price is unavailable.
+    pub(crate) fn formatted_total_cost(&self) -> String {
+        let known = format!("${:.4}", self.total_cost_usd);
+        if self.has_unpriced_turns() {
+            format!("{known} + unpriced")
+        } else {
+            known
+        }
+    }
+}
+
 /// One per-turn cost row in a [`SessionCostView`]. Mirrors
 /// `wcore_protocol::events::TurnCost`.
 // v0.9.2 W10: additive `PartialEq` so `SessionCostView` (which holds a
@@ -1146,6 +1238,20 @@ pub struct TurnCostView {
     pub provider: String,
     /// The turn's cost in USD.
     pub cost_usd: f64,
+    /// Whether `cost_usd` is metered or known-free. False means the provider
+    /// price is unknown, so a zero value must not be presented as free.
+    pub priced: bool,
+}
+
+impl TurnCostView {
+    /// Format this row's cost without treating an unknown price as free.
+    pub(crate) fn formatted_cost(&self) -> String {
+        if self.priced {
+            format!("${:.4}", self.cost_usd)
+        } else {
+            "unpriced".to_string()
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1215,10 +1321,10 @@ pub struct ConfigView {
     /// Whether plan-first is enabled (`[plan] plan_first`) — the agent is
     /// nudged to plan before large/risky changes.
     pub plan_first: bool,
-    /// `--force` (`--yolo`, `--dangerously-skip-permissions`) is active:
-    /// every tool call is auto-approved by the engine's approval manager
-    /// (`SessionMode::Force`). The status bar appends a `· FORCE` badge
-    /// so the mode is impossible to miss.
+    /// Whether `--force`, `--yolo`, or the approval-only compatibility flag
+    /// `--dangerously-skip-permissions` granted launch authority to use Force.
+    /// This remains true after a live posture de-escalation; render active
+    /// posture from [`App::mode`], not this flag.
     pub force: bool,
     /// The active provider's resolved `ProviderCompat` cost-per-token
     /// values (`cost_per_input_token`, `cost_per_output_token`,

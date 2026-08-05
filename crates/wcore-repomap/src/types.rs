@@ -182,4 +182,17 @@ pub enum RepoMapError {
         #[source]
         source: std::io::Error,
     },
+    /// F23-06 — the persistent index store could not be read or written.
+    ///
+    /// Always names the store file. A corrupt, truncated or
+    /// wrong-schema-version store produces this rather than an empty index,
+    /// because an index that quietly reports zero records reads to a caller
+    /// as "this repository has nothing in it".
+    #[error("index store at {path} is unusable: {message}")]
+    Store {
+        /// The store file the failure refers to.
+        path: PathBuf,
+        /// What went wrong, including the remedy where one exists.
+        message: String,
+    },
 }

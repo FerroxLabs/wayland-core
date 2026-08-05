@@ -1,0 +1,8 @@
+=== windows records= 83 states= {'accepted': 27, 'attempted': 29, 'settled': 27}
+   distinct delivery ids= 27
+   settled-per-id histogram= {1: 27}
+   settled delivered=  {True: 27}
+=== linux records= 39 states= {'accepted': 13, 'attempted': 13, 'settled': 13}
+   distinct delivery ids= 13
+   settled-per-id histogram= {1: 13}
+   settled delivered=  {True: 13}

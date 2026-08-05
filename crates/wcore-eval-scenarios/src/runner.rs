@@ -22,16 +22,26 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use crate::capability_honesty::CapabilityEvidence;
+use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
+pub use crate::egress_evidence::ManagedHttpEgressEvidence;
+pub use crate::filesystem_evidence::FilesystemDeltaEvidence;
+use crate::filesystem_evidence::{EvidenceRoots, Snapshot as FilesystemSnapshot};
+use crate::process_tree::ProcessTree;
 use crate::providers::{ProviderConfig, ProviderId};
+use crate::redaction::SecretRedactor;
 use crate::stderr_capture::StderrCapture;
 use crate::tempenv::{self, TempEnvOptions};
 use crate::trace::{ToolTrace, TraceEntry};
@@ -41,6 +51,8 @@ use crate::trace::{ToolTrace, TraceEntry};
 pub struct ScenarioResult {
     pub name: String,
     pub provider: ProviderId,
+    pub platform: crate::scenario::Platform,
+    pub approval: crate::scenario::ApprovalPolicy,
     pub passed: bool,
     pub failures: Vec<Failure>,
     pub wall_time: Duration,
@@ -64,6 +76,57 @@ pub struct ScenarioResult {
     /// acknowledgements like "style updated", mode changes, engine notices).
     /// Asserted via [`crate::assertions::Assertion::InfoContains`].
     pub info_events: Vec<String>,
+    pub execution: ExecutionEvidence,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionEvidence {
+    pub config_sha256: String,
+    pub sandbox_backend: String,
+    pub process_tree_sha256: String,
+    pub containment_authoritative: bool,
+    pub cleanup_verified: bool,
+    pub artifact_scan_complete: bool,
+    pub prompt_dispatch_time: Duration,
+    pub first_token_time: Option<Duration>,
+    pub approval_response_time: Duration,
+    pub approval_commands: Vec<ApprovalCommandEvidence>,
+    #[serde(default)]
+    pub provider_attempts: Option<u64>,
+    #[serde(default)]
+    pub provider_retries: Option<u64>,
+    #[serde(default)]
+    pub provider_typed_failures: Vec<String>,
+    #[serde(default)]
+    pub provider_usage: Option<ProviderUsageEvidence>,
+    #[serde(default)]
+    pub managed_http_egress: Option<ManagedHttpEgressEvidence>,
+    #[serde(default)]
+    pub filesystem_deltas: Option<Vec<FilesystemDeltaEvidence>>,
+    /// True only after snapshots of every required workspace and engine-state
+    /// root succeed both before and after the candidate session.
+    #[serde(default)]
+    pub filesystem_snapshot_complete: bool,
+    #[serde(default)]
+    pub peak_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub peak_cpu_millis: Option<u64>,
+    pub cancellation_requested: bool,
+    pub shutdown_time: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageEvidence {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalCommandEvidence {
+    pub call_id: String,
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +149,7 @@ pub enum Failure {
         observed_usd: f64,
         budget_usd: f64,
     },
+    CostMissing,
     Crashed {
         stderr_tail: String,
         exit: i32,
@@ -120,6 +184,9 @@ pub enum Failure {
     /// invalid wire data, etc.) — surface so the test layer doesn't
     /// silently swallow it.
     RunnerError(String),
+    SecretDetected {
+        sink: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -135,7 +202,9 @@ pub enum SpawnError {
 /// Resolution order (first hit wins):
 /// 1. `WCORE_EVAL_BIN` env var — explicit override; tests can pin a
 ///    specific build.
-/// 2. `target/release/wayland-core` then `target/debug/wayland-core`
+/// 2. `CARGO_TARGET_DIR/{release,debug}/wayland-core` when Cargo is using a
+///    non-default artifact directory.
+/// 3. `target/release/wayland-core` then `target/debug/wayland-core`
 ///    by walking up from `CARGO_MANIFEST_DIR` two levels (mirrors the
 ///    pattern in `crates/wcore-cli/tests/release_binary_smoke.rs`).
 ///
@@ -172,6 +241,15 @@ pub fn discover_binary() -> Result<PathBuf, SpawnError> {
         "wayland-core"
     };
 
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        for profile in ["release", "debug"] {
+            let cand = target_dir.join(profile).join(bin_name);
+            if cand.exists() {
+                return Ok(cand);
+            }
+        }
+    }
+
     for profile in ["release", "debug"] {
         let cand = workspace_root.join("target").join(profile).join(bin_name);
         if cand.exists() {
@@ -180,8 +258,9 @@ pub fn discover_binary() -> Result<PathBuf, SpawnError> {
     }
 
     Err(SpawnError::BinaryMissing(format!(
-        "no wayland-core binary at {}/target/{{release,debug}}/{bin_name}; \
-         pre-build it (`cargo build -p wcore-cli`) or set WCORE_EVAL_BIN",
+        "no wayland-core binary in CARGO_TARGET_DIR or at \
+         {}/target/{{release,debug}}/{bin_name}; pre-build it \
+         (`cargo build -p wcore-cli`) or set WCORE_EVAL_BIN",
         workspace_root.display()
     )))
 }
@@ -202,7 +281,56 @@ pub fn spawn_for_run(
     yolo: bool,
     wayland_home: Option<&std::path::Path>,
 ) -> Result<Child, SpawnError> {
-    let mut cmd = Command::new(bin);
+    let secret = provider.resolved_key();
+    spawn_for_run_with_secret(
+        bin,
+        cwd,
+        provider,
+        yolo,
+        wayland_home,
+        secret.as_deref(),
+        SpawnInstrumentation::default(),
+    )
+}
+
+#[derive(Default)]
+struct SpawnInstrumentation<'a> {
+    process_tree: Option<&'a ProcessTree>,
+    egress_capture: Option<&'a crate::egress_evidence::Capture>,
+}
+
+fn spawn_for_run_with_secret(
+    bin: &std::path::Path,
+    cwd: &std::path::Path,
+    provider: &ProviderConfig,
+    yolo: bool,
+    wayland_home: Option<&std::path::Path>,
+    secret: Option<&str>,
+    instrumentation: SpawnInstrumentation<'_>,
+) -> Result<Child, SpawnError> {
+    let isolated_home = wayland_home.unwrap_or(cwd);
+    let child_environment = ChildEnvironment::build(cwd, isolated_home, secret)?;
+    let prepared_executable = instrumentation
+        .process_tree
+        .map(|process_tree| process_tree.prepare_executable(bin))
+        .transpose()?;
+    let executable = prepared_executable
+        .as_ref()
+        .map_or(bin, crate::process_tree::PreparedExecutable::path);
+    let mut cmd = Command::new(executable);
+    let vault_guard = child_environment.apply_tokio(&mut cmd)?;
+    if prepared_executable.is_some() {
+        #[cfg(target_os = "linux")]
+        cmd.env("WCORE_EVAL_PINNED_EXECUTABLE", "/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
+        cmd.env("WCORE_EVAL_PINNED_EXECUTABLE", executable);
+    }
+    if let Some(capture) = instrumentation.egress_capture {
+        capture.configure(&mut cmd);
+    }
+    // Build an allowlisted child environment before adding any scenario
+    // arguments. Credentials enter through a one-use file that Core deletes
+    // before bootstrap; they never appear in argv, env, or persisted config.
     // D3: only force-approve when the scenario's policy is `Yolo`. Without
     // `--yolo` the engine boots in `Default` approval mode and emits
     // `ApprovalRequired` per mutating tool, which the runner answers per policy.
@@ -213,12 +341,24 @@ pub fn spawn_for_run(
         .arg("--provider")
         .arg(provider.id.cli_name())
         .arg("--model")
-        .arg(&provider.model)
-        .current_dir(cwd)
+        .arg(&provider.model);
+    if let Some(base_url) = &provider.base_url {
+        cmd.arg("--base-url").arg(base_url);
+    }
+    cmd.current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(process_tree) = instrumentation.process_tree {
+        process_tree.prepare_workspace(cwd)?;
+        if let Some(wayland_home) = wayland_home
+            && !wayland_home.starts_with(cwd)
+        {
+            process_tree.prepare_workspace(wayland_home)?;
+        }
+        process_tree.configure(&mut cmd, prepared_executable.as_ref())?;
+    }
     // `wayland_config_dir()` = `$WAYLAND_HOME` resolves the global config layer:
     // MCP servers, skills dir, and memory DBs. D4 cross-session runs pass ONE
     // persistent home so those carry across sessions. Persona/coverage runs pass
@@ -226,38 +366,32 @@ pub fn spawn_for_run(
     // stripping the var (`None`) instead falls back to the developer's real home
     // and dials their actual MCP servers. `None` remains for callers that
     // genuinely want the host default.
-    match wayland_home {
-        Some(home) => {
-            cmd.env("WAYLAND_HOME", home);
-        }
-        None => {
-            cmd.env_remove("WAYLAND_HOME");
-        }
-    }
-    // Hermeticity: pass an explicitly-configured key to the child via
-    // `--api-key` so scenarios don't silently depend on the ambient env's
-    // key. Without this, a scenario that sets `with_api_key(...)` still falls
-    // back to the host env — so it "passes" on a developer machine (which has
-    // a real key) and crashes with "No API key found" in CI (which doesn't).
-    // `None` preserves the documented env-resolution fallback.
-    if let Some(key) = &provider.api_key {
-        cmd.arg("--api-key").arg(key);
-    }
-    Ok(cmd.spawn()?)
+    let child = cmd.spawn();
+    drop(vault_guard);
+    let child = child?;
+    drop(prepared_executable);
+    Ok(child)
 }
 
-/// Spawn the binary with arbitrary args + no provider seeding — used by
-/// the `wayland-core --help` smoke test that does NOT touch the engine.
-/// stdout/stderr piped so the caller can collect output; stdin null so
-/// the process exits immediately when `--help` finishes.
-pub fn spawn_with_args(bin: &std::path::Path, args: &[&str]) -> Result<Child, SpawnError> {
+/// Spawn the binary with arbitrary args in an explicit isolated directory —
+/// used by the `wayland-core --help` smoke test that does not touch the engine.
+pub fn spawn_with_args(
+    bin: &std::path::Path,
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
+    let child_environment = ChildEnvironment::build(cwd, cwd, None)?;
+    let vault_guard = child_environment.apply_tokio(&mut cmd)?;
     cmd.args(args)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    Ok(cmd.spawn()?)
+    let child = cmd.spawn();
+    drop(vault_guard);
+    Ok(child?)
 }
 
 /// Drive one scenario × provider to completion and return the result.
@@ -267,6 +401,18 @@ pub fn spawn_with_args(bin: &std::path::Path, args: &[&str]) -> Result<Child, Sp
 pub async fn run(
     scenario: &crate::scenario::Scenario,
     provider: &ProviderConfig,
+) -> anyhow::Result<ScenarioResult> {
+    let bin = discover_binary().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    run_with_binary(scenario, provider, &bin).await
+}
+
+/// Drive a scenario against a caller-validated binary artifact. The CLI uses
+/// this path so artifact selection and provenance cannot be replaced by the
+/// legacy developer auto-discovery between validation and spawn.
+pub async fn run_with_binary(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
 ) -> anyhow::Result<ScenarioResult> {
     // Persona path: a fresh hermetic throwaway env per run. WAYLAND_HOME points
     // at the tempdir (NOT stripped): `wayland_config_dir()` then resolves to the
@@ -280,9 +426,47 @@ pub async fn run(
     // which loads regardless of WAYLAND_HOME, so this only empties the global
     // layer. The cross-session harness drives `run_session_in` directly against
     // its own persistent home instead.
-    let env = tempenv::build_with(provider, &TempEnvOptions::default())?;
-    let bin = discover_binary().map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    run_session_in(scenario, provider, &bin, env.path(), Some(env.path())).await
+    let env = tempenv::build_with(
+        provider,
+        &TempEnvOptions {
+            budget_max_cost_usd: (scenario.max_total_cost_usd > 0.0)
+                .then_some(scenario.max_total_cost_usd),
+            ..TempEnvOptions::default()
+        },
+    )?;
+    run_session_in(scenario, provider, bin, env.path(), Some(env.home())).await
+}
+
+/// Drive a scenario inside a caller-prepared hermetic environment.
+///
+/// This is the deterministic-fixture seam for scripts that must name files in
+/// the scenario workspace before the provider fixture starts. The caller owns
+/// and retains the borrowed environment for the complete run; execution uses
+/// the same setup, containment, cleanup, assertion, and secret-scanning path as
+/// [`run_with_binary`].
+pub async fn run_with_binary_in_environment(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+    env: &crate::tempenv::TempEnv,
+) -> anyhow::Result<ScenarioResult> {
+    run_session_in(scenario, provider, bin, env.path(), Some(env.home())).await
+}
+
+/// Drive a scenario inside caller-owned project and `WAYLAND_HOME` paths.
+///
+/// Unlike [`run_with_binary_in_environment`], this seam keeps the global and
+/// project config roots distinct. It is used by packaged cascade tests that
+/// must prove the production global/project merge rather than a pre-merged
+/// fixture file. The caller owns both paths for the complete run.
+pub async fn run_with_binary_in_paths(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+    project: &std::path::Path,
+    wayland_home: &std::path::Path,
+) -> anyhow::Result<ScenarioResult> {
+    run_session_in(scenario, provider, bin, project, Some(wayland_home)).await
 }
 
 /// Drive ONE session of a scenario inside an already-prepared working
@@ -300,127 +484,490 @@ pub(crate) async fn run_session_in(
     cwd: &std::path::Path,
     wayland_home: Option<&std::path::Path>,
 ) -> anyhow::Result<ScenarioResult> {
-    let start = Instant::now();
-
+    let secret = provider.resolved_key();
+    let redactor = SecretRedactor::from_secret(secret.clone());
+    let evidence_roots = EvidenceRoots::new(cwd, wayland_home)?;
     // Run the scenario's setup hook BEFORE spawning the engine. The closure
     // seeds the working dir — input files to probe, fixture scripts (mock MCP
     // server, shell hooks), and config appends (`[mcp.servers.*]`,
     // `[[hooks.*]]`) onto the tempenv-seeded `.wayland-core/config.toml`. This
     // was previously assigned on `Scenario` but never invoked, so any
     // setup-dependent scenario silently degraded; D6/D7/coverage need it.
-    if let Some(setup) = &scenario.setup {
-        setup(cwd).map_err(|e| anyhow::anyhow!("scenario setup failed: {e}"))?;
-    }
+    let setup_result = scenario.setup.as_ref().map_or(Ok(()), |setup| {
+        setup(cwd).map_err(|error| anyhow::anyhow!("scenario setup failed: {error}"))
+    });
+    let outcome = match setup_result {
+        Ok(()) => {
+            let config_sha256 = tempenv::config_sha256(cwd)
+                .map_err(|error| anyhow::anyhow!("could not hash effective config: {error}"))?;
+            run_prepared_session(SessionRun {
+                scenario,
+                provider,
+                bin,
+                cwd,
+                wayland_home,
+                secret: secret.as_deref(),
+                redactor: &redactor,
+                config_sha256,
+                evidence_roots: &evidence_roots,
+            })
+            .await
+        }
+        Err(error) => Err(error),
+    };
 
-    let mut child = spawn_for_run(
+    let cleanup_error = scenario
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup(cwd).err());
+
+    let result = match (outcome, cleanup_error) {
+        (Ok(mut result), Some(error)) => {
+            result.failures.push(Failure::RunnerError(format!(
+                "scenario cleanup failed: {error}"
+            )));
+            result.passed = false;
+            Ok(result)
+        }
+        (Err(run_error), Some(cleanup_error)) => Err(anyhow::anyhow!(
+            "{run_error}; scenario cleanup failed: {cleanup_error}"
+        )),
+        (outcome, None) => outcome,
+    };
+    let artifact_scan = scan_artifacts(&redactor, &evidence_roots);
+    let result = match (result, artifact_scan) {
+        (Ok(mut result), Ok(contaminated)) => {
+            result.execution.artifact_scan_complete = true;
+            for sink in contaminated {
+                result.failures.push(Failure::SecretDetected { sink });
+            }
+            result.passed = result.failures.is_empty();
+            Ok(result)
+        }
+        (Ok(mut result), Err(error)) => {
+            result.execution.artifact_scan_complete = false;
+            result.failures.push(Failure::RunnerError(format!(
+                "artifact secret scan failed: {error}"
+            )));
+            result.passed = false;
+            Ok(result)
+        }
+        (Err(run_error), Err(scan_error)) => Err(anyhow::anyhow!(
+            "{run_error}; artifact secret scan failed: {scan_error}"
+        )),
+        (result, Ok(_)) => result,
+    };
+    result
+        .map(|result| redactor.result(result))
+        .map_err(|error| anyhow::anyhow!(redactor.text(error.to_string()).0))
+}
+
+async fn run_prepared_session(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
+    let evidence_roots = input.evidence_roots;
+    let before = FilesystemSnapshot::capture(evidence_roots)
+        .map_err(|error| anyhow::anyhow!("could not snapshot scenario evidence roots: {error}"))?;
+    let mut result = run_session_body(input).await?;
+    let after = FilesystemSnapshot::capture(evidence_roots)
+        .map_err(|error| anyhow::anyhow!("could not snapshot scenario evidence roots: {error}"))?;
+    result.execution.filesystem_deltas = Some(before.delta(after));
+    result.execution.filesystem_snapshot_complete = true;
+    Ok(result)
+}
+
+fn scan_artifacts(
+    redactor: &SecretRedactor,
+    roots: &EvidenceRoots,
+) -> std::io::Result<Vec<String>> {
+    let mut contaminated = Vec::new();
+    for root in roots.scan_roots() {
+        // Validate every required physical root even when there is no provider
+        // secret to search for. Completeness must describe coverage, not merely
+        // whether the redactor had a needle.
+        let _ = std::fs::read_dir(root)?;
+        for relative in redactor.remove_contaminated_files(root)? {
+            let classified = roots.classify(&root.join(relative))?;
+            contaminated.push(format!(
+                "artifact:{}:{}",
+                classified.scope,
+                classified.relative.display()
+            ));
+        }
+    }
+    Ok(contaminated)
+}
+
+struct SessionRun<'a> {
+    scenario: &'a crate::scenario::Scenario,
+    provider: &'a ProviderConfig,
+    bin: &'a std::path::Path,
+    cwd: &'a std::path::Path,
+    wayland_home: Option<&'a std::path::Path>,
+    secret: Option<&'a str>,
+    redactor: &'a SecretRedactor,
+    config_sha256: String,
+    evidence_roots: &'a EvidenceRoots,
+}
+
+async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
+    let SessionRun {
+        scenario,
+        provider,
+        bin,
+        cwd,
+        wayland_home,
+        secret,
+        redactor,
+        config_sha256,
+        evidence_roots: _,
+    } = input;
+    let authority_evidence_required = authority_evidence_required();
+    let egress_capture = authority_evidence_required
+        .then(|| crate::egress_evidence::Capture::create(cwd))
+        .transpose()
+        .map_err(|error| {
+            anyhow::anyhow!("could not prepare authenticated egress capture: {error}")
+        })?;
+
+    // One configured candidate identity cannot safely own two evaluator
+    // workspaces at once. Serialize runs inside this supervisor; the kernel
+    // identity lock in ProcessTree rejects concurrent external supervisors.
+    #[cfg(target_os = "linux")]
+    let _candidate_identity_guard = crate::process_tree::serialize_candidate_identity().await;
+    let start = Instant::now();
+    let mut process_tree = ProcessTree::prepare()
+        .map_err(|error| anyhow::anyhow!("process containment unavailable: {error}"))?;
+    let sandbox_backend = process_tree.backend_name().to_string();
+    let containment_authoritative = process_tree.is_authoritative();
+
+    let mut child = spawn_for_run_with_secret(
         bin,
         cwd,
         provider,
         scenario.approval == crate::scenario::ApprovalPolicy::Yolo,
         wayland_home,
+        secret,
+        SpawnInstrumentation {
+            process_tree: Some(&process_tree),
+            egress_capture: egress_capture.as_ref(),
+        },
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    process_tree
+        .bind(&mut child)
+        .await
+        .map_err(|error| anyhow::anyhow!("could not bind evaluator child: {error}"))?;
+    let process_tree_sha256 = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{}:{}",
+            sandbox_backend,
+            process_tree.root_pid().unwrap_or_default()
+        ))
+    );
 
     // Detach stderr first so we never deadlock on a full pipe.
     let stderr = child.stderr.take().expect("piped stderr");
-    let stderr_cap = StderrCapture::spawn(stderr);
+    let stderr_cap = StderrCapture::spawn_redacted(stderr, redactor.clone());
 
     let stdin = child.stdin.take().expect("piped stdin");
-    let stdout = child.stdout.take().expect("piped stdout");
+    // EOF on this pipe is NOT a reliable "the candidate exited" signal on
+    // Windows — every descendant it spawned inherited a live write end. Pair
+    // the pipe with a liveness probe on the direct child so a candidate that
+    // exits while leaving a background process running is graded on what it
+    // actually did, not recorded as `Hung`. See `candidate_stdout`.
+    let stdout = crate::candidate_stdout::CandidateStdout::new(
+        child.stdout.take().expect("piped stdout"),
+        process_tree.root_pid(),
+    );
+    let stdout_secret_detected = Arc::new(AtomicBool::new(false));
 
     // Outer wall-time guard. On Elapsed we MUST start_kill + wait —
     // tokio::time::timeout only cancels the future, not the child.
-    let drive = drive_session(stdin, stdout, scenario);
+    let drive = drive_session(
+        stdin,
+        stdout,
+        scenario,
+        redactor.clone(),
+        Arc::clone(&stdout_secret_detected),
+    );
     let result = tokio::time::timeout(scenario.max_total_time, drive).await;
 
-    let (turn_results, trace, final_text, cost_report, hit_internal_error, boot_time, info_events) =
-        match result {
-            Ok(Ok(drive_out)) => (
-                drive_out.turn_results,
-                drive_out.trace,
-                drive_out.final_text,
-                drive_out.cost,
-                drive_out.runner_error,
-                drive_out.boot_time,
-                drive_out.info_events,
-            ),
-            Ok(Err(e)) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                let stderr_tail = stderr_cap.snapshot();
-                return Ok(ScenarioResult {
-                    name: scenario.name.to_string(),
-                    provider: provider.id,
-                    passed: false,
-                    failures: vec![Failure::RunnerError(e.to_string())],
-                    wall_time: start.elapsed(),
-                    cost_usd: 0.0,
-                    trace: ToolTrace::default(),
-                    final_text: String::new(),
-                    stderr_tail,
-                    turn_results: Vec::new(),
-                    workdir: cwd.to_path_buf(),
-                    boot_time: Duration::ZERO,
-                    info_events: Vec::new(),
-                });
+    let (
+        turn_results,
+        trace,
+        final_text,
+        cost_report,
+        hit_internal_error,
+        boot_time,
+        info_events,
+        prompt_dispatch_time,
+        first_token_time,
+        approval_response_time,
+        approval_commands,
+        provider_attempts,
+        provider_retries,
+        provider_typed_failures,
+        provider_usage,
+        capability_honesty_error,
+    ) = match result {
+        Ok(Ok(drive_out)) => (
+            drive_out.turn_results,
+            drive_out.trace,
+            drive_out.final_text,
+            drive_out.cost,
+            drive_out.runner_error,
+            drive_out.boot_time,
+            drive_out.info_events,
+            drive_out.prompt_dispatch_time,
+            drive_out.first_token_time,
+            drive_out.approval_response_time,
+            drive_out.approval_commands,
+            drive_out.provider_attempts,
+            drive_out.provider_retries,
+            drive_out.provider_typed_failures,
+            drive_out.provider_usage,
+            drive_out.capability_honesty_error,
+        ),
+        Ok(Err(e)) => {
+            let shutdown_started = Instant::now();
+            let cleanup_error = process_tree.terminate(&mut child).await.err();
+            let cleanup_verified = cleanup_error.is_none() && containment_authoritative;
+            let shutdown_time = shutdown_started.elapsed();
+            stderr_cap.finish().await;
+            let stderr_tail = stderr_cap.snapshot();
+            let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
+                || Failure::RunnerError(e.to_string()),
+                |timeout| Failure::OverTime {
+                    observed_secs: timeout.observed.as_secs_f64(),
+                    budget_secs: timeout.budget.as_secs_f64(),
+                },
+            );
+            let mut failures = vec![failure];
+            if let Some(error) = cleanup_error {
+                failures.push(Failure::RunnerError(format!(
+                    "process-tree cleanup failed: {error}"
+                )));
             }
-            Err(_elapsed) => {
-                // M-1: timeout fired. Kill explicitly, reap, then record
-                // Hung with the stderr tail snapshot.
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                let stderr_tail = stderr_cap.snapshot();
-                return Ok(ScenarioResult {
-                    name: scenario.name.to_string(),
-                    provider: provider.id,
-                    passed: false,
-                    failures: vec![Failure::Hung {
-                        stderr_tail: stderr_tail.clone(),
-                    }],
-                    wall_time: start.elapsed(),
-                    cost_usd: 0.0,
-                    trace: ToolTrace::default(),
-                    final_text: String::new(),
-                    stderr_tail,
-                    turn_results: Vec::new(),
-                    workdir: cwd.to_path_buf(),
-                    boot_time: Duration::ZERO,
-                    info_events: Vec::new(),
-                });
+            add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
+            return Ok(ScenarioResult {
+                name: scenario.name.to_string(),
+                provider: provider.id,
+                platform: crate::scenario::Platform::current(),
+                approval: scenario.approval,
+                passed: false,
+                failures,
+                wall_time: start.elapsed(),
+                cost_usd: 0.0,
+                trace: ToolTrace::default(),
+                final_text: String::new(),
+                stderr_tail,
+                turn_results: Vec::new(),
+                workdir: cwd.to_path_buf(),
+                boot_time: Duration::ZERO,
+                info_events: Vec::new(),
+                execution: ExecutionEvidence {
+                    config_sha256,
+                    sandbox_backend,
+                    process_tree_sha256,
+                    containment_authoritative,
+                    cleanup_verified,
+                    artifact_scan_complete: false,
+                    prompt_dispatch_time: Duration::ZERO,
+                    first_token_time: None,
+                    approval_response_time: Duration::ZERO,
+                    approval_commands: Vec::new(),
+                    provider_attempts: None,
+                    provider_retries: None,
+                    provider_typed_failures: Vec::new(),
+                    provider_usage: None,
+                    managed_http_egress: None,
+                    filesystem_deltas: None,
+                    filesystem_snapshot_complete: false,
+                    peak_memory_bytes: process_tree.peak_memory_bytes(),
+                    peak_cpu_millis: process_tree.peak_cpu_millis(),
+                    cancellation_requested: true,
+                    shutdown_time,
+                },
+            });
+        }
+        Err(_elapsed) => {
+            // M-1: timeout fired. Kill explicitly, reap, then record
+            // Hung with the stderr tail snapshot.
+            let shutdown_started = Instant::now();
+            let cleanup_error = process_tree.terminate(&mut child).await.err();
+            let cleanup_verified = cleanup_error.is_none() && containment_authoritative;
+            let shutdown_time = shutdown_started.elapsed();
+            stderr_cap.finish().await;
+            let stderr_tail = stderr_cap.snapshot();
+            let mut failures = vec![Failure::Hung {
+                stderr_tail: stderr_tail.clone(),
+            }];
+            if let Some(error) = cleanup_error {
+                failures.push(Failure::RunnerError(format!(
+                    "process-tree cleanup failed: {error}"
+                )));
             }
-        };
+            add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
+            return Ok(ScenarioResult {
+                name: scenario.name.to_string(),
+                provider: provider.id,
+                platform: crate::scenario::Platform::current(),
+                approval: scenario.approval,
+                passed: false,
+                failures,
+                wall_time: start.elapsed(),
+                cost_usd: 0.0,
+                trace: ToolTrace::default(),
+                final_text: String::new(),
+                stderr_tail,
+                turn_results: Vec::new(),
+                workdir: cwd.to_path_buf(),
+                boot_time: Duration::ZERO,
+                info_events: Vec::new(),
+                execution: ExecutionEvidence {
+                    config_sha256,
+                    sandbox_backend,
+                    process_tree_sha256,
+                    containment_authoritative,
+                    cleanup_verified,
+                    artifact_scan_complete: false,
+                    prompt_dispatch_time: Duration::ZERO,
+                    first_token_time: None,
+                    approval_response_time: Duration::ZERO,
+                    approval_commands: Vec::new(),
+                    provider_attempts: None,
+                    provider_retries: None,
+                    provider_typed_failures: Vec::new(),
+                    provider_usage: None,
+                    managed_http_egress: None,
+                    filesystem_deltas: None,
+                    filesystem_snapshot_complete: false,
+                    peak_memory_bytes: process_tree.peak_memory_bytes(),
+                    peak_cpu_millis: process_tree.peak_cpu_millis(),
+                    cancellation_requested: true,
+                    shutdown_time,
+                },
+            });
+        }
+    };
 
     // Normal-path child shutdown. The drive loop already sent `stop`
     // and consumed the trailing `session_cost`; the child should exit
     // promptly. Give a short grace, then kill if it lingers.
-    let shutdown = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
-    let exit_code = match shutdown {
-        Ok(Ok(status)) => status.code().unwrap_or(0),
-        Ok(Err(_)) | Err(_) => {
+    let shutdown_started = Instant::now();
+    let shutdown = process_tree
+        .wait_for_exit_and_cleanup(&mut child, Duration::from_secs(8))
+        .await;
+    let (exit_code, cleanup_error) = match shutdown {
+        Ok(Some((status, cleanup_error))) => (status.code().unwrap_or(0), cleanup_error),
+        Ok(None) | Err(_) => {
             // The child either errored on `wait()` or did not exit within the
             // grace window (it produced its output but hung on shutdown). Kill
             // it and surface a NON-zero sentinel so the `exit_code != 0` gate
             // below records `Crashed` — never silently report a clean exit for
             // a binary that couldn't exit (cross-audit finding #8).
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            -1
+            let cleanup_error = process_tree.terminate(&mut child).await.err();
+            (-1, cleanup_error)
         }
     };
+    let cleanup_verified = cleanup_error.is_none() && containment_authoritative;
+    let shutdown_time = shutdown_started.elapsed();
 
+    stderr_cap.finish().await;
     let stderr_tail = stderr_cap.snapshot();
     let cost_usd = cost_report.as_ref().map(|c| c.total_usd).unwrap_or(0.0);
     let wall_time = start.elapsed();
 
     let mut failures: Vec<Failure> = Vec::new();
+    let managed_http_egress = egress_capture
+        .as_ref()
+        .and_then(|capture| match capture.read() {
+            Ok(evidence) => Some(evidence),
+            Err(error) => {
+                failures.push(Failure::RunnerError(format!(
+                    "managed HTTP egress evidence incomplete: {error}"
+                )));
+                None
+            }
+        });
+    // An authoritative process tree must SHOW its work: if the cgroup backend
+    // is the one that ran, the peak memory and CPU samples it exists to produce
+    // have to be there, and a silent sampling gap is a failure.
+    //
+    // The predicate is `samples_kernel_resources()` — "the sampler actually
+    // ran" — and NOT `is_authoritative()`. That distinction is the second half
+    // of this repair, and it was learned the hard way.
+    //
+    // The first half added `containment_authoritative` to a condition that had
+    // read `authority_evidence_required` alone. That removed the unreachable
+    // pass state on macOS (`Backend::ProcessGroup` is not authoritative) and
+    // the comment here duly recorded that "on macOS and Windows the assertion
+    // could never pass". The Windows half of that claim was false, and the fix
+    // left Windows in exactly the state it was written to abolish:
+    // `Backend::WindowsJob` IS authoritative — a Job Object genuinely contains
+    // the tree — but it samples nothing, because `finish_cleanup` populates
+    // `peak_memory_bytes`/`peak_cpu_millis` in the `Backend::Cgroup` arm alone.
+    // So on Windows all three conjuncts were permanently true and this gate
+    // could never pass. Identified from CI run 30929030076 by matching the
+    // receipt's `detail_sha256` against
+    // `sha256('{"RunnerError":"authoritative kernel resource evidence unavailable"}')`.
+    //
+    // Authoritative containment and resource sampling are simply different
+    // properties. Keying on the one we actually mean keeps Linux behaviour
+    // identical (there the cgroup backend is both) and stops the implication
+    // "authoritative therefore sampled" from mis-firing on any future backend.
+    //
+    //   * the samples exist only on `Backend::Cgroup`, which is
+    //     `#[cfg(target_os = "linux")]` — and `packaged_driver_gate.rs` sets
+    //     `WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE=1` itself, on every platform,
+    //     while its own comments state that the samples "come from the cgroup
+    //     backend alone and therefore exist on no macOS or Windows host";
+    //   * even on Linux, `Cgroup::create` needs euid 0 AND
+    //     `WCORE_EVAL_CANDIDATE_UID`/`_GID` naming a distinct unprivileged
+    //     identity (process_tree.rs). Those two variables are READ in exactly
+    //     one place and WRITTEN nowhere in this repository, so no CI job and no
+    //     developer checkout has ever supplied them.
+    // The result was a gate with no reachable pass state, which proves as
+    // little as one with no fail state.
+    //
+    // Requiring the authoritative posture ITSELF is a separate, already-built
+    // switch: under `WCORE_EVAL_REQUIRE_CONTAINMENT`, `ProcessTree::prepare`
+    // returns the cgroup error instead of falling back, so the run never
+    // reaches this line. Nothing that used to fail closed now passes silently
+    // — a non-authoritative run still records `sandbox_backend:
+    // "process-group-observed-nonauthoritative"` and `resources: Unavailable`
+    // in the receipt, which is the honest surface for what it measured.
+    if authority_evidence_required
+        && process_tree.samples_kernel_resources()
+        && (process_tree.peak_memory_bytes().is_none() || process_tree.peak_cpu_millis().is_none())
+    {
+        failures.push(Failure::RunnerError(
+            "authoritative kernel resource evidence unavailable".to_string(),
+        ));
+    }
     if let Some(err) = hit_internal_error {
         failures.push(Failure::RunnerError(err));
     }
+    if let Some(observed) = capability_honesty_error {
+        failures.push(Failure::AssertionFailed {
+            assertion: "CapabilityHonesty".to_string(),
+            observed,
+        });
+    }
+    if let Some(error) = cleanup_error {
+        failures.push(Failure::RunnerError(format!(
+            "process-tree cleanup failed: {error}"
+        )));
+    }
+    add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
     if exit_code != 0 {
         failures.push(Failure::Crashed {
             stderr_tail: stderr_tail.clone(),
             exit: exit_code,
         });
+    }
+    if cost_report.is_none() {
+        failures.push(Failure::CostMissing);
     }
 
     // Soft cost budget (cross-audit finding #3). The hard wall-time kill is the
@@ -483,8 +1030,19 @@ pub(crate) async fn run_session_in(
     // turn-2 `expect_tool("Write")` — the multi-turn marketer rewrite must
     // actually re-invoke the tool in turn 2.
     for (turn_idx, turn_def) in scenario.turns.iter().enumerate() {
+        let observed_steps = trace
+            .entries
+            .iter()
+            .filter(|entry| entry.turn == turn_idx)
+            .count();
+        if observed_steps > turn_def.max_steps {
+            failures.push(Failure::StepsExceeded {
+                observed: observed_steps,
+                budget: turn_def.max_steps,
+            });
+        }
         for expected_tool in &turn_def.expected_tools {
-            if trace.count_in_turn(expected_tool, turn_idx) == 0 {
+            if trace.dispatched_count_in_turn(expected_tool, turn_idx) == 0 {
                 failures.push(Failure::ExpectedToolMissing(format!(
                     "{expected_tool} (turn {turn_idx})"
                 )));
@@ -505,6 +1063,8 @@ pub(crate) async fn run_session_in(
     let mut result = ScenarioResult {
         name: scenario.name.to_string(),
         provider: provider.id,
+        platform: crate::scenario::Platform::current(),
+        approval: scenario.approval,
         passed: false,
         failures,
         wall_time,
@@ -516,6 +1076,29 @@ pub(crate) async fn run_session_in(
         workdir: cwd.to_path_buf(),
         boot_time,
         info_events,
+        execution: ExecutionEvidence {
+            config_sha256,
+            sandbox_backend,
+            process_tree_sha256,
+            containment_authoritative,
+            cleanup_verified,
+            artifact_scan_complete: false,
+            prompt_dispatch_time,
+            first_token_time,
+            approval_response_time,
+            approval_commands,
+            provider_attempts,
+            provider_retries,
+            provider_typed_failures,
+            provider_usage,
+            managed_http_egress,
+            filesystem_deltas: None,
+            filesystem_snapshot_complete: false,
+            peak_memory_bytes: process_tree.peak_memory_bytes(),
+            peak_cpu_millis: process_tree.peak_cpu_millis(),
+            cancellation_requested: scenario.turns.iter().any(|turn| turn.stop_mid_turn),
+            shutdown_time,
+        },
     };
     let mut result_level_failures: Vec<Failure> = Vec::new();
     for turn_def in &scenario.turns {
@@ -535,6 +1118,30 @@ pub(crate) async fn run_session_in(
     Ok(result)
 }
 
+fn add_capture_failures(
+    failures: &mut Vec<Failure>,
+    stderr: &StderrCapture,
+    stdout_secret_detected: &AtomicBool,
+) {
+    if stderr.secret_detected() {
+        failures.push(Failure::SecretDetected {
+            sink: "stderr".to_string(),
+        });
+    }
+    if stdout_secret_detected.load(Ordering::Acquire) {
+        failures.push(Failure::SecretDetected {
+            sink: "stdout".to_string(),
+        });
+    }
+}
+
+fn authority_evidence_required() -> bool {
+    std::env::var_os("WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE").is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
 /// Output of the inner stdin/stdout-driving loop. Pulled out so the
 /// outer `tokio::time::timeout(...)` can wrap it cleanly.
 struct DriveOutput {
@@ -549,6 +1156,59 @@ struct DriveOutput {
     boot_time: Duration,
     /// `info` event messages captured across the run (D1/D2).
     info_events: Vec<String>,
+    prompt_dispatch_time: Duration,
+    first_token_time: Option<Duration>,
+    approval_response_time: Duration,
+    approval_commands: Vec<ApprovalCommandEvidence>,
+    provider_attempts: Option<u64>,
+    provider_retries: Option<u64>,
+    provider_typed_failures: Vec<String>,
+    provider_usage: Option<ProviderUsageEvidence>,
+    capability_honesty_error: Option<String>,
+}
+
+#[derive(Debug, Error)]
+#[error(
+    "turn {turn} exceeded its {budget_secs:.3}s deadline after {observed_secs:.3}s",
+    budget_secs = .budget.as_secs_f64(),
+    observed_secs = .observed.as_secs_f64()
+)]
+struct TurnTimeout {
+    turn: usize,
+    observed: Duration,
+    budget: Duration,
+}
+
+async fn read_turn_event<R>(
+    reader: &mut BufReader<R>,
+    turn: usize,
+    started: Instant,
+    budget: Duration,
+    redactor: &SecretRedactor,
+    secret_detected: &AtomicBool,
+) -> anyhow::Result<Option<Value>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let observed = started.elapsed();
+    let Some(remaining) = budget.checked_sub(observed) else {
+        return Err(TurnTimeout {
+            turn,
+            observed,
+            budget,
+        }
+        .into());
+    };
+
+    match tokio::time::timeout(remaining, read_one_event(reader, redactor, secret_detected)).await {
+        Ok(event) => event,
+        Err(_) => Err(TurnTimeout {
+            turn,
+            observed: started.elapsed(),
+            budget,
+        }
+        .into()),
+    }
 }
 
 /// Build the approval-response command for a tool `call_id` under the given
@@ -625,15 +1285,79 @@ fn capture_config_changed(ev: &Value, info_events: &mut Vec<String>) {
     info_events.push(format!("config_changed: {caps}"));
 }
 
+/// Fill tool inputs that are intentionally absent from the normal Yolo
+/// lifecycle events. Structured traces are an explicit host opt-in and carry
+/// the engine's PII-scrubbed `ToolCallTrace::input`, keyed by the same call ID.
+fn capture_structured_tool_inputs(
+    event: &Value,
+    trace: &mut ToolTrace,
+    structured_inputs: &mut std::collections::HashMap<String, (String, String)>,
+) -> Result<(), String> {
+    let Some(tool_calls) = event
+        .get("trace")
+        .and_then(|value| value.get("tool_calls"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+
+    for call in tool_calls {
+        let call_id = call
+            .get("call_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "structured tool trace omitted call_id".to_string())?;
+        let tool_name = call
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("structured tool trace {call_id} omitted tool_name"))?;
+        let input = serde_json::to_string(
+            call.get("input")
+                .ok_or_else(|| format!("structured tool trace {call_id} omitted input"))?,
+        )
+        .map_err(|error| format!("structured tool trace {call_id} input: {error}"))?;
+
+        if let Some((prior_name, prior_input)) = structured_inputs.get(call_id)
+            && (prior_name != tool_name || prior_input != &input)
+        {
+            return Err(format!(
+                "conflicting structured tool trace for call_id {call_id}"
+            ));
+        }
+        structured_inputs.insert(call_id.to_string(), (tool_name.to_string(), input.clone()));
+
+        if let Some(entry) = trace
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
+            if entry.tool_name != tool_name {
+                return Err(format!(
+                    "tool name mismatch for call_id {call_id}: result={}, trace={tool_name}",
+                    entry.tool_name
+                ));
+            }
+            if entry.input.is_empty() {
+                entry.input = input;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn drive_session(
     mut stdin: tokio::process::ChildStdin,
-    stdout: tokio::process::ChildStdout,
+    stdout: crate::candidate_stdout::CandidateStdout,
     scenario: &crate::scenario::Scenario,
+    redactor: SecretRedactor,
+    secret_detected: Arc<AtomicBool>,
 ) -> anyhow::Result<DriveOutput> {
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
     // Cold-boot latency clock: from here (≈ just after spawn) to the `ready`
     // event = the engine's bootstrap time (a usability/perf metric).
     let drive_start = Instant::now();
+    let mut capability_evidence = CapabilityEvidence::default();
+    let mut ready_memory_enabled = false;
 
     // Consume engine bootstrap output up to AND INCLUDING the `ready` event
     // before sending the first user message, so we don't race bootstrap. We
@@ -644,9 +1368,15 @@ async fn drive_session(
     let boot_time = {
         let mut saw_ready = false;
         for _ in 0..256 {
-            match read_one_event(&mut reader).await? {
+            match read_one_event(&mut reader, &redactor, &secret_detected).await? {
                 Some(ev) => {
+                    capability_evidence.capture(&ev);
                     if ev.get("type").and_then(Value::as_str) == Some("ready") {
+                        ready_memory_enabled = ev
+                            .get("capabilities")
+                            .and_then(|capabilities| capabilities.get("memory_enabled"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         saw_ready = true;
                         break;
                     }
@@ -665,7 +1395,15 @@ async fn drive_session(
     let mut final_text = String::new();
     let mut turn_results: Vec<TurnResult> = Vec::new();
     let mut runner_error: Option<String> = None;
-    let mut info_events: Vec<String> = Vec::new();
+    let mut info_events = vec![format!("ready: memory_enabled={ready_memory_enabled}")];
+    let mut prompt_dispatch_time = Duration::ZERO;
+    let mut first_token_time = None;
+    let mut approval_response_time = Duration::ZERO;
+    let mut approval_commands = Vec::new();
+    let mut provider_attempts = None;
+    let mut provider_retries = None;
+    let mut provider_typed_failures = Vec::new();
+    let mut provider_usage = None;
     // D3: how to answer the engine's approval gate (only fires when the
     // scenario spawned WITHOUT `--yolo`, i.e. policy != Yolo).
     let approval = scenario.approval;
@@ -675,14 +1413,27 @@ async fn drive_session(
     // JSON keyed by `call_id` here, then attach it to the `TraceEntry` when the
     // result lands. Best-effort: a result with no pending request falls back to
     // empty input (the prior behaviour).
-    let mut pending_inputs: std::collections::HashMap<String, String> =
+    let mut pending_inputs: std::collections::HashMap<String, (String, Instant)> =
         std::collections::HashMap::new();
+    let mut structured_inputs: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let mut denied_calls = std::collections::HashSet::new();
     // #278 — `session_cost` is emitted by the engine BEFORE `stream_end`
     // (engine.rs `fire_on_session_end` runs inside `engine.run()`; the
     // json-stream loop emits `stream_end` only after `engine.run()` returns).
     // The per-turn loop below therefore MUST capture cost events as they fly
     // by — the post-stop drain is too late for the common one-turn case.
     let mut cost: Option<CostReport> = None;
+
+    // Turn-level timing trace, off unless `WCORE_EVAL_TURN_TRACE` is set.
+    //
+    // Exists because a `Failure::OverTime` is otherwise UNREADABLE: it reports
+    // only "the turn crossed its budget", which is the same observation whether
+    // the engine never produced a first token or produced one and then ignored
+    // a cancellation. Those are a harness-budget problem and a product defect
+    // respectively, and CI run 30434804220 could not tell them apart. Writes to
+    // stderr so it never contaminates the child's json-stream on stdout.
+    let turn_trace = std::env::var_os("WCORE_EVAL_TURN_TRACE").is_some();
 
     for (turn_idx, turn) in scenario.turns.iter().enumerate() {
         let turn_start = Instant::now();
@@ -712,10 +1463,25 @@ async fn drive_session(
             // `config_changed` as the terminal event when a change happened,
             // and a no-op `info` as terminal otherwise. Bounded so neither
             // case can hang us.
-            for _ in 0..16 {
-                match read_one_event(&mut reader).await? {
+            let mut response_events = 0usize;
+            while response_events < 16 {
+                match read_turn_event(
+                    &mut reader,
+                    turn_idx,
+                    turn_start,
+                    turn.max_time,
+                    &redactor,
+                    &secret_detected,
+                )
+                .await?
+                {
                     Some(ev) => {
+                        capability_evidence.capture(&ev);
                         let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
+                        if ty == "capability_activation" {
+                            continue;
+                        }
+                        response_events += 1;
                         if ty == "config_changed" {
                             capture_config_changed(&ev, &mut info_events);
                             // Terminal for a successful change.
@@ -754,20 +1520,39 @@ async fn drive_session(
             "msg_id": msg_id,
             "content": turn.prompt,
         });
+        let prompt_dispatch_started = Instant::now();
         let mut line = serde_json::to_vec(&cmd)?;
         line.push(b'\n');
         stdin.write_all(&line).await?;
         stdin.flush().await?;
+        prompt_dispatch_time =
+            prompt_dispatch_time.saturating_add(prompt_dispatch_started.elapsed());
+        let prompt_sent_at = Instant::now();
+        if turn_trace {
+            eprintln!(
+                "[turn-trace] turn={turn_idx} t={:.3}s prompt_sent",
+                turn_start.elapsed().as_secs_f64()
+            );
+        }
 
         let mut turn_text = String::new();
-        // D2: Stop-mid-turn — send `stop` once, right after the first event
-        // of this turn arrives, then expect the engine to halt the run future
-        // and emit `stream_end`. `stop_pending` flips false after the send so
-        // it fires exactly once.
+        // D2: Stop-mid-turn — send stop once after the first event that
+        // proves provider/tool work is active. Bootstrap bookkeeping events
+        // do not qualify: stopping on one of those can cancel before the
+        // provider request is even sent, creating a false cancellation proof.
         let mut stop_pending = turn.stop_mid_turn;
 
         loop {
-            let ev = match read_one_event(&mut reader).await {
+            let ev = match read_turn_event(
+                &mut reader,
+                turn_idx,
+                turn_start,
+                turn.max_time,
+                &redactor,
+                &secret_detected,
+            )
+            .await
+            {
                 Ok(Some(ev)) => ev,
                 Ok(None) => {
                     runner_error = Some(format!(
@@ -776,31 +1561,64 @@ async fn drive_session(
                     break;
                 }
                 Err(e) => {
+                    if e.downcast_ref::<TurnTimeout>().is_some() {
+                        if turn_trace {
+                            eprintln!(
+                                "[turn-trace] turn={turn_idx} t={:.3}s TURN_TIMEOUT stop_pending={stop_pending}",
+                                turn_start.elapsed().as_secs_f64()
+                            );
+                        }
+                        return Err(e);
+                    }
                     runner_error = Some(format!("stdout decode error: {e}"));
                     break;
                 }
             };
-            // D2: Stop-mid-turn — the first event of the turn proves the
-            // engine started working; send `stop` now to cancel it. The engine
-            // breaks its `engine.run()` future (the `ProtocolCommand::Stop` arm
-            // in the in-turn select loop) and emits this turn's `stream_end`,
-            // which ends the loop below normally.
-            if stop_pending {
+            capability_evidence.capture(&ev);
+            if turn_trace {
+                eprintln!(
+                    "[turn-trace] turn={turn_idx} t={:.3}s event={}",
+                    turn_start.elapsed().as_secs_f64(),
+                    ev.get("type").and_then(Value::as_str).unwrap_or("?")
+                );
+            }
+            // D2: wait for observable model/tool activity, then cancel the
+            // active run future. The current event is still dispatched below,
+            // so a triggering text delta remains visible to the evaluator.
+            let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
+            if stop_pending
+                && matches!(
+                    ty,
+                    "text_delta"
+                        | "thinking"
+                        | "tool_request"
+                        | "tool_running"
+                        | "approval_required"
+                )
+            {
                 stop_pending = false;
                 let stop_cmd = serde_json::json!({"type": "stop"});
                 let mut sline = serde_json::to_vec(&stop_cmd)?;
                 sline.push(b'\n');
                 stdin.write_all(&sline).await?;
                 stdin.flush().await?;
+                if turn_trace {
+                    eprintln!(
+                        "[turn-trace] turn={turn_idx} t={:.3}s stop_sent",
+                        turn_start.elapsed().as_secs_f64()
+                    );
+                }
             }
 
             // Dispatch by "type" tag — same model the W0 host decoder
             // contract uses. Unknown variants are silently dropped
             // (forward-compat).
-            let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
             match ty {
                 "text_delta" => {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
+                        if first_token_time.is_none() && !t.is_empty() {
+                            first_token_time = Some(prompt_sent_at.elapsed());
+                        }
                         turn_text.push_str(t);
                     }
                 }
@@ -820,10 +1638,14 @@ async fn drive_session(
                         .and_then(|t| t.get("args"))
                         .or_else(|| ev.get("input"))
                         .or_else(|| ev.get("arguments"));
-                    if !call_id.is_empty()
-                        && let Some(v) = input_val
-                    {
-                        pending_inputs.insert(call_id.clone(), v.to_string());
+                    if !call_id.is_empty() {
+                        pending_inputs.insert(
+                            call_id.clone(),
+                            (
+                                input_val.map(ToString::to_string).unwrap_or_default(),
+                                Instant::now(),
+                            ),
+                        );
                     }
                     // D3: in non-`Yolo` mode the engine emits `tool_request`
                     // and then BLOCKS on `request_approval(call_id)` (no
@@ -833,10 +1655,41 @@ async fn drive_session(
                     // call_id with no pending approval (auto-approved tools like
                     // Read/Glob), so responding to every request is safe.
                     if let Some(cmd) = approval_command(approval, &call_id) {
+                        let approval_started = Instant::now();
                         let mut line = serde_json::to_vec(&cmd)?;
                         line.push(b'\n');
                         stdin.write_all(&line).await?;
                         stdin.flush().await?;
+                        approval_response_time =
+                            approval_response_time.saturating_add(approval_started.elapsed());
+                        approval_commands.push(ApprovalCommandEvidence {
+                            call_id: call_id.clone(),
+                            approved: approval == crate::scenario::ApprovalPolicy::ApproveAll,
+                        });
+                        if approval == crate::scenario::ApprovalPolicy::DenyAll {
+                            let tool_name = ev
+                                .get("tool")
+                                .and_then(|tool| tool.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let pending = pending_inputs.remove(&call_id);
+                            let input = pending
+                                .as_ref()
+                                .map(|(input, _)| input.clone())
+                                .unwrap_or_default();
+                            let duration = pending.map(|(_, started)| started.elapsed());
+                            denied_calls.insert(call_id.clone());
+                            trace.entries.push(TraceEntry {
+                                call_id,
+                                tool_name,
+                                input,
+                                output: "denied by eval approval policy".to_string(),
+                                is_error: true,
+                                duration,
+                                turn: turn_idx,
+                            });
+                        }
                     }
                 }
                 "tool_result" => {
@@ -858,18 +1711,74 @@ async fn drive_session(
                     let is_error = ev.get("status").and_then(Value::as_str) == Some("error");
                     // Attach the pending input captured from `tool_request`;
                     // empty (prior behaviour) when no matching request was seen.
-                    let input = pending_inputs.remove(&call_id).unwrap_or_default();
-                    trace.entries.push(TraceEntry {
-                        call_id,
-                        tool_name,
-                        input,
-                        output,
-                        is_error,
-                        duration: None,
-                        turn: turn_idx,
-                    });
+                    let pending = pending_inputs.remove(&call_id);
+                    let input = pending
+                        .as_ref()
+                        .map(|(input, _)| input.clone())
+                        .or_else(|| {
+                            structured_inputs
+                                .get(&call_id)
+                                .map(|(_, input)| input.clone())
+                        })
+                        .unwrap_or_default();
+                    let duration = pending.map(|(_, started)| started.elapsed());
+                    if denied_calls.remove(&call_id)
+                        && let Some(denied) = trace
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.call_id == call_id)
+                    {
+                        denied.tool_name = tool_name;
+                        denied.output = output;
+                        denied.is_error = is_error;
+                        denied.duration = duration.or(denied.duration);
+                    } else {
+                        trace.entries.push(TraceEntry {
+                            call_id,
+                            tool_name,
+                            input,
+                            output,
+                            is_error,
+                            duration,
+                            turn: turn_idx,
+                        });
+                    }
+                }
+                "trace_event" => {
+                    if let Err(error) =
+                        capture_structured_tool_inputs(&ev, &mut trace, &mut structured_inputs)
+                    {
+                        runner_error = Some(error);
+                    }
+                }
+                "provider_attempt" => {
+                    provider_attempts = Some(provider_attempts.unwrap_or(0_u64).saturating_add(1));
+                    provider_retries.get_or_insert(0);
+                    if let Some(failure) = ev.get("failure").and_then(Value::as_str)
+                        && !provider_typed_failures.iter().any(|seen| seen == failure)
+                    {
+                        provider_typed_failures.push(failure.to_string());
+                    }
+                }
+                "provider_retry" => {
+                    provider_retries = Some(provider_retries.unwrap_or(0_u64).saturating_add(1));
+                    if let Some(failure) = ev.get("failure").and_then(Value::as_str)
+                        && !provider_typed_failures.iter().any(|seen| seen == failure)
+                    {
+                        provider_typed_failures.push(failure.to_string());
+                    }
+                }
+                "provider_failure" => {
+                    if let Some(failure) = ev.get("failure").and_then(Value::as_str)
+                        && !provider_typed_failures.iter().any(|seen| seen == failure)
+                    {
+                        provider_typed_failures.push(failure.to_string());
+                    }
                 }
                 "stream_end" => {
+                    if let Some(usage) = parse_provider_usage(&ev) {
+                        provider_usage = Some(usage);
+                    }
                     // Only THIS turn's stream_end ends the turn. The engine
                     // echoes the msg_id we sent (`set_current_msg_id` +
                     // `emit_stream_end(&msg_id)` in the json-stream loop), so a
@@ -893,9 +1802,7 @@ async fn drive_session(
                     // #278 — capture in-band; this event arrives BEFORE
                     // stream_end on the wire and would otherwise fall into
                     // `_ => {}` and be dropped, leaving `cost_usd == 0.0`.
-                    if cost.is_none()
-                        && let Some(c) = crate::cost::parse(&ev)
-                    {
+                    if let Some(c) = crate::cost::parse(&ev) {
                         cost = Some(c);
                     }
                 }
@@ -925,10 +1832,17 @@ async fn drive_session(
                         .unwrap_or("")
                         .to_string();
                     if let Some(cmd) = approval_command(approval, &call_id) {
+                        let approval_started = Instant::now();
                         let mut line = serde_json::to_vec(&cmd)?;
                         line.push(b'\n');
                         stdin.write_all(&line).await?;
                         stdin.flush().await?;
+                        approval_response_time =
+                            approval_response_time.saturating_add(approval_started.elapsed());
+                        approval_commands.push(ApprovalCommandEvidence {
+                            call_id,
+                            approved: approval == crate::scenario::ApprovalPolicy::ApproveAll,
+                        });
                     }
                 }
                 _ => {}
@@ -936,6 +1850,12 @@ async fn drive_session(
         }
 
         let elapsed = turn_start.elapsed();
+        if turn_trace {
+            eprintln!(
+                "[turn-trace] turn={turn_idx} t={:.3}s turn_end stop_pending={stop_pending}",
+                elapsed.as_secs_f64()
+            );
+        }
         // `final_text` reflects the MOST RECENT turn's assistant text, even if
         // empty (finding #7) — a final turn that produced only tool calls must
         // not leave `final_text` showing a stale earlier turn's prose.
@@ -966,12 +1886,14 @@ async fn drive_session(
     drop(stdin); // close stdin so the engine's command reader sees EOF
 
     loop {
-        match read_one_event(&mut reader).await {
+        match read_one_event(&mut reader, &redactor, &secret_detected).await {
             Ok(Some(ev)) => {
-                if cost.is_none()
-                    && let Some(c) = crate::cost::parse(&ev)
-                {
+                capability_evidence.capture(&ev);
+                if let Some(c) = crate::cost::parse(&ev) {
                     cost = Some(c);
+                }
+                if let Some(usage) = parse_provider_usage(&ev) {
+                    provider_usage = Some(usage);
                 }
                 // Drain to EOF either way — leaving bytes in the pipe
                 // can stall the child's exit.
@@ -989,6 +1911,43 @@ async fn drive_session(
         runner_error,
         boot_time,
         info_events,
+        prompt_dispatch_time,
+        first_token_time,
+        approval_response_time,
+        approval_commands,
+        provider_attempts,
+        provider_retries,
+        provider_typed_failures,
+        provider_usage,
+        capability_honesty_error: [
+            capability_evidence.enforce_frozen_thresholds().err(),
+            capability_evidence
+                .enforce_expectations(&scenario.capability_expectations)
+                .err(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|left, right| format!("{left}; {right}")),
+    })
+}
+
+fn parse_provider_usage(event: &Value) -> Option<ProviderUsageEvidence> {
+    if event.get("type").and_then(Value::as_str) != Some("stream_end") {
+        return None;
+    }
+    let usage = event.get("usage")?;
+    Some(ProviderUsageEvidence {
+        input_tokens: usage.get("input_tokens")?.as_u64()?,
+        output_tokens: usage.get("output_tokens")?.as_u64()?,
+        cache_read_tokens: usage
+            .get("cache_read_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_write_tokens: usage
+            .get("cache_write_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("cache_creation_tokens").and_then(Value::as_u64))
+            .unwrap_or(0),
     })
 }
 
@@ -997,28 +1956,166 @@ async fn drive_session(
 /// skipped. Lines that don't parse are silently dropped (W0 host
 /// decoder contract — tolerate unknown / forward-additive shapes).
 async fn read_one_event<R>(
-    reader: &mut tokio::io::Lines<BufReader<R>>,
+    reader: &mut BufReader<R>,
+    redactor: &SecretRedactor,
+    secret_detected: &AtomicBool,
 ) -> anyhow::Result<Option<Value>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    const MAX_STDOUT_EVENT_BYTES: usize = 64 * 1024;
     loop {
-        match reader.next_line().await? {
-            None => return Ok(None),
-            Some(line) => {
+        let mut line = Vec::new();
+        let complete = loop {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                break !line.is_empty();
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            if line.len().saturating_add(consumed) > MAX_STDOUT_EVENT_BYTES {
+                anyhow::bail!("stdout event exceeded {MAX_STDOUT_EVENT_BYTES} bytes");
+            }
+            line.extend_from_slice(&available[..consumed]);
+            reader.consume(consumed);
+            if newline.is_some() {
+                break true;
+            }
+        };
+        match complete {
+            false => return Ok(None),
+            true => {
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                let line = std::str::from_utf8(&line)
+                    .map_err(|_| anyhow::anyhow!("stdout event was not valid UTF-8"))?;
                 if line.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Value>(&line) {
-                    Ok(v) => return Ok(Some(v)),
-                    Err(_e) => {
-                        // Skip non-JSON lines (defensive — the engine
-                        // shouldn't emit any but a stray panic message
-                        // could land here).
-                        continue;
+                match serde_json::from_str::<Value>(line) {
+                    Ok(mut value) => {
+                        if redactor.value(&mut value) {
+                            secret_detected.store(true, Ordering::Release);
+                        }
+                        return Ok(Some(value));
                     }
+                    Err(_) => continue,
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod structured_trace_tests {
+    use super::{ToolTrace, TraceEntry, capture_structured_tool_inputs};
+
+    #[test]
+    fn structured_trace_fills_auto_approved_tool_input() {
+        let mut trace = ToolTrace {
+            entries: vec![TraceEntry {
+                call_id: "call-read".to_string(),
+                tool_name: "Read".to_string(),
+                input: String::new(),
+                output: "contents".to_string(),
+                is_error: false,
+                duration: None,
+                turn: 0,
+            }],
+        };
+        let event = serde_json::json!({
+            "type": "trace_event",
+            "trace": {
+                "tool_calls": [{
+                    "call_id": "call-read",
+                    "tool_name": "Read",
+                    "input": {"file_path": "/fixture/repository/README.md"}
+                }]
+            }
+        });
+        let mut inputs = std::collections::HashMap::new();
+
+        capture_structured_tool_inputs(&event, &mut trace, &mut inputs).unwrap();
+
+        assert_eq!(
+            trace.entries[0].input,
+            r#"{"file_path":"/fixture/repository/README.md"}"#
+        );
+        assert_eq!(inputs["call-read"].0, "Read");
+    }
+
+    #[test]
+    fn structured_trace_rejects_call_id_name_conflict() {
+        let mut trace = ToolTrace {
+            entries: vec![TraceEntry {
+                call_id: "call-read".to_string(),
+                tool_name: "Read".to_string(),
+                input: String::new(),
+                output: "contents".to_string(),
+                is_error: false,
+                duration: None,
+                turn: 0,
+            }],
+        };
+        let event = serde_json::json!({
+            "type": "trace_event",
+            "trace": {
+                "tool_calls": [{
+                    "call_id": "call-read",
+                    "tool_name": "Write",
+                    "input": {"file_path": "/fixture/repository/README.md"}
+                }]
+            }
+        });
+        let mut inputs = std::collections::HashMap::new();
+
+        let error = capture_structured_tool_inputs(&event, &mut trace, &mut inputs).unwrap_err();
+
+        assert!(error.contains("tool name mismatch"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod evidence_root_tests {
+    use super::scan_artifacts;
+    use crate::filesystem_evidence::EvidenceRoots;
+    use crate::redaction::SecretRedactor;
+
+    const SECRET: &str = "home-only-secret-canary";
+
+    #[test]
+    fn secret_canary_only_in_wayland_home_is_detected_with_scope() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        let home = parent.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let leaked = home.join("memory.db");
+        std::fs::write(&leaked, format!("persisted {SECRET}")).unwrap();
+        let roots = EvidenceRoots::new(&workspace, [&home]).unwrap();
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+
+        let contaminated = scan_artifacts(&redactor, &roots).unwrap();
+
+        assert_eq!(
+            contaminated,
+            ["artifact:engine_state:memory.db".to_string()]
+        );
+        assert!(!leaked.exists());
+    }
+
+    #[test]
+    fn unavailable_required_root_makes_artifact_scan_incomplete() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = EvidenceRoots::new(workspace.path(), [home.path()]).unwrap();
+        std::fs::remove_dir(home.path()).unwrap();
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+
+        assert!(scan_artifacts(&redactor, &roots).is_err());
     }
 }

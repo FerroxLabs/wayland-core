@@ -1,0 +1,46 @@
+F29-02 / TASK 1 -- SBOM DETERMINISM MEASUREMENT
+captured: 2026-07-27T15:43:37Z
+host:     Linux 6.8.0-101-generic x86_64
+toolchain: rustc 1.95.0 (59807616e 2026-04-14)   [rust-toolchain.toml pins 1.95.0]
+commit A: 148330aeadcb628c1a772171ce4de041b53e3d8c   path /root/wayland-29-02
+commit B: 148330aeadcb628c1a772171ce4de041b53e3d8c   path /root/wl29-pathb
+
+SINGLE VARIABLE: same commit, same lockfile, same toolchain, --locked.
+The ONLY difference between A and B is the absolute checkout path.
+
+== INPUTS: cargo metadata --locked --format-version 1 ==
+2d3f6bec469273cc160f792a16b1672661fec35a06fc7cc2909ea97b4f1cddcd  /tmp/meta-a.json
+84a5e7833cc443f7e4c6c9ed366f854ba009ec71400a0638c6cb96640f7b7b69  /tmp/meta-b.json
+  inputs DIFFER -- correct, they embed the checkout path
+  absolute-path occurrences: A=1538  B=1538
+
+== OUTPUTS: wayland-release sbom ==
+5028fe289ceb05f39578c6e8848e8e91dba5aaef22a526a5396858f2a8ac9d1a  /tmp/sbom-a1.json
+5028fe289ceb05f39578c6e8848e8e91dba5aaef22a526a5396858f2a8ac9d1a  /tmp/sbom-a2.json
+5028fe289ceb05f39578c6e8848e8e91dba5aaef22a526a5396858f2a8ac9d1a  /tmp/sbom-b.json
+  same-path regeneration byte-identical? YES
+  cross-path byte-identical?             YES
+
+  BEFORE the canonical-payload fix (commit 7ef04ea8) the same measurement gave
+  a1=a2=d8d27e5b... but b=6a8b4a14..., differing at byte 83 line 4 -- the
+  serialNumber, derived from the raw metadata text. That is the defect this
+  measurement found and that no same-directory test could see.
+
+== DOCUMENT SHAPE (real 865-package locked graph) ==
+  bomFormat       = CycloneDX
+  specVersion     = 1.5
+  serialNumber    = urn:uuid:00dcc6d0-31ac-8afa-9433-bcf7b228f9ea
+  metadata keys   = ['tools']  <- no timestamp
+  components      = 865
+  purl-sorted     = True
+  origins         = {'registry': 808, 'workspace-member': 57}
+  git-sourced     = 0  <- confirms 29-01 F29-CEN-19 refutation
+  explicit-unknown licence = 2 ['wcore-fixture-harness', 'workspace-hack']
+  file:// leaks   = 0
+  manifest_path   = 0
+  bytes           = 447364
+
+== PINNED OFFLINE FIXTURE (determinism provable with no cargo at all) ==
+8ec20514fc342a8c4b99fdbd4610e2bb8c54df18d982bace9f26f52e5db54fd2  crates/wcore-fixture-harness/fixtures/f29/cargo-metadata.json
+28f7c0538ed86bc70af9a90a18799aa597943f9375838956006c208fdfc9e3b3  crates/wcore-fixture-harness/fixtures/f29/expected-sbom.json
+33156894714c7378a18776fe6bd245427629b829e8c45a22d9ce5523f72fa039  crates/wcore-fixture-harness/fixtures/f29/MANIFEST.tsv

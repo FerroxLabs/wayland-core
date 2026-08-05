@@ -1,0 +1,670 @@
+# Delivery semantics, per channel adapter
+
+**What guarantee you get when the gateway sends a message on your behalf, and what to expect
+when it restarts.**
+
+This document is a *description of what the code does today*, not an aspiration. Every cell
+below traces to a source line or to a measurement, both cited. Where the honest answer is
+"no guarantee", it says so.
+
+It is enforced. `crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs`
+constructs all ten adapters through the production factory and fails the build if any row in
+the table below disagrees with the adapter's actual capability. See
+[Keeping this document true](#keeping-this-document-true).
+
+---
+
+## 1. The short version
+
+| | |
+|---|---|
+| **1 of 10** adapters | exactly-once — Matrix, and it is the only one ever proven at the real platform. **Conditional: only for a body that fits in one platform message** — see [§4.1](#41-exactly-once-stops-at-the-message-cap) |
+| **9 of 10** adapters | at-most-once — a delivery whose outcome is unknown is **abandoned, not retried** |
+| **0 of 10** adapters | at-least-once (the gateway never automatically re-sends to a destination that cannot recognise a replay) |
+| **On every platform** | a **recurring** job that outlives its trigger period sends again, under a new delivery id. Not a duplicate, and not Windows-specific — see [§5](#5-a-recurring-job-delivers-again-and-that-is-not-a-duplicate) |
+
+**On 2026-07-30 this table lost two of its three exactly-once rows.** Slack and Discord were
+each driven at their real API for the first time, and each produced **two** messages from a
+replayed key. Both had held the claim on the strength of a mock. A mock can only prove that we
+put a token on the wire; it says nothing about whether the destination honours it, and for both
+of these it did not. Matrix is the only row that was driven live before it was believed, and it
+is the only one still standing.
+
+Nothing is ever silently dropped. An abandoned delivery is recorded, listed by
+`wayland-core gateway abandoned`, and re-sendable by an operator.
+
+---
+
+## 2. The table
+
+"Guarantee" is per **delivery id** — read [§4](#4-what-the-guarantee-is-scoped-to) before
+relying on it, because that scope is narrower than "one message".
+
+| Adapter | Platform primitive | Guarantee | Outcome-unknown delivery is… | On restart, expect | Replay measured at a real destination? |
+|---|---|---|---|---|---|
+| **Slack** | none that Slack honours — the adapter sends an `Idempotency-Key` header and **`slack.com` ignores it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Slack | **Yes** — a replayed key produced **two** messages; see the correction note below |
+| **Matrix** | `PUT …/send/m.room.message/{txnId}` — the txn id *is* the idempotency slot | **exactly-once, up to 32,768 chars; at-least-once above it** — see [§4.1](#41-exactly-once-stops-at-the-message-cap) | **retried** with the same key, below the cap | one message below the cap; the homeserver returns the original `event_id` | **BELOW the cap: Yes** — by the PRODUCT, against matrix.org, across a real `kill -9`; see [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). **ABOVE the cap: NOT MEASURED at a real destination** — the harness exists and has never completed a run; see [§4.1](#41-exactly-once-stops-at-the-message-cap) |
+| **Discord** | `nonce` field on message create — **transmitted, but Discord does not dedupe on it** | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Discord | **Yes** — a replayed key produced **two** messages; see [§8](#8-discord-was-wrong-and-how-it-was-found) |
+| **Telegram** | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Telegram | **NOT MEASURED at a real destination** — see the correction below |
+| **Twilio SMS** | none that Twilio honours — the adapter sends an `Idempotency-Key` header and the `Messages` resource documents no dedup slot to read it | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Twilio | **NOT MEASURED at a real destination** — see the correction below |
+| **WhatsApp** (Meta Graph) | none that Meta honours — the adapter sends the delivery id as `biz_opaque_callback_data`, which the Cloud API documents as *tracking* data, not a dedup slot | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Meta | **NOT MEASURED at a real destination** — see the correction below |
+| **Email** (SMTP) | none that any MTA guarantees | **at-most-once** | **abandoned** | zero or one message — unknowable without checking the mailbox | **NOT MEASURED** |
+| **Signal** (`signal-cli`) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Signal | **NOT MEASURED** |
+| **iMessage** (AppleScript) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Messages.app. **macOS only** — on Linux and Windows the adapter is not compiled in and cannot be constructed at all | **NOT MEASURED** |
+| **MS Teams** (Bot Framework) | none | **at-most-once** | **abandoned** | zero or one message — unknowable without checking Teams | **NOT MEASURED** |
+| **WhatsApp bridge** (`backend = "baileys"` / `"whatsapp-web"`) | none — the bridge's `sendText` RPC carries no key and neither backend accepts one | **at-most-once** | **abandoned** | zero or one message — unknowable without checking WhatsApp | **NOT MEASURED, and no replay has been driven at all** — see the note below |
+
+**The WhatsApp bridge row is weaker still, and is labelled rather than filled in.** The other
+ten rows describe adapters the registry constructs from a platform string alone. The bridge is
+an eleventh `Channel` reached through the *same* platform string (`whatsapp`) with an opt-in
+`backend` key, so it is not covered by
+`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs` — that harness
+enumerates platforms, and this adapter adds none. Its row is derived from source only: the
+bridge's `sendText` RPC transmits no idempotency token, so
+`supports_outbound_idempotency()` is left at the trait's `false` default. Treat the row as a claim
+about our code and as no evidence whatever about WhatsApp's behaviour. See
+[whatsapp-bridge.md](whatsapp-bridge.md).
+
+**Update 2026-07-30 — a message HAS now been sent, and the scope of that is narrow.** A real
+number was QR-paired and a `sendText` delivered to a real WhatsApp account
+(`messageId 3EB0404DBF5C774E89077E`, recipient confirmed receipt). The session also survived a
+process kill and reconnected from stored `creds.json` with no re-pairing, which is the property
+that matters for a deployment.
+
+**But that was driven straight at the bridge over JSON-RPC, NOT through Core's
+`WhatsappBridgeChannel`.** So what is proven is that *the bridge* can send, and that pairing and
+session persistence work. The Rust adapter → bridge → WhatsApp path is **still unproven end to
+end**, and no replay of any kind has been driven, so the guarantee column above is unchanged. The
+distinction is recorded rather than blurred because collapsing it is precisely the error that put
+two false `exactly-once` rows in this table.
+
+**"NOT MEASURED" means not measured, and it is not a pass.** Seven of the ten — Email, Signal,
+iMessage, MS Teams, **Twilio SMS, WhatsApp and Telegram** — have never had a replay driven at a
+real destination. Their rows are derived: the adapter transmits nothing the destination is documented
+to honour, so the capability bit and the spine's behaviour follow. That is real evidence about
+*our* code and no evidence at all about the *platform's* behaviour. It is weaker than the rows
+above it and is labelled rather than filled in optimistically.
+
+Three rows have been driven at the real platform, all on 2026-07-30: Slack, which turned out to
+be wrong — see the correction below; Discord, also wrong —
+[§8](#8-discord-was-wrong-and-how-it-was-found); and Matrix, which held —
+[§9](#9-the-matrix-row-driven-end-to-end-2026-07-30). Those are what make the derived rows
+interpretable: two of them are the known-positive proving a duplicate is genuinely produced when
+no key is honoured, rather than a duplicate being merely theorised.
+
+### Correction, 2026-07-30 — Twilio and WhatsApp were never measured at a real destination
+
+Until this date both rows read *"Replay measured at a real destination? **Yes** — a replayed key
+produced **two** messages"*, and the paragraph above them said the four pre-existing rows "come
+from one run in which a single delivery key was replayed twice through real adapters over real
+HTTP".
+
+**Every clause of that is true and the answer in the column is still wrong**, because the
+question in the column header is *"at a real destination?"* and the run was
+`crates/wcore-cli/tests/f24_c1_outbound_idempotency.rs` — a **`mockito`** fixture. Real adapters,
+real HTTP, real production factory, and a destination we wrote. Measured with
+`/usr/bin/grep` on 2026-07-30: **zero** files in `crates/` reference a Twilio or Meta live
+credential (`TWILIO_ACCOUNT_SID`, `WHATSAPP_ACCESS_TOKEN`, `WA_ACCESS_TOKEN`, `live_twilio`,
+`live_whatsapp`); the known-positive in the same search, `SLACK_BOT_TOKEN`, returns
+`live_slack_actions.rs`, so the search was alive and the absence is real. **We hold no Twilio or
+Meta credentials.**
+
+This is the identical defect the Slack correction below diagnoses, in the two rows directly
+beneath it: *the evidence column must state the same claim as the guarantee column.* It survived
+that correction because the reviewer was looking at Slack.
+
+**Telegram's row carried the same overstatement and has now been corrected too.**
+`lane/twilio-whatsapp-identity` flagged it but declined to edit a row it had not measured, which
+was the right call for a lane. The orchestrator verified it independently before changing it:
+`TELEGRAM_BOT_TOKEN` and `live_telegram` return **four** hits across `crates/`, all four in
+`wcore-safety/src/pii.rs` as a **redaction pattern** — no live test exists. Two known-positives in
+the same sweep were alive (`SLACK_BOT_TOKEN` → `live_slack_actions.rs`,
+`live_matrix`/`MATRIX_ACCESS_TOKEN` → `matrix_live_room.rs`), so the absence is real and not a
+dead search. Telegram came from the same `mockito` run as the other two.
+
+Neither guarantee changed. `at-most-once` was never in doubt for either: it follows from the
+absence of a documented dedup slot, and that is a fact about the platforms' published APIs, not
+about our fixture. What changed is the strength of the evidence claimed for it.
+
+### Correction, 2026-07-30 — the Slack row was wrong, and how
+
+Until this date the Slack row read **exactly-once**, "On restart, expect: **one message**",
+live-proven. Its evidence column said *"real HTTP; the key was present on both attempts."*
+
+**That is evidence for a different claim.** Key-on-wire is a fact about our request. Arrival
+count is a fact about Slack. The row asserted the second and cited the first, and the three rows
+beneath it show what the missing measurement looks like when it is actually taken — they say
+"produced **two** messages", a count.
+
+It has now been taken. Against `slack.com`, private channel `C0BLR1UKKU6`, through the adapter as
+the production registry factory builds it:
+
+```text
+send   with key K -> ts 1785385438.299299
+send   with key K -> ts 1785385438.564099     <- a SECOND message, not the first one
+conversations.history: 2 arrivals with that body
+```
+
+Confirmed three independent ways in one run: two distinct `ts` values returned, two records read
+back from `conversations.history`, and `chat.delete` succeeding on **both** (a delete that
+succeeds proves the message existed; a delete of a fabricated `ts` returns `message_not_found`,
+which is the control proving that instrument can fail). A raw-`curl` probe outside the adapter
+reproduced it identically. Slack's Web API documents no request-level idempotency surface, and
+the adapter's own `api.rs` already said the header was "inert against real Slack" — the capability
+bit above it said the opposite, and the bit was the one the gateway read.
+
+The practical consequence while the row was wrong: `LedgeredHandler::dispatch_fire` **re-sent**
+outcome-unknown Slack deliveries on restart, believing the destination would collapse the replay.
+Slack does not. Those re-sends were duplicates, and invisible from our side because the ledger
+recorded one delivery. Slack now takes the same `abandoned` path as the other seven, which
+surfaces the delivery to an operator instead of silently doubling it.
+
+The header is still transmitted, because a Slack-compatible destination pointed at through
+`api_base_url` may honour it. What changed is the claim about `slack.com`.
+
+Standing lesson for this table: **the evidence column must state the same claim as the guarantee
+column.** A row whose evidence is about our request cannot support a guarantee about their
+arrival count.
+
+### Where each guarantee comes from, in code
+
+| Adapter | Capability declared at | Key reaches the wire at |
+|---|---|---|
+| Slack | `wcore-channel-slack/src/lib.rs` `supports_outbound_idempotency` — **`false`**, because `slack.com` ignores the key | the `idempotency-key` request header IS still sent on a keyed send (bound by the mockito test `a_keyed_send_puts_the_key_on_the_wire_though_slack_ignores_it`, and by its twin proving the header is **absent** when unkeyed) — but no Slack-honoured slot exists. The live arrival count is asserted by `wcore-channels-registry/tests/live_slack_actions.rs` |
+| Matrix | `wcore-channel-matrix/src/lib.rs:294` | `wcore-channel-matrix/src/rest.rs:63` `txn_id_for_key`, used `rest.rs:133-135`; bound by test `lib.rs:539`, and by the live wire capture in [§9](#9-the-matrix-row-driven-end-to-end-2026-07-30) |
+| Discord | **`false`**, overridden explicitly in `wcore-channel-discord/src/lib.rs` | `rest::nonce_for_key` IS still sent as `nonce` (`lib.rs:170-172`), and Discord ignores it for deduplication — see [§8](#8-discord-was-wrong-and-how-it-was-found) |
+| Twilio SMS | **`false`**, overridden explicitly in `wcore-channel-sms/src/lib.rs` | the delivery id IS sent as an `Idempotency-Key` request header (`api::IDEMPOTENCY_HEADER`), bound in both directions by `a_keyed_send_puts_the_delivery_id_on_the_wire_though_twilio_ignores_it` and `an_unkeyed_send_carries_no_delivery_id_header`. Twilio's `Messages` resource documents no dedup slot, so nothing reads it there |
+| WhatsApp | **`false`**, overridden explicitly in `wcore-channel-whatsapp/src/lib.rs` | the delivery id IS sent as `biz_opaque_callback_data`, the Cloud API's documented ≤512-char *tracking* string, which Meta echoes back in the `statuses` object of the `messages` webhook. Bound by `a_keyed_send_carries_the_delivery_id_as_biz_opaque_callback_data` and its absence twin |
+| the other five | *no override* — they inherit the trait default `false` at `wcore-channels/src/lib.rs:139` | *nothing* — they inherit the pass-through `send_message_idempotent` at `wcore-channels/src/lib.rs:123-129`, which ignores the key |
+
+#### Transmitting an id is ATTRIBUTION. It is not deduplication. (2026-07-30)
+
+Four adapters now put the gateway's delivery id on the wire while declaring
+`supports_outbound_idempotency() == false`: Slack, Discord, Twilio SMS and WhatsApp. That
+combination is not a contradiction and it is not an oversight, so it is worth stating once.
+
+- **Transmitting** the id is a fact about *our request*. It makes an arrival **attributable**: a
+  destination that records what we sent can say which `cron:{job_id}:{scheduled_for_millis}`
+  caused it, so a repeated body is judgeable as a replay (same identity twice — a real violation)
+  or a recurrence (the trigger fired again — expected).
+- **Deduplicating** is a fact about *their arrival count*, and only a run at the real platform
+  can establish it.
+
+Before 2026-07-30 Twilio and WhatsApp transmitted nothing, and the cost was not theoretical: in
+the Windows journey run, **8 of 12 repeats were graded `indeterminate` — unjudgeable in
+principle** — purely because `twilio.messages` and `whatsapp.messages` arrivals carried no
+identity, and the receipt correctly refuses to call an unmeasurable property clean. The same
+journey restricted to Slack returned 24 classified recurrences and `rc=0`.
+
+**What this cost, stated rather than absorbed.** The old `false` for these two rested on a
+*mechanical* argument — we send nothing, therefore nothing can dedupe. That argument is gone.
+The bit stays `false` as a **conservative default pending
+`wcore-channels-registry/tests/live_twilio_whatsapp_identity.rs`**, which is written, gated on
+credentials we do not hold, and panics rather than skipping. The asymmetry that makes the trade
+sound: a wrong `false` abandons a delivery *visibly* (`wayland-core gateway abandoned`), while a
+wrong `true` duplicates one *silently*.
+
+---
+
+## 3. How the gateway decides, exactly
+
+One code path, `LedgeredHandler::dispatch_fire` in
+`crates/wcore-gateway/src/automation.rs:143-237`. Every scheduled channel delivery goes
+through it.
+
+| Ledger state when the delivery is seen again | Adapter declares | What happens | Line |
+|---|---|---|---|
+| first sight | either | attempt it | `:218` |
+| `Settled` (succeeded **or** failed for a known reason) | either | **nothing is sent** | `:169-171` |
+| `Attempted` — process died mid-send, outcome UNKNOWN | `true` | **re-attempt, carrying the original key**; the destination suppresses the replay | `:216-220` |
+| `Attempted` — outcome UNKNOWN | `false` | **abandon**: recorded with reason `OutcomeUnknownNoDedup`, warned, not sent | `:201-215` |
+
+Two consequences worth stating plainly:
+
+- **A send that fails for a known reason is not retried by the delivery spine** (`:227-231`
+  settles both arms). Conflating a known failure with an unknown outcome is what turns one
+  failed send into a retry storm; the code deliberately does not.
+- **The gateway never guesses.** For the eight at-most-once adapters it will not re-send, because
+  re-sending to a destination that cannot recognise the replay *is* the duplicate. It records the
+  delivery instead and hands the decision to you.
+
+### What to do with an abandoned delivery
+
+```
+wayland-core gateway abandoned          # list them, with the reason
+wayland-core gateway resend <id> --confirm-not-delivered
+wayland-core gateway ack <id>           # you checked; nothing more to do
+```
+
+`resend` tells you, per destination, whether the replay is safe
+(`wcore-cli/src/gateway.rs:981-990`): *"replay-safe: no — this destination cannot recognise a
+replay; if the first copy did land, there are now two."* That sentence is generated from the
+same capability bit as this table's Guarantee column, so it cannot disagree with it.
+
+---
+
+## 4. What the guarantee is scoped to
+
+**Read this before quoting "exactly-once" to anyone.**
+
+The guarantee is keyed on a *delivery id*, which is
+(`crates/wcore-cron/src/runner.rs:324-338`):
+
+```
+cron:{job_id}:{scheduled_for_millis}[:{occurrence}]
+```
+
+That is a **(job, scheduled instant)** pair. Exactly-once means: *for one job firing at one
+scheduled instant, the destination gets one message.*
+
+It does **not** mean "the customer receives one message". If something upstream of the ledger
+fires the same job for a *different* scheduled instant, that is a new delivery id, and to the
+ledger and to every adapter it is a genuinely new delivery. No adapter's dedup can suppress it,
+because the key differs.
+
+That is not hypothetical, and it is not a defect either: **the ordinary way it happens is a
+recurring trigger doing exactly what it was configured to do.** A job on `every:60` alive for
+three minutes produces three delivery ids and three messages. See
+[§5](#5-a-recurring-job-delivers-again-and-that-is-not-a-duplicate), which is the measured case
+and the one this programme initially mis-filed as a Windows duplication defect.
+
+### 4.1 Exactly-once stops at the message cap
+
+**The Matrix row has a precondition, and until 2026-07-31 this document did not state it.**
+
+Every adapter declares a single-message length cap through `Channel::max_message_len()`;
+Matrix's is **32,768 characters** (`crates/wcore-channel-matrix/src/lib.rs:165-167`). When a body
+exceeds it, `ChannelManager::send_to_keyed`
+(`crates/wcore-channels/src/manager.rs:776-812`) splits it and sends the pieces **with no
+idempotency key at all**.
+
+That is the correct behaviour, not a bug. An over-cap body becomes N messages at the
+destination under one logical delivery, so one key cannot identify them; giving every chunk the
+same key would make a *correct* destination suppress chunks 2..N as replays and silently
+truncate the message. Dropping the key is the only honest option available.
+
+But it means the guarantee inverts above the cap:
+
+| Body | Key on the wire | Guarantee | A retry produces |
+|---|---|---|---|
+| ≤ 32,768 chars | yes — the txn id | **exactly-once** | one message; the homeserver returns the original `event_id` |
+| > 32,768 chars | **none** | **at-least-once** | **a second full copy of every chunk** |
+
+**So a retry above the cap duplicates, on Matrix, today.** The spine is what decides whether to
+retry, and it used to ask a per-**adapter** question — `supports_outbound_idempotency()`, which
+is a property of the connector and knows nothing about the body in hand. It therefore answered
+`true` about sends that carried no key.
+
+Callers now ask the per-**message** form,
+`ChannelManager::supports_outbound_idempotency_for(channel, text)`, which is `true` only when
+the adapter transmits a key *and* the body fits in one message. It reads the same
+`chunks_for` decision the send itself uses, so the answer cannot drift from the behaviour. The
+cap-blind form is retained for callers that genuinely ask about the connector — capability
+reporting and the drift test below.
+
+Two call sites moved, and one of them was printing the falsehood to a human:
+`wayland-core gateway resend` reported `replay-safe: yes` for an over-cap body, at the exact
+moment an operator is deciding whether a duplicate is possible. It now distinguishes "this
+platform cannot deduplicate at all" from "this body was too long for the key to ride".
+
+The other nine adapters are unaffected in practice: they are `at-most-once` at every length,
+because they transmit nothing the destination honours whether the body is chunked or not.
+
+#### The above-cap half is NOT MEASURED at a real destination (2026-07-31)
+
+**Everything above this line is derived from our own source. The `at-least-once` claim for an
+over-cap body has never been confirmed by counting arrivals at matrix.org**, and this section
+would be repeating the exact mistake §8 and the Slack correction diagnose if it implied
+otherwise. The reasoning is strong — no key is transmitted, and §8 established that a
+destination with no honoured key produces a duplicate — but reasoning is what the Discord row
+had.
+
+The harness is written and committed:
+`crates/wcore-channels-registry/tests/matrix_cap_replay.rs`. It sends an over-cap body, replays
+the same delivery id, and counts arrivals through an independent read of the room — **and it
+runs a below-cap control in the same session against the same room.** That control is not
+decoration: "two arrivals above the cap" is equally well explained by "a replayed key always
+duplicates here", which would make the §2 row false rather than conditional. Only the pair
+distinguishes them. The test is `#[ignore]`d and **panics on missing configuration rather than
+skipping**, so it cannot report green without having talked to a homeserver.
+
+**Why it has not run:** the stored Matrix credential is dead. On 2026-07-31 matrix.org answered
+the first authenticated call with `M_UNKNOWN_TOKEN — "Token is not active"`. A working token is
+a Sean-only input, so this is blocked on a credential and not on engineering.
+
+What that run DID establish, because it happens before the first network write:
+
+```text
+MCR_CAP=32768
+MCR_BODY   ctrl_chars=51 ctrl_chunks=1   subj_chars=36814 subj_chunks=2
+MCR_PREDICTED ctrl=true  subj=false
+```
+
+That is a measurement of **our** code and not of Matrix: the production `ChannelManager`, built
+by the production loader from real channel TOML, answers `true` for a body that will carry the
+key and `false` for one that will not. It is the fix working at the product surface. It is not
+evidence about arrival counts, and it is not counted as any.
+
+The run wrote nothing to the room — it failed on the baseline read, which precedes the first
+send, and neither `MCR_CTRL_RECEIPTS` nor `MCR_SUBJ_RECEIPTS` was ever printed.
+
+---
+
+## 5. A recurring job delivers again, and that is not a duplicate
+
+**A recurring cron job whose run outlives one trigger period delivers each body again, under a
+NEW delivery id. That is the trigger working, on every platform.** Windows crosses the period
+more often than the others, and nothing about the behaviour is Windows-specific.
+
+This section previously read *"On Windows, a gateway whose runtime restarts across the Task
+Scheduler `PT1M` repetition boundary re-fires cron jobs that have already fired"* and was filed
+as the defect `F24-GWP-H1`. **Both halves of that sentence are wrong**, and the run it cited is
+the evidence against it:
+
+- *"re-fires jobs that have already fired"* — the second delivery of a body is a **different
+  scheduled occurrence**, not a re-fire of the first. Every repeat in that run carried a
+  **different delivery id**: 5 of 5 keyed jobs, **zero replays**.
+- *"On Windows"* — the mechanism is platform-neutral. Windows crosses the window **reliably**,
+  not exclusively.
+
+**So the one remaining exactly-once row in §2 is conditional on timing — on every platform, not
+just Windows.** A recurrence carries a different delivery id, and a different id is not a replay,
+so Matrix will send the second copy too. That is correct behaviour for a recurring job and it is
+not what the exactly-once guarantee is about; §4 is the section that says what the guarantee is
+scoped to. Slack and Discord reach the same outcome by a plainer route: since the 2026-07-30
+corrections above, neither has an honoured idempotency slot at all, so nothing anywhere is
+deduplicating them.
+
+### What was actually measured, 2026-07-30
+
+The journey submits every job with `--trigger every:15`, which is **rate-floored to sixty
+seconds** — `TriggerBound::new((*every_secs).max(60), 1)` (`wcore-cron/src/trigger.rs:238`),
+applied to the resulting instant at `trigger.rs:366`. They are 60-second **recurring** jobs, so
+any run alive past one period legitimately sees each body twice.
+
+The internal control is in the same run: the **heartbeat** job, which was never inside a kill
+window, recurred three times with scheduled deltas of **60068 ms** and **64940 ms** — the floor,
+measured directly — and nobody ever called those duplicates.
+
+| | arrival lines | distinct texts | arrivals per text | distinct delivery ids among repeats |
+|---|---|---|---|---|
+| Windows | 27 | 13 | `{2: 12, 3: 1}` | **all distinct — 5 of 5 keyed jobs, 0 replays** |
+| macOS | 13 | 13 | `{1: 13}` | n/a — no repeats |
+
+It is **deterministic, not intermittent**. Task Scheduler's minimum repetition interval is
+`PT1M`, which exceeds the 60 s floor, so a Windows kill-and-recover leg always costs more than
+one period; launchd and systemd restart inside it. The two Windows runs bear this out exactly:
+the 67.7 s run produced 12 repeats, the 0.3 s run produced 0. Predicting the count from the run
+duration is what makes this recurrence rather than a fault.
+
+It was also **not** a lock failure — the process count never exceeded 1 — and the ledger
+recorded 27 distinct delivery ids **each settled exactly once**. The spine did its job
+perfectly, which is what you would expect, because there was nothing to suppress: see
+[§4](#4-what-the-guarantee-is-scoped-to). A different key is not a replay.
+
+### So do the §2 exactly-once rows still hold on Windows?
+
+**Yes, unchanged.** Exactly-once is scoped to a delivery id, and every delivery id in that run
+was delivered once. What a slow run changes is the number of delivery ids, not the guarantee
+over each — and *more* of them is a stronger measurement of the property, not a weaker one.
+
+What a reader should take from it is the §4 warning restated: **"exactly-once" does not mean
+"one message".** A recurring job that is alive for three minutes will send three messages, and
+no adapter's dedup can or should suppress that.
+
+### The one real gap the same run exposed
+
+Of 24 delivery arrivals, **only 8 carried an `idempotency_key` at all** — one adapter of the
+three. `twilio.messages` and `whatsapp.messages` emit none, so for them a replay is
+indistinguishable from a recurrence **in principle**, not merely in this harness. That is the
+`at-most-once` row in §2 seen from the measurement side, and it is why the journey gate counts
+an unclassifiable repeat **against** the run rather than passing it: an unmeasurable property
+reported as a measured clean one is the failure this document exists to prevent.
+
+### How to grade a run of this kind
+
+**Not from the receipt headline.** For that same run the headline read `arrived: 12,
+duplicates: 0, losses: 0` (`F24-GWP-M1`, since fixed). And **not from `duplicates` alone**
+either, in the other direction: `duplicates` counts repeats of a message **body**, which is not
+what exactly-once is about.
+
+`wayland-journey verify` reports the classification and grades on it
+(`crates/wcore-eval-scenarios/src/journey.rs`, `DeliveryIdentity`):
+
+| bucket | meaning | grade |
+|---|---|---|
+| `replays` | the same delivery id arrived twice | **FAIL** — a real exactly-once violation |
+| `recurrences` | the same body under different delivery ids | **PASS** — the trigger fired again |
+| `indeterminate` | a repeat where an arrival carried no id | **FAIL** — unprovable is not clean |
+
+Before that distinction existed, both the driver and the verifier refused any `duplicates != 0`,
+so a Windows journey — which crosses the period every time — had **no reachable pass state at
+all**. A gate that cannot pass proves as little as one that cannot fail, and it additionally
+hides real progress.
+
+---
+
+## 6. Why the eight cannot simply be fixed
+
+`supports_outbound_idempotency` is a **capability declaration, not a preference**
+(`wcore-channels/src/lib.rs:131-138`). An adapter that returns `true` without transmitting a key
+the destination will honour reintroduces exactly the duplicate the method exists to prevent — it
+converts a *visible* duplicate into an *invisible* one. So `false` is not a gap to be closed by
+editing a boolean; it is true.
+
+Seven platforms provide no client-supplied deduplication token at all: Telegram Bot API, Twilio
+Programmable Messaging, WhatsApp Cloud API, SMTP, `signal-cli`, AppleScript-driven Messages.app,
+and Microsoft Bot Framework. Verified 2026-07-30 against a three-model panel — unanimous, 7 of 7
+"no" from each of three independent models, with primary sources: Twilio documents SMS-send
+POSTs as explicitly non-idempotent; RFC 5321 §6.1 permits duplicate delivery and RFC 5322 §3.6.4
+makes `Message-ID` an identifier, not a dedup contract; signal-cli's JSON-RPC `id` only
+correlates the response; the Bot Framework `activity.id` is channel-assigned and senders are
+told not to deduplicate on it.
+
+**Discord is the eighth, and it fails for a different and more instructive reason.** The other
+seven expose no token to send. Discord exposes one — `nonce` — and *accepts* it, echoing the
+value straight back in the create response. It simply never deduplicates on it. A token that is
+accepted and ignored is strictly more dangerous than no token at all, because the adapter can
+truthfully say "the key is on the wire" and be wrong about the only thing that matters. See
+[§8](#8-discord-was-wrong-and-how-it-was-found).
+
+One nuance, because "the platform" and "the API we use" are not the same thing: **Telegram's
+lower-level MTProto API does have a `random_id` dedup token — the Bot API's `sendMessage` does
+not expose it.** This adapter is a Bot API client, so the token is unreachable from where we
+stand. Reaching it would mean writing an MTProto client, which is a different product, not a
+fix to this one.
+
+**The nearest miss is SMTP, and it is still a no.** `make_outbound_message_id`
+(`wcore-channel-email/src/smtp.rs:287`) mints a fresh RFC 5322 `Message-ID` per send, and
+deriving it from the delivery key instead would be a few lines. But no RFC and no common MTA
+guarantees suppression of a duplicate `Message-ID`; a few destinations happen to. Declaring
+`true` on the strength of "some mailboxes probably will" would be a reassuring sentence over
+code that does not implement the guarantee, which is the failure mode this document exists to
+prevent. It is left as it is, and recorded here as the one candidate a future product decision
+could revisit.
+
+---
+
+## 7. Keeping this document true
+
+A declaration that drifts from the code is worse than no declaration. This one is enforced by
+`crates/wcore-channels-registry/tests/delivery_semantics_declaration.rs`, which:
+
+1. parses the **Guarantee** column of §2's table out of this very file at test time;
+2. constructs **all ten adapters through the production factory**
+   (`channel_factory_for`) with hermetic fixture configs and no real credentials;
+3. asserts, per adapter, that `supports_outbound_idempotency()` is `true` exactly when this
+   table says `exactly-once` or `exactly-once-below-cap`;
+4. asserts the row set and the constructible-adapter set are **the same set** — a new adapter
+   with no row here fails the build, and a row here naming no adapter fails it too;
+5. asserts the **cap** half of a conditional row against the wire: `exactly-once-below-cap`
+   requires a `<platform>.cap` line, and the number must equal what the constructed adapter's
+   `max_message_len()` returns. Matrix's cap had **no test of any kind** before 2026-07-31 — the
+   one number the surviving exactly-once claim is conditional on was the one number nothing
+   checked;
+6. asserts the converse, which is what stops this document sliding back: a row claiming bare
+   `exactly-once` must belong to an adapter reporting **no** cap. An adapter with a finite cap
+   can only honestly claim `exactly-once-below-cap`, so the unconditional sentence cannot be
+   written about it.
+
+If you change an adapter's capability **or its `max_message_len`**, this file is part of the
+change.
+
+**What checks 5 and 6 still do NOT establish — tracked as
+[FerroxLabs/wayland#934](https://github.com/FerroxLabs/wayland/issues/934).** They compare the
+cap in this document against the cap the adapter returns. Both numbers are ours. Whether either
+equals the *platform's* real limit is unmeasured, and the six adapters that do have a cap test
+assert `max_message_len()` against the literal the function returns one line above — which
+restates the code rather than testing it. Being wrong is not cosmetic in either direction: a cap
+set too high reinstates HIGH-6 (the platform rejects the message and it is dropped), and a cap
+set too low chunks bodies that did not need it, which per [§4.1](#41-exactly-once-stops-at-the-message-cap)
+**drops the idempotency key and downgrades exactly-once for messages that should have been
+covered by it.** Closing it needs a live boundary probe per platform, at `cap` and `cap + 1`,
+against eight destinations we do not all hold credentials for.
+
+---
+
+## 8. Discord was wrong, and how it was found
+
+Until 2026-07-30 this document put Discord in the exactly-once column. **It was wrong**, and the
+row said why it might be: *"No — mock only. Key-on-wire is bound by a mockito test; no real
+Discord destination has been driven."* A mockito test can only ever prove that we **send** a
+stable token. Everything after that — that Discord would **honour** it — was inference, and the
+inference was false.
+
+Measured by `lane/discord-live` against a real bot, a real guild and a real channel.
+
+### The platform does not deduplicate on `nonce`. There is no window.
+
+Same channel, same author, byte-identical nonce, replayed at four delays:
+
+| delay | first id | second id | result |
+|---|---|---|---|
+| 0 s | 1532233150594289704 | 1532233156847992891 | **two messages** |
+| 5 s | 1532233158874108034 | 1532233181867278427 | **two messages** |
+| 30 s | 1532233187801960489 | 1532233320211943434 | **two messages** |
+| 90 s | 1532233322401370353 | 1532233706088038480 | **two messages** |
+
+`BL-24C1-DISCORD-WINDOW` asked how long the dedup window is. The answer is that there isn't one.
+
+Three controls, because a verdict that can only ever read "duplicate" would be a
+permanently-red gate and worth nothing:
+
+1. **The nonce is accepted, not rejected.** `POST` returns 200 and Discord echoes the value back
+   (`nonce_sent == nonce_echoed`), so the token is well-formed and inside the 25-char cap.
+2. **The comparator can report identity** — two GETs of one message compare equal.
+3. **A same-id outcome is reachable through this very API** — `PATCH` returns the same id as the
+   `POST`. So "deduplicated" was an achievable result; it just never happened.
+
+### End to end through the gateway, one delivery id, two messages
+
+Outcome-unknown was produced honestly rather than simulated: the adapter's own `api_base_url`
+seam pointed at a proxy that forwards the create to real Discord and then never responds, so the
+message lands and the product never learns the outcome — the `F24-C-H1` shape exactly.
+
+| step | evidence |
+|---|---|
+| `once:` trigger — structurally cannot fire twice | job `97ce67c3-52f0-48da-92e1-80692363a555` |
+| attempt 1 reached Discord, key on the wire | `FORWARDED id=1532234475344498829 nonce=wle82e6651cfa60bb8` |
+| the nonce IS the derivation of the delivery id | `nonce_for_key("cron:97ce67c3-…:1785383566000") = wle82e6651cfa60bb8`; `millis+1` correctly differs |
+| gateway killed `-9`, then restarted | gateway 2's own banner: `carried=1 (unattempted 0 / unknown-outcome 1)` |
+| arrivals at Discord, baseline 0 | **2** |
+
+Because the adapter declared `true`, the spine took the re-attempt arm at `automation.rs:216-220`
+instead of the abandon arm at `:201-215`, and `wayland-core gateway abandoned` was empty before
+and after. The product did not fail to notice a duplicate; **it created one on purpose**, on the
+strength of a guarantee the platform does not provide.
+
+### What changed
+
+`supports_outbound_idempotency()` now returns `false` for Discord. The nonce is still sent —
+it is useful to clients for optimistic reconciliation — but the spine no longer treats it as a
+replay guard, so an outcome-unknown Discord delivery is abandoned, recorded and nameable, like
+every other at-most-once adapter.
+
+### The lesson worth keeping
+
+The row that was wrong is the row that had never been driven at a real destination, and it said
+so in its own last column. **A "NOT MEASURED" cell is a prediction, and predictions in this table
+have now been wrong once.** The other four unmeasured rows — Email, Signal, iMessage, MS Teams —
+predict `at-most-once`, which is the safe direction to be wrong in; Discord predicted
+`exactly-once`, which is not.
+
+
+---
+
+## 9. The Matrix row, driven end to end (2026-07-30)
+
+Every other exactly-once row in §2 rests on a key being *present on the wire*. The Matrix row
+now rests on something stronger: the shipped `wayland-core` binary crashed mid-send against
+`matrix.org` and the replay was collapsed by the homeserver.
+
+Measured by `lane/matrix-live` on `hetzner-dsm`, room `!REDACTED-MATRIX-ROOM:matrix.org`. The
+product spoke to the real homeserver through a recording forwarder
+(`scripts/matrix-live-proxy.mjs`) which forwarded the first send upstream **for real** and then
+withheld the response, so the event landed while the product's outcome stayed unknown. The room
+was then read by a separate process talking directly to matrix.org.
+
+| | txn id on the wire | homeserver's `event_id` |
+|---|---|---|
+| process life 1 (pid 3132637), response withheld, then `kill -9` | `cron:bf4c989c-…:1785385265000` | `$BAnrbBtxNCqVOn0q…` |
+| process life 2 (pid 3138250), `carried=1 (unknown-outcome 1)` | `cron:bf4c989c-…:1785385265000` — **identical** | `$BAnrbBtxNCqVOn0q…` — **identical** |
+| control: same body, **different** delivery id | `cron:99a26815-…:1785385376000` | `$8rWWSSH7nc9lgq3F…` — different |
+
+Independent read of the room: **2 events**, not 3.
+
+**The control is the point.** A count of one would have been equally explained by
+exactly-once working and by the replay never being attempted. Two — with one of them
+demonstrably produced by a *different* delivery id — distinguishes them, and is the live
+demonstration of [§4](#4-what-the-guarantee-is-scoped-to): a different key is not a replay.
+
+### The row was true and unreachable at the same time
+
+This run also found the reason no one had ever driven it: `Target::Channel` carried no
+destination, and the dispatcher passed the **channel name** as the outgoing `conversation_id`.
+The first attempt produced
+
+```text
+PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:…    <- `mxlive` is the CHANNEL NAME
+403 M_FORBIDDEN "User @… not in room mxlive"
+```
+
+Not Matrix-specific: the per-adapter default-destination fallbacks (`slack lib.rs:416`,
+`whatsapp :238`, `sms :250`) are all gated on an **empty** conversation id, which cron never
+produced, so none of them was reachable from a scheduled delivery. `cron add --conversation`
+and `Target::Channel::conversation_id` close it. Until then, the exactly-once guarantee in
+§2 described a path that could not address a Matrix room at all.
+
+### One thing a redaction does NOT tell you
+
+`Channel::delete_message` reports success when the homeserver accepts the redaction, and
+`rest.rs:342-349` calls that "the strongest guarantee the protocol offers". Measured the same
+night: **matrix.org answers `200 {"event_id": …}` to a redaction of an event id that never
+existed**, and to one with an empty event id. Acceptance is therefore compatible with nothing
+having been redacted. Grade a delete by reading the event back and checking that `content.body`
+is gone — never by the status code.
+
+<!-- DELIVERY-SEMANTICS-MACHINE-READABLE
+Do not edit by hand. Kept in step with the table in §2; the test reads BOTH and requires
+them to agree, so a table edit that misses this block fails, and vice versa.
+
+Vocabulary: exactly-once | exactly-once-below-cap | at-most-once | at-least-once.
+
+`exactly-once-below-cap` is the CONDITIONAL guarantee of §4.1 — the key rides only while the
+body fits in one platform message. A row declaring it MUST also carry a `<platform>.cap` line
+giving that platform's `max_message_len()` in chars, and the test asserts the number against
+the adapter the production factory builds. Conversely a row declaring bare `exactly-once` MUST
+have `max_message_len() == None`: a finite cap with an unconditional claim is the drift this
+vocabulary exists to make unsayable.
+slack = at-most-once
+matrix = exactly-once-below-cap
+matrix.cap = 32768
+discord = at-most-once
+telegram = at-most-once
+sms = at-most-once
+whatsapp = at-most-once
+email = at-most-once
+signal = at-most-once
+imessage = at-most-once
+msteams = at-most-once
+-->

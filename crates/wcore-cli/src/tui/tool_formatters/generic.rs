@@ -13,13 +13,16 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 
 use super::ToolResultFormatter;
-use super::fmt_duration;
+use super::{first_line_preview, fmt_duration, raw_text};
 use crate::tui::theme::Theme;
 
 /// Max number of lines the generic formatter shows in `detail_lines`
 /// before truncating. Cards beyond this length get an explicit
 /// `... (N more lines)` footer.
 const MAX_DETAIL_LINES: usize = 30;
+
+/// Max chars of a plain-text payload echoed on the summary line.
+const RAW_PREVIEW: usize = 60;
 
 pub struct GenericFormatter;
 
@@ -44,6 +47,18 @@ impl ToolResultFormatter for GenericFormatter {
                     }
                 }
             }
+        }
+        // UAT-T3. A non-object payload reaches here for every plain-text tool
+        // result. `completed in 0.0s` was two fabrications in one clause: the
+        // card model carries no timing, so `duration` is always `Duration::ZERO`
+        // — a placeholder, not a measurement — and "completed" is asserted for
+        // payloads that may well be an error string. Show the tool's own words
+        // instead, and say nothing when there are none.
+        if let Some(text) = raw_text(payload) {
+            return first_line_preview(text, RAW_PREVIEW);
+        }
+        if duration.is_zero() {
+            return String::new();
         }
         format!("completed in {}", fmt_duration(duration))
     }

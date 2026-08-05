@@ -387,7 +387,7 @@ pub fn assemble(
 mod tests {
     use std::collections::HashMap;
 
-    use wcore_pricing::{ModelPrice, PricingCatalog};
+    use wcore_pricing::{BillingClassification, ModelPrice, PricingCatalog};
 
     use super::*;
 
@@ -397,6 +397,7 @@ mod tests {
             output_per_mtok_usd: output,
             cache_read_per_mtok_usd: None,
             cache_write_per_mtok_usd: None,
+            billing: BillingClassification::Metered,
         }
     }
 

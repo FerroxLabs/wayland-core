@@ -84,11 +84,6 @@ pub fn additional_skills_dirs(add_dirs: &[PathBuf]) -> Vec<PathBuf> {
 // Git root detection
 // ---------------------------------------------------------------------------
 
-/// Maximum number of ancestor directories to traverse when looking for a
-/// `.git` entry. Caps `find_git_root` to avoid unbounded walks on deeply
-/// nested paths that are outside any repository (e.g. network mounts).
-const GIT_ROOT_DEPTH_CAP: usize = 32;
-
 /// Find the nearest git root from `start` by walking up looking for a `.git`
 /// entry (file or directory). Returns `None` if no `.git` is found before
 /// reaching the filesystem root or after `GIT_ROOT_DEPTH_CAP` ancestors.
@@ -96,17 +91,7 @@ const GIT_ROOT_DEPTH_CAP: usize = 32;
 /// F-087: capped at 32 ancestors to prevent slow walks on paths that are
 /// deep inside a network FS or outside any git repository.
 pub fn find_git_root(start: &Path) -> Option<PathBuf> {
-    let mut current = start.to_path_buf();
-    for _ in 0..GIT_ROOT_DEPTH_CAP {
-        if current.join(".git").exists() {
-            return Some(current);
-        }
-        match current.parent() {
-            Some(parent) if parent != current => current = parent.to_path_buf(),
-            _ => return None,
-        }
-    }
-    None
+    wcore_config::workspace_trust::nearest_workspace_git_root(start)
 }
 
 // ---------------------------------------------------------------------------
@@ -116,26 +101,11 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
 /// Walk up from `cwd` to the git root (or home directory), collecting all
 /// `.wayland-core/<subdir>/` directories that exist. Returns deepest-first.
 fn walk_up_dirs(cwd: &Path, subdir: &str) -> Vec<PathBuf> {
-    let stop_at = stop_boundary(cwd);
     let mut dirs = Vec::new();
-    let mut current = cwd.to_path_buf();
-
-    loop {
+    for current in wcore_config::workspace_trust::executable_project_ancestors(cwd) {
         let candidate = current.join(".wayland-core").join(subdir);
         if candidate.is_dir() {
             dirs.push(candidate);
-        }
-
-        // Stop if we've reached the boundary or the filesystem root
-        if Some(&current) == stop_at.as_ref() || current.parent().is_none() {
-            break;
-        }
-
-        match current.parent() {
-            Some(parent) if parent != current.as_path() => {
-                current = parent.to_path_buf();
-            }
-            _ => break,
         }
     }
 

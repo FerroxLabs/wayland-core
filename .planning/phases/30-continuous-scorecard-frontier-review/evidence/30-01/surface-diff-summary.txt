@@ -1,0 +1,9 @@
+shipped surfaces      : 148
+shipped top-level     : 28
+docs tokens extracted : 12
+  BINARY_AND_DOCS : 42
+  BINARY_ONLY     : 91
+  DOCS_ONLY       : 4
+  NO_FAMILY       : 15
+top-level commands owned by NO family (6): init mcp-serve models profile project-context setup
+documented-but-absent (4): forgeflows version wayland-core wcore-cli

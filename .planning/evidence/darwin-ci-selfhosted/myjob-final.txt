@@ -1,0 +1,23 @@
+name        : Build (aarch64-apple-darwin) [self-hosted]
+conclusion  : success
+runner_name : sean-mac-arm64
+runner_id   : 34
+created_at  : 2026-07-30T07:42:13Z
+started_at  : 2026-07-30T07:42:16Z
+completed_at: 2026-07-30T07:50:16Z
+head_sha    : 9f3e15439364f5e3be55b51bc77ec8a7bcabeccf
+--- steps ---
+1. success  Set up job
+2. success  Assert this runner really is Apple silicon (label is a claim, not proof)
+3. success  Run actions/checkout@v6
+4. success  Setup vx (installs Rust from vx.toml)
+5. success  Ensure aarch64-apple-darwin target (host triple; no-op when present)
+6. success  Build release binary
+7. success  Verify the produced binary is genuinely arm64
+8. success  Upload release binary
+9. success  Report runner disk (self-hosted runners are not reimaged)
+17. success  Post Setup vx (installs Rust from vx.toml)
+18. success  Post Run actions/checkout@v6
+19. success  Complete job
+QUEUE_WAIT_SEC=3
+RUN_MIN=8.00

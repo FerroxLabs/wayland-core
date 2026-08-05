@@ -1,0 +1,627 @@
+use super::*;
+
+fn lease_paths() -> BTreeSet<PathBuf> {
+    let Ok(directory) = lease_directory() else {
+        return BTreeSet::new();
+    };
+    fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(OsStr::to_str) == Some("toml"))
+        .collect()
+}
+
+#[test]
+fn sha256_matches_known_vector() {
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+#[test]
+fn generated_profile_names_are_safe_and_bounded() {
+    let name = profile_name(u64::MAX, u64::MAX);
+    validate_profile_name(&name).unwrap();
+    assert!(name.len() <= 64);
+}
+
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn real_profile_collision_allocates_a_new_identity() {
+    require_live_acceptance();
+    let _lock = MutationLock::acquire().unwrap();
+    let creation = current_process_creation_time().unwrap();
+    let start = PROFILE_COUNTER.fetch_add(MAX_PROFILE_ATTEMPTS, Ordering::Relaxed);
+    let occupied = profile_name(start, creation);
+    let occupied_w = widen(&occupied);
+    let display = widen("Wayland-Core collision test");
+    let description = widen("W-ACE collision allocation proof");
+    let mut occupied_sid = ptr::null_mut();
+    let hr = unsafe {
+        CreateAppContainerProfile(
+            occupied_w.as_ptr(),
+            display.as_ptr(),
+            description.as_ptr(),
+            ptr::null(),
+            0,
+            &mut occupied_sid as *mut _ as _,
+        )
+    };
+    assert_eq!(hr, 0, "pre-create collision profile: {hr:#x}");
+    let (allocated, allocated_sid) = unsafe { allocate_unique_profile(start).unwrap() };
+    assert_ne!(allocated, occupied);
+    unsafe {
+        FreeSid(occupied_sid as _);
+        FreeSid(allocated_sid as _);
+        assert_eq!(DeleteAppContainerProfile(occupied_w.as_ptr()), 0);
+        assert_eq!(DeleteAppContainerProfile(widen(&allocated).as_ptr()), 0);
+    }
+}
+
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn setup_failure_after_durable_lease_cleans_up() {
+    require_live_acceptance();
+    let baseline = lease_paths();
+    let result =
+        ExecutionIdentity::start_with_apply(&SandboxManifest::default(), |_intents, _sid| {
+            Err(exec_error("injected ACL setup failure".into()))
+        });
+    assert!(result.is_err(), "injected setup failure must propagate");
+    assert_eq!(
+        lease_paths(),
+        baseline,
+        "setup failure must remove its durable lease after verified cleanup"
+    );
+}
+
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn live_owner_is_never_reclaimed() {
+    require_live_acceptance();
+    let mut identity = ExecutionIdentity::start(&SandboxManifest::default()).unwrap();
+    let lease_path = identity.lease_path.clone();
+    {
+        let _lock = MutationLock::acquire().unwrap();
+        unsafe { recover_dead_leases_locked(&lease_directory().unwrap()).unwrap() };
+    }
+    assert!(
+        lease_path.exists(),
+        "live owner lease must remain authoritative"
+    );
+    identity.mark_process_exited().unwrap();
+    identity.cleanup().unwrap();
+}
+
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn malformed_or_unknown_lease_fails_closed() {
+    require_live_acceptance();
+    let directory = lease_directory().unwrap();
+    let path = directory.join(format!("WCore-malformed-{}.toml", std::process::id()));
+    fs::write(
+        &path,
+        "version = 1\nstate = \"active\"\nunknown_critical = true\n",
+    )
+    .unwrap();
+    let result = ExecutionIdentity::start(&SandboxManifest::default());
+    assert!(
+        result.is_err(),
+        "malformed or unknown-critical lease must block new execution"
+    );
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn crash_helper_entry() {
+    if std::env::var_os("WCORE_ACL_CRASH_HELPER").is_none() {
+        return;
+    }
+    let grant = PathBuf::from(std::env::var_os("WCORE_ACL_CRASH_GRANT").unwrap());
+    let marker = PathBuf::from(std::env::var_os("WCORE_ACL_CRASH_MARKER").unwrap());
+    let identity = ExecutionIdentity::start(&SandboxManifest {
+        fs_read_allow: vec![grant],
+        ..Default::default()
+    })
+    .unwrap();
+    fs::write(&marker, &identity.profile_name).unwrap();
+    std::mem::forget(identity);
+    std::process::exit(91);
+}
+
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn killed_owner_is_recovered_before_next_execution() {
+    require_live_acceptance();
+    let temp = tempfile::tempdir().unwrap();
+    let grant = temp.path().join("grant");
+    fs::create_dir(&grant).unwrap();
+    let marker = temp.path().join("profile.txt");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("crash_helper_entry")
+        .arg("--nocapture")
+        .env("WAYLAND_SANDBOX_LIVE_WINDOWS", "1")
+        // The helper must lease into the SAME root as this process, or the
+        // lease it abandons lands where this test never looks.
+        .env(TEST_LEASE_ROOT_ENV, test_lease_root().unwrap())
+        .env("WCORE_ACL_CRASH_HELPER", "1")
+        .env("WCORE_ACL_CRASH_GRANT", &grant)
+        .env("WCORE_ACL_CRASH_MARKER", &marker)
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(91), "crash helper must exit abruptly");
+    let profile = fs::read_to_string(&marker).unwrap();
+    let lease_path = lease_directory().unwrap().join(format!("{profile}.toml"));
+    assert!(
+        lease_path.exists(),
+        "crash must leave durable recovery authority"
+    );
+
+    let mut old_sid: *mut core::ffi::c_void = ptr::null_mut();
+    let hr = unsafe {
+        DeriveAppContainerSidFromAppContainerName(
+            widen(&profile).as_ptr(),
+            &mut old_sid as *mut _ as _,
+        )
+    };
+    assert_eq!(hr, 0, "derive crashed profile SID: {hr:#x}");
+    let old_sid_guard = SidFreeGuard(old_sid);
+    assert!(unsafe { contains_exact_sid_ace(&grant, old_sid_guard.0).unwrap() });
+
+    let mut next = ExecutionIdentity::start(&SandboxManifest::default()).unwrap();
+    assert!(
+        !lease_path.exists(),
+        "next start must reconcile dead owner first"
+    );
+    assert!(!unsafe { contains_exact_sid_ace(&grant, old_sid_guard.0).unwrap() });
+    next.mark_process_exited().unwrap();
+    next.cleanup().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// F-28-02-002 — the stale-lease wedge.
+//
+// These do NOT need `WAYLAND_SANDBOX_LIVE_WINDOWS` and are NOT `#[ignore]`d, on
+// purpose: they run in the ordinary `cargo test -p wcore-sandbox` pass. Every
+// wedge-adjacent test in this file before them was gated AND ignored, which is
+// the same shape as the suites on this program that reported `test result: ok`
+// having executed zero tests. Nothing here needs a real AppContainer profile —
+// the whole defect lives in file-and-liveness handling — so nothing here buys a
+// gate it does not need.
+//
+// Both legs are proved, because only proving the reclaim leg would be satisfied
+// by an implementation that reclaims unconditionally, which would revoke the
+// ACLs of a container that is still running.
+// ---------------------------------------------------------------------------
+
+static SYNTHETIC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Serialize the wedge tests against each other.
+///
+/// Deliberately a plain in-process mutex rather than [`MutationLock`]: these
+/// four tests share one per-process temp lease root, and all they need is that
+/// one of them is not deleting its lease while another enumerates the
+/// directory. Taking the real cross-process lock instead would make them depend
+/// on `SeCreateGlobalPrivilege` (its mutex lives in the `Global\` namespace),
+/// which would test the privileges of whoever ran `cargo test` rather than the
+/// repair. The lock is intentionally NOT poisoned-propagating: one failing
+/// assertion must not cascade into three misleading secondary failures.
+fn wedge_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Write a lease that can never reconcile (it carries the test SID sentinel,
+/// exactly like the two files found wedging a real developer box).
+///
+/// `owner_live` selects the ONLY difference between the two legs: a live leg
+/// stamps this process's real creation time, so `owner_is_live` sees a running
+/// owner; a dead leg stamps a creation time no process has, so the recorded
+/// owner identity provably does not exist. Using a mismatched creation time
+/// rather than an exited pid is deliberate — it cannot flake on Windows pid
+/// reuse, which would silently turn the "dead" leg into a "live" one.
+fn write_unreconcilable_lease(tag: &str, owner_live: bool, intents: Vec<AclIntent>) -> PathBuf {
+    let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let profile_name = format!(
+        "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}",
+        std::process::id()
+    );
+    validate_profile_name(&profile_name).unwrap();
+    let real_creation = current_process_creation_time().unwrap();
+    let mut lease = LeaseFile {
+        version: LEASE_VERSION,
+        state: LeaseState::Prepared,
+        profile_name: profile_name.clone(),
+        sid_sha256: sha256_hex(TEST_SID_SENTINEL),
+        owner_pid: std::process::id(),
+        owner_creation_time: if owner_live {
+            real_creation
+        } else {
+            real_creation.wrapping_add(1)
+        },
+        intents,
+        lease_sha256: String::new(),
+    };
+    lease.refresh_digest();
+    assert_eq!(
+        owner_is_live(&lease).unwrap(),
+        owner_live,
+        "the synthetic lease must present the owner liveness this leg is testing"
+    );
+    let path = lease_directory()
+        .unwrap()
+        .join(format!("{profile_name}.toml"));
+    write_new_synced_lease(&path, &lease).unwrap();
+    path
+}
+
+/// Files sitting in the quarantine directory whose name came from `lease_path`.
+///
+/// Scoped to one lease rather than counting the whole directory: these tests
+/// share a per-process lease root, and a global count would couple them.
+fn quarantined_for(lease_path: &Path) -> Vec<PathBuf> {
+    let name = lease_path.file_name().and_then(OsStr::to_str).unwrap();
+    let quarantine = lease_directory().unwrap().join(QUARANTINE_DIRECTORY);
+    fs::read_dir(quarantine)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(OsStr::to_str)
+                .is_some_and(|found| found.starts_with(name))
+        })
+        .collect()
+}
+
+#[test]
+fn dead_owner_unreconcilable_lease_is_reclaimed_not_refused_forever() {
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let path = write_unreconcilable_lease("dead", false, Vec::new());
+    assert!(path.exists(), "the wedge lease must start on disk");
+
+    // Before F-28-02-002 was repaired this returned Err, and did so on every
+    // later call, which is what made the denial of service permanent.
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a dead owner's unreconcilable lease must not refuse acquisition forever");
+
+    assert!(
+        !path.exists(),
+        "the reclaimed lease must be gone from the ACTIVE lease directory"
+    );
+    let quarantined = quarantined_for(&path);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "the lease must be MOVED to quarantine, not deleted: {quarantined:?}"
+    );
+    let preserved = fs::read_to_string(&quarantined[0]).unwrap();
+    assert!(
+        preserved.contains(TEST_SID_SENTINEL_SHA256),
+        "quarantine must preserve the evidence verbatim"
+    );
+    fs::remove_file(&quarantined[0]).unwrap();
+}
+
+#[test]
+fn live_owner_unreconcilable_lease_is_honoured_not_reclaimed() {
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    // Identical to the leg above in every respect EXCEPT that the recorded
+    // owner is this running process. Reclaiming this would revoke the ACLs of a
+    // container that is still executing.
+    let path = write_unreconcilable_lease("live", true, Vec::new());
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a live owner's lease must be skipped, not error");
+
+    assert!(
+        path.exists(),
+        "a lease whose owning process is RUNNING must never be reclaimed"
+    );
+    assert!(
+        quarantined_for(&path).is_empty(),
+        "a live owner's lease must never reach quarantine"
+    );
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn quarantine_directory_does_not_become_a_second_wedge() {
+    // Recovery rejects every unrecognised entry in the lease directory with a
+    // hard error. The quarantine directory it creates IS such an entry, so an
+    // implementation that reclaimed the lease but did not allow-list its own
+    // quarantine directory would refuse forever from the second pass onward —
+    // the identical defect, one indirection further down.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let path = write_unreconcilable_lease("reentry", false, Vec::new());
+    unsafe { recover_dead_leases_locked(&directory) }.unwrap();
+    assert!(
+        directory.join(QUARANTINE_DIRECTORY).is_dir(),
+        "the first reclamation must create the quarantine directory"
+    );
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a lease directory that CONTAINS a quarantine directory must still recover");
+
+    for stale in quarantined_for(&path) {
+        fs::remove_file(stale).unwrap();
+    }
+}
+
+/// Reclaim one unreconcilable lease and return the report the product emitted.
+///
+/// Reads the report out of the production emit path, NOT out of the quarantined
+/// file. That distinction is the whole of `F-28-ADJ-001`: the quarantined file
+/// contains the grant path because the file was MOVED verbatim, so asserting on
+/// it passes no matter what the operator is told.
+fn reclaim_and_capture_report(tag: &str, intents: Vec<AclIntent>) -> String {
+    let directory = lease_directory().unwrap();
+    let _ = take_emitted_reclamations();
+    let path = write_unreconcilable_lease(tag, false, intents);
+
+    unsafe { recover_dead_leases_locked(&directory) }.unwrap();
+
+    let mut reports = take_emitted_reclamations();
+    assert_eq!(
+        reports.len(),
+        1,
+        "exactly one reclamation must have been reported, got: {reports:?}"
+    );
+    for stale in quarantined_for(&path) {
+        fs::remove_file(stale).unwrap();
+    }
+    reports.pop().unwrap()
+}
+
+#[test]
+fn reclamation_reports_grants_it_could_not_revoke() {
+    // A lease with recorded intents cannot have those grants revoked: the SID
+    // is stored as a digest and cannot be reconstructed. Refusing forever never
+    // revoked them either, so reclaiming is strictly better — but the operator
+    // has to be TOLD, and that is the ONLY warning they get.
+    //
+    // Asserted in BOTH directions on purpose. Disclosure alone is satisfied by
+    // an implementation that always discloses; silence alone is satisfied by
+    // one that never does. Mutant M3 (adjudication `28-adj`) deletes the
+    // disclosure branch so every reclamation claims nothing was left behind —
+    // the negative assertion below is what catches it.
+    let _lock = wedge_test_lock();
+    const GRANT: &str = r"C:\f28h2-residual";
+
+    let disclosed = reclaim_and_capture_report(
+        "residual",
+        vec![AclIntent {
+            path: GRANT.to_string(),
+            kind: IntentKind::Allow,
+            mask: ACL_READ_MASK,
+        }],
+    );
+    assert!(
+        disclosed.contains(GRANT),
+        "a grant that could not be revoked must be named to the operator: {disclosed}"
+    );
+    assert!(
+        disclosed.contains("could NOT be revoked automatically"),
+        "the report must say the grants were not revoked, not merely list a path: {disclosed}"
+    );
+    assert!(
+        !disclosed.contains("nothing was left behind"),
+        "a lease WITH un-revokable grants must never be reported as leaving nothing behind: \
+         {disclosed}"
+    );
+
+    let silent = reclaim_and_capture_report("noresidual", Vec::new());
+    assert!(
+        silent.contains("nothing was left behind"),
+        "a lease with no recorded grant must say so plainly: {silent}"
+    );
+    assert!(
+        !silent.contains("could NOT be revoked automatically"),
+        "a lease with no recorded grant must not manufacture a residual warning: {silent}"
+    );
+    assert!(
+        !silent.contains(GRANT),
+        "a lease with no recorded grant must name no path: {silent}"
+    );
+}
+
+/// Write a lease file with exactly the given bytes, bypassing the writer.
+///
+/// Reproduces an on-disk STATE, and does not claim to simulate the crash that
+/// produces it. That the state is reachable is established by
+/// `write_new_synced_lease` creating the file before writing its content, and
+/// by `zero_length_lease_is_reachable_through_the_writer` below.
+fn write_raw_lease(tag: &str, bytes: &[u8]) -> PathBuf {
+    let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = lease_directory().unwrap().join(format!(
+        "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}.toml",
+        std::process::id()
+    ));
+    fs::write(&path, bytes).unwrap();
+    path
+}
+
+#[test]
+fn zero_length_lease_is_reclaimed_not_refused_forever() {
+    // F-28-ADJ-002. Reproduced on hardware at 1b9f148f before this fix: a
+    // 0-byte .toml refused all sandboxed execution, twice running, with
+    // `invalid AppContainer ACL lease size 0`.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let _ = take_emitted_reclamations();
+    let path = write_raw_lease("zerolen", b"");
+    assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("a 0-byte lease must not refuse acquisition forever");
+
+    assert!(
+        !path.exists(),
+        "the 0-byte lease must be gone from the ACTIVE lease directory"
+    );
+    let quarantined = quarantined_for(&path);
+    assert_eq!(
+        quarantined.len(),
+        1,
+        "it must be MOVED to quarantine, not deleted: {quarantined:?}"
+    );
+    let reports = take_emitted_reclamations();
+    assert_eq!(
+        reports.len(),
+        1,
+        "the reclamation must be reported: {reports:?}"
+    );
+    assert!(
+        reports[0].contains("0-byte"),
+        "the report must name the actual cause: {}",
+        reports[0]
+    );
+    assert!(
+        reports[0].contains("nothing was left behind"),
+        "an empty lease recorded no grant and must say so: {}",
+        reports[0]
+    );
+
+    // Permanence was the finding, so prove the SECOND pass is clean too.
+    unsafe { recover_dead_leases_locked(&directory) }
+        .expect("recovery must stay clean after reclaiming a 0-byte lease");
+    fs::remove_file(&quarantined[0]).unwrap();
+}
+
+#[test]
+fn a_non_empty_unreadable_lease_still_fails_closed() {
+    // The guard rail on the fix above. Reclamation is keyed on zero LENGTH
+    // only. A non-empty lease that will not parse is indistinguishable from a
+    // tampered one -- it may carry real ACL grants -- so it must keep refusing.
+    // Widening the 0-byte reclamation to "anything unreadable" would silently
+    // convert this deliberate fail-closed into a reclaim, which is why this
+    // test sits next to it rather than in the existing ignore-gated suite.
+    let _lock = wedge_test_lock();
+    let directory = lease_directory().unwrap();
+    let path = write_raw_lease("malformed", b"version = 1\nstate = \"nonsense\"\n");
+    assert!(fs::metadata(&path).unwrap().len() > 0);
+
+    let result = unsafe { recover_dead_leases_locked(&directory) };
+
+    assert!(
+        result.is_err(),
+        "a non-empty unparseable lease must still fail closed, not be reclaimed"
+    );
+    assert!(
+        path.exists(),
+        "a non-empty unparseable lease must NOT be quarantined: it may hold real grants"
+    );
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn zero_length_lease_is_reachable_through_the_writer() {
+    // The half of F-28-ADJ-002 that is about CAUSE rather than effect: the
+    // 0-byte state is not hypothetical, it is what the product's own writer
+    // leaves on disk between creating the file and writing its content. Proved
+    // by observing the file at that exact instant rather than by reading the
+    // source, and without killing anything.
+    let _lock = wedge_test_lock();
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
+    let probe = std::sync::Arc::clone(&observed);
+    let path = write_new_synced_lease_observed("window", move |path| {
+        *probe.lock().unwrap() = Some(fs::metadata(path).unwrap().len());
+    });
+    assert_eq!(
+        observed.lock().unwrap().take(),
+        Some(0),
+        "the writer must be observable with the lease created and still empty"
+    );
+    fs::remove_file(&path).unwrap();
+}
+
+/// Drive the real writer, calling `probe` after the file exists and before its
+/// content is written.
+fn write_new_synced_lease_observed(tag: &str, probe: impl FnOnce(&Path)) -> PathBuf {
+    let sequence = SYNTHETIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let profile_name = format!(
+        "{PROFILE_PREFIX}-h2{tag}-{:08x}-{sequence:04x}",
+        std::process::id()
+    );
+    let mut lease = LeaseFile {
+        version: LEASE_VERSION,
+        state: LeaseState::Prepared,
+        profile_name: profile_name.clone(),
+        sid_sha256: sha256_hex(TEST_SID_SENTINEL),
+        owner_pid: std::process::id(),
+        owner_creation_time: current_process_creation_time().unwrap(),
+        intents: Vec::new(),
+        lease_sha256: String::new(),
+    };
+    lease.refresh_digest();
+    let path = lease_directory()
+        .unwrap()
+        .join(format!("{profile_name}.toml"));
+    storage::write_new_synced_lease_with_probe(&path, &lease, probe).unwrap();
+    path
+}
+
+fn require_live_acceptance() {
+    assert_eq!(
+        std::env::var_os("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
+        Some(OsStr::new("1")),
+        "native acceptance must be invoked explicitly with WAYLAND_SANDBOX_LIVE_WINDOWS=1"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Instrument, not a gate.
+//
+// Deliberately `#[ignore]`d and deliberately assertion-free: it MEASURES, and a
+// timing threshold here would either be so loose it proves nothing or so tight
+// it flakes on a busy host. It exists because the Windows sandbox stall was
+// diagnosed wrong twice from arithmetic that merely happened to match, and the
+// only thing that settled it was running this.
+//
+// Recorded on SEANDESKTOP (32 logical cores, NVMe), whole ExecutionIdentity
+// lifecycle through the real entry points, median per op:
+//
+//   BEFORE the profile RPCs were moved out of MutationLock : ~140 ms
+//   AFTER                                                  :  ~68 ms  (idle)
+//                                                            ~103 ms (32 CPU burners)
+//
+// The floor is the AppX profile service itself: the same 24 threads doing ONLY
+// CreateAppContainerProfile + DeleteAppContainerProfile with no lock of ours
+// cost 350 ms total (~15 ms/op), and that part is Windows', not ours.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "measurement instrument; run explicitly with --ignored --nocapture"]
+fn measure_concurrent_lifecycles() {
+    require_live_acceptance();
+    let workspace = tempfile::tempdir().unwrap();
+    fs::write(workspace.path().join("a.txt"), b"x").unwrap();
+    let manifest = SandboxManifest {
+        fs_write_allow: vec![workspace.path().to_path_buf()],
+        ..SandboxManifest::default()
+    };
+    for threads in [1usize, 4, 8, 16, 24] {
+        let started = std::time::Instant::now();
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    let mut identity = ExecutionIdentity::start(&manifest).unwrap();
+                    identity.mark_process_exited().unwrap();
+                    identity.cleanup().unwrap();
+                });
+            }
+        });
+        let total_ms = started.elapsed().as_millis();
+        println!(
+            "MEASURE concurrent threads={threads} total_ms={total_ms} per_op_ms={:.1}",
+            total_ms as f64 / threads as f64
+        );
+    }
+}

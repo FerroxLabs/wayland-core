@@ -1,0 +1,19 @@
+PANEL-MEMBER: kimi
+PANEL-QUESTION-SHA256: ccd6608ce227290e3bf093d415f01d46db8e9d2e9b7eee72b8adf3e641e4ca7f
+---
+• Judging from the evidence as presented.
+
+  **On the primary contract.** The deciding construct is `CredentialRef` itself: two `String` fields (`name`, `source_file`), a constructor `CredentialRef::new(name, source_file)` with no value parameter, and no accessor, variant, or `From` impl that can accept a secret. Since `Debug`, `Display`, `Serialize`, and `Deserialize` are all derived over exactly those two fields, no emitter can produce a value the type cannot hold. The projection in Evidence 2 feeds it `p.credential_env_var` (a variable *name*) and `p.credential_file` (a path) — never `api_key`, even though the internal `MigrationPlan` has one in scope. That is the structural boundary the contract asks for, and the multi-emitter probe plus the positive-half assertions (non-empty creds, source reference present) make the measurement non-vacuous.
+
+  **On the Round 2/3 finding.** The `details` channel is now closed as a construction-path problem: the field is private, `insert_detail` is the sole writer and scrubs, `deserialize_scrubbed` covers the untrusted-document path, and struct literals are impossible outside the module. The hostile-document test exercises the path the probe previously missed. I accept that closure.
+
+  **Paths I can still name — findings, not vote-changers:**
+
+  1. **The scrubber is heuristic, not structural.** `scrub_detail` strips URL userinfo, *known* secret query-param names, and *known* secret flags. A credential embedded in a shape those patterns don't match — a token in a URL path segment (`https://host/mcp/SECRET/v1`), a secret as a positional argument in a `command` string, or a header-shaped value (`Authorization: Bearer …`) placed in a detail — survives into `details` and is emitted by every serializer. `details` remains a channel where a credential-shaped string is *representable*; it is gated by policy on every entry path, not made unrepresentable by type. The real-home measurement (7 real secrets, 0 emitted) bounds this empirically but cannot close it in principle.
+  2. **`source_home` is emitted as `self.source_home.display().to_string()` (Evidence 2)** — an absolute path from the discovering machine, contradicting the "no absolute path reaches an emitted document" invariant stated for the sibling fields. Not a credential channel under any realistic peer layout, but it is an observable deviation from the stated invariant and worth fixing for consistency.
+
+  Neither path lets a *first-class discovered credential* travel — that value is dropped at the `to_portability` conversion with no inverse — so the phase-26 contract as stated holds.
+
+  PANEL-VERDICT: contract-holds
+  PANEL-BASIS: `CredentialRef` has no field, variant, or accessor capable of carrying a value and `to_portability` is the only projection into it, so the discovered credential is unrepresentable downstream; the residual `details` channel is scrubbed on every construction path but remains pattern-based, so heuristic scrub coverage — not the type — is the only thing standing between an unusually-shaped embedded secret and emission.
+

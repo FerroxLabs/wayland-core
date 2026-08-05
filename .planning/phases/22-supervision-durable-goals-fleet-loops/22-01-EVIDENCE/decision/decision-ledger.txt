@@ -1,0 +1,8 @@
+F22-06-PANEL-CODEX: RECOMMENDS additive-at-current-version verdict_sound=yes evidence=panel-codex.txt
+F22-06-PANEL-GEMINI: RECOMMENDS additive-at-current-version verdict_sound=yes evidence=panel-gemini.txt
+F22-06-PANEL-KIMI: RECOMMENDS additive-at-current-version verdict_sound=yes evidence=panel-kimi.txt
+F22-06-PANEL-CLAUDE-ADVERSARIAL: RECOMMENDS additive-at-current-version verdict_sound=yes evidence=panel-claude-adversarial.txt
+F22-06-MEASURE-SOURCE-BOUNDARY: OK evidence=source-boundary.txt
+F22-06-MEASURE-MIGRATION-SURFACE: OK evidence=migration-surface.txt option=explicit-versioned-migration
+F22-06-VERDICT-CHALLENGE: UPHELD unsound_votes=0 evidence=panel-dissent.txt
+F22-06-RECORD-SHAPE: CHOSEN additive-at-current-version basis=majority dissent=panel-dissent.txt rationale=../../22-01-JOURNAL-COMPAT.md

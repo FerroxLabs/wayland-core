@@ -28,9 +28,9 @@
 use super::SandboxBackend;
 use crate::error::{Result, SandboxError};
 use crate::manifest::{NetworkPolicy, SandboxManifest};
-use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
+use crate::{DirectoryAuthority, ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Once;
 
@@ -81,10 +81,94 @@ impl SandboxBackend for BubblewrapBackend {
         true
     }
 
+    fn owns_descendants_hard(&self) -> bool {
+        true
+    }
+
+    /// bwrap binds the retained checkout as `/proc/self/fd/N` inside its mount
+    /// namespace (see [`BubblewrapBackend::execute_bound`]), so `--chdir`
+    /// resolves to the exact retained object rather than a re-openable path.
+    fn binds_cwd_authority(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         manifest: &SandboxManifest,
         cmd: SandboxCommand,
+    ) -> Result<SandboxOutput> {
+        self.execute_bound(manifest, cmd, None).await
+    }
+
+    async fn execute_with_cwd_authority(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        cwd: DirectoryAuthority,
+    ) -> Result<SandboxOutput> {
+        self.execute_bound(manifest, cmd, Some(cwd)).await
+    }
+
+    fn hard_containment_identity(&self) -> Option<super::HardContainmentIdentity> {
+        // Only a real, resolvable `bwrap` binary qualifies. When bwrap is
+        // absent this is `None`, so the backend is structurally non-qualifying.
+        let path = self.bwrap_path.as_deref()?;
+        Some(super::HardContainmentIdentity {
+            mechanism: super::HardContainmentMechanism::BubblewrapPidNamespace,
+            executable_identity: path.to_owned(),
+            runtime_identity: format!("bubblewrap-pid-namespace:{path}"),
+            process_tree_mechanism:
+                super::process_tree::ProcessTreeMechanism::LinuxPidNamespaceReap,
+        })
+    }
+
+    async fn probe_hard_containment(
+        &self,
+        fs: &crate::manifest::HardContainmentFilesystem,
+    ) -> Result<super::HardContainmentProbe> {
+        // Structural gate: no usable bwrap → cannot establish hard containment.
+        let identity = self.hard_containment_identity().ok_or_else(|| {
+            SandboxError::PolicyNotSupported(
+                "bubblewrap is unavailable for hard containment".into(),
+            )
+        })?;
+
+        // Semantic live probe: actually spawn a PID-namespaced child under the
+        // EXACT normalized policy. `execute_bound` reads the namespaced
+        // child-pid from bwrap's `--info-fd` (failing closed if absent) and owns
+        // the complete tree via `ProcessTreeGuard`, so a probe failure at any
+        // stage (spawn, child-pid read, timeout, output overflow, wait) kills
+        // the owned tree and returns an error here. The probe command is the
+        // benign builtin `true` — NEVER candidate argv — so a failed admission
+        // never runs candidate-controlled code.
+        let manifest = fs.to_manifest();
+        let out = self
+            .execute_bound(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                },
+                None,
+            )
+            .await?;
+        if out.exit_code != 0 {
+            return Err(SandboxError::ExecFailed(format!(
+                "bubblewrap hard-containment probe exited {}; stderr={}",
+                out.exit_code,
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(super::HardContainmentProbe { identity })
+    }
+}
+
+impl BubblewrapBackend {
+    async fn execute_bound(
+        &self,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+        cwd_authority: Option<DirectoryAuthority>,
     ) -> Result<SandboxOutput> {
         // 1. AllowHosts unsupported: bwrap has no DNS gate.
         if let NetworkPolicy::AllowHosts(_) = manifest.network {
@@ -140,6 +224,14 @@ impl SandboxBackend for BubblewrapBackend {
         bwrap_argv.push("--clearenv".into());
         bwrap_argv.push("--new-session".into());
 
+        #[cfg(target_os = "linux")]
+        let (mut status_reader, status_writer, status_fd) = bwrap_status_channel()?;
+        #[cfg(target_os = "linux")]
+        {
+            bwrap_argv.push("--info-fd".into());
+            bwrap_argv.push(status_fd.to_string());
+        }
+
         // Minimal filesystem skeleton.
         bwrap_argv.push("--tmpfs".into());
         bwrap_argv.push("/tmp".into());
@@ -186,24 +278,55 @@ impl SandboxBackend for BubblewrapBackend {
         }
 
         // Secret-read-deny overlays, after the positive binds so later-arg-wins
-        // mount ordering shadows them. Caller (secret_deny_paths) emits ONLY
-        // paths under a mounted root, so the parent always exists in the
-        // namespace and the bind cannot fail-spawn. Stat at bind time to pick
-        // file (mask with /dev/null) vs dir (mask with empty tmpfs); a vanished
-        // path is skipped (nothing to read).
-        for p in &manifest.fs_read_deny {
-            match std::fs::symlink_metadata(p) {
-                Ok(md) if md.is_dir() => {
-                    bwrap_argv.push("--tmpfs".into());
-                    bwrap_argv.push(p.to_string_lossy().into_owned());
+        // mount ordering shadows them. Directory denies use one empty,
+        // read-only bind. A writable tmpfs is not a denial: it hides reads but
+        // lets the child mint replacement authority at the denied pathname.
+        //
+        // Classify every denied path ONCE, then reduce the set to the mounts
+        // bubblewrap can actually realize (see `reduce_read_deny_mounts`), then
+        // render. Classifying before reducing is what lets the reduction know
+        // which entries are directories, and directories are the only entries
+        // that can subsume another.
+        let deny_entries: Vec<(PathBuf, DenyMountKind)> = manifest
+            .fs_read_deny
+            .iter()
+            .map(|path| {
+                let kind = match std::fs::symlink_metadata(path) {
+                    Ok(md) if md.is_dir() => DenyMountKind::Directory,
+                    Ok(_) => DenyMountKind::NonDirectory,
+                    // Path gone since enumeration — nothing to mask.
+                    Err(_) => DenyMountKind::Absent,
+                };
+                (path.clone(), kind)
+            })
+            .collect();
+        let deny_mounts = reduce_read_deny_mounts(&deny_entries);
+        let denied_directory_mask = if deny_mounts
+            .iter()
+            .any(|(_, kind)| *kind == DenyMountKind::Directory)
+        {
+            Some(tempfile::tempdir().map_err(|error| {
+                SandboxError::ExecFailed(format!("create read-deny directory mask: {error}"))
+            })?)
+        } else {
+            None
+        };
+        for (path, kind) in &deny_mounts {
+            let source = match kind {
+                DenyMountKind::Directory => denied_directory_mask
+                    .as_ref()
+                    .expect("directory deny mask was created")
+                    .path()
+                    .to_string_lossy()
+                    .into_owned(),
+                DenyMountKind::NonDirectory => "/dev/null".to_owned(),
+                DenyMountKind::Absent => {
+                    unreachable!("reduce_read_deny_mounts drops absent denies")
                 }
-                Ok(_) => {
-                    bwrap_argv.push("--ro-bind".into());
-                    bwrap_argv.push("/dev/null".into());
-                    bwrap_argv.push(p.to_string_lossy().into_owned());
-                }
-                Err(_) => { /* path gone since enumeration — nothing to mask */ }
-            }
+            };
+            bwrap_argv.push("--ro-bind".into());
+            bwrap_argv.push(source);
+            bwrap_argv.push(path.to_string_lossy().into_owned());
         }
 
         // Env injection (manifest-only; host env is dropped by --clearenv).
@@ -213,10 +336,54 @@ impl SandboxBackend for BubblewrapBackend {
             bwrap_argv.push(v.clone());
         }
 
-        // Working directory.
-        if let Some(cwd) = &cmd.cwd {
-            bwrap_argv.push("--chdir".into());
-            bwrap_argv.push(cwd.to_string_lossy().into_owned());
+        // Working directory. Delegated execution binds the retained directory
+        // descriptor into the namespace as `/proc/self/fd/N` and chdirs there,
+        // so a pathname replacement between admission and spawn cannot redirect
+        // the working directory; ordinary callers keep the path-based mode. The
+        // inheritable loan is held until this function returns so the descriptor
+        // stays valid while bwrap builds its namespace.
+        #[cfg(target_os = "linux")]
+        let _cwd_handle = {
+            use std::os::fd::AsRawFd;
+            if let Some(authority) = cwd_authority.as_ref() {
+                if cmd.cwd.as_deref() != Some(authority.display_path()) {
+                    return Err(SandboxError::PathDenied(
+                        "bubblewrap cwd does not match retained authority".to_owned(),
+                    ));
+                }
+                let handle = authority.try_clone_inheritable_handle()?;
+                let source = format!("/proc/self/fd/{}", handle.as_raw_fd());
+                let destination = authority.display_path().to_string_lossy().into_owned();
+                bwrap_argv.push("--bind".into());
+                bwrap_argv.push(source);
+                bwrap_argv.push(destination.clone());
+                bwrap_argv.push("--chdir".into());
+                bwrap_argv.push(destination);
+                Some(handle)
+            } else if let Some(cwd) = &cmd.cwd {
+                bwrap_argv.push("--chdir".into());
+                bwrap_argv.push(cwd.to_string_lossy().into_owned());
+                None
+            } else {
+                None
+            }
+        };
+        // bwrap runs only on Linux; on other targets this file compiles as a
+        // stub, so the retained-descriptor bind is unavailable and the retained
+        // authority (if any) is validated for path agreement only.
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Some(authority) = cwd_authority.as_ref()
+                && cmd.cwd.as_deref() != Some(authority.display_path())
+            {
+                return Err(SandboxError::PathDenied(
+                    "bubblewrap cwd does not match retained authority".to_owned(),
+                ));
+            }
+            if let Some(cwd) = &cmd.cwd {
+                bwrap_argv.push("--chdir".into());
+                bwrap_argv.push(cwd.to_string_lossy().into_owned());
+            }
         }
 
         // Resource limits — best-effort via bwrap's --rlimit-as for address
@@ -303,6 +470,7 @@ impl SandboxBackend for BubblewrapBackend {
             // instead of leaking it. Mirrors no_sandbox.rs. bwrap's
             // --die-with-parent then tears down the inner sandboxed process.
             .kill_on_drop(true);
+        super::process_tree::isolate(&mut command);
 
         // NOTE: Landlock is deliberately NOT applied around the bwrap backend.
         // A `pre_exec` ruleset is inherited by bwrap and confines bwrap's OWN
@@ -311,15 +479,29 @@ impl SandboxBackend for BubblewrapBackend {
         // non-empty. bwrap's `--unshare-all` + the constructive `--ro-bind`
         // set already provide a deny-by-default filesystem view that is a strict
         // superset of any Landlock allowlist built from the same paths, and the
-        // secret-read-deny enforcement rides on the `--ro-bind /dev/null` /
-        // `--tmpfs` overlays above — not on Landlock. bwrap sets NO_NEW_PRIVS
+        // secret-read-deny enforcement rides on read-only empty directory /
+        // `/dev/null` overlays above — not on Landlock. bwrap sets NO_NEW_PRIVS
         // itself. The `landlock` feature + `bwrap_landlock.rs` remain compiled
         // (exercised by --all-features CI) as the foundation for a future
         // inner-command re-exec shim, but production runs seccomp-only.
 
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|e| SandboxError::ExecFailed(format!("bwrap spawn failed: {e}")))?;
+        let mut process_tree =
+            super::process_tree::ProcessTreeGuard::new(child.id()).map_err(|error| {
+                SandboxError::ExecFailed(format!("process-tree ownership: {error}"))
+            })?;
+        #[cfg(target_os = "linux")]
+        let mut sandbox_tree = {
+            drop(status_writer);
+            let child_pid = read_bwrap_child_pid(&mut status_reader)?;
+            super::process_tree::ProcessTreeGuard::from_observed_root(child_pid).map_err(
+                |error| {
+                    SandboxError::ExecFailed(format!("sandbox process-tree ownership: {error}"))
+                },
+            )?
+        };
 
         // Now safe to drop the BPF tempfile — bwrap has read the fd into
         // its child setup. Holding it longer wastes a fd until return.
@@ -330,18 +512,21 @@ impl SandboxBackend for BubblewrapBackend {
             .timeout
             .unwrap_or_else(|| std::time::Duration::from_secs(30));
 
-        let wait_fut = child.wait_with_output();
+        let wait_fut = super::wait_with_bounded_output_on_exit(&mut child, || {
+            #[cfg(target_os = "linux")]
+            sandbox_tree.disarm();
+            process_tree.disarm();
+        });
         let output = match tokio::time::timeout(timeout, wait_fut).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
-                return Err(SandboxError::ExecFailed(format!("bwrap wait failed: {e}")));
+                return Err(e);
             }
             Err(_elapsed) => {
-                // `timeout` dropped `wait_fut` on elapse, which drops the
-                // Child it owns. With `kill_on_drop(true)` set above, that
-                // drop reaps the bwrap process; bwrap's --die-with-parent
-                // then tears down the inner namespace tree — no pid escapes
-                // our handle.
+                // Dropping this future arms `ProcessTreeGuard` before the
+                // direct bwrap handle is dropped. Linux descendant discovery
+                // kills the PID-namespace init and its complete tree; the
+                // dedicated outer process group is the final backstop.
                 return Err(SandboxError::Timeout);
             }
         };
@@ -356,6 +541,129 @@ impl SandboxBackend for BubblewrapBackend {
     }
 }
 
+/// How a single `fs_read_deny` entry is realized as a bubblewrap mount.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DenyMountKind {
+    /// A directory: masked with one empty, read-only bind.
+    Directory,
+    /// Exists and is not a directory: masked with a `/dev/null` bind.
+    NonDirectory,
+    /// Vanished between enumeration and render — nothing to mask.
+    Absent,
+}
+
+/// Reduce classified `fs_read_deny` entries to the mounts bubblewrap can
+/// actually realize, preserving input order.
+///
+/// **Why this exists (21-C3-01).** bubblewrap enforces a deny by MOUNTING over
+/// the denied path, and a mount needs its mount point to be creatable. Once
+/// `/p` carries an empty READ-ONLY mask, `/p/q` no longer exists inside the
+/// namespace and cannot be `mkdir`'d, so a second `--ro-bind` at `/p/q` aborts
+/// the entire spawn before `execve`:
+///
+/// ```text
+/// bwrap: Can't mkdir /…/workspace/.git: Read-only file system
+/// ```
+///
+/// Measured on `hetzner-dsm` (bubblewrap 0.9.0): with the same two paths,
+/// `[/p, /p/q]` exits 1 having run nothing while `[/p/q, /p]` runs the shell
+/// and exits 0. The rendering was therefore ORDER-DEPENDENT even though
+/// `fs_read_deny` is a set, which is why the reduction lives here and not at
+/// any one caller — a caller cannot be asked to know bubblewrap's mount
+/// ordering, and three independent producers hand this renderer nested pairs:
+///
+/// - `wcore_agent::spawner`'s `[parent_workspace, git_common_dir]` for an
+///   isolated-mutation child. That pair is CORRECT: `git_common_dir` is
+///   `<parent>/.git` for an ordinary clone but the MAIN repo's `.git` — outside
+///   the parent — when the parent is itself a linked worktree. Whether it nests
+///   is a property of the parent's git layout, not a caller mistake.
+/// - `WorkspacePolicy::secret_deny_paths_dynamic`, whose secret walk can return
+///   both a credentials directory and a file inside it.
+/// - `wcore_swarm::dispatch`'s `sandbox_read_denies`.
+///
+/// The other two backends have no analogue: macOS `sandbox_exec` emits
+/// independent `(deny file-read* (subpath …))` SBPL rules and Windows
+/// AppContainer applies a protected DACL per object, so overlapping denies are
+/// simply both enforced.
+///
+/// **Why dropping is safe.** A deny nested under a DIRECTORY deny is redundant:
+/// the ancestor's empty read-only mask removes the descendant pathname from the
+/// namespace entirely, which is at least as strong as masking it directly
+/// (verified: with only the ancestor denied, a read of `<parent>/.git/config`
+/// fails and a write to `<parent>/.git/` fails `Directory nonexistent`).
+/// A `NonDirectory` entry can have no descendants, and an entry is never
+/// dropped for any other reason — this is the sole reduction.
+///
+/// Nesting is decided component-wise via `Path::starts_with`, so `/p-backup` is
+/// not treated as nested under `/p`. Comparison is lexical, so a symlinked
+/// alias of a denied ancestor is NOT recognised and both denies are emitted —
+/// that is the safe direction (a redundant mount that may abort, never a
+/// silently discarded denial).
+fn reduce_read_deny_mounts(entries: &[(PathBuf, DenyMountKind)]) -> Vec<(PathBuf, DenyMountKind)> {
+    let mut kept = Vec::with_capacity(entries.len());
+    for (index, (path, kind)) in entries.iter().enumerate() {
+        if *kind == DenyMountKind::Absent {
+            continue;
+        }
+        // Collapse an exact repeat onto its first occurrence.
+        if entries[..index].iter().any(|(earlier, earlier_kind)| {
+            *earlier_kind != DenyMountKind::Absent && earlier == path
+        }) {
+            continue;
+        }
+        // Drop anything strictly nested under a directory deny, wherever that
+        // ancestor sits in the list. Scanning the WHOLE list rather than the
+        // prefix is deliberate: the abort this prevents was order-dependent, so
+        // the reduction must not be.
+        if entries.iter().any(|(ancestor, ancestor_kind)| {
+            *ancestor_kind == DenyMountKind::Directory
+                && ancestor != path
+                && path.starts_with(ancestor)
+        }) {
+            continue;
+        }
+        kept.push((path.clone(), *kind));
+    }
+    kept
+}
+
+#[cfg(target_os = "linux")]
+fn bwrap_status_channel() -> Result<(
+    std::io::BufReader<std::os::unix::net::UnixStream>,
+    std::os::unix::net::UnixStream,
+    std::os::fd::RawFd,
+)> {
+    use std::os::fd::AsRawFd;
+
+    let (reader, writer) = std::os::unix::net::UnixStream::pair()
+        .map_err(|error| SandboxError::ExecFailed(format!("bwrap status channel: {error}")))?;
+    let fd = writer.as_raw_fd();
+    // SAFETY: F_SETFD only updates flags on the owned writer descriptor.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } == -1 {
+        return Err(SandboxError::ExecFailed(format!(
+            "bwrap status descriptor: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    reader
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|error| SandboxError::ExecFailed(format!("bwrap status timeout: {error}")))?;
+    Ok((std::io::BufReader::new(reader), writer, fd))
+}
+
+#[cfg(target_os = "linux")]
+fn read_bwrap_child_pid(reader: &mut impl std::io::Read) -> Result<u32> {
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let status = <serde_json::Value as serde::Deserialize>::deserialize(&mut deserializer)
+        .map_err(|error| SandboxError::ExecFailed(format!("bwrap status JSON: {error}")))?;
+    status
+        .get("child-pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| SandboxError::ExecFailed("bwrap status omitted child-pid".to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -365,6 +673,178 @@ mod tests {
         let backend = BubblewrapBackend::new();
         // Cannot assert true/false absolutely; just ensure no panic.
         let _ = backend.is_available();
+    }
+
+    // ── 21-C3-01: overlapping fs_read_deny entries aborted bubblewrap ────────
+    //
+    // The renderer mounts over each denied path, so a deny nested under a
+    // directory deny needed a mount point inside a read-only mask and bwrap
+    // aborted before `execve`. `reduce_read_deny_mounts` drops the nested,
+    // redundant deny. The live proof that containment survives the drop is
+    // `required_live_bwrap_overlapping_deny_runs_shell_and_still_contains`.
+
+    fn dir(path: &str) -> (PathBuf, DenyMountKind) {
+        (PathBuf::from(path), DenyMountKind::Directory)
+    }
+    fn file(path: &str) -> (PathBuf, DenyMountKind) {
+        (PathBuf::from(path), DenyMountKind::NonDirectory)
+    }
+    fn gone(path: &str) -> (PathBuf, DenyMountKind) {
+        (PathBuf::from(path), DenyMountKind::Absent)
+    }
+    fn paths(reduced: &[(PathBuf, DenyMountKind)]) -> Vec<String> {
+        reduced
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The exact `spawner.rs` pair for an isolated-mutation child, in the order
+    /// it is constructed: parent workspace then `<parent>/.git`. This is the
+    /// input that aborted bwrap.
+    #[test]
+    fn nested_directory_deny_collapses_onto_its_ancestor() {
+        let entries = vec![dir("/ws/parent"), dir("/ws/parent/.git")];
+        let reduced = reduce_read_deny_mounts(&entries);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent".to_owned()],
+            "the nested .git deny is redundant under the parent mask and must not be mounted"
+        );
+        // Third assertion (LANE-BRIEF §6b-ii): the pre-fix renderer emitted one
+        // mount per entry, so it would have emitted TWO here — the exact
+        // sequence bwrap 0.9.0 aborts on. Without this the test would also pass
+        // on the unfixed renderer.
+        assert_eq!(
+            entries.len(),
+            2,
+            "the unreduced input must still be the two-mount sequence that aborted"
+        );
+    }
+
+    /// The abort was order-dependent — `[/p, /p/q]` failed while `[/p/q, /p]`
+    /// succeeded — so the reduction must not be. Both orders must reduce to the
+    /// same single ancestor mount.
+    #[test]
+    fn deny_reduction_is_independent_of_input_order() {
+        let ancestor_first = reduce_read_deny_mounts(&[dir("/ws/parent"), dir("/ws/parent/.git")]);
+        let descendant_first =
+            reduce_read_deny_mounts(&[dir("/ws/parent/.git"), dir("/ws/parent")]);
+        assert_eq!(paths(&ancestor_first), vec!["/ws/parent".to_owned()]);
+        assert_eq!(paths(&descendant_first), paths(&ancestor_first));
+    }
+
+    /// A file nested under a denied directory is equally redundant, and the
+    /// whole chain collapses to the outermost directory.
+    #[test]
+    fn nested_file_and_deep_chain_collapse_to_the_outermost_directory() {
+        let reduced = reduce_read_deny_mounts(&[
+            dir("/ws/parent"),
+            file("/ws/parent/.env"),
+            dir("/ws/parent/.git"),
+            file("/ws/parent/.git/config"),
+        ]);
+        assert_eq!(paths(&reduced), vec!["/ws/parent".to_owned()]);
+    }
+
+    /// Nesting is component-wise, not a string prefix: `/ws/parent-backup` is a
+    /// SIBLING of `/ws/parent` and dropping it would silently discard a denial.
+    #[test]
+    fn string_prefix_sibling_is_not_treated_as_nested() {
+        let reduced = reduce_read_deny_mounts(&[dir("/ws/parent"), dir("/ws/parent-backup")]);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent".to_owned(), "/ws/parent-backup".to_owned()],
+            "a sibling sharing a string prefix must keep its own deny mount"
+        );
+    }
+
+    /// Only a DIRECTORY deny masks a subtree. A non-directory deny is rendered
+    /// as a `/dev/null` bind over one pathname and subsumes nothing, so nothing
+    /// may be dropped on account of it. (Unreachable from a real filesystem;
+    /// pinned so a future classification change cannot open a hole quietly.)
+    #[test]
+    fn non_directory_deny_subsumes_nothing() {
+        let reduced = reduce_read_deny_mounts(&[file("/ws/parent"), dir("/ws/parent/.git")]);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent".to_owned(), "/ws/parent/.git".to_owned()]
+        );
+    }
+
+    /// A path that vanished between enumeration and render has nothing to mask,
+    /// and — critically — cannot be treated as a directory that subsumes its
+    /// descendants, because no mask will be mounted at it.
+    #[test]
+    fn absent_ancestor_is_dropped_and_does_not_subsume_its_descendant() {
+        let reduced = reduce_read_deny_mounts(&[gone("/ws/parent"), dir("/ws/parent/.git")]);
+        assert_eq!(
+            paths(&reduced),
+            vec!["/ws/parent/.git".to_owned()],
+            "an absent ancestor mounts no mask, so the descendant deny must survive"
+        );
+    }
+
+    /// An exact repeat collapses onto its first occurrence — one mount, one
+    /// pathname.
+    #[test]
+    fn exact_duplicate_deny_collapses_to_one_mount() {
+        let reduced = reduce_read_deny_mounts(&[dir("/ws/parent"), dir("/ws/parent")]);
+        assert_eq!(paths(&reduced), vec!["/ws/parent".to_owned()]);
+    }
+
+    /// Nothing is dropped when nothing overlaps: the reduction is not a
+    /// general-purpose filter and must leave a disjoint deny set untouched.
+    /// This is the "would the gate fail" control for every test above.
+    #[test]
+    fn disjoint_denies_are_left_untouched() {
+        let reduced = reduce_read_deny_mounts(&[
+            dir("/ws/parent"),
+            dir("/elsewhere/main-repo/.git"),
+            file("/ws/other/.env"),
+        ]);
+        assert_eq!(
+            paths(&reduced),
+            vec![
+                "/ws/parent".to_owned(),
+                "/elsewhere/main-repo/.git".to_owned(),
+                "/ws/other/.env".to_owned(),
+            ],
+            "a linked-worktree parent's git_common_dir sits outside the parent and must survive"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn multiline_bwrap_status_yields_child_pid_without_waiting_for_eof() {
+        struct LiveStatus<'a> {
+            bytes: &'a [u8],
+        }
+
+        impl std::io::Read for LiveStatus<'_> {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                if self.bytes.is_empty() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+                }
+                let count = output.len().min(self.bytes.len());
+                output[..count].copy_from_slice(&self.bytes[..count]);
+                self.bytes = &self.bytes[count..];
+                Ok(count)
+            }
+        }
+
+        let mut status = LiveStatus {
+            bytes: b"{\n  \"child-pid\": 4242\n}\n",
+        };
+        assert_eq!(read_bwrap_child_pid(&mut status).unwrap(), 4242);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn truncated_bwrap_status_fails_closed() {
+        let mut status = std::io::Cursor::new(b"{\n  \"child-pid\": 4242".as_slice());
+        let error = read_bwrap_child_pid(&mut status).unwrap_err();
+        assert!(error.to_string().contains("bwrap status JSON"));
     }
 
     #[tokio::test]
@@ -500,6 +980,40 @@ mod tests {
 
     #[tokio::test]
     #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn bwrap_denied_directory_is_not_writable() {
+        let backend = BubblewrapBackend::new();
+        if !backend.is_available() {
+            eprintln!("bwrap not available; skipping");
+            return;
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        let denied = root.path().join("authority");
+        std::fs::create_dir(&denied).unwrap();
+        let target = denied.join("replacement");
+        let manifest = SandboxManifest {
+            fs_write_allow: vec![root.path().to_path_buf()],
+            fs_read_deny: vec![denied],
+            ..Default::default()
+        };
+        let output = backend
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/touch".into(),
+                        target.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(output.exit_code, 0, "denied directory accepted a write");
+        assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
     async fn bwrap_enforces_read_deny_returns_true() {
         let backend = BubblewrapBackend::new();
         assert!(backend.enforces_read_deny());
@@ -526,5 +1040,254 @@ mod tests {
             )
             .await;
         assert!(matches!(res, Err(SandboxError::PathDenied(_))));
+    }
+
+    /// Required live acceptance: bwrap is installed AND usable, and the backend
+    /// admits for delegated execution (enforces read-deny, owns descendants
+    /// hard, binds retained cwd authority, does not bypass containment). Fails
+    /// if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_admission() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        assert!(backend.enforces_read_deny());
+        assert!(backend.owns_descendants_hard());
+        assert!(backend.binds_cwd_authority());
+        let registry = crate::SandboxRegistry::new(std::sync::Arc::new(BubblewrapBackend::new()));
+        assert!(
+            !registry.bypasses_containment(),
+            "delegated bwrap admission must not bypass containment"
+        );
+        assert!(registry.binds_workspace_authority());
+        // Prove real usability, not merely PATH presence.
+        let output = backend
+            .execute(
+                &SandboxManifest {
+                    network: NetworkPolicy::Deny,
+                    ..Default::default()
+                },
+                SandboxCommand {
+                    argv: vec!["true".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("required live bwrap admission execution");
+        assert_eq!(output.exit_code, 0, "{output:?}");
+    }
+
+    /// Required live acceptance for 21-C3-01, BOTH HALVES in one run.
+    ///
+    /// Arm 1 is the instrument control: the same probe, the same paths, with an
+    /// EMPTY deny list. Both secrets must be readable. Without it a probe that
+    /// can never see the parent (wrong path, unbound mount, dead shell) would
+    /// report "REFUSED" for free, and the containment half would be vacuous.
+    ///
+    /// Arm 2 is the fix: `fs_read_deny = [parent, parent/.git]` — the exact
+    /// overlapping pair `spawner.rs` builds for an isolated-mutation child.
+    /// It must (a) RUN the shell, which before the fix it could not, bwrap
+    /// aborting with `Can't mkdir …/.git: Read-only file system`; and (b) still
+    /// refuse BOTH the parent read and the `.git` read. Either half alone is
+    /// not a pass: (a) without (b) is a hole, (b) without (a) is the broken
+    /// build that made three plans record a refusal that never happened.
+    ///
+    /// Fails if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_overlapping_deny_runs_shell_and_still_contains() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+
+        let parent = tempfile::tempdir().expect("parent workspace");
+        let parent_root = std::fs::canonicalize(parent.path()).expect("canonicalize parent");
+        std::fs::create_dir_all(parent_root.join(".git")).expect("parent .git");
+        std::fs::write(parent_root.join("secret.txt"), b"PARENTSECRET\n").expect("parent secret");
+        std::fs::write(parent_root.join(".git").join("config"), b"GITSECRET\n")
+            .expect("git secret");
+        let child = tempfile::tempdir().expect("child workspace");
+        let child_root = std::fs::canonicalize(child.path()).expect("canonicalize child");
+
+        // The liveness marker is assembled by the shell at runtime rather than
+        // written literally, so only a shell that actually executed can produce
+        // the joined string. (21-C3 §6: a marker embedded literally in the
+        // command text is satisfiable without the command ever running.)
+        let script = format!(
+            "printf %s%s SHELL RAN; echo; \
+             cat {parent}/secret.txt 2>/dev/null; \
+             cat {parent}/.git/config 2>/dev/null; \
+             exit 0",
+            parent = parent_root.display()
+        );
+        let run = |deny: Vec<PathBuf>| {
+            let manifest = SandboxManifest {
+                fs_read_allow: vec![parent_root.clone()],
+                fs_write_allow: vec![child_root.clone()],
+                fs_read_deny: deny,
+                network: NetworkPolicy::Deny,
+                ..Default::default()
+            };
+            let command = SandboxCommand {
+                argv: vec!["/bin/sh".into(), "-c".into(), script.clone()],
+                cwd: Some(child_root.clone()),
+            };
+            async move {
+                let backend = BubblewrapBackend::new();
+                backend.execute(&manifest, command).await
+            }
+        };
+
+        // ── Arm 1: control. No deny — the probe MUST see both secrets. ───────
+        let control = run(Vec::new()).await.expect("control execution");
+        let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+        assert!(
+            control_stdout.contains("SHELLRAN"),
+            "control shell must run; stdout={control_stdout:?} stderr={:?}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        assert!(
+            control_stdout.contains("PARENTSECRET") && control_stdout.contains("GITSECRET"),
+            "instrument is dead: the probe cannot read either secret even with NO deny, so a \
+             REFUSED reading in arm 2 would prove nothing; stdout={control_stdout:?}"
+        );
+
+        // ── Arm 2: the spawner's overlapping pair, ancestor first. ───────────
+        let denied = run(vec![parent_root.clone(), parent_root.join(".git")])
+            .await
+            .expect("overlapping-deny execution");
+        let denied_stdout = String::from_utf8_lossy(&denied.stdout).into_owned();
+        let denied_stderr = String::from_utf8_lossy(&denied.stderr).into_owned();
+        // Half 1 — the shell RUNS. This is what 21-C3-01 broke.
+        assert!(
+            !denied_stderr.contains("Can't mkdir"),
+            "bwrap aborted on the overlapping deny pair (21-C3-01): stderr={denied_stderr:?}"
+        );
+        assert!(
+            denied_stdout.contains("SHELLRAN"),
+            "a delegated mutating child must be able to run a shell; \
+             stdout={denied_stdout:?} stderr={denied_stderr:?}"
+        );
+        // Half 2 — containment is NOT weakened. Both reads still refused.
+        assert!(
+            !denied_stdout.contains("PARENTSECRET"),
+            "parent workspace leaked into the child: stdout={denied_stdout:?}"
+        );
+        assert!(
+            !denied_stdout.contains("GITSECRET"),
+            "parent .git leaked into the child — the nested deny was dropped without the \
+             ancestor mask covering it: stdout={denied_stdout:?}"
+        );
+    }
+
+    /// Required live acceptance: bubblewrap mints hard containment ONLY after a
+    /// real PID-namespace probe, and the minted authority binds the exact
+    /// backend + normalized policy. Drift in the spawn parameters refuses. Fails
+    /// if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_hard_containment_mint_and_drift() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        // A cheap identity is available and names the PID-namespace mechanism.
+        let identity = backend
+            .hard_containment_identity()
+            .expect("bwrap must offer a hard-containment identity");
+        assert_eq!(
+            identity.mechanism,
+            crate::HardContainmentMechanism::BubblewrapPidNamespace
+        );
+
+        // Candidate/roots must be outside global temp/home; place them on a
+        // synthetic absolute tree (existence is not required — bwrap binds them
+        // with `-try` semantics and skips the missing sources).
+        let fs = crate::manifest::HardContainmentFilesystem::new(
+            std::path::PathBuf::from("/srv/wl-hard/candidate"),
+            vec![std::path::PathBuf::from("/srv/wl-hard/scratch")],
+        )
+        .expect("policy validates");
+
+        let registry = crate::SandboxRegistry::new(std::sync::Arc::new(BubblewrapBackend::new()));
+        let cmd = SandboxCommand {
+            argv: vec!["/bin/echo".into(), "hi".into()],
+            cwd: None,
+        };
+        let authority = registry
+            .establish_hard_containment(&fs, &cmd)
+            .await
+            .expect("live bwrap PID-namespace probe must mint hard containment");
+
+        // Drifted argv is refused (fail closed) — this authority is one-use.
+        let drifted = SandboxCommand {
+            argv: vec!["/bin/echo".into(), "TAMPERED".into()],
+            cwd: None,
+        };
+        let err = registry
+            .verify_hard_containment(authority, &fs, &drifted)
+            .expect_err("spawn-parameter drift must refuse");
+        assert!(matches!(err, SandboxError::ExecFailed(_)), "{err:?}");
+    }
+
+    /// Required live acceptance: `execute_with_cwd_authority` binds the retained
+    /// directory object as the child's cwd via `/proc/self/fd/N` + `--chdir`.
+    /// After the authority is retained the parent pathname is swapped for a
+    /// decoy; the child must still see and mutate the RETAINED object, proving
+    /// the fd binding is not redirected by a pathname replacement. Fails if
+    /// bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_retained_cwd_enforcement() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("seed"), b"retained").unwrap();
+        let authority = DirectoryAuthority::open(&checkout).unwrap();
+
+        // Pathname swap AFTER retention: move the real object aside, plant a
+        // decoy at the original path. The retained fd must win.
+        let moved = tmp.path().join("moved");
+        std::fs::rename(&checkout, &moved).unwrap();
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(checkout.join("seed"), b"decoy").unwrap();
+
+        let output = backend
+            .execute_with_cwd_authority(
+                &SandboxManifest {
+                    network: NetworkPolicy::Deny,
+                    ..Default::default()
+                },
+                SandboxCommand {
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "cat seed; printf bound > marker".into(),
+                    ],
+                    cwd: Some(checkout.clone()),
+                },
+                authority,
+            )
+            .await
+            .expect("required live retained-cwd bwrap execution");
+        assert_eq!(output.exit_code, 0, "{output:?}");
+        // The child read and mutated the RETAINED object, never the decoy.
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "retained");
+        assert_eq!(std::fs::read(moved.join("marker")).unwrap(), b"bound");
+        assert!(
+            !checkout.join("marker").exists(),
+            "child escaped to the swapped-in decoy"
+        );
     }
 }

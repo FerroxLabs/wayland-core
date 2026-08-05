@@ -1,0 +1,23 @@
+# 30-02 authoritative gates on hetzner-dsm at lane HEAD 42c4bb59
+
+## trials verify against the COMMITTED protocol and COMMITTED results
+TRIALS_VERIFY=OK legs=15 run=9 unproven=6 comparatives=6 scope=SCRIPTED_HARNESS protocol_sha256=d18407e0b96bf753f66adc1eab7d21cbaeca1b9e627cecf0159095938b83ef25
+rc=0 for the verify leg (the 101 below is clippy, which runs after it)
+
+## cargo nextest run -p wcore-eval-scenarios --no-fail-fast
+     Summary [   3.523s] 470 tests run: 470 passed, 5 skipped
+NEXTEST_RC=0
+
+## clippy: 4 errors, ALL in Phase 24's journey.rs, NONE in this lane's four files
+   --> crates/wcore-eval-scenarios/src/journey.rs:683:13
+   --> crates/wcore-eval-scenarios/src/journey.rs:695:13
+   --> crates/wcore-eval-scenarios/src/journey.rs:707:34
+   --> crates/wcore-eval-scenarios/src/journey.rs:717:13
+
+## this lane's changed source files vs merge-base 97f2cb1b
+crates/wcore-eval-scenarios/bin/wayland-scorecard.rs
+crates/wcore-eval-scenarios/src/frontier_trials.rs
+crates/wcore-eval-scenarios/src/lib.rs
+crates/wcore-eval-scenarios/tests/frontier_trials_contract.rs
+
+## fence: meter, concurrent lanes' files, shared CLI files, lockfile -> 0 changed

@@ -1,0 +1,50 @@
+  1 ready                                  capabilities,contract,execution_policy,session_id,version
+  2 execution_policy                       contract_version,critical,effective_at_unix_ms,policy,reason,revision
+  3 workspace_policy                       policy
+  4 capability_activation                  capability,stage
+  5 capability_activation                  capability,reason,stage
+  6 capability_activation                  capability,stage
+  7 capability_activation                  capability,stage
+  8 capability_activation                  capability,stage
+  9 capability_activation                  capability,stage
+ 10 capability_activation                  capability,stage
+ 11 capability_activation                  capability,stage
+ 12 capability_activation                  capability,stage
+ 13 capability_activation                  capability,stage
+ 14 capability_activation                  capability,stage
+ 15 capability_activation                  capability,reason,stage
+ 16 capability_activation                  capability,stage
+ 17 capability_activation                  capability,reason,stage
+ 18 capability_activation                  capability,stage
+ 19 capability_activation                  capability,reason,stage
+ 20 capability_activation                  capability,stage
+ 21 capability_activation                  capability,stage
+ 22 capability_activation                  capability,stage
+ 23 capability_activation                  capability,stage
+ 24 capability_activation                  capability,stage
+ 25 capability_activation                  capability,stage
+ 26 capability_activation                  capability,stage
+ 27 capability_activation                  capability,stage
+ 28 pong                                   
+ 29 info                                   message,msg_id
+ 30 info                                   message,msg_id
+ 31 info                                   message,msg_id
+ 32 config_changed                         capabilities
+ 33 error                                  error
+ 34 approval_resume                        approved,resume_token
+ 35 info                                   message,msg_id
+ 36 info                                   message,msg_id
+ 37 budget_grant_result                    additional_cost_usd,additional_tokens,outcome,refusal_reason,request_id
+ 38 pong                                   
+
+DISTINCT TYPES: 10
+   approval_resume                        x1
+   budget_grant_result                    x1
+   capability_activation                  x24
+   config_changed                         x1
+   error                                  x1
+   execution_policy                       x1
+   info                                   x5
+   pong                                   x2
+   ready                                  x1
+   workspace_policy                       x1

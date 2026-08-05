@@ -9,7 +9,9 @@
 use wcore_config::compat::ProviderCompat;
 
 /// Compute the USD cost of one turn from raw token counts plus the
-/// provider's price rows. Missing price rows are treated as zero.
+/// provider's price rows. Missing cache-category rows fall back to the normal
+/// input rate so cached tokens cannot silently become free; a completely
+/// unpriced compatibility profile still evaluates to zero.
 ///
 /// Pricing is `tokens * price_per_token` for each of the four token
 /// categories (input, output, cache_read, cache_write). When `ProviderCompat`
@@ -23,10 +25,19 @@ pub fn estimate_turn_cost(
     cache_write_tokens: u64,
     compat: &ProviderCompat,
 ) -> f64 {
-    let input = input_tokens as f64 * compat.cost_per_input_token.unwrap_or(0.0);
+    let input_rate = compat.cost_per_input_token.unwrap_or(0.0);
+    let input = input_tokens as f64 * input_rate;
     let output = output_tokens as f64 * compat.cost_per_output_token.unwrap_or(0.0);
-    let cache_read = cache_read_tokens as f64 * compat.cost_per_cache_read_token.unwrap_or(0.0);
-    let cache_write = cache_write_tokens as f64 * compat.cost_per_cache_write_token.unwrap_or(0.0);
+    let cache_read_rate = compat
+        .cost_per_cache_read_token
+        .filter(|rate| *rate > 0.0)
+        .unwrap_or(input_rate);
+    let cache_write_rate = compat
+        .cost_per_cache_write_token
+        .filter(|rate| *rate > 0.0)
+        .unwrap_or(input_rate);
+    let cache_read = cache_read_tokens as f64 * cache_read_rate;
+    let cache_write = cache_write_tokens as f64 * cache_write_rate;
     input + output + cache_read + cache_write
 }
 
@@ -44,5 +55,25 @@ mod tests {
     fn default_compat_zero_cost() {
         let compat = ProviderCompat::default();
         assert_eq!(estimate_turn_cost(1000, 500, 100, 200, &compat), 0.0);
+    }
+
+    #[test]
+    fn missing_cache_rates_fall_back_to_input_rate() {
+        let compat = ProviderCompat {
+            cost_per_input_token: Some(0.000_001),
+            ..Default::default()
+        };
+        assert_eq!(estimate_turn_cost(0, 0, 1_000, 2_000, &compat), 0.003);
+    }
+
+    #[test]
+    fn zero_cache_rate_sentinels_fall_back_to_input_rate() {
+        let compat = ProviderCompat {
+            cost_per_input_token: Some(0.000_001),
+            cost_per_cache_read_token: Some(0.0),
+            cost_per_cache_write_token: Some(0.0),
+            ..Default::default()
+        };
+        assert_eq!(estimate_turn_cost(0, 0, 1_000, 2_000, &compat), 0.003);
     }
 }

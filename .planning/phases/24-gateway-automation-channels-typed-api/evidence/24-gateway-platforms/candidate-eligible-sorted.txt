@@ -1,0 +1,17 @@
+2026-07-30T07:44:38+07:00 7c610798 OK notes(cli-danger-tiers): measured base semantics of all five danger spellings
+2026-07-30T07:38:44+07:00 da8e46b5 OK test(egress): measure whether an untrusted project config can disable the egress gate
+2026-07-30T05:29:30+07:00 53252d58 OK docs(27-C2b): NOTES — brief premise (b) is stale, fix landed at 85b60a2f
+2026-07-30T03:08:19+07:00 d622cb09 OK merge(ledger-regrade): 11 of 18 criterion rows were stale
+2026-07-30T03:08:00+07:00 d6a41ecd OK regrade: land 27-C4/27-C5 and add CRITERIA-STATUS.md
+2026-07-30T03:05:31+07:00 20ad391b OK wip(ledger-regrade): rescue 455 lines of in-flight ledger corrections
+2026-07-30T02:58:10+07:00 d5fbc11c OK test(24-C5): complete the receipt fixture the lane left mid-edit
+2026-07-30T02:24:56+07:00 78cce3ec OK docs(22-c3-terminal): lane summary — the bypass that was still representable
+2026-07-30T02:00:08+07:00 59755af6 OK docs(21-c3): equivalence lane summary — tool differential now runs on both surfaces; contract corpus stays green
+2026-07-30T01:12:57+07:00 d189bc13 OK docs(flake): post-merge confirmation — 10/10 clean at 1893a6f1, census still 0/0
+2026-07-29T23:50:43+07:00 cf004dea OK docs(small-defects): lane summary — 2 fixed, 1 refuted, cross-user leak proven on the wire
+2026-07-29T23:38:16+07:00 95f07fbb OK summary(C4-F3): lane summary — fixed at the ProviderCompat layer, live-proved
+2026-07-29T23:38:09+07:00 61aa094e OK docs(26-sc3-o1): record the vec0/fts5 capture proof, closing that open item
+2026-07-29T23:25:26+07:00 3ef034ec OK summary(23B-C3-usermodel): final merged-HEAD verification numbers
+2026-07-29T23:06:59+07:00 267049a6 OK docs(f27): record the second integration merge and why it needed no re-gate
+2026-07-29T21:19:00+07:00 083983c6 OK docs(27-c3): summary gate table with final read-back counts
+2026-07-29T21:11:07+07:00 84c3ebb4 OK docs(27-c1): reconciliation — dropped my UNC check for theirs, re-proved all four artefacts on the merged tree

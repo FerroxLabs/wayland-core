@@ -1,0 +1,56 @@
+=== cron.rs 178-195 ===
+    /// The gateway's delivery spine reads this to decide whether an
+    /// outcome-unknown delivery may be retried. Only a channel target is a
+    /// delivery at all; for anything else the question does not arise and the
+    /// conservative answer is the correct one.
+    async fn dispatch_is_idempotent(&self, target: &Target) -> bool {
+        match target {
+            Target::Channel { channel_name, .. } => match &self.channels {
+                Some(mgr) => {
+                    mgr.read()
+                        .await
+                        .supports_outbound_idempotency(channel_name)
+                        .await
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+=== wcore-cron runner.rs 272-285 ===
+    /// a gateway killed mid-delivery and restarted by the platform delivered
+    /// the same body TWICE — which is the duplicate the phase's first Success
+    /// Criterion forbids.
+    ///
+    /// So the answer defaults to "no", and the spine treats "no" as "record it
+    /// and name it, do not send it again". A handler that overrides this to
+    /// `true` is asserting the key reaches the wire.
+    async fn dispatch_is_idempotent(&self, _target: &Target) -> bool {
+        false
+    }
+}
+
+/// The identity of one scheduled fire.
+///
+=== automation.rs 150-170 ===
+        }
+        let id = fire.delivery_id();
+
+        // Asked BEFORE the ledger guard is taken, because it may touch the
+        // channel manager and no guard here is ever held across an await.
+        let destination_dedupes = self.inner.dispatch_is_idempotent(target).await;
+
+        {
+            let mut l = lock(&self.ledger);
+            match l
+                .accept(&id, destination_of(target))
+                .map_err(|e| CronError::Dispatch(e.to_string()))?
+            {
+                Accept::Accepted => {}
+                // The outbound idempotency key doing its job: this scheduled
+                // occurrence was already recorded, so it is not created twice.
+                // Whether it still needs an attempt is the resume path's
+                // question, not this one's.
+                Accept::Duplicate => {
+                    if matches!(l.state(&id), Some(DeliveryState::Settled)) {
+                        return Ok(());

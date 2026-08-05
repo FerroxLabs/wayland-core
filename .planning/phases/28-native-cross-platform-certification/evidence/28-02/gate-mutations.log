@@ -1,0 +1,35 @@
+REJECTED         sandbox green with its activeness removed
+                 -> REJECTED: F28R-100 results.cells[0] `sandbox-probes-linux-acp`: a sandbox green carries no activeness observation. Absence of an observed violation is
+REJECTED         sandbox green with NotMeasured activeness
+                 -> REJECTED: F28R-100 results.cells[0] `sandbox-probes-linux-acp`: activeness.observed is not true. `NotMeasured` on a sandbox cell is a RED, never a gre
+REJECTED         sandbox green with blank activeness detail
+                 -> REJECTED: F28R-101 results.cells[0] `sandbox-probes-linux-acp`.activeness: required field `detail` is empty
+REJECTED         sandbox cell recorded BEFORE the control
+                 -> REJECTED: F28R-092 results.cells[0] `sandbox-probes-linux-acp`: recorded_at=5 does not follow the control (recorded_at=1000); the control completes an
+REJECTED         sandbox cell citing a control this run did not measure
+                 -> REJECTED: F28R-091 results.cells[0] `sandbox-probes-linux-acp`: a sandbox verdict cites control_ref `control:other@elsewhere:run-9`, which is not the 
+REJECTED         sandbox cell citing no control at all
+                 -> REJECTED: F28R-091 results.cells[0] `sandbox-probes-linux-acp`: a sandbox verdict cites control_ref `None`, which is not the control measured for this
+REJECTED         every sandbox cell removed (vacuous precedence gate)
+                 -> REJECTED: F28R-093 results: no sandbox-dimension cell was checked for control precedence. A precedence gate over an empty set passes without proving a
+REJECTED         a red with no attribution
+                 -> REJECTED: F28R-070 results.cells[216] `sandbox-probes-macos-acp`: a red carries no attribution; every red is attributed to a carried-red ledger entry 
+REJECTED         a new finding carrying no Phase 28 re-score
+                 -> REJECTED: F28R-073 results.cells[216].attribution.finding: required field `p28_severity` is absent
+REJECTED         a CRITICAL cell given a skip
+                 -> REJECTED: F28R-080 results.cells[0] `sandbox-probes-linux-acp` `sandbox-probes-linux-acp`: a CRITICAL cell carries a skip. A critical cell has no lega
+REJECTED         observation-blocked skip citing the FAVOURABLE intel file
+                 -> REJECTED: F28R-004 results.cells[24] `unicode-linux-acp` `unicode-linux-acp`: observation-blocked evidence `.planning/intel/APPCONTAINER-SSH-LORE-READ
+REJECTED         a fifth skip class invented mid-run
+                 -> REJECTED: F28R-081 results.cells[24] `unicode-linux-acp` `unicode-linux-acp`: skip_class `harness-bound` is not one of the four contract classes ['arc
+REJECTED         a run whose binary is not the candidate
+                 -> REJECTED: F28R-125 results.runs `linux-1`: binary digest 0000000000000000000000000000000000000000000000000000000000000000 does not match the candidate
+
+--- control re-run on the UNMUTATED artifacts ---
+PASS             --verify -> {"cells": 651, "pass": 627, "red": 24, "runs": 3, "skip": 0}
+PASS             --check-activeness -> {"sandbox_cells": 74, "sandbox_greens_checked": 50}
+PASS             --check-control-precedence -> {"sandbox_cells_checked": 74}
+PASS             --check-skips -> {"skips_checked": 0}
+PASS             --check-binary-binding -> {"runs_checked": 3, "unbound_targets": []}
+
+13/13 mutations rejected

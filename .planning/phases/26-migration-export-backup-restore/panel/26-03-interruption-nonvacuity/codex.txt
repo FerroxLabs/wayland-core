@@ -1,0 +1,192 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.4
+--------
+workdir: /Users/seandonahoe/dev/waylandcore-frontier-worktrees/lane-26c/.planning/phases/26-migration-export-backup-restore/panel/26-03-interruption-nonvacuity
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 019fa3fc-ca6a-71e2-ac89-8049cbfdc8aa
+--------
+user
+# Decision A — did both interruption legs prove exact rollback from a genuinely mid-flight kill, or is either leg vacuous?
+
+`wayland-core backup restore` journals the prior tree before mutating, so an
+operation killed mid-flight can be rolled back exactly. Two platform legs claim
+to prove that. Judge whether either is vacuous.
+
+Answer with exactly one line `PANEL-VERDICT: <option-id>` and one line
+`PANEL-BASIS: <one sentence>`, then up to 250 words.
+
+## Options (rotated order; ids are fixed)
+
+### `windows-exactness-gap`
+- **Name:** The Windows leg landed mid-flight but did not reach exactness; record the gap and its severity
+- **Pros:** Names a real platform difference honestly instead of averaging it away.
+- **Cons:** Only legitimate when the Windows leg is NON-vacuous and its digests differ; recording a vacuous leg as an exactness gap is rounding up.
+
+### `both-legs-sound`
+- **Name:** Both legs proved exact rollback from a genuinely mid-flight kill
+- **Pros:** Each leg independently established mid-flight landing — an open journal record AND an observably intermediate target AND a kill that did not land after completion — before any digest comparison counted, and both produced equal pre- and post-recovery digests under the same named algorithm.
+- **Cons:** Nothing is recorded as outstanding, so any residual weakness in either leg's controls ships as proven.
+
+### `linux-leg-vacuous`
+- **Name:** The Linux leg proved nothing — its kill did not land mid-flight
+- **Pros:** A consistent tree after a kill that landed late is trivially consistent and is not a rollback proof.
+- **Cons:** Contradicted if the capture shows an open journal, an intermediate target and completed_before_kill=no.
+
+### `windows-leg-vacuous`
+- **Name:** The Windows leg proved nothing — its kill did not land mid-flight
+- **Pros:** Same reasoning as above, applied to Windows; a leg whose kill landed after completion must be re-run with a fixture sized for that hardware rather than dressed up as a platform gap.
+- **Cons:** Contradicted if the Windows capture shows an open journal, an intermediate target and completed_before_kill=no.
+
+## Evidence in this directory
+
+- `interrupt-evidence-linux.txt`, `interrupt-evidence-windows.txt` — the two main runs.
+- `interrupt-negctl-linux.txt`, `interrupt-negctl-windows.txt` — negative controls: a deliberately undersized fixture, which the script must DETECT as a late kill and exit non-zero for.
+- `interrupt-handlerctl-linux.txt`, `interrupt-handlerctl-windows.txt` — handler controls: a CATCHABLE mechanism, for which the probe must fire.
+- `interrupt-openhandle-windows.txt` — Windows-only: the target held open by another handle.
+
+## The measured state, stated plainly
+
+Both main runs report `MIDFLIGHT-JOURNAL-OPEN: yes`, `MIDFLIGHT-TARGET-INTERMEDIATE: yes`,
+`completed_before_kill=no`, and `DIGEST-EQUAL: yes`. The two `DIGEST-ALGO` lines are
+byte-equal, so the comparison measures content rather than encoding.
+
+Both negative controls DETECTED their late kill and exited 9, so each platform's
+mid-flight check demonstrably fires.
+
+**The asymmetry you must weigh.** The handler control — the leg that turns
+`fired=no` from an assumption into a measurement of uncatchability — passes on
+Linux (`HANDLER-CONTROL: fired=yes`) and FAILS on Windows (`fired=no`). On
+Windows the probe is now proven to ARM (`installed=` is read from a marker the
+binary writes only after a handler registers, no longer a hardcoded string), and
+the console CTRL_C event is proven to be DELIVERED (the helper exits 0 and the
+target process dies, leaving `DIGEST-EQUAL: no`) — but the process terminates
+before the probe file is written, so the probe never records the event.
+
+So on Windows: rollback exactness under `TerminateProcess` is measured and
+holds; the claim that `TerminateProcess` was *uncatchable* is NOT independently
+established, because the paired control that would establish it does not fire.
+
+Does that asymmetry make the Windows leg vacuous, or is it a control gap that
+leaves the leg's rollback claim intact? Note that `TerminateProcess` is
+uncatchable by documented Win32 semantics regardless of what the probe records.
+
+=== interrupt-evidence-linux.txt ===
+INTERRUPT-PLATFORM: linux
+KILL-MECHANISM: SIGKILL CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: yes
+MIDFLIGHT-TARGET-INTERMEDIATE: yes
+MIDFLIGHT-TIMING: op_expected_ms=3231 kill_at_ms=900 completed_before_kill=no
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-POST: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-EQUAL: yes
+PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state
+=== interrupt-evidence-windows.txt ===
+
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: TerminateProcess CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: yes
+MIDFLIGHT-TARGET-INTERMEDIATE: yes
+MIDFLIGHT-TIMING: op_expected_ms=3408 kill_at_ms=900 completed_before_kill=no
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-EQUAL: yes
+DEEP-PATH-RESTORED: yes len=294
+PROOF-OK: exact rollback from an uncatchable mid-flight kill, over a target that carried state
+
+
+=== interrupt-negctl-linux.txt ===
+INTERRUPT-PLATFORM: linux
+KILL-MECHANISM: SIGKILL CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 2
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=61 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-POST: 0422e58f46c2378bdef16c58aada8d18348c91dbb5aaf592aaaf172e23ce72cc
+DIGEST-EQUAL: no
+NEGATIVE-CONTROL: late-kill-detected
+NEGCTL-EXIT: 9
+PROOF-FAIL: the operation completed before the kill landed, so this run proves nothing about rollback
+=== interrupt-negctl-windows.txt ===
+
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: TerminateProcess CATCHABLE: no
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 2
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=40 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: 771ba432e80b6ade3c453140819eb14c31159f2966fab67957024efa7d5895f1
+DIGEST-EQUAL: no
+NEGATIVE-CONTROL: late-kill-detected
+NEGCTL-EXIT: 9
+PROOF-FAIL: the operation completed before the kill landed, so this run proves nothing about
+rollback
+
+
+=== interrupt-handlerctl-linux.txt ===
+INTERRUPT-PLATFORM: linux
+KILL-MECHANISM: SIGTERM CATCHABLE: yes
+KILL-HANDLER-PROBE: installed=yes fired=yes
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: yes
+MIDFLIGHT-TARGET-INTERMEDIATE: yes
+MIDFLIGHT-TIMING: op_expected_ms=3202 kill_at_ms=900 completed_before_kill=no
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-POST: 4069e26f5d5527be57482afe86f6c422b22d19a5ee9574cf44fb087b89542a40
+DIGEST-EQUAL: yes
+HANDLER-CONTROL: fired=yes
+PROOF-OK: the probe fires for a catchable signal, so fired=no under SIGKILL is a measurement
+=== interrupt-handlerctl-windows.txt ===
+
+HANDLER-CONTROL-DELIVERY: helper exit 0
+INTERRUPT-PLATFORM: windows
+KILL-MECHANISM: console-ctrl-c CATCHABLE: yes
+KILL-HANDLER-PROBE: installed=yes fired=no
+FIXTURE-PAYLOADS: 120
+MIDFLIGHT-JOURNAL-OPEN: no
+MIDFLIGHT-TARGET-INTERMEDIATE: no
+MIDFLIGHT-TIMING: op_expected_ms=3441 kill_at_ms=900 completed_before_kill=yes
+DIGEST-ALGO: sha256/wcore-portability-tree-v1 path-norm=slash-relative content=raw-bytes
+DIGEST-PRE: 719ee8c7770d7dbc8b1cabfe55d94ae8cce11382ebd64cad1fca91c808c2aa51
+DIGEST-POST: ac93329ece23ae81807dc31c661847b7bb7ca72649e02500a3397079d6e30978
+DIGEST-EQUAL: no
+DEEP-PATH-RESTORED: yes len=294
+HANDLER-CONTROL: fired=no
+PROOF-FAIL: the handler probe did NOT fire for a catchable mechanism, so the uncatchability
+measurement is vacuous on this platform
+deprecated: `[features].codex_hooks` is deprecated. Use `[features].hooks` instead.
+Enable it with `--enable hooks` or `[features].hooks` in config.toml. See https://developers.openai.com/codex/config-basic#feature-flags for details.
+2026-07-27T14:31:24.582095Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: "Bearer realm=\"OAuth\", resource_metadata=\"https://mcp.canva.com/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"Missing or invalid access token\"" })
+2026-07-27T14:31:25.217802Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when Auth(AuthorizationRequired)
+hook: SessionStart
+hook: SessionStart Completed
+hook: UserPromptSubmit
+hook: UserPromptSubmit Completed
+codex
+PANEL-VERDICT: both-legs-sound
+PANEL-BASIS: Both main runs independently prove a non-late mid-flight kill and exact digest restoration; the failed Windows handler control weakens only the redundant empirical uncatchability check, not rollback exactness.
+The Windows run has an open journal, an observably intermediate target, `completed_before_kill=no`, and equal pre/post digests under the same content algorithm. Its negative control demonstrates that the harness rejects late kills. `TerminateProcess` uncatchability follows documented Win32 semantics; failure of the catchable CTRL_C probe means Windows cannot claim that `fired=no` was independently validated by this instrumentation, but it does not make the measured mid-flight mutation or exact recovery vacuous. `windows-exactness-gap` is inapplicable because the Windows digests do not differ.
+hook: Stop
+hook: Stop Completed
+tokens used
+34,299
+PANEL-VERDICT: both-legs-sound
+PANEL-BASIS: Both main runs independently prove a non-late mid-flight kill and exact digest restoration; the failed Windows handler control weakens only the redundant empirical uncatchability check, not rollback exactness.
+The Windows run has an open journal, an observably intermediate target, `completed_before_kill=no`, and equal pre/post digests under the same content algorithm. Its negative control demonstrates that the harness rejects late kills. `TerminateProcess` uncatchability follows documented Win32 semantics; failure of the catchable CTRL_C probe means Windows cannot claim that `fired=no` was independently validated by this instrumentation, but it does not make the measured mid-flight mutation or exact recovery vacuous. `windows-exactness-gap` is inapplicable because the Windows digests do not differ.

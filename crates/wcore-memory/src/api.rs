@@ -11,6 +11,15 @@ use crate::v2_types::{
     Procedure, ProcedureId, Query, Tier, UserModel,
 };
 
+/// The refusal a control returns when the backend has no store to act on.
+/// Shared by the `*_recalled` defaults so a `NullMemory` cannot report a
+/// control as applied.
+fn no_controls() -> crate::error::MemoryError {
+    crate::error::MemoryError::InvalidControl(
+        "this memory backend exposes no operator controls".to_string(),
+    )
+}
+
 #[async_trait]
 pub trait MemoryApi: Send + Sync {
     async fn record_episode(&self, ep: Episode, tok: AccessToken) -> Result<EpisodeId>;
@@ -96,5 +105,113 @@ pub trait MemoryApi: Send + Sync {
     /// real `PartitionDispatcher`/`Memory` perform the swap.
     async fn rebind_session(&self, _session_id: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// F23-03 — the operator control surface over recall, when this backend
+    /// has one.
+    ///
+    /// Returns `None` for `NullMemory` and test fixtures, which have no store
+    /// to correct, forget, scope or bound. A caller that gets `None` must say
+    /// so rather than reporting a control as applied: the whole value of these
+    /// controls is that a user can trust the answer.
+    fn controls(&self) -> Option<crate::provenance::MemoryControls> {
+        None
+    }
+
+    /// 23B-C3 — forget a recalled item by the id a user actually saw,
+    /// whichever partition holds it.
+    ///
+    /// `/memory forget <id>` used to call `MemoryControls::forget_episode`
+    /// directly, which hardcodes `Partition::Episodic`. Semantic facts are the
+    /// only partition the engine auto-injects into the outbound provider
+    /// request body, so a user could see a fact in their prompt, ask for it to
+    /// be forgotten, and be told `NotFound` while it kept being sent. This
+    /// tries episodic first (unchanged behaviour for every id that resolved
+    /// before) and falls through to the fact store ONLY on `NotFound` — never
+    /// on a denial, so a gate refusal is still surfaced as a refusal instead
+    /// of being retried against another cell.
+    async fn forget_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::ForgetReceipt> {
+        let controls = self.controls().ok_or_else(no_controls)?;
+        match controls.forget_episode(&tok, tier, id, actor) {
+            Err(crate::error::MemoryError::NotFound { .. }) => {
+                controls.forget_fact(&tok, tier, id, actor)
+            }
+            other => other,
+        }
+    }
+
+    /// 23B-C3 — correct a recalled item by the id a user actually saw.
+    ///
+    /// The default impl handles episodes and REFUSES OUT LOUD for facts,
+    /// because correcting a fact requires re-embedding the corrected triple
+    /// and this trait's default has no embedder. A silent partial success —
+    /// updating the text and leaving the old vector, or nulling the vector and
+    /// thereby performing a forget — is exactly the "reported a control as
+    /// applied" failure the F23-03 controls exist to avoid.
+    /// `PartitionDispatcher` overrides this and does the re-embed.
+    async fn correct_recalled(
+        &self,
+        tier: Tier,
+        id: &str,
+        corrected: &str,
+        actor: &str,
+        tok: AccessToken,
+    ) -> Result<crate::provenance::CorrectionReceipt> {
+        let controls = self.controls().ok_or_else(no_controls)?;
+        match controls.correct_episode(&tok, tier, id, corrected, actor) {
+            Err(crate::error::MemoryError::NotFound { .. }) => {
+                Err(crate::error::MemoryError::InvalidControl(format!(
+                    "no episode {id} at tier {}; correcting a semantic fact needs a re-embedding \
+                     and this memory backend exposes no embedder",
+                    tier.as_str()
+                )))
+            }
+            other => other,
+        }
+    }
+
+    /// 23B-C3 — the per-session nudge bound, when this backend has one.
+    ///
+    /// Returns `None` for backends with no nudge path. `NudgeBudget` shipped
+    /// in F23-03 with a cap, an off switch and an atomic claim, and with no
+    /// caller anywhere outside its own unit tests — so the criterion's
+    /// "nudges" clause named a control no user could see or reach. This is the
+    /// accessor `/memory nudge` reads.
+    fn nudge_budget(&self) -> Option<std::sync::Arc<crate::provenance::NudgeBudget>> {
+        None
+    }
+
+    /// 23B-C3 — the record of what memory was injected into the prompt on the
+    /// user's behalf, and the switch that stops it being injected.
+    ///
+    /// Returns `None` for backends that never inject anything. See
+    /// [`crate::activation`] for why this is a different question from
+    /// provenance.
+    fn activation_log(&self) -> Option<std::sync::Arc<crate::activation::ActivationLog>> {
+        None
+    }
+
+    /// F23-03 — search, plus the provenance of everything it selected and
+    /// everything it excluded.
+    ///
+    /// The default impl returns the ordinary hits with an EMPTY report, which
+    /// reads as "this backend cannot tell you where these came from". It does
+    /// not fabricate a provenance record, because a wrong answer to "why is
+    /// this in my context window" is worse than no answer.
+    async fn search_with_provenance(
+        &self,
+        q: Query,
+        tok: AccessToken,
+    ) -> Result<(Vec<Hit>, crate::provenance::RecallReport)> {
+        Ok((
+            self.search(q, tok).await?,
+            crate::provenance::RecallReport::default(),
+        ))
     }
 }

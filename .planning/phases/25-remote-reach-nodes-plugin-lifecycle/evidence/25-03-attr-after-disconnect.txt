@@ -1,0 +1,55 @@
+  machine   f25-farnode-box
+  os        linux
+  key id    bfed45d376de52e0d67057526eb8c078210499f854053d55e42cba2456503445
+  version   1.0
+  verdict   same
+  backends  cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+###      ATTRIBUTION after REPAIR
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+
+###      probe farnode while its far end is UP
+$ /root/wayland-25/target/release/wayland-core node probe farnode
+node 'farnode' is LIVE
+  advertised before: cloud (unavailable), container (unavailable), local, ssh (unavailable)
+  advertised now:    cloud (unavailable), container (unavailable), local, ssh (unavailable)
+[exit=0]
+
+STATE: probe-while-up said: node 'farnode' is LIVE
+STATE: stopping the far end for real: docker stop f25-03-farnode
+STATE: far end still listening on 2222? 0
+### OFFLINE — probe farnode after its far end was STOPPED
+$ /root/wayland-25/target/release/wayland-core node probe farnode
+node 'farnode' is OFFLINE: far end exited 255: ssh: connect to host 127.0.0.1 port 2222: Connection refused 
+  no in-flight work was recorded against it
+  work submitted to it will now be REFUSED, not rerouted
+[exit=0]
+
+STATE: the probe returned in 0s — bounded, not hung
+###      node list (farnode must read offline)
+$ /root/wayland-25/target/release/wayland-core node list
+NODE           OS        STATE    VERSION    LIVENESS                     VERDICT / BACKENDS
+farnode        linux     paired   1.0        offline (far end exited 255: ssh: connect to host 127.0.0.1 port 2222: Connection refused ) same | cloud (unavailable), container (unavailable), local, ssh (unavailable)
+selfnode       linux     paired   1.0        unknown (not probed since pairing) same | cloud (unavailable), container, local, ssh (unavailable)
+[exit=0]
+
+###      submit to the offline node (non-zero, no reroute)
+$ /root/wayland-25/target/release/wayland-core node submit farnode
+wayland-core node: REFUSED: node 'farnode' was last observed offline (far end exited 255: ssh: connect to host 127.0.0.1 port 2222: Connection refused ); refusing to run and NOT falling back to another node (node 'farnode')
+[exit=1]
+
+STATE: a stopped far end is detected within a bounded time, refuses work, and does not reroute
+###      ATTRIBUTION after DISCONNECT
+$ /root/wayland-25/target/release/wayland-core node attribution selfnode --receipt /root/f25-03-evidence/receipt-selfnode.json
+receipt     /root/f25-03-evidence/receipt-selfnode.json
+backend     local
+node        selfnode
+attribution HOLDS — work attributed to node 'selfnode' (key d66f9b31b176)
+[exit=0]
+

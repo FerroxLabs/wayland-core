@@ -1,0 +1,88 @@
+DISSENT — Phase 28 acceptance gate. The losing arguments in their own terms.
+
+The external panel was unanimous (3-0) and the internal pass concurred conditionally, making it
+4-0. A unanimous panel is the one most likely to have agreed too fast, so recording the losing
+arguments is MORE important here, not less. This is what a later reader needs in order to
+reopen the decision if the risk in it lands.
+
+=== ARGUMENT FOR c4-literal, in its own terms, and it is the morally strongest option ===
+
+Criterion 4 says what it says. "Zero findings remain at every severity before acceptance" is
+not ambiguous prose that happens to admit a weaker reading; it is a distinctive claim, and it is
+distinctive precisely BECAUSE it exceeds the ordinary rule. A certification is not a feature
+phase. It is the artifact a release stands on, and it is consumed by people who were not in the
+room. The only certification claim that survives contact with a hostile reader is one that
+needs no footnote: this candidate had no known open defect of any kind, at any severity, on any
+platform. Every weaker claim is a negotiation, and every negotiation is conducted by the party
+with the deadline.
+
+The counter-argument that carried is narrower than the 4-0 vote makes it look, and it rests on
+exactly one fact rather than on the option's merits: Criterion 4 was authored on 2026-07-19,
+six days BEFORE the severity amendment of 2026-07-25. Had those dates been reversed — had the
+criterion been written by someone who already knew the standing rule and chose to exceed it for
+the certification gate specifically — this dissent would be the decision, and c4-disposition
+would be an agent overruling an informed human instruction. Anyone reopening this should check
+that date claim first, because it is the whole load-bearing structure. If the human ever
+restates Criterion 4 in its literal form KNOWING the current severity policy, that restatement
+supersedes this decision immediately and without further panel.
+
+Its defeat, stated plainly: the literal rule is the one this program ran and measured, and it
+produced 74 plans over two weeks with the phase no closer to done. Worse, it is unreachable
+here — bash under Windows AppContainer cannot be made to work at any budget, so an empty-ledger
+gate could only ever be reached by relabelling that finding out of existence. A rule that can
+only be satisfied by dishonesty produces dishonesty.
+
+=== ARGUMENT FOR c4-standing, in its own terms ===
+
+It is the only option with no new machinery, no new rubric, no new cross-audit obligation and no
+new receipt fields. Every other phase in this program runs on RULE B. Making the certification
+phase run on a bespoke variant means the phase most in need of predictability is the one
+operating under a rule invented for it, by the agent that then has to satisfy it. There is a
+real, unglamorous argument that consistency across thirty phases is worth more than a locally
+better rule in one of them.
+
+Its defeat: it does the WORSE narrowing. Dropping MEDIUM and LOW from the gate entirely means a
+MEDIUM finding need not even be RECORDED, which directly defeats the "no critical case is
+skipped" half of F28-04 and makes sub-HIGH findings invisible at the exact moment visibility is
+the entire product. c4-disposition costs paperwork; c4-standing costs the ledger.
+
+=== ARGUMENT FOR c4-escalate, in its own terms ===
+
+The conflict is between two documents the human owns, written by him, six days apart. He is the
+only party who can say which one he meant. An agent choosing between two of a human's own
+instructions — and choosing the one that happens to be easier to satisfy — is not obviously
+better than asking, however well the choice is reasoned and however much the reasoning is
+written down.
+
+Its defeat: the program's operating rule reserves to the human only irreversible outward actions
+and inputs no agent can produce, and names them exhaustively — merge, PR, tag, release, issue
+closure, evidence-ref deletion, credentials. Evidence-acceptance policy is explicitly not among
+them, and the measured cost of the opposite habit was 18 blocking human gates across 32 plans,
+the single largest contributor to a two-week wall clock. The decision is also fully reversible:
+it is written down, its dissent is written down, and a one-line instruction from Sean overturns
+it.
+
+=== THE OBJECTION THAT NEARLY CHANGED THE OUTCOME ===
+
+Recorded because it says something about the PANEL rather than about the options.
+
+c4-disposition is c4-standing with paperwork. Strip the machinery and the candidate is
+byte-identical under both, the defects are identical under both, and only the prose differs. A
+receipt is not a control: it does not stop a defect reaching a user, it records that someone
+knew. All three external members treated "enumerated in the receipt" as though it were a
+mitigation, and all three did so in the same direction — which is one argument counted three
+times, not three independent confirmations.
+
+That objection was not defeated by the vote. It was defeated by attaching amendment A2, which
+removes the findings the objection actually cares about from the accept path entirely: anything
+contradicting one of Phase 28's four Success Criteria is CRITICAL or HIGH by construction and
+can only be FIXED or DISPROVED. Two findings this program is carrying TODAY at sub-HIGH move
+across that line immediately — the descendant-process-tree reap failure (Criterion 2 says "no
+orphan process") and the AppContainer silent-sandbox-disable (Criterion 1 is sandbox probes).
+
+The consequence for a later reader: A2 IS THE DECISION. If a future plan, executor or reviewer
+keeps c4-disposition's four dispositions but drops or softens A2 — by scoring findings at their
+inherited severity, or by letting a criterion-contradicting finding take the ACCEPT path — then
+this decision has silently become c4-standing with paperwork, the dissent above becomes correct,
+and the certification is worth materially less than its own text claims. Check A2 before
+trusting any Phase 28 acceptance.

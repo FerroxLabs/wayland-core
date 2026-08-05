@@ -146,6 +146,23 @@ impl TestSinkHandle {
 }
 
 impl OutputSink for TestSink {
+    fn emit_midflight_monitor_decision(
+        &self,
+        directive: wcore_protocol::events::MonitorDirective,
+        reason: wcore_protocol::events::MonitorReason,
+    ) {
+        self.record(&ProtocolEvent::MidFlightMonitorDecision { directive, reason });
+    }
+
+    fn emit_capability_activation(
+        &self,
+        activation: &wcore_protocol::events::CapabilityActivation,
+    ) {
+        self.record(&ProtocolEvent::CapabilityActivation {
+            activation: activation.clone(),
+        });
+    }
+
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
         self.record(&ProtocolEvent::TextDelta {
             text: text.to_string(),

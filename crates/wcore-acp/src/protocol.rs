@@ -69,6 +69,14 @@ pub enum ErrorCode {
     /// agent for this principal". The roster returns only AUTHORIZED agents, so
     /// this doubles as the not-authorized signal without leaking existence.
     AgentNotFound,
+    /// F24-03: the caller authenticated and its ROLE does not permit this
+    /// command. Distinct from [`Self::AuthRequired`] so a host can tell "your
+    /// credential is not accepted" from "your credential is fine and this
+    /// command is not yours" — opposite operator actions. Unlike
+    /// [`Self::AgentNotFound`], hiding this behind a not-found would be wrong:
+    /// the method demonstrably exists, and pretending otherwise would send an
+    /// operator looking for a typo in a method name that is correct.
+    Forbidden,
 }
 
 impl ErrorCode {
@@ -83,6 +91,7 @@ impl ErrorCode {
             Self::AuthRequired => -32002,
             Self::ToolFailed => -32003,
             Self::AgentNotFound => -32004,
+            Self::Forbidden => -32005,
         }
     }
 }
@@ -482,6 +491,11 @@ mod tests {
     #[test]
     fn agent_not_found_code_value() {
         assert_eq!(ErrorCode::AgentNotFound.code(), -32004);
+        assert_eq!(ErrorCode::Forbidden.code(), -32005);
+        // A role refusal and an authentication failure must never share a
+        // code: a host that cannot tell them apart tells its operator to
+        // rotate a credential that was never the problem.
+        assert_ne!(ErrorCode::Forbidden.code(), ErrorCode::AuthRequired.code());
     }
 
     /// Compat regression (red-team R2): a `session/create` that does NOT select

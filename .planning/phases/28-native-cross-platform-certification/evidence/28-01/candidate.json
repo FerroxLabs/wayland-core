@@ -1,0 +1,1403 @@
+{
+  "attribution_method": {
+    "claim_forms": [
+      "explicit (HIGH PRECISION, used for BOTH attribution and the claimed-but-absent accusation): `wayland-core <verb> ...` inside a backtick span or code fence",
+      "bare (HIGH RECALL, used for ATTRIBUTION ONLY): a backtick span that is ENTIRELY `<verb> <sub>...`, at most 4 tokens, no English prose word, verb not an external tool or code keyword"
+    ],
+    "known_limitation": "Recall is not complete. A phase may claim a surface in a form neither pattern recognises. Such a surface is reported as class `attribution-weak`, NOT as `present-but-unclaimed`, so a limit of the instrument is never rendered as a fact about the product. Conversely the bare form is deliberately BARRED from asserting claimed-but-absent: accusing a phase of claiming a surface that does not exist costs a disposition to clear, so only the high-precision form may accuse."
+  },
+  "candidate": {
+    "commit": "32e2f57d09fe4b287e513081862217dc9daa5901",
+    "kr05_lease_wedge_repair_455dd836": "PRESENT (455dd836 is an ancestor of the candidate; verified by git merge-base --is-ancestor)",
+    "provisional": true,
+    "provisional_reason": "Pre-merge integration-branch tip, not a released candidate: lanes for phases 24, 26 and 23B were still executing when this was resolved. Plan 28-02 MUST re-resolve against the actual certification candidate.",
+    "tree": "63ec0e6c36ff8e63789aab2f9760870304b671df"
+  },
+  "findings": [
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R001",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core acp` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R002",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core agent` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R003",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core crucible` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R004",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "24",
+        "26"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core fetch` is exposed by the candidate binary and is discussed by phase artifact(s) 24,26, but not in a form this resolver recognises as a claim"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R005",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core forge` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R006",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "27"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core image` is exposed by the candidate binary and is discussed by phase artifact(s) 27, but not in a form this resolver recognises as a claim"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R007",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core init` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R008",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core mcp-serve` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R009",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "26"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core migrate` is exposed by the candidate binary and is discussed by phase artifact(s) 26, but not in a form this resolver recognises as a claim"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R010",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core models` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R011",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "24",
+        "26"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core profile` is exposed by the candidate binary and is discussed by phase artifact(s) 24,26, but not in a form this resolver recognises as a claim"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R012",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core project-context` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R013",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core self-update` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R014",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "24",
+        "27"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core session` is exposed by the candidate binary and is discussed by phase artifact(s) 24,27, but not in a form this resolver recognises as a claim"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R015",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "24",
+        "26"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core setup` is exposed by the candidate binary and is discussed by phase artifact(s) 24,26, but not in a form this resolver recognises as a claim"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "present-but-unclaimed",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R016",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "MEDIUM",
+      "phases": [],
+      "rationale": "Certified anyway and flagged. An uncertified surface that ships is worse than an unattributed one, so this does NOT reduce coverage; it records that attribution is incomplete. The surface may predate phases 24-27, which is itself worth knowing at certification time.",
+      "subject": "surface `wayland-core swarm` is exposed by the candidate binary and appears NOWHERE in any phase 24-27 artifact"
+    },
+    {
+      "available_dispositions": "FIXED,DISPROVED,ACCEPTED,DEFERRED",
+      "class": "attribution-weak",
+      "contradicted_criterion": "-",
+      "disposition": "OPEN",
+      "id": "F-28-01-R017",
+      "inherited_severity": "n/a-raised-by-phase-28",
+      "p28_severity": "LOW",
+      "phases": [
+        "24",
+        "26"
+      ],
+      "rationale": "This is a RESOLVER RECALL limitation, not an established product fact. It is recorded rather than silently upgraded to present-but-unclaimed, because reporting a measurement the instrument could not take as though it were a finding about the product is the error this program has paid for before. The surface is certified regardless; only its attribution is unproven.",
+      "subject": "surface `wayland-core workflow` is exposed by the candidate binary and is discussed by phase artifact(s) 24,26, but not in a form this resolver recognises as a claim"
+    }
+  ],
+  "inputs": [
+    {
+      "path": ".planning/phases/28-native-cross-platform-certification/evidence/28-01/surface-capture.txt",
+      "role": "surface_capture",
+      "sha256": "37f96ab8eaef4cd3c8c2e5a42534a8c046eff0d96f2e35368382c219a4ee61f3"
+    },
+    {
+      "path": ".planning/phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md",
+      "role": "phase_artifact_24",
+      "sha256": "2cf10f89f173fc2547cf235014c873c846a490972e507c614807280237aa9e6d"
+    },
+    {
+      "path": ".planning/phases/24-gateway-automation-channels-typed-api/24-02-SUMMARY.md",
+      "role": "phase_artifact_24",
+      "sha256": "8c44f3be813cc8fe7f6df62dc62a95ff768951f77cbab7a5054a585021d3ac9e"
+    },
+    {
+      "path": ".planning/phases/24-gateway-automation-channels-typed-api/24-B-SUMMARY.md",
+      "role": "phase_artifact_24",
+      "sha256": "dd4cfe254b5b5c3608e329cf0bca7d2d6a3086118d98c74ffcf556147afacaf0"
+    },
+    {
+      "path": ".planning/phases/24-gateway-automation-channels-typed-api/24-C-SUMMARY.md",
+      "role": "phase_artifact_24",
+      "sha256": "a3b6c9f5efd01a8d6ded9a43c2de7116ed72e89ac6e426faa79b1cf8bb331b8b"
+    },
+    {
+      "path": ".planning/phases/24-gateway-automation-channels-typed-api/24-PHASE-REPORT.md",
+      "role": "phase_artifact_24",
+      "sha256": "bda192d6d19aedce956b717af36a40cc3ae4f811b852becc3b8f41666d6945ca"
+    },
+    {
+      "path": ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-01-SUMMARY.md",
+      "role": "phase_artifact_25",
+      "sha256": "c40626b083382f92344574c43590f813c6ffe09d65c1e038b3d027697b603acc"
+    },
+    {
+      "path": ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-02-SUMMARY.md",
+      "role": "phase_artifact_25",
+      "sha256": "accb22ce6ad3504d2bf725482770b3009bfe459d54735f479bbd5c93fad3b326"
+    },
+    {
+      "path": ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-03-SUMMARY.md",
+      "role": "phase_artifact_25",
+      "sha256": "7e99eeba681b704345aa4b0532d782dac88affaaefd92a18e9b340a3a8d67e67"
+    },
+    {
+      "path": ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-04-SUMMARY.md",
+      "role": "phase_artifact_25",
+      "sha256": "9b402eb0bce41ecc6e4141f6a1055e731a0a0bdf5c852c7a4533b48528215b4a"
+    },
+    {
+      "path": ".planning/phases/26-migration-export-backup-restore/26-01-SUMMARY.md",
+      "role": "phase_artifact_26",
+      "sha256": "7baf42afec7fc5fa404039e3309e530ec1751a58a497f885dbab8263faeb153e"
+    },
+    {
+      "path": ".planning/phases/26-migration-export-backup-restore/26-03-SUMMARY.md",
+      "role": "phase_artifact_26",
+      "sha256": "d34c46eb4940e32cf0dacc6552d9dd595a6815d2844e38b47b2b4c8dd13c1402"
+    },
+    {
+      "path": ".planning/phases/27-multimodal-browser-generation-voice/27-01-SUMMARY.md",
+      "role": "phase_artifact_27",
+      "sha256": "600d06bea6c9f240525392b7d100e7d96092a6bc975ffea84cb5ef033436df99"
+    },
+    {
+      "path": ".planning/phases/27-multimodal-browser-generation-voice/27-02-SUMMARY.md",
+      "role": "phase_artifact_27",
+      "sha256": "bca114866dc9bf3916f6f8fa21f90cffe6b513db73a93e3c3292005bf7be79fc"
+    },
+    {
+      "path": ".planning/phases/27-multimodal-browser-generation-voice/27-03-SUMMARY.md",
+      "role": "phase_artifact_27",
+      "sha256": "d6deaf6193bb24012c7a011b3cb2df160d2d57c28e4e1a35323faf697f575f46"
+    },
+    {
+      "path": ".planning/phases/27-multimodal-browser-generation-voice/27-04-SUMMARY.md",
+      "role": "phase_artifact_27",
+      "sha256": "c695ca8dd5f990c713983548ca5a1d39984b5a71027cc0df369d3e44f5515693"
+    },
+    {
+      "path": ".planning/phases/27-multimodal-browser-generation-voice/27-PHASE-VERDICT.md",
+      "role": "phase_artifact_27",
+      "sha256": "da1591d0c79a8b85f75547d9cbae8d145c42bc044df1137352deebe34f07b3dd"
+    }
+  ],
+  "phases": [
+    {
+      "artifacts": [
+        ".planning/phases/24-gateway-automation-channels-typed-api/24-01-SUMMARY.md",
+        ".planning/phases/24-gateway-automation-channels-typed-api/24-02-SUMMARY.md",
+        ".planning/phases/24-gateway-automation-channels-typed-api/24-B-SUMMARY.md",
+        ".planning/phases/24-gateway-automation-channels-typed-api/24-C-SUMMARY.md",
+        ".planning/phases/24-gateway-automation-channels-typed-api/24-PHASE-REPORT.md"
+      ],
+      "claimed_surfaces_bare_only": [
+        "gateway",
+        "pid",
+        "wcore-contract"
+      ],
+      "claimed_surfaces_explicit": [
+        "cron"
+      ],
+      "phase": "24"
+    },
+    {
+      "artifacts": [
+        ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-01-SUMMARY.md",
+        ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-02-SUMMARY.md",
+        ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-03-SUMMARY.md",
+        ".planning/phases/25-remote-reach-nodes-plugin-lifecycle/25-04-SUMMARY.md"
+      ],
+      "claimed_surfaces_bare_only": [
+        "unrecognized"
+      ],
+      "claimed_surfaces_explicit": [
+        "backend",
+        "node",
+        "plugin"
+      ],
+      "phase": "25"
+    },
+    {
+      "artifacts": [
+        ".planning/phases/26-migration-export-backup-restore/26-01-SUMMARY.md",
+        ".planning/phases/26-migration-export-backup-restore/26-03-SUMMARY.md"
+      ],
+      "claimed_surfaces_bare_only": [
+        "backup"
+      ],
+      "claimed_surfaces_explicit": [
+        "auth"
+      ],
+      "phase": "26"
+    },
+    {
+      "artifacts": [
+        ".planning/phases/27-multimodal-browser-generation-voice/27-01-SUMMARY.md",
+        ".planning/phases/27-multimodal-browser-generation-voice/27-02-SUMMARY.md",
+        ".planning/phases/27-multimodal-browser-generation-voice/27-03-SUMMARY.md",
+        ".planning/phases/27-multimodal-browser-generation-voice/27-04-SUMMARY.md",
+        ".planning/phases/27-multimodal-browser-generation-voice/27-PHASE-VERDICT.md"
+      ],
+      "claimed_surfaces_bare_only": [],
+      "claimed_surfaces_explicit": [],
+      "phase": "27"
+    }
+  ],
+  "phases_without_artifact": [],
+  "schema": "f28-candidate/v1",
+  "surface_count": 116,
+  "surface_probe_binary": {
+    "host": "Ubuntu-2404-noble-amd64-base",
+    "path": "/root/wayland-p28/target/debug/wayland-core",
+    "profile": "debug",
+    "sha256": "da69ae6f7fac9e61c7e9b8bc08407bbc957894136465730785ccd4e29cc65163"
+  },
+  "surfaces": [
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core acp",
+      "evidence": "v0.7.0 1.A.10: ACP server + client surface. `acp serve` binds the HTTP/SSE transport; `acp request` drives a one-shot session/message round-trip",
+      "id": "cmd:acp"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core acp request",
+      "evidence": "One-shot ACP request against a running server. Mostly a smoke-test handle for `serve`",
+      "id": "cmd:acp/request"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core acp serve",
+      "evidence": "Bind the HTTP/SSE transport to a TCP port and serve sessions",
+      "id": "cmd:acp/serve"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core agent",
+      "evidence": "v0.7.0 3.B.2: manage user-defined agents (create, list, show, edit, delete). Built-ins from the bundled pack are read-only",
+      "id": "cmd:agent"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core agent create",
+      "evidence": "Create a new user agent (persists to ~/.wayland/agents/<name>.toml)",
+      "id": "cmd:agent/create"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core agent delete",
+      "evidence": "Delete a user agent. Built-ins cannot be deleted",
+      "id": "cmd:agent/delete"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core agent edit",
+      "evidence": "Open the user agent's TOML file in $EDITOR for hand-editing",
+      "id": "cmd:agent/edit"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core agent list",
+      "evidence": "List user agents (and optionally the built-ins)",
+      "id": "cmd:agent/list"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core agent show",
+      "evidence": "Print the resolved manifest for an agent (user or built-in)",
+      "id": "cmd:agent/show"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core auth",
+      "evidence": "CLI surface: manage provider API keys (list / add / remove) directly in the global `config.toml` — the lightweight alternative to the full onboarding flow",
+      "id": "cmd:auth"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core auth add",
+      "evidence": "Add (or replace) a provider API key. The key is validated against the provider's endpoint before it is written",
+      "id": "cmd:auth/add"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core auth list",
+      "evidence": "List every configured provider with a masked API key",
+      "id": "cmd:auth/list"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core auth login",
+      "evidence": "Sign in to a subscription provider via OAuth in the browser",
+      "id": "cmd:auth/login"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core auth logout",
+      "evidence": "Sign out (delete stored OAuth tokens) for a subscription provider",
+      "id": "cmd:auth/logout"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core auth remove",
+      "evidence": "Remove a provider's API key from the config",
+      "id": "cmd:auth/remove"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core auth status",
+      "evidence": "Show OAuth login status (provider, plan, token expiry)",
+      "id": "cmd:auth/status"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core backend",
+      "evidence": "F25-01: execution backends — list / probe / run / cancel / orphans / receipt verify / diff across local, container, ssh and cloud",
+      "id": "cmd:backend"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend cancel",
+      "evidence": "Cancel a live task by id, from any process, and report what cleanup was observed",
+      "id": "cmd:backend/cancel"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend diff",
+      "evidence": "Diff two or more receipts of the SAME task and report equivalence",
+      "id": "cmd:backend/diff"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend list",
+      "evidence": "List every reference backend with its availability, the probe that established it, and its declared capabilities",
+      "id": "cmd:backend/list"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend orphans",
+      "evidence": "Enumerate surfaces still carrying a task nonce, per backend",
+      "id": "cmd:backend/orphans"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend probe",
+      "evidence": "Probe one backend and print the result plus its lifecycle health",
+      "id": "cmd:backend/probe"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend receipt",
+      "evidence": "Receipt operations",
+      "id": "cmd:backend/receipt"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend run",
+      "evidence": "Run a task definition on one backend and write its receipt",
+      "id": "cmd:backend/run"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backend scan",
+      "evidence": "F25-05: scan every backend for orphaned execution left behind by a task, printing the RAW enumeration alongside the count and naming the reaping mechanism each backend actually relies on",
+      "id": "cmd:backend/scan"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core backup",
+      "evidence": "Archive, verify, restore and recover a Wayland home (F26-03)",
+      "id": "cmd:backup"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backup create",
+      "evidence": "Create a verifiable archive of a Wayland home",
+      "id": "cmd:backup/create"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backup digest",
+      "evidence": "Print the tree digest of a home, and the algorithm used",
+      "id": "cmd:backup/digest"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backup recover",
+      "evidence": "Roll back any operation whose owning process died mid-flight",
+      "id": "cmd:backup/recover"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backup restore",
+      "evidence": "Restore an archive into a home directory",
+      "id": "cmd:backup/restore"
+    },
+    {
+      "attributed_phases": [
+        "26"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core backup verify",
+      "evidence": "Verify an archive's manifest, payload digests and entry paths",
+      "id": "cmd:backup/verify"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core cron",
+      "evidence": "v0.8.1 U7: manage scheduled cron jobs (add / list / remove / enable / disable). Persists to `$WAYLAND_HOME/cron/jobs.json`; the background runner spawned at session boot picks up changes on its next tick",
+      "id": "cmd:cron"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron add",
+      "evidence": "Add a new job. Exactly one of `--slash`, `--channel`, or `--skill` must be provided (with matching companion flags)",
+      "id": "cmd:cron/add"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron daemon",
+      "evidence": "Spawn the cron runner as a detached background daemon",
+      "id": "cmd:cron/daemon"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron disable",
+      "evidence": "Disable a job by id (kept on disk, skipped by the runner)",
+      "id": "cmd:cron/disable"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron enable",
+      "evidence": "Enable a job by id",
+      "id": "cmd:cron/enable"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron history",
+      "evidence": "Print the last N fire records for a job (timestamp, outcome, duration, error message if any). Records come from the JSONL ring-buffer written by the runner alongside jobs.json",
+      "id": "cmd:cron/history"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron list",
+      "evidence": "List every persisted cron job",
+      "id": "cmd:cron/list"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron logs",
+      "evidence": "Tail recent log lines associated with a job's fires. Currently surfaces fire records from the history file (same data as `cron history`) formatted as structured log lines compatible with the engine's tracing output",
+      "id": "cmd:cron/logs"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron remove",
+      "evidence": "Remove a job by id",
+      "id": "cmd:cron/remove"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core cron status",
+      "evidence": "Print full details for one job: id, expression, target, state, created_at, last_fired, and the outcome of the most recent fire attempt (success + duration, or error message)",
+      "id": "cmd:cron/status"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core crucible",
+      "evidence": "Crucible (Mixture-of-Providers): run the cross-provider council over a task. N proposers (each pinned to its own provider from `[providers]`) answer in parallel; a fenced, read-only aggregator fuses them. Requires `[crucible] enabled = true",
+      "id": "cmd:crucible"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core fetch",
+      "evidence": "FluxRouter web_fetch (`POST /v1/fetch`): fetch a URL and print it as markdown. `--render` selects the JS-rendered premium arm. A free / paid-but-uncleared Flux key returns an `upgrade_required` message — web_fetch is a paid-only capability",
+      "id": "cmd:fetch"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core forge",
+      "evidence": "Anvil (gated forge) — forge a candidate that passes a REAL executable gate (tests / build / lint), then stamp a verified receipt. Requires ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the works",
+      "id": "cmd:forge"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core gateway",
+      "evidence": "F24-B: the persistent gateway runtime — install / uninstall / start / stop / restart / status / drain, plus the `run` verb every generated launchd, systemd and scheduled-task unit invokes",
+      "id": "cmd:gateway"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway drain",
+      "evidence": "Close admission, finish in-flight work within a budget, and exit",
+      "id": "cmd:gateway/drain"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway install",
+      "evidence": "Register the gateway as a per-user native service for this platform",
+      "id": "cmd:gateway/install"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway restart",
+      "evidence": "Stop then start. A stop refusal because nothing was running is not an error here — restarting a stopped gateway is a start",
+      "id": "cmd:gateway/restart"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway run",
+      "evidence": "The long-lived runtime itself. This is what every generated service unit invokes; it is not normally typed by an operator",
+      "id": "cmd:gateway/run"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway start",
+      "evidence": "Start the registered gateway through the platform's service manager",
+      "id": "cmd:gateway/start"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway status",
+      "evidence": "Report what the gateway is doing",
+      "id": "cmd:gateway/status"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway stop",
+      "evidence": "Stop it through the platform's service manager",
+      "id": "cmd:gateway/stop"
+    },
+    {
+      "attributed_phases": [
+        "24"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core gateway uninstall",
+      "evidence": "Remove the native service registration",
+      "id": "cmd:gateway/uninstall"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core image",
+      "evidence": "FluxRouter image generation (`POST /v1/images/generations`). Writes the decoded image to `--out` (or stdout when piped). A free / paid-but-uncleared Flux key returns a `premium_locked` message — image generation is a paid-only capability",
+      "id": "cmd:image"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core init",
+      "evidence": "v0.7.0 1.B.2: scaffold .wayland/config.toml + WAYLAND.md in cwd",
+      "id": "cmd:init"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core mcp-serve",
+      "evidence": "v0.6.4 Task 2.4: serve the engine's tool registry as an MCP server (stdio or SSE transport). Used by external MCP clients like Claude Desktop, mcp-cli, etc. to call wayland-core's tools",
+      "id": "cmd:mcp-serve"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core migrate",
+      "evidence": "Import an existing agent setup (Hermes) into wayland-core profiles",
+      "id": "cmd:migrate"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core migrate hermes",
+      "evidence": "Import Hermes profiles (`~/.hermes/profiles/*`) into wayland-core",
+      "id": "cmd:migrate/hermes"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core migrate openclaw",
+      "evidence": "Import an OpenClaw setup (`~/.openclaw`) into wayland-core",
+      "id": "cmd:migrate/openclaw"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core models",
+      "evidence": "F-089: model catalog commands",
+      "id": "cmd:models"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core models list",
+      "evidence": "List known models from the bundled pricing catalog. Prints `provider/model_id` one per line. When `--provider` is omitted the full catalog across every built-in provider is shown",
+      "id": "cmd:models/list"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core node",
+      "evidence": "F25-03: nodes — pair / list / show / probe / revoke / submit / attribution across paired machines that host execution backends",
+      "id": "cmd:node"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node advertise",
+      "evidence": "Print THIS host's FRESH capability advertisement, from a real probe. The far-end half of `node probe`",
+      "id": "cmd:node/advertise"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node attribution",
+      "evidence": "Re-verify a receipt's attribution chain against a paired node",
+      "id": "cmd:node/attribution"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node identity",
+      "evidence": "Print THIS host's node identity. With `--challenge`, also sign it — this is the far-end half of pairing and is what the controller runs over ssh",
+      "id": "cmd:node/identity"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node list",
+      "evidence": "List every paired node with identity, capabilities, version and liveness",
+      "id": "cmd:node/list"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node pair",
+      "evidence": "Pair a remote host as a node, proving its identity before recording it",
+      "id": "cmd:node/pair"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node probe",
+      "evidence": "Probe a node's liveness and refresh its capability advertisement",
+      "id": "cmd:node/probe"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node revoke",
+      "evidence": "Withdraw a node's authority. Subsequent work to it is REFUSED and in-flight work on it is terminated; nothing reroutes",
+      "id": "cmd:node/revoke"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node show",
+      "evidence": "Everything known about one node",
+      "id": "cmd:node/show"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core node submit",
+      "evidence": "Ask whether work may be submitted to a node, and exit non-zero when the answer is no. This is the scriptable form of the refusal",
+      "id": "cmd:node/submit"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 1,
+      "entrypoint": "wayland-core plugin",
+      "evidence": "Manage installed plugins (install / list / available / remove)",
+      "id": "cmd:plugin"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin approve",
+      "evidence": "Approve an installed plugin's CURRENT bytes so the loader will run it",
+      "id": "cmd:plugin/approve"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin available",
+      "evidence": "List plugins available in the local default registry (or the directory pointed at by `--registry-dir`)",
+      "id": "cmd:plugin/available"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin inspect",
+      "evidence": "Report everything known about one installed plugin, including whether the loader will admit it. Non-zero exit when it is not installed",
+      "id": "cmd:plugin/inspect"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin install",
+      "evidence": "Install a plugin. `name@marketplace` installs from a registered Claude Code marketplace (see `plugin marketplace add`); a bare `name` uses the legacy registry / GitHub-Releases path",
+      "id": "cmd:plugin/install"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin list",
+      "evidence": "List installed plugins",
+      "id": "cmd:plugin/list"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin marketplace",
+      "evidence": "Manage Claude Code plugin marketplaces",
+      "id": "cmd:plugin/marketplace"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin new",
+      "evidence": "Scaffold a new plugin from a shipped template",
+      "id": "cmd:plugin/new"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin publish",
+      "evidence": "Produce a digest-addressed, signed bundle into a local marketplace directory. Never pushes, merges, releases or deploys",
+      "id": "cmd:plugin/publish"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin recover",
+      "evidence": "Repair a half-written plugin store (interrupted update, missing live generation, drifted install directory)",
+      "id": "cmd:plugin/recover"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin remove",
+      "evidence": "Remove an installed plugin",
+      "id": "cmd:plugin/remove"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin rollback",
+      "evidence": "Restore the exact bytes of the retained prior generation",
+      "id": "cmd:plugin/rollback"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin sign",
+      "evidence": "Sign a plugin's entry artifact with the engine's Ed25519 trust root",
+      "id": "cmd:plugin/sign"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin test",
+      "evidence": "Run a plugin's own test suite and return its verdict faithfully",
+      "id": "cmd:plugin/test"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin update",
+      "evidence": "Re-resolve a plugin from its marketplace, retaining the prior generation so the update can be rolled back",
+      "id": "cmd:plugin/update"
+    },
+    {
+      "attributed_phases": [
+        "25"
+      ],
+      "depth": 2,
+      "entrypoint": "wayland-core plugin verify",
+      "evidence": "Report manifest validity, declared permissions and API compatibility. Non-zero exit on an incompatible declared API version",
+      "id": "cmd:plugin/verify"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core profile",
+      "evidence": "Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted home with its own config, credentials, memory, and skills",
+      "id": "cmd:profile"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile create",
+      "evidence": "Create a new isolated profile",
+      "id": "cmd:profile/create"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile delete",
+      "evidence": "Delete a profile and its entire home directory",
+      "id": "cmd:profile/delete"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile export",
+      "evidence": "Export a profile's home tree to a directory",
+      "id": "cmd:profile/export"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile import",
+      "evidence": "Import a directory tree as a new profile",
+      "id": "cmd:profile/import"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile list",
+      "evidence": "List all profiles (the active one is marked with `*`)",
+      "id": "cmd:profile/list"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile rename",
+      "evidence": "Rename a profile. Re-points the active selection if it named `old`",
+      "id": "cmd:profile/rename"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile show",
+      "evidence": "Show a profile's home path and which stores it contains",
+      "id": "cmd:profile/show"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core profile use",
+      "evidence": "Set the active profile for future launches",
+      "id": "cmd:profile/use"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core project-context",
+      "evidence": "v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md / AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd",
+      "id": "cmd:project-context"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core self-update",
+      "evidence": "v0.8.1 U9: update wayland-core to the latest signed release from `FerroxLabs/wayland-core`. Verifies the `.sig` artifact against the pinned marketplace pubkey (ed25519) before atomic swap. Use `--check-only` to print versions without instal",
+      "id": "cmd:self-update"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core session",
+      "evidence": "F23-02 (Phase 23B): operator verbs over saved sessions — list, search, show, checkpoint, rewind, retry, fork, export, retain, reconcile and cancel. Every operation prints a machine-observable `F23_SESSION=` token to STDOUT and uses the exit",
+      "id": "cmd:session"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session cancel",
+      "evidence": "Cancel every interrupted turn so the session becomes resumable",
+      "id": "cmd:session/cancel"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session checkpoint",
+      "evidence": "Capture a workspace checkpoint over the named files",
+      "id": "cmd:session/checkpoint"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session export",
+      "evidence": "Write the redacted export envelope",
+      "id": "cmd:session/export"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session fork",
+      "evidence": "Fork a session, leaving the parent byte-identical",
+      "id": "cmd:session/fork"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session list",
+      "evidence": "List saved sessions (STDOUT, unlike the root `--list-sessions` flag)",
+      "id": "cmd:session/list"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session reconcile",
+      "evidence": "List or resolve outstanding unknown-effect items",
+      "id": "cmd:session/reconcile"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session retain",
+      "evidence": "Set a retain-until bound and report the resulting retention state",
+      "id": "cmd:session/retain"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session retry",
+      "evidence": "Re-run one turn. Approval is re-derived; an expired one is refused",
+      "id": "cmd:session/retry"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session rewind",
+      "evidence": "Restore a previously captured checkpoint",
+      "id": "cmd:session/rewind"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session search",
+      "evidence": "Full-text search across saved sessions",
+      "id": "cmd:session/search"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core session show",
+      "evidence": "Show one session's metadata, lineage, retention and reconcile state",
+      "id": "cmd:session/show"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core setup",
+      "evidence": "CLI surface: launch the TUI on the Onboarding (connect/configure) surface regardless of whether a config already exists. Onboarding handles an existing config gracefully via an Overwrite/Keep choice. The plain `wayland-core` launch only ope",
+      "id": "cmd:setup"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core swarm",
+      "evidence": "v0.6.4 Task 2.6: dispatch a worktree-isolated worker swarm",
+      "id": "cmd:swarm"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 1,
+      "entrypoint": "wayland-core workflow",
+      "evidence": "ForgeFlows: validate / list / run saved `.ron` workflows from `.wayland/workflows/` [aliases: forgeflows]",
+      "id": "cmd:workflow"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core workflow list",
+      "evidence": "List the saved workflows discovered under `.wayland/workflows/*.ron`. Each line is `name  ~N agents  — description`. Unparseable files are skipped with a warning to stderr",
+      "id": "cmd:workflow/list"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core workflow run",
+      "evidence": "Execute a saved workflow by name. Resolves `<NAME>` to `.wayland/workflows/<NAME>.ron`, parses it, and runs it through the workflow engine over a real provider",
+      "id": "cmd:workflow/run"
+    },
+    {
+      "attributed_phases": [],
+      "depth": 2,
+      "entrypoint": "wayland-core workflow validate",
+      "evidence": "Parse and validate a single workflow `.ron` file without executing it. Prints an OK summary on success or the typed parse error (with its field pointer) on failure",
+      "id": "cmd:workflow/validate"
+    }
+  ],
+  "targets": [
+    {
+      "artifact_name": "wayland-core-x86_64-unknown-linux-gnu",
+      "digest": null,
+      "os_family": "linux",
+      "provenance": "",
+      "reason": "CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.",
+      "status": "unbindable",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    {
+      "artifact_name": "wayland-core-aarch64-unknown-linux-gnu",
+      "digest": null,
+      "os_family": "linux",
+      "provenance": "",
+      "reason": "CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.",
+      "status": "unbindable",
+      "target": "aarch64-unknown-linux-gnu"
+    },
+    {
+      "artifact_name": "wayland-core-x86_64-apple-darwin",
+      "digest": null,
+      "os_family": "macos",
+      "provenance": "",
+      "reason": "CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.",
+      "status": "unbindable",
+      "target": "x86_64-apple-darwin"
+    },
+    {
+      "artifact_name": "wayland-core-aarch64-apple-darwin",
+      "digest": null,
+      "os_family": "macos",
+      "provenance": "",
+      "reason": "CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. This target is obtainable from CI since d9c7683b and must be bound before the macOS leg is certified.",
+      "status": "unbindable",
+      "target": "aarch64-apple-darwin"
+    },
+    {
+      "artifact_name": "wayland-core-x86_64-pc-windows-msvc",
+      "digest": null,
+      "os_family": "windows",
+      "provenance": "",
+      "reason": "CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.",
+      "status": "unbindable",
+      "target": "x86_64-pc-windows-msvc"
+    },
+    {
+      "artifact_name": "wayland-core-aarch64-pc-windows-msvc",
+      "digest": null,
+      "os_family": "windows",
+      "provenance": "",
+      "reason": "CI run 30269095004 for this exact commit is status=queued (measured 2026-07-27); the release-binary matrix has produced no artifact yet. Re-run the resolver once that run completes.",
+      "status": "unbindable",
+      "target": "aarch64-pc-windows-msvc"
+    }
+  ]
+}

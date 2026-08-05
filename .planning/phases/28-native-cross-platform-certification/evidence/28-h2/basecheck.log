@@ -1,0 +1,38 @@
+﻿F28H2 BASECHECK started=2026-07-29T00:35:31.5764346+07:00
+BASE_SHA=12fc794f08012333adc7c864cdeff95540c0f014
+BASE_DIRTY=0
+BASE_CLIPPY_WARNINGS=4
+BASE_CLIPPY_UNUSED_IMPORT=3
+BASE_BWRAP=required_live_bwrap_admission;result=FAILED;passed=0;failed=1
+BASE_BWRAP=required_live_bwrap_hard_containment_mint_and_drift;result=FAILED;passed=0;failed=1
+BASE_BWRAP=required_live_bwrap_retained_cwd_enforcement;result=FAILED;passed=0;failed=1
+HEAD_SHA=3f3f93dc8dc64c847ad5ab0955837d3e91d44d1a
+HEAD_DIRTY=0
+BUILD:    Compiling wcore-sandbox v0.12.25 (C:\f28h2-repo\crates\wcore-sandbox)
+BUILD:    Compiling wcore-cli v0.12.25 (C:\f28h2-repo\crates\wcore-cli)
+BUILD:    Compiling wcore-plugin-api v0.12.25 (C:\f28h2-repo\crates\wcore-plugin-api)
+BUILD:    Compiling wcore-tools v0.12.25 (C:\f28h2-repo\crates\wcore-tools)
+BUILD:    Compiling wcore-swarm v0.12.25 (C:\f28h2-repo\crates\wcore-swarm)
+BUILD:    Compiling wcore-exec-backend v0.12.25 (C:\f28h2-repo\crates\wcore-exec-backend)
+BUILD:    Compiling wcore-agents-pack v0.12.25 (C:\f28h2-repo\crates\wcore-agents-pack)
+BUILD:    Compiling wayland-honcho v0.12.25 (C:\f28h2-repo\crates\wayland-honcho)
+BUILD:    Compiling wcore-plugin-wasm v0.12.25 (C:\f28h2-repo\crates\wcore-plugin-wasm)
+BUILD:    Compiling wcore-pluginsrc v0.12.25 (C:\f28h2-repo\crates\wcore-pluginsrc)
+BUILD:    Compiling wayland-ollama v0.12.25 (C:\f28h2-repo\crates\wayland-ollama)
+BUILD:    Compiling wayland-browser v0.12.25 (C:\f28h2-repo\crates\wayland-browser)
+BUILD:    Compiling wayland-cua v0.12.25 (C:\f28h2-repo\crates\wayland-cua)
+BUILD:    Compiling wcore-dispatch v0.12.25 (C:\f28h2-repo\crates\wcore-dispatch)
+BUILD:    Compiling wcore-honcho-adapter v0.12.25 (C:\f28h2-repo\crates\wcore-honcho-adapter)
+BUILD:    Compiling wcore-mcp v0.12.25 (C:\f28h2-repo\crates\wcore-mcp)
+BUILD:    Compiling wcore-browser v0.12.25 (C:\f28h2-repo\crates\wcore-browser)
+BUILD:    Compiling wcore-cua v0.12.25 (C:\f28h2-repo\crates\wcore-cua)
+BUILD:    Compiling wcore-skills v0.12.25 (C:\f28h2-repo\crates\wcore-skills)
+BUILD:    Compiling wcore-plugin-subprocess v0.12.25 (C:\f28h2-repo\crates\wcore-plugin-subprocess)
+BUILD:    Compiling wcore-eval v0.12.25 (C:\f28h2-repo\crates\wcore-eval)
+BUILD:    Compiling wcore-evolve v0.12.25 (C:\f28h2-repo\crates\wcore-evolve)
+BUILD:    Compiling wcore-agent v0.12.25 (C:\f28h2-repo\crates\wcore-agent)
+BUILD:     Finished `release` profile [optimized] target(s) in 11m 40s
+BUILD: warning: the following packages contain code that will be rejected by a future version of Rust: imap-proto v0.10.2
+BUILD: note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+HEAD_EXE_SHA256=2114d41c2db1d0c20296126785a08b36c4fb75dca9d255bcf38c8240d7e7aded
+finished=2026-07-29T00:47:16.9299387+07:00

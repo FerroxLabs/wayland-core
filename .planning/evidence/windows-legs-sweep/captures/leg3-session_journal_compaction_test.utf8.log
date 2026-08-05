@@ -1,0 +1,53 @@
+﻿cargo : warning: unused import: `Component`
+At line:1 char:409
++ ... n_test")) { cargo test -p wcore-agent --test $t -- --nocapture *> "D: ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: unused import: `Component`:String) [], Remo 
+   teException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  --> crates\wcore-tools\src\media_intake.rs:56:17
+   |
+56 | use std::path::{Component, Path, PathBuf};
+   |                 ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `wcore-tools` (lib) generated 1 warning (run `cargo fix --lib -p wcore-tools` to apply 1 
+suggestion)
+   Compiling wcore-agent v0.12.25 (D:\wls\repo\crates\wcore-agent)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.54s
+warning: the following packages contain code that will be rejected by a future version of Rust: 
+imap-proto v0.10.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo 
+report future-incompatibilities --id 1`
+     Running tests\session_journal_compaction_test.rs 
+(D:\wls\target\debug\deps\session_journal_compaction_test-67feb0bf065a0fc8.exe)
+
+running 23 tests
+test genesis_legacy_snapshot_substitution_cannot_mint_current_authority ... ok
+test committed_snapshot_with_torn_journal_fails_closed ... ok
+test committed_snapshot_with_empty_journal_fails_closed ... ok
+test committed_snapshot_with_missing_journal_fails_closed ... ok
+test representable_legacy_snapshot_is_migrated_under_writer_lease ... ok
+test self_consistent_snapshot_state_substitution_is_not_authoritative ... ok
+test restart_rejects_public_snapshot_dacl ... ok
+test compacted_legacy_snapshot_substitution_cannot_be_laundered_into_current_authority ... ok
+test pending_snapshot_publication_repairs_forward_from_recovered_journal_state ... ok
+test restart_rejects_hard_linked_snapshot ... ok
+test restart_rejects_symlinked_snapshot ... ok
+test restart_rejects_oversize_snapshot ... ok
+test restart_rejects_snapshot_path_replacement ... ok
+test repeated_current_snapshot_publication_is_byte_idempotent ... ok
+test compacted_non_genesis_log_without_snapshot_fails_closed ... ok
+test pending_snapshot_publication_never_clears_when_target_is_not_reconstructible ... ok
+test compacted_suffix_appends_and_reopens_without_duplicate_state ... ok
+test older_journal_snapshot_pair_cannot_roll_back_accepted_authority ... ok
+test crash_phases_select_snapshot_plus_full_log_or_snapshot_plus_anchor ... ok
+test snapshot_log_mismatch_and_snapshot_corruption_fail_closed ... ok
+test substituted_anchor_and_binding_cannot_authorize_foreign_snapshot ... ok
+test torn_authority_publication_does_not_authorize_snapshot ... ok
+test validated_snapshot_at_every_cursor_replays_the_same_committed_state ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+

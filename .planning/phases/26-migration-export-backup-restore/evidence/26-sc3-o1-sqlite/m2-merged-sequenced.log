@@ -1,0 +1,39 @@
+[m2-merged-sequenced] prefilling memory.db to ~150 MiB ...
+[m2-merged-sequenced] prefill done in 0.9s, memory.db = 158.3 MiB
+[m2-merged-sequenced] waiting for writers: 0/3 started (iter 0, 1785342724)
+[m2-merged-sequenced] waiting for writers: 3/3 started (iter 1, 1785342725)
+[m2-merged-sequenced] journal modes reported by writers: {'w0': 'wal', 'w1': 'wal', 'w2': 'wal'}
+[m2-merged-sequenced] all 3 writers exited; home is at rest
+[m2-merged-sequenced] pre-archive committed high-water marks: {'w0': 17940, 'w1': 17812, 'w2': 17582}
+[m2-merged-sequenced] backup create rc=0 in 13.20s
+archive: /tmp/lane-backup-sqlite-m2-merged-sequenced/backup.tar.gz
+payloads: 2
+tree_digest: 4fc9b6155d185f16dab4f41be42aa95144b0bf6f17c1f53e31b2f5b55a28ff58
+credentials_backend: unknown
+secrets_carried: no
+sqlite_captures: 1
+sqlite_capture: memory.db
+windows_unrestorable_paths: 0
+[m2-merged-sequenced] post-archive committed high-water marks: {'w0': 17940, 'w1': 17812, 'w2': 17582}
+[m2-merged-sequenced] backup restore rc=0
+restored: /tmp/lane-backup-sqlite-m2-merged-sequenced/restored
+payloads: 2
+recovered_before_start: 0
+remap_disposition: remapped
+credential remap: backend `unknown` — 0 credential source(s) will be absent after restore. action: none required; every secret source resolves inside the restored home.
+[m2-merged-sequenced] restored entries: ['config.toml', 'memory.db']
+---- RESULT ----
+ARM: sequenced
+   ...(integrity_check problem lines elided)...
+ARM: sequenced
+WRITERS: 3
+ARCHIVE-SECONDS: 13.20
+PRE-ARCHIVE-COMMITTED: 53334
+RESTORED-SIDECARS: []
+INTEGRITY-CHECK: ok
+INTEGRITY-PROBLEM-LINES: 0
+MISSING-COMMITTED-ROWS: 0
+MISSING-BY-WRITER: {'w0': 0, 'w1': 0, 'w2': 0}
+VERDICT: PASS
+WLRC=0
+WLDONE

@@ -1,0 +1,68 @@
+{
+  "finding": "F24-C3-H4",
+  "binary": "/root/wl-24c3h4-postfix",
+  "binary_sha256": "7a042868355c83851a9d397e5d1e62c563befba06809730feebb00bc4f93ce80",
+  "build_info": "wayland-core 0.12.25 (source 353a5f6e5b25fa622df2c50c17497b282f88d42f)",
+  "run_id": "83ac7fc5",
+  "submitted_total": 6,
+  "preload": 0,
+  "live": 6,
+  "settle_ms": 45000,
+  "replied_total": 6,
+  "turns_total": 6,
+  "raw_replies_total": 6,
+  "instrument_fault": null,
+  "cron_requested": false,
+  "cron_text": null,
+  "cron_fires": null,
+  "lost_total": 0,
+  "lost": [],
+  "duplicated_total": 0,
+  "duplicated": [],
+  "max_concurrent_getupdates": 1,
+  "poll_total": 56,
+  "still_pending": [],
+  "replies": [
+    {
+      "seq": 115,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-0\\-83ac7fc5",
+      "at": "2026-07-28T18:19:56.395Z"
+    },
+    {
+      "seq": 116,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-1\\-83ac7fc5",
+      "at": "2026-07-28T18:19:56.649Z"
+    },
+    {
+      "seq": 119,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-2\\-83ac7fc5",
+      "at": "2026-07-28T18:19:56.897Z"
+    },
+    {
+      "seq": 120,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-3\\-83ac7fc5",
+      "at": "2026-07-28T18:19:57.184Z"
+    },
+    {
+      "seq": 121,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-4\\-83ac7fc5",
+      "at": "2026-07-28T18:19:57.432Z"
+    },
+    {
+      "seq": 122,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-5\\-83ac7fc5",
+      "at": "2026-07-28T18:19:57.708Z"
+    }
+  ],
+  "gateway_log_lines": [
+    "\u001b[2m2026-07-28T18:19:06.909540Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24c3h4tg \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mtelegram",
+    "[gateway] channels registered=1",
+    "[gateway] inbound: subscriber spawned, webhook host disabled policies=1"
+  ]
+}

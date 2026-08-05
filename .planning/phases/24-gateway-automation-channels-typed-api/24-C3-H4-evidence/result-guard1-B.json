@@ -1,0 +1,85 @@
+{
+  "finding": "F24-C3-H4",
+  "binary": "/root/wl-24c3h4-postfix",
+  "binary_sha256": "7a042868355c83851a9d397e5d1e62c563befba06809730feebb00bc4f93ce80",
+  "build_info": "wayland-core 0.12.25 (source 353a5f6e5b25fa622df2c50c17497b282f88d42f)",
+  "run_id": "e04a2da9",
+  "submitted_total": 8,
+  "preload": 4,
+  "live": 4,
+  "replied_total": 8,
+  "turns_total": 8,
+  "raw_replies_total": 9,
+  "instrument_fault": null,
+  "cron_requested": true,
+  "cron_text": "F24C3H4-CRON e04a2da9",
+  "cron_fires": 1,
+  "lost_total": 0,
+  "lost": [],
+  "duplicated_total": 0,
+  "duplicated": [],
+  "max_concurrent_getupdates": 1,
+  "poll_total": 57,
+  "still_pending": [],
+  "replies": [
+    {
+      "seq": 31,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-pre\\-0\\-e04a2da9",
+      "at": "2026-07-28T17:56:29.328Z"
+    },
+    {
+      "seq": 34,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-pre\\-1\\-e04a2da9",
+      "at": "2026-07-28T17:56:29.502Z"
+    },
+    {
+      "seq": 35,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-pre\\-2\\-e04a2da9",
+      "at": "2026-07-28T17:56:29.795Z"
+    },
+    {
+      "seq": 36,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-pre\\-3\\-e04a2da9",
+      "at": "2026-07-28T17:56:30.065Z"
+    },
+    {
+      "seq": 37,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-0\\-e04a2da9",
+      "at": "2026-07-28T17:56:30.375Z"
+    },
+    {
+      "seq": 40,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-1\\-e04a2da9",
+      "at": "2026-07-28T17:56:30.702Z"
+    },
+    {
+      "seq": 41,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-2\\-e04a2da9",
+      "at": "2026-07-28T17:56:31.056Z"
+    },
+    {
+      "seq": 42,
+      "chat_id": "770001",
+      "text": "F24C3\\-REPLY f24c3\\-h4\\-live\\-3\\-e04a2da9",
+      "at": "2026-07-28T17:56:31.416Z"
+    },
+    {
+      "seq": 133,
+      "chat_id": "f24c3h4tg",
+      "text": "F24C3H4\\-CRON e04a2da9",
+      "at": "2026-07-28T17:57:16.365Z"
+    }
+  ],
+  "gateway_log_lines": [
+    "\u001b[2m2026-07-28T17:56:19.564735Z\u001b[0m \u001b[32m INFO\u001b[0m channel auto-registered \u001b[3mchannel\u001b[0m\u001b[2m=\u001b[0mf24c3h4tg \u001b[3mplatform\u001b[0m\u001b[2m=\u001b[0mtelegram",
+    "[gateway] channels registered=1",
+    "[gateway] inbound: subscriber spawned, webhook host disabled policies=1"
+  ]
+}

@@ -1,0 +1,16 @@
+# Phase 27 / plan 27-02 Task 1 — observation ledger.
+# Host: hetzner-dsm (Ubuntu 24.04, Linux 6.8.0-101). SHA: 2ecdfdf5.
+# Machine facts established BEFORE any observation: no chromium /
+# chromium-browser / google-chrome / camoufox anywhere on PATH; DISPLAY and
+# WAYLAND_DISPLAY both unset. This box can drive neither a browser nor a
+# desktop, so every "true" below is a claim the machine cannot honour.
+F27-02-OBS-01::CONFIRMED::evidence=handshake/baseline.jsonl
+F27-02-OBS-02::CONFIRMED::evidence=handshake/no-browser-backend.jsonl
+F27-02-OBS-03::CONFIRMED::evidence=handshake/display-advertised.jsonl
+F27-02-OBS-04::CONFIRMED::evidence=handshake/cloud-creds-absent.jsonl
+F27-02-OBS-05::CONFIRMED::evidence=handshake/cloud-creds-present.jsonl
+F27-02-OBS-06::CONFIRMED::evidence=READINESS.log
+F27-02-OBS-07::CONFIRMED::evidence=ops/browser-navigate-policy-allowed-wire.jsonl
+F27-02-OBS-08::REFUTED-NO-DEFECT::evidence=ops/browser-navigate-wire.jsonl
+F27-02-OBS-09::CONFIRMED::evidence=ops/browser-navigate-allowed-wire.jsonl
+F27-02-OBS-10::CONFIRMED::evidence=OPERATIONS.log

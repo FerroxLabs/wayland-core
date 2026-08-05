@@ -25,6 +25,7 @@ wcore-types.workspace    = true
 wcore-tools.workspace    = true
 wcore-protocol.workspace = true
 wcore-config.workspace   = true
+wcore-sandbox.workspace  = true
 
 async-trait.workspace = true
 tokio.workspace       = true
@@ -34,12 +35,17 @@ reqwest.workspace     = true
 wcore-egress.workspace = true
 serde.workspace       = true
 serde_json.workspace  = true
+base64.workspace      = true
 anyhow.workspace      = true
 thiserror.workspace   = true
 tracing.workspace     = true
 url.workspace         = true
 ipnet = "2"
 parking_lot.workspace = true
+# 27-C2(b): the liveness probe resolves the sidecar binary on PATH WITHOUT
+# executing it (bootstrap.rs's `<command> --help` preflight note). `which` is
+# PATHEXT-aware on Windows; same version wcore-sandbox already pins.
+which = "6"
 
 # Wave BR — supervisor uses libc::kill(pid, 0) for parent-PID liveness probes.
 [target.'cfg(unix)'.dependencies]

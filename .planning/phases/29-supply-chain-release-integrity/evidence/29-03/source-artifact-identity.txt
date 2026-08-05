@@ -1,0 +1,54 @@
+F29-02-SOURCE-ARTIFACT-IDENTITY — what moved, and what did not
+==============================================================
+Commit: 3658c4281fe228af1f700a56a42e662d3d6a9c7c
+
+29-01 named this the central finding of the census (F29-CEN-10, HIGH):
+
+  | object                              | digest                          | who vouches |
+  |-------------------------------------|---------------------------------|-------------|
+  | the ARCHIVE users download          | Sigstore attestation subject    | gh attestation verify |
+  | the extracted BINARY that was eval'd| receipt.identity.binary_sha256  | the Phase 28 receipt's CI signature |
+
+and measured that NOTHING in the tree related those two digests to each other.
+
+WHAT THIS PLAN CLOSED — one of the two joins
+---------------------------------------------
+The signed release manifest carries `artifacts[]` with name, sha256 and
+byte_length. Before this plan nothing compared the bytes actually downloaded
+against that list, so those digests were decorative: a correctly signed
+manifest would have sat beside whatever archive the source handed over.
+
+`VerifiedManifest::check_archive` now binds them, and `self_update::run` calls
+it on the downloaded file immediately BEFORE `verify_provenance`, ANDed with it
+and never substituting for it:
+
+    manifest.check_archive(&archive_name, &digest, bytes)
+
+Refusals are typed and distinct: `ArtifactNotInManifest` when the manifest does
+not name the archive this host needs at all, and `ArtifactDigestMismatch`
+carrying expected and actual digest AND byte length. Proved by
+`the_downloaded_archive_must_match_the_digest_the_manifest_signed`, which
+carries its pristine control (the named digest and length are ACCEPTED) before
+each of its three mutations.
+
+So: MANIFEST <-> ARCHIVE is now bound, in the shipped updater.
+
+WHAT THIS PLAN DID NOT CLOSE — the other join, and it is the important one
+--------------------------------------------------------------------------
+MANIFEST <-> CERTIFIED BINARY remains open. The manifest models it as
+`certification: Evidence<CertificationBindingV1>` and every manifest this lane
+produced carries:
+
+    "certification": { "state": "unavailable",
+                       "code": "phase_28_certification_binding_not_yet_available" }
+
+That is deliberate: the binding is 29-01's requirement R28-A on Phase 28, filed
+in 29-01-RECEIPT-INTERFACE.md, and Phase 28 is executing concurrently. Phase 29
+invents no receipt field. Until R28-A lands, a release manifest still cannot
+honestly claim that the certified candidate is the artifact users download —
+it can now only claim that the archive users download is the archive the
+manifest names.
+
+This clause is therefore graded PARTIAL, not MET. Grading it MET on the archive
+half alone would be exactly the downward redefinition this program has already
+paid for.

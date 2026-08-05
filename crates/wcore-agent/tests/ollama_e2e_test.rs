@@ -22,8 +22,11 @@
 //! `Arc<dyn PluginProvider>` to a concrete `wcore_providers::LlmProvider`
 //! is the W8c.3.D chain edge") is now real code.
 
+mod common;
+
 use std::sync::Arc;
 
+use common::{RECOVERY_TEST_KEY, configure_persisted_test_session};
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::null_sink::NullSink;
 use wcore_config::compat::ProviderCompat;
@@ -172,16 +175,21 @@ async fn bootstrap_with_ollama_provider_completes_a_turn() {
         "llama4",
     ));
 
-    let config = ollama_test_config("ollama:llama4");
+    let mut config = ollama_test_config("ollama:llama4");
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+    configure_persisted_test_session(&mut config, workdir.path());
+    let mut result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
         .provider(provider)
         .build()
         .await
         .expect("bootstrap with ollama provider should succeed");
-
-    let mut engine = result.engine;
-    let outcome = engine
+    result
+        .engine
+        .init_session("ollama", workdir.path().to_str().unwrap(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
+    let outcome = result
+        .engine
         .run("say hello", "msg-1")
         .await
         .expect("engine should drive one turn against wiremock-backed Ollama");

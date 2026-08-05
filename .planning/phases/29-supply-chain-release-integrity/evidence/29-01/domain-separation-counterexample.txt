@@ -1,0 +1,45 @@
+$ echo '### receipt.rs DOES domain-separate:'; /usr/bin/grep -n 'SIGNATURE_DOMAIN' crates/wcore-eval-scenarios/src/receipt.rs; echo '### plugin/index.rs does NOT — it signs raw serde_json::to_vec(&body):'; /usr/bin/sed -n '68,72p' crates/wcore-cli/src/plugin/index.rs; /usr/bin/sed -n '128,142p' crates/wcore-cli/src/plugin/index.rs; echo '### and its bundled trust root is still the all-zeros placeholder refused at runtime:'; /usr/bin/sed -n '100,115p' crates/wcore-cli/src/plugin/index.rs
+--- captured 2026-07-27T14:51:21Z at tree c6766f02498f7bc7dda1511108c1d59ef9741af0 ---
+### receipt.rs DOES domain-separate:
+25:const SIGNATURE_DOMAIN: &[u8] = b"wayland.eval.receipt.v1\0";
+943:    let mut message = Vec::with_capacity(SIGNATURE_DOMAIN.len() + body_sha256.len());
+944:    message.extend_from_slice(SIGNATURE_DOMAIN);
+### plugin/index.rs does NOT — it signs raw serde_json::to_vec(&body):
+#[serde(deny_unknown_fields)]
+pub struct IndexEnvelope {
+    /// Hex-encoded ed25519 signature over `serde_json::to_vec(&body)`.
+    pub signature: String,
+    pub body: IndexBody,
+        Self { pubkey }
+    }
+
+    /// Verify and return the body, or surface a structured error.
+    pub fn verify(&self, env: &IndexEnvelope) -> Result<IndexBody, IndexError> {
+        let sig_bytes = decode_hex_n(&env.signature, 64)?;
+        let sig = Signature::from_slice(&sig_bytes)
+            .map_err(|e| IndexError::BadSignature(e.to_string()))?;
+        let body_bytes = serde_json::to_vec(&env.body)?;
+        self.pubkey
+            .verify(&body_bytes, &sig)
+            .map_err(|e| IndexError::BadSignature(e.to_string()))?;
+        // Schema gate: refuse forwards-incompatible versions. Bump the
+        // accept-list as the schema evolves.
+        if env.body.schema_version != "1.0" {
+### and its bundled trust root is still the all-zeros placeholder refused at runtime:
+    ///
+    /// F-021: refuses to construct when `INDEX_PUBKEY_HEX` is still the
+    /// all-zeros placeholder. The identity-point key would let anyone forge
+    /// signatures, so any caller that hits this path before the real key ships
+    /// gets a clear error instead of a permissive trust root.
+    pub fn bundled() -> Result<Self, IndexError> {
+        if INDEX_PUBKEY_HEX.bytes().all(|b| b == b'0') {
+            return Err(IndexError::BadPubKey(
+                "INDEX_PUBKEY_HEX is the all-zeros placeholder. Replace it with the real \
+                 FerroxLabs signing pubkey before using the marketplace verifier. (F-021)"
+                    .into(),
+            ));
+        }
+        Self::with_pubkey_hex(INDEX_PUBKEY_HEX)
+    }
+
+--- exit=0 ---

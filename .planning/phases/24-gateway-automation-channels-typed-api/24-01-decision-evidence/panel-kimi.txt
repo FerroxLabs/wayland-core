@@ -1,0 +1,30 @@
+• This is a panel decision task. Answer with reasoning and end with PANEL_POSITION line.
+
+  Analysis: The binding rule is clear. win-service-scm measured "unsupported" — cannot be chosen. win-defer requires detach-baseline verdict to exist — it measured "dies"... wait, the rule says win-defer "requires a detach-baseline verdict to exist. It measured: dies." A verdict exists (dies), so defer is technically eligible? But defer fails criteria. win-detached-only measured survives — eligible. win-scheduled-task measured survives — eligible.
+
+  Criterion 1 demands native service lifecycle on Windows. Detached-only doesn't provide install/start/status/drain lifecycle management by the platform. Scheduled task provides registration, run-at-logon, restart-on-failure, queryable via schtasks — closest analogue to per-user launchd/systemd. Criterion 5 requires platform's own mechanism to bring runtime back after hard kill — Task Scheduler restart-on-failure can do that; detached-only cannot.
+
+  So: win-scheduled-task, with the detach-flag defect fix as prerequisite (not mutually exclusive).
+
+  Write concise reasoning, end with exact line.
+
+• **Position: win-scheduled-task**
+
+  Reasoning:
+
+  The binding rule eliminates win-service-scm outright. Its required precondition is `PROBE scm RESULT=survives`; the measured result is `unsupported`. The probe proved registration is available but start returned 1053 — survival under the SCM was never demonstrated, and the handshake-capable binary that could demonstrate it does not exist. Choosing it would mean building the phase's central Windows property on an unmeasured mechanism. That is exactly what the hard rule forbids, and no amount of structural elegance overrides it.
+
+  win-defer is technically admissible (a detach-baseline verdict exists — it is `dies`), but it concedes both Criterion 1 and Criterion 5 on a platform they name explicitly. It should be the fallback only if nothing measured available, which is not the case.
+
+  That leaves the two surviving mechanisms, and the prompt's own framing is correct: this is not "which spawn" but "which registration model." The detach-flag fix (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB`, measured 600/600 beats, normal exit) is a prerequisite defect fix under either option — the current no-flags path is a confirmed product bug (1/600 beats, killed by the session's Job Object). So the real question is what sits on top of the fixed spawn:
+
+  - **win-detached-only** gives a process that survives its spawning session but has no install/start/status/drain/restart surface owned by the platform. Criterion 1 says "native service lifecycle (install / start / status / drain / restart / upgrade / rollback)" — a hand-started process is not that. Worse, Criterion 5 requires the platform's own mechanism to bring the runtime back after a hard kill with no drain. Detached-only has no resurrection mechanism at all; it cannot close Criterion 5 by construction.
+  - **win-scheduled-task** measured `survives`: registered at logon, ran, wrote 119 beats from a session-independent parent, corroborated by a stray child alive ~40s after its ssh session ended. Task Scheduler gives install (`/create`), start (`/run`), status (`/query`), and restart-on-failure expressible in the task definition — which is precisely the platform-owned recovery Criterion 5 demands. It is also the closest privilege-and-shape analogue to the per-user launchd agent and per-user systemd unit already in the repo, keeping the three families symmetric without an elevation prompt in the install path.
+
+  The costs are real but bounded and documentable: no pre-login start (a documented difference from the Unix families, and acceptable for a per-user agent runtime whose siblings are also per-user), and a `schtasks` CLI contract whose output must be parsed carefully rather than a typed API. Neither cost touches the criteria; the SCM's costs (elevation, handshake implementation, drain-budget reconciliation against the service stop timeout) would be payable only *after* the mechanism were proven — and it was not.
+
+  So: fix the detach flags as the defect repair they are, and register through Task Scheduler as the lifecycle mechanism. Both measurements support that combination; no measurement supports any other.
+
+  PANEL_POSITION=win-scheduled-task
+
+To resume this session: kimi -r session_59914bc4-b75b-43a2-9f06-1a1606aa1c54

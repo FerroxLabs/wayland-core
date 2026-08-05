@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::retry::{RetryPolicy, RetryState};
+use crate::trigger::{Trigger, TriggerBound};
+
 /// What a cron job does when it fires.
 ///
 /// Canonical on-disk form uses `kind` as the discriminator. The Desktop app
@@ -18,7 +21,37 @@ pub enum Target {
     /// Run a slash command (e.g. "/memory show working").
     Slash { command: String },
     /// Send a message through a registered channel.
-    Channel { channel_name: String, text: String },
+    ///
+    /// # `conversation_id` — F-ML-5, found live on 2026-07-30
+    ///
+    /// This variant carried only `{ channel_name, text }`, and the dispatcher
+    /// (`wcore-agent/src/cron.rs`) passed the **channel name** as the outgoing
+    /// message's `conversation_id` for want of anything better. So every
+    /// scheduled channel delivery addressed a conversation named after the
+    /// channel, and could only arrive where those two strings happened to be
+    /// equal. Measured against a real homeserver:
+    ///
+    /// ```text
+    /// PUT /_matrix/client/v3/rooms/mxlive/send/m.room.message/cron:…
+    /// 403 M_FORBIDDEN "User @… not in room mxlive"     <- `mxlive` is the CHANNEL NAME
+    /// ```
+    ///
+    /// It is not Matrix-specific. Slack (`lib.rs:416`), WhatsApp (`:238`) and
+    /// SMS (`:250`) each fall back to a configured default destination — but
+    /// only when `conversation_id` **is empty**, which cron never produced. So
+    /// no adapter's configured default was reachable from a scheduled delivery.
+    ///
+    /// `None` now means "the adapter's own default", which is what those three
+    /// fallbacks were written for and what an adapter with no default should
+    /// refuse rather than guess at.
+    Channel {
+        channel_name: String,
+        text: String,
+        /// Destination conversation / room / chat id. `None` defers to the
+        /// adapter's configured default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+    },
     /// Invoke a skill by name (engine routes it).
     Skill {
         name: String,
@@ -40,6 +73,8 @@ enum TargetRepr {
     Channel {
         channel_name: String,
         text: String,
+        #[serde(default)]
+        conversation_id: Option<String>,
     },
     Skill {
         name: String,
@@ -52,7 +87,15 @@ impl From<TargetRepr> for Target {
     fn from(r: TargetRepr) -> Self {
         match r {
             TargetRepr::Slash { command } => Target::Slash { command },
-            TargetRepr::Channel { channel_name, text } => Target::Channel { channel_name, text },
+            TargetRepr::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            } => Target::Channel {
+                channel_name,
+                text,
+                conversation_id,
+            },
             TargetRepr::Skill { name, args } => Target::Skill { name, args },
         }
     }
@@ -110,6 +153,24 @@ pub enum CronFireOutcome {
     /// advanced (so the job does not hot-loop re-firing every tick within
     /// its window) but the outcome is NOT recorded as a success.
     Staged,
+    /// The fire was SELECTED while this process owned the schedule, and
+    /// ownership was lost before the dispatch could be performed — a
+    /// gateway entering drain while a tick was in flight.
+    ///
+    /// `last_fired` is NOT advanced, because the job genuinely did not run
+    /// and the incoming owner must still fire it. Recorded rather than
+    /// silent: a fire that vanished between selection and dispatch with no
+    /// record is indistinguishable from a fire that never came due, and
+    /// that ambiguity is what makes a handover look like a lost job.
+    Abandoned { reason: String },
+    /// The retry cap was reached and this job has STOPPED trying.
+    ///
+    /// A named terminal state rather than an absence of further records:
+    /// a job that gave up an hour ago and a job that is between attempts are
+    /// otherwise indistinguishable to an operator reading `cron status`.
+    /// `last_fired` IS advanced, so an exhausted job does not re-select on
+    /// every tick.
+    GaveUp { attempts: u32, message: String },
 }
 
 /// Snapshot of a single cron fire, written to the ring-buffer history
@@ -148,6 +209,32 @@ pub struct CronJob {
     /// after every dispatch (success or error). None until the first fire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_result: Option<CronFireOutcome>,
+
+    // ---- Phase 24 plan 24-02: the trigger vocabulary ----
+    //
+    // All three are `#[serde(default)]` and skipped when absent, so every job
+    // written before this vocabulary existed still loads byte-for-byte
+    // unchanged and every job written after it stays readable by an older
+    // reader. `expression` remains the canonical cron field; a job with no
+    // `trigger` resolves to [`Trigger::Cron`] over it, which is exactly what
+    // it did before.
+    /// WHEN this job fires, separately from what it does. Absent on a job
+    /// authored before the vocabulary existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Trigger>,
+    /// This job's own bound. NARROWER than its trigger's default or it is
+    /// clamped back — see [`TriggerBound::clamp_to`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<TriggerBound>,
+    /// How this job retries a failed dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+    /// Retry bookkeeping for the current failure run.
+    #[serde(default)]
+    pub retry_state: RetryState,
+    /// Last heartbeat observed for a commitment trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat: Option<DateTime<Utc>>,
 }
 
 impl CronJob {
@@ -166,14 +253,106 @@ impl CronJob {
             created_at: Utc::now(),
             last_fired: None,
             last_result: None,
+            trigger: None,
+            bound: None,
+            retry: None,
+            retry_state: RetryState::default(),
+            last_heartbeat: None,
         })
     }
 
-    /// Compute the next-fire time strictly after `after`. Returns
-    /// `Ok(None)` if the cron schedule has no future occurrence (e.g. a
-    /// specific past timestamp).
+    /// Construct a job on any trigger in the vocabulary.
+    ///
+    /// `expression` is filled with the trigger's rendered descriptor so the
+    /// field an operator already reads keeps meaning "when this fires" for
+    /// every variant rather than only for cron. The trigger's own parameters
+    /// are validated; the descriptor is display, not authority.
+    pub fn with_trigger(trigger: Trigger, target: Target) -> crate::Result<Self> {
+        trigger.validate()?;
+        Ok(Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            expression: render_trigger(&trigger),
+            target,
+            enabled: true,
+            created_at: Utc::now(),
+            last_fired: None,
+            last_result: None,
+            trigger: Some(trigger),
+            bound: None,
+            retry: None,
+            retry_state: RetryState::default(),
+            last_heartbeat: None,
+        })
+    }
+
+    /// The trigger this job actually fires on.
+    ///
+    /// A job with no stored trigger resolves to [`Trigger::Cron`] over its
+    /// `expression`, which is precisely the behaviour every job had before
+    /// the vocabulary existed.
+    pub fn effective_trigger(&self) -> Trigger {
+        self.trigger.clone().unwrap_or_else(|| Trigger::Cron {
+            expression: self.expression.clone(),
+        })
+    }
+
+    /// The bound actually applied, after clamping any stored bound to the
+    /// trigger's default. Never wider than the default.
+    pub fn effective_bound(&self) -> TriggerBound {
+        let default = self.effective_trigger().default_bound();
+        match self.bound.clone() {
+            Some(b) => b.clamp_to(&default),
+            None => default,
+        }
+    }
+
+    /// The retry policy actually applied, after clamping.
+    pub fn effective_retry(&self) -> RetryPolicy {
+        self.retry.clone().unwrap_or_default().clamped()
+    }
+
+    /// The observable heartbeat state, for a commitment trigger only.
+    pub fn heartbeat_state(&self, now: DateTime<Utc>) -> Option<crate::trigger::HeartbeatState> {
+        crate::trigger::heartbeat_state(&self.effective_trigger(), self.last_heartbeat, now)
+    }
+
+    /// Compute the next-fire time strictly after `after`, under this job's
+    /// trigger and bound.
+    ///
+    /// `Ok(None)` when there is no further occurrence: a spent one-shot, a
+    /// commitment past its deadline, a cron expression pinned to the past, or
+    /// an externally driven trigger whose next fire the clock cannot predict.
     pub fn next_fire_after(&self, after: DateTime<Utc>) -> crate::Result<Option<DateTime<Utc>>> {
-        crate::schedule::next_fire_after(&self.expression, after)
+        self.effective_trigger()
+            .next_after(after, &self.effective_bound())
+    }
+}
+
+/// Render a trigger as the human-readable descriptor stored in
+/// `CronJob::expression`.
+///
+/// A cron trigger renders as its plain expression, so nothing about the
+/// historical shape changes on disk. Every other variant renders with a
+/// leading `@` so it is unmistakably not a cron expression to any reader —
+/// including one that tries to parse it.
+pub fn render_trigger(t: &Trigger) -> String {
+    match t {
+        Trigger::Cron { expression } => expression.clone(),
+        Trigger::Once { at } => format!("@once {}", at.to_rfc3339()),
+        Trigger::Interval { every_secs } => format!("@every {every_secs}s"),
+        Trigger::Event { topic } => format!("@event {topic}"),
+        Trigger::Webhook { path, require_auth } => {
+            let auth = if *require_auth { "auth" } else { "OPEN" };
+            format!("@webhook {path} ({auth})")
+        }
+        Trigger::Poll { url, every_secs } => format!("@poll {url} every {every_secs}s"),
+        Trigger::Commitment {
+            deadline,
+            heartbeat_secs,
+        } => format!(
+            "@commit by {} heartbeat {heartbeat_secs}s",
+            deadline.to_rfc3339()
+        ),
     }
 }
 
@@ -196,10 +375,51 @@ mod tests {
         let t = Target::Channel {
             channel_name: "team-slack".into(),
             text: "status check".into(),
+            conversation_id: None,
         };
         let s = serde_json::to_string(&t).unwrap();
         let back: Target = serde_json::from_str(&s).unwrap();
         assert_eq!(t, back);
+    }
+
+    /// F-ML-5 back-compat and forward-compat, in one test.
+    ///
+    /// Every job already on disk was written WITHOUT `conversation_id`. If it
+    /// failed to load, the fix would silently disable every existing schedule,
+    /// which is a worse outcome than the defect. And a job that DOES carry one
+    /// must round-trip it, or the flag is decorative.
+    #[test]
+    fn a_channel_target_written_before_conversation_id_existed_still_loads() {
+        let legacy = r#"{"kind":"channel","channel_name":"team-slack","text":"status check"}"#;
+        let back: Target = serde_json::from_str(legacy).expect("legacy records must still load");
+        assert_eq!(
+            back,
+            Target::Channel {
+                channel_name: "team-slack".into(),
+                text: "status check".into(),
+                conversation_id: None,
+            }
+        );
+        // …and a legacy record must not GAIN the field when rewritten, so a
+        // downgrade reads what it wrote.
+        assert!(
+            !serde_json::to_string(&back)
+                .unwrap()
+                .contains("conversation_id"),
+            "an absent destination must not be serialized as null"
+        );
+
+        // Known-positive in the same test: a destination that IS set survives
+        // the round trip. Without this the assertion above passes on a field
+        // that is never written under any circumstances.
+        let addressed = Target::Channel {
+            channel_name: "mxlive".into(),
+            text: "status check".into(),
+            conversation_id: Some("!REDACTED-MATRIX-ROOM:matrix.org".into()),
+        };
+        let s = serde_json::to_string(&addressed).unwrap();
+        assert!(s.contains("!REDACTED-MATRIX-ROOM:matrix.org"), "got {s}");
+        assert_eq!(serde_json::from_str::<Target>(&s).unwrap(), addressed);
     }
 
     #[test]
@@ -304,6 +524,7 @@ mod tests {
             Target::Channel {
                 channel_name: "team-slack".into(),
                 text: "hi".into(),
+                conversation_id: None,
             }
         );
     }

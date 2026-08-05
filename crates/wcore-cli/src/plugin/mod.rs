@@ -12,17 +12,26 @@
 // Install root defaults to `dirs::data_dir()/wayland-core/plugins`,
 // overridable via `--install-root` (handy for tests + sandbox setups).
 
+pub mod approve;
 pub mod catalog;
 pub mod error;
+pub mod generations;
 pub mod index;
+pub mod inspect;
 pub mod install;
 pub mod known;
+pub mod lifecycle;
 pub mod lockfile;
 pub mod manifest;
 pub mod marketplace;
+pub mod publish;
 pub mod quarantine;
+pub mod recover;
 pub mod registry;
 pub mod resolver;
+pub mod scaffold;
+pub mod sign;
+pub mod verify;
 
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -80,6 +89,82 @@ pub enum PluginCmd {
         /// Plugin name to remove.
         name: String,
     },
+
+    // --- F25-04: the governed lifecycle. Author side first, operator side
+    // below. Each verb dispatches into its own module so this file stays a
+    // dispatcher rather than becoming the implementation.
+    /// Scaffold a new plugin from a shipped template.
+    New {
+        /// Kebab-case plugin name (`^[a-z][a-z0-9-]*$`).
+        name: String,
+        /// Directory to generate into. The plugin lands in `<path>/<name>`.
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        /// Which shipped template: `static` (compiled into the engine) or
+        /// `wasm` (an on-disk component plugin).
+        #[arg(long, default_value = "static")]
+        template: String,
+    },
+    /// Run a plugin's own test suite and return its verdict faithfully.
+    Test {
+        /// The plugin's source directory.
+        dir: PathBuf,
+    },
+    /// Report manifest validity, declared permissions and API compatibility.
+    /// Non-zero exit on an incompatible declared API version.
+    Verify {
+        /// The plugin directory to verify.
+        dir: PathBuf,
+    },
+    /// Sign a plugin's entry artifact with the engine's Ed25519 trust root.
+    Sign {
+        /// The plugin directory to sign.
+        dir: Option<PathBuf>,
+        /// Path to a raw 32-byte Ed25519 signing key.
+        #[arg(long)]
+        key: Option<PathBuf>,
+        /// Instead of signing, mint a new keypair at this path (writes
+        /// `<path>` and `<path>.pub`).
+        #[arg(long)]
+        new_key: Option<PathBuf>,
+    },
+    /// Produce a digest-addressed, signed bundle into a local marketplace
+    /// directory. Never pushes, merges, releases or deploys.
+    Publish {
+        /// The signed plugin directory to publish.
+        dir: PathBuf,
+        /// Target marketplace directory.
+        #[arg(long)]
+        to: PathBuf,
+    },
+    /// Report everything known about one installed plugin, including whether
+    /// the loader will admit it. Non-zero exit when it is not installed.
+    Inspect {
+        /// Plugin name, or its `<plugin>@<marketplace>` directory name.
+        name: String,
+    },
+    /// Approve an installed plugin's CURRENT bytes so the loader will run it.
+    Approve {
+        /// Plugin name, or its `<plugin>@<marketplace>` directory name.
+        name: String,
+        /// Withdraw approval instead of granting it.
+        #[arg(long)]
+        revoke: bool,
+    },
+    /// Re-resolve a plugin from its marketplace, retaining the prior
+    /// generation so the update can be rolled back.
+    Update {
+        /// Plugin name, or its `<plugin>@<marketplace>` directory name.
+        name: String,
+    },
+    /// Restore the exact bytes of the retained prior generation.
+    Rollback {
+        /// Plugin name, or its `<plugin>@<marketplace>` directory name.
+        name: String,
+    },
+    /// Repair a half-written plugin store (interrupted update, missing live
+    /// generation, drifted install directory).
+    Recover,
 }
 
 /// `plugin marketplace <cmd>` — register and inspect Claude Code marketplaces.
@@ -136,6 +221,52 @@ pub fn run(args: PluginArgs) -> anyhow::Result<()> {
         } => {
             if let Some((plugin, market)) = name.split_once('@') {
                 let quarantine_root = marketplace_root.join(".quarantine");
+                let installed_at =
+                    humantime::format_rfc3339(std::time::SystemTime::now()).to_string();
+
+                // F25-04: acquire FIRST, then branch on what was acquired.
+                //
+                // The lowering pipeline GENERATES a `plugin.toml` from a
+                // canonical draft, which is right for a foreign (Claude Code)
+                // plugin and destructive for a Wayland-native one: it would
+                // discard the author's manifest, the entry artifact and the
+                // detached signature. A signed, digest-addressed bundle has to
+                // arrive byte for byte or it is not the thing that was signed.
+                // Before this branch existed there was NO install path for a
+                // native plugin at all — `plugin install` could only ingest the
+                // foreign format.
+                let source = marketplace::resolve_source(
+                    &marketplace_root,
+                    &quarantine_root,
+                    market,
+                    plugin,
+                )?;
+                if lifecycle::is_native_bundle(&source.fetched_root) {
+                    if dry_run {
+                        println!(
+                            "would install the Wayland-native plugin {plugin}@{market} \
+                             verbatim from {}",
+                            source.fetched_root.display()
+                        );
+                        println!("(dry run — nothing installed)");
+                        return Ok(());
+                    }
+                    let (dir, digest) = lifecycle::native_install(
+                        &marketplace_root,
+                        market,
+                        plugin,
+                        &source,
+                        installed_at,
+                    )?;
+                    println!("installed {plugin}@{market} → {}", dir.display());
+                    println!("  digest {digest}");
+                    println!(
+                        "  NOT YET APPROVED — it will be refused at load until you run \
+                         `wayland-core plugin approve {plugin}`"
+                    );
+                    return Ok(());
+                }
+
                 let planned = marketplace::resolve_and_plan(
                     &marketplace_root,
                     &quarantine_root,
@@ -146,11 +277,29 @@ pub fn run(args: PluginArgs) -> anyhow::Result<()> {
                 if dry_run {
                     println!("(dry run — nothing installed)");
                 } else {
-                    let installed_at =
-                        humantime::format_rfc3339(std::time::SystemTime::now()).to_string();
-                    let dir =
-                        marketplace::commit_install(&marketplace_root, &planned, installed_at)?;
+                    let dir = marketplace::commit_install(
+                        &marketplace_root,
+                        &planned,
+                        installed_at.clone(),
+                    )?;
+                    // Adopt the install into the governed lifecycle: retain it
+                    // as a generation and point live at it. Doing this HERE
+                    // rather than in a parallel `plugin install --governed` is
+                    // what keeps one install path instead of two.
+                    let version = lifecycle::manifest_version(&dir);
+                    let (_, digest) = lifecycle::adopt_install(
+                        &marketplace_root,
+                        plugin,
+                        &version,
+                        &dir,
+                        installed_at,
+                    )?;
                     println!("installed {plugin}@{market} → {}", dir.display());
+                    println!("  digest {digest}");
+                    println!(
+                        "  NOT YET APPROVED — it will be refused at load until you run \
+                         `wayland-core plugin approve {plugin}`"
+                    );
                 }
                 return Ok(());
             }
@@ -188,8 +337,35 @@ pub fn run(args: PluginArgs) -> anyhow::Result<()> {
             println!("installed {name}");
         }
         PluginCmd::Remove { name } => {
-            install::remove(&install_root, &name)?;
-            println!("removed {name}");
+            // A marketplace install is a `<plugin>@<marketplace>/` directory
+            // plus a lockfile record plus (since F25-04) generation and
+            // approval state. `install::remove` only ever knew about the legacy
+            // `<name>.json` records, so removing a marketplace-installed plugin
+            // used to report "not installed" while the directory stayed on
+            // disk and kept loading. Try the marketplace path first and fall
+            // back to the legacy one.
+            let (plugin, market) = match name.split_once('@') {
+                Some((p, m)) => (p.to_string(), Some(m.to_string())),
+                None => (name.clone(), None),
+            };
+            let market = match market {
+                Some(m) => Some(m),
+                None => lockfile::read_lock(&marketplace_root)?
+                    .into_iter()
+                    .find(|r| r.plugin == plugin)
+                    .map(|r| r.marketplace),
+            };
+            let removed = match &market {
+                Some(m) => marketplace::remove_marketplace_plugin(&marketplace_root, &plugin, m)?,
+                None => false,
+            };
+            if removed {
+                lifecycle::forget(&marketplace_root, &plugin)?;
+                println!("removed {plugin}");
+            } else {
+                install::remove(&install_root, &name)?;
+                println!("removed {name}");
+            }
         }
         PluginCmd::List => {
             let legacy = install::list_installed(&install_root)?;
@@ -213,6 +389,38 @@ pub fn run(args: PluginArgs) -> anyhow::Result<()> {
                 println!("{}\t{}\t{}", mf.name, mf.version, mf.description);
             }
         }
+        // --- F25-04 lifecycle verbs -------------------------------------
+        PluginCmd::New {
+            name,
+            path,
+            template,
+        } => {
+            scaffold::run_new(&name, &path, scaffold::Template::parse(&template)?)?;
+        }
+        PluginCmd::Test { dir } => scaffold::run_test(&dir)?,
+        PluginCmd::Verify { dir } => verify::run(&dir)?,
+        PluginCmd::Sign { dir, key, new_key } => {
+            sign::run(dir.as_deref(), key.as_deref(), new_key.as_deref())?
+        }
+        PluginCmd::Publish { dir, to } => publish::run(
+            &dir,
+            &to,
+            humantime::format_rfc3339(std::time::SystemTime::now()).to_string(),
+        )?,
+        PluginCmd::Inspect { name } => inspect::run(&marketplace_root, &name)?,
+        PluginCmd::Approve { name, revoke } => approve::run(
+            &marketplace_root,
+            &name,
+            revoke,
+            humantime::format_rfc3339(std::time::SystemTime::now()).to_string(),
+        )?,
+        PluginCmd::Update { name } => lifecycle::run_update(
+            &marketplace_root,
+            &name,
+            humantime::format_rfc3339(std::time::SystemTime::now()).to_string(),
+        )?,
+        PluginCmd::Rollback { name } => lifecycle::run_rollback(&marketplace_root, &name)?,
+        PluginCmd::Recover => recover::run(&marketplace_root)?,
         PluginCmd::Marketplace { cmd } => match cmd {
             MarketplaceCmd::Add { source } => {
                 let quarantine_root = marketplace_root.join(".quarantine");

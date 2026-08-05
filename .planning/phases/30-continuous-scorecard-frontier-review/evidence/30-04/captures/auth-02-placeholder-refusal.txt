@@ -1,0 +1,4 @@
+RUN_SHA=5d48ec270f642498cc095bd21ad4a256e628c4c3
+--- verify the SAME approval against the COMMITTED bundled placeholder root ---
+wayland-scorecard: reserved action `frontier_positioning` is unreachable: the approval trust root declares key `sean-reserved-approval-root` as the all-zeros placeholder, which authorises nothing. Substitution point: replace APPROVAL_ROOT_PUBKEY_HEX in crates/wcore-eval-scenarios/src/reserved_authority.rs with Sean's real Ed25519 approval public key. Until that substitution is made, every reserved action including frontier positioning is structurally unreachable from this repository. (F-030)
+REFUSED_AS_REQUIRED

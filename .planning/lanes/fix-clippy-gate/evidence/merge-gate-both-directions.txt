@@ -1,0 +1,38 @@
+=== ARM A: CAN PASS -- real gate, committed baseline, at HEAD
+running: cargo nextest run --workspace --profile ci --no-fail-fast
+nextest exit: 100
+summary:      Summary [  76.732s] 13562 tests run: 13559 passed (1 flaky, 1 leaky), 3 failed, 72 skipped
+tests executed: 13562
+baseline entries : 3
+observed failures: 3
+
+GATE PASSED — no new failures, baseline exactly matched.
+ARM_A_RC=0  secs=89
+
+=== ARM B: CAN FAIL -- the real keyring incident replayed.
+=== Baseline as it stood BEFORE c73ac417: same file minus the f14 entry.
+prekeyring baseline entries: 5
+running: cargo nextest run --workspace --profile ci --no-fail-fast
+nextest exit: 100
+summary:      Summary [  74.376s] 13562 tests run: 13559 passed (2 flaky, 2 leaky), 3 failed, 72 skipped
+tests executed: 13562
+baseline entries : 2
+observed failures: 3
+
+GATE FAILED — NEW test failures not present in the baseline:
+  wcore-cli::f14_sigkill_recovery
+  isolated_profile_without_secure_store_fails_before_turn_or_provider_intent
+ARM_B_RC=1  secs=77
+
+=== ARM B re-run after the reporter fix ===
+WLRC=1
+WLDONE
+running: cargo nextest run --workspace --profile ci --no-fail-fast
+nextest exit: 100
+summary:      Summary [  76.108s] 13562 tests run: 13559 passed (1 leaky), 3 failed, 72 skipped
+tests executed: 13562
+baseline entries : 2
+observed failures: 3
+
+GATE FAILED — NEW test failures not present in the baseline:
+  wcore-cli::f14_sigkill_recovery isolated_profile_without_secure_store_fails_before_turn_or_provider_intent

@@ -1,0 +1,8 @@
+name of display:    :100
+number of extensions:    23
+    XTEST
+  dimensions:    1280x1024 pixels (325x260 millimeters)
+--- BEFORE ---
+x:640 y:512 screen:0 window:543
+--- AFTER xdotool mousemove 100 100 ---
+x:640 y:512 screen:0 window:543

@@ -130,8 +130,49 @@ fn seed_desktop_jobs_json(wayland_home: &Path) {
 // json-stream driver helpers (for R-003, R-005, R-006, R-011, R-012)
 // ---------------------------------------------------------------------------
 
+/// Where a harness-spawned engine's INFO trace record actually lands, relative
+/// to the scenario workdir.
+///
+/// This is NOT stderr, and it is not a matter of test configuration:
+/// `ChildEnvironment::apply_tokio` calls `env_clear()` and rebuilds the child
+/// environment from a fixed allowlist that does not contain `RUST_LOG`, so an
+/// engine spawned by the runner ALWAYS boots with `RUST_LOG` unset regardless
+/// of what the test process sets. With `RUST_LOG` unset, `wcore-cli`'s
+/// subscriber (the #147 stderr-noise reduction) tees the full INFO record into
+/// `$WAYLAND_HOME/logs/wayland-core.log` and admits only `ERROR` to stderr.
+///
+/// `tempenv` points `WAYLAND_HOME` at `<workdir>/.wayland-core`, which makes
+/// the record an ordinary workdir-relative artifact that
+/// [`Assertion::check_artifacts`] can read.
+///
+/// R-011/R-012 previously read these events off stderr. That stopped working
+/// when #147 moved them here — the events kept firing, the detectors went
+/// blind. They now read the sink the events go to.
+const ENGINE_TRACE_LOG: &str = ".wayland-core/logs/wayland-core.log";
+
+/// Build the hermetic scenario environment that
+/// [`wcore_eval_scenarios::runner::run_with_binary`] would otherwise build and
+/// drop internally, so the caller keeps `$WAYLAND_HOME` alive after the run and
+/// can read [`ENGINE_TRACE_LOG`] out of it. The options mirror
+/// `run_with_binary` exactly so this is the same environment, only owned here.
+fn owned_eval_env(
+    provider: &ProviderConfig,
+    scenario: &Scenario,
+) -> wcore_eval_scenarios::tempenv::TempEnv {
+    wcore_eval_scenarios::tempenv::build_with(
+        provider,
+        &wcore_eval_scenarios::tempenv::TempEnvOptions {
+            budget_max_cost_usd: (scenario.max_total_cost_usd > 0.0)
+                .then_some(scenario.max_total_cost_usd),
+            ..wcore_eval_scenarios::tempenv::TempEnvOptions::default()
+        },
+    )
+    .expect("build hermetic eval environment")
+}
+
 /// Locate the binary to use for json-stream tests: WCORE_EVAL_BIN env var
-/// first, then target/{release,debug}/wayland-core relative to workspace root.
+/// first, then Cargo's integration-test binary, then the legacy workspace
+/// target/{release,debug}/wayland-core locations.
 /// Returns None (SKIP) if the binary can't be found.
 fn maybe_eval_binary() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("WCORE_EVAL_BIN") {
@@ -139,6 +180,10 @@ fn maybe_eval_binary() -> Option<std::path::PathBuf> {
         if pb.exists() {
             return Some(pb);
         }
+    }
+    let cargo_bin = std::path::PathBuf::from(binary());
+    if cargo_bin.exists() {
+        return Some(cargo_bin);
     }
     // Walk up from this file's manifest dir to workspace root.
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -152,9 +197,31 @@ fn maybe_eval_binary() -> Option<std::path::PathBuf> {
     None
 }
 
+/// How long R-012's raw ready-event layer waits for the engine's first line.
+///
+/// MEASURED, not guessed. On an idle Windows box (SeanDesktop, debug build) the
+/// engine answers in ~0.75 s and the whole test finishes in ~2.3 s; on Linux it
+/// is well under that. The deadline is deliberately more than a magnitude above
+/// the measured cost so that a run which crosses it has a real problem — either
+/// the engine refused to start (its stderr is captured and printed) or it was
+/// not scheduled, and the two are now distinguishable in the failure text.
+///
+/// Do NOT raise this to make a contended suite green. The scheduling pressure
+/// belongs in `.config/nextest.toml`; the deadline is the product statement.
+const READY_DEADLINE: Duration = Duration::from_secs(10);
+
 /// Seed a hermetic env suitable for json-stream invocation:
 /// `<root>/.wayland-core/config.toml` with absolute session dir.
 /// Returns (tempdir, sessions_path).
+///
+/// CAVEAT (measured 2026-07-31, not fixed here): the provider table this writes
+/// is `[provider.<name>]`, but `wcore_config::Config` declares the map as
+/// `providers` — so the seeded `api_key` and `model` are parsed into nothing and
+/// the engine still reports "No API key found". Only `[session] directory` is
+/// actually honoured. Every caller that needs the engine to reach `ready` must
+/// therefore supply the credential by another route (env var or
+/// `--api-key-file`). Left as-is deliberately: correcting the table name here
+/// would silently change what nine call sites are testing.
 fn seed_json_stream_env(
     root: &Path,
     provider: &str,
@@ -829,13 +896,15 @@ async fn r009_pricing_gpt4o_mini_accurate() {
 
     let provider = ProviderConfig::new(ProviderId::OpenAI, "gpt-4o-mini").with_api_key(key);
 
-    let result = match wcore_eval_scenarios::runner::run(&scenario, &provider).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[R-009 SKIP] runner error: {e}");
-            return;
-        }
-    };
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
+    let result =
+        match wcore_eval_scenarios::runner::run_with_binary(&scenario, &provider, &bin).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[R-009 SKIP] runner error: {e}");
+                return;
+            }
+        };
 
     // Hard assertion: session_cost event must arrive (cost_usd > 0) AND
     // cost must be within a wide sanity band (any positive value < $0.10).
@@ -989,62 +1058,68 @@ async fn r010_openrouter_url_no_double_v1() {
 // R-011 — channels auto-register logs
 // ---------------------------------------------------------------------------
 //
-// Wave 1.1 rewrite: uses Scenario::new builder + runner::run so the
-// Assertion::StderrContains pipeline fires. The old WARN-and-return-Ok path
-// (silent pass when the F-014 log line is absent) is replaced by a hard FAIL.
+// Wave 1.1 rewrite: uses Scenario::new builder + runner::run so the assertion
+// pipeline fires. The old WARN-and-return-Ok path (silent pass when the F-014
+// log line is absent) is replaced by a hard FAIL.
 //
-// The engine sets RUST_LOG=info in the seeded env (via tempenv). Because the
-// runner's `spawn_for_run` inherits the parent environment, we set RUST_LOG
-// on the test process before spawning so the child picks it up.
+// #147 follow-up: the assertion reads the engine's trace record, not stderr.
+// The event never stopped firing; #147 moved the sink. A harness child always
+// runs with `RUST_LOG` unset (`ChildEnvironment` clears the environment and
+// does not allowlist it), so INFO goes to `$WAYLAND_HOME/logs/wayland-core.log`
+// and only ERROR reaches stderr. See ENGINE_TRACE_LOG. Reading stderr here was
+// asserting on a stream the event is guaranteed not to be on — a detector that
+// can only ever report absence.
 //
-// Target substring (from the F-014 fix commit):
+// Target line (from the F-014 fix commit):
 //   "F-014: channel_manager.start_all() complete — inbound polling active"
-// We check for any of the component substrings to be robust against minor
-// log message edits while still catching the absence of the log entirely.
+// The needle is the event-specific middle of it: narrow enough that only the
+// success branch of the start_all call can produce it, and free of the em-dash
+// tail that is pure prose.
 
 #[tokio::test]
 #[serial]
 async fn r011_channels_auto_register_logs() {
-    // Ensure RUST_LOG=info so the child binary emits tracing output.
-    // The runner inherits env from the test process, so setting it here
-    // propagates to the spawned engine binary.
-    // SAFETY: #[serial] serializes every env-mutating test in this binary.
-    unsafe { std::env::set_var("RUST_LOG", "info") };
-
     let scenario = Scenario::new("r011_channels_auto_register_logs", Category::Coverage)
-        // No turns — we only care about bootstrap stderr. The runner reads
-        // the ready event then immediately sends stop.
+        // No turns — we only care about bootstrap. The runner reads the ready
+        // event then immediately sends stop.
         .max_total_time(Duration::from_secs(30));
 
     // Use a fake key — no real API call is made (stop is sent immediately).
     let provider = ProviderConfig::new(ProviderId::Anthropic, "claude-sonnet-4-20250514")
         .with_api_key("sk-ant-harness-r011-000000".to_string());
 
-    let result = match wcore_eval_scenarios::runner::run(&scenario, &provider).await {
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
+    // Own the environment so `$WAYLAND_HOME` — and the trace record inside it —
+    // outlives the run. `run_with_binary` builds an equivalent env internally
+    // and drops it before returning, which would delete the evidence.
+    let env = owned_eval_env(&provider, &scenario);
+    let result = match wcore_eval_scenarios::runner::run_with_binary_in_environment(
+        &scenario, &provider, &bin, &env,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             panic!("R-011 FAIL: runner error: {e}");
         }
     };
 
-    // Hard assertion: the F-014 fix MUST produce at least one of these
-    // substrings in stderr at RUST_LOG=info. Absence = FAIL (not WARN).
-    // Per the research doc §5: "R-011 WARN marks as WARN not FAIL" is the
-    // exact silent-pass pattern this rewrite closes.
-    let channel_log_assert = Assertion::StderrContainsAny(vec![
-        "start_all() complete",
-        "channel_manager",
-        "inbound polling active",
-    ]);
-    match channel_log_assert.check_result(&result) {
+    // Hard assertion: the F-014 fix MUST record the completed start_all.
+    // Absence = FAIL (not WARN). Per the research doc §5: "R-011 WARN marks as
+    // WARN not FAIL" is the exact silent-pass pattern this rewrite closes.
+    let channel_log_assert = Assertion::FileContains {
+        path: ENGINE_TRACE_LOG,
+        needle: "channel_manager.start_all() complete",
+    };
+    match channel_log_assert.check_artifacts(env.path()) {
         Ok(()) => {
-            eprintln!("[R-011 PASS] channel_manager.start_all() complete logged in stderr");
+            eprintln!("[R-011 PASS] channel_manager.start_all() complete recorded in engine trace");
         }
         Err(msg) => {
             panic!(
-                "R-011 FAIL: F-014 channel bootstrap log absent from stderr.\n{msg}\n\
-                 This means start_all() is not being called (F-014 regression) \
-                 or RUST_LOG did not propagate.\n\
+                "R-011 FAIL: F-014 channel bootstrap event absent from the engine trace.\n{msg}\n\
+                 This means start_all() is not being called (F-014 regression), \
+                 or the engine stopped recording the event.\n\
                  failures: {:?}",
                 result.failures
             );
@@ -1056,69 +1131,77 @@ async fn r011_channels_auto_register_logs() {
 // R-012 — Honcho fallback: user_model_backend = "local" when no key
 // ---------------------------------------------------------------------------
 //
-// Wave 1.1 rewrite: uses Scenario::new builder + runner::run so the
-// Assertion::StderrContainsAny pipeline fires. The old WARN-and-return-Ok
-// path (silent pass when neither the ready-event field nor the stderr hint
-// is found) is replaced by a hard FAIL via check_result().
+// Wave 1.1 rewrite: uses Scenario::new builder + runner::run so the assertion
+// pipeline fires. The old WARN-and-return-Ok path (silent pass when neither the
+// ready-event field nor the stderr hint is found) is replaced by a hard FAIL.
 //
-// The runner inherits HONCHO_API_KEY from the test process. For the fallback
-// to fire, HONCHO_API_KEY must be absent. We remove it from the test env
-// before spawning (safe: nextest runs each test in its own process).
+// #147 follow-up: the same sink move that blinded R-011 blinded this one. The
+// F-093 fallback line is `tracing::info!`, so under a harness child (which
+// always runs with `RUST_LOG` unset — see ENGINE_TRACE_LOG) it goes to
+// `$WAYLAND_HOME/logs/wayland-core.log`, never to stderr. Layer 2 now reads
+// that record.
 //
-// Two-layer assertion:
-//   1. ready event: if user_model_backend appears, it must == "local".
-//      (still inline assert — the runner doesn't expose the raw ready event)
-//   2. StderrContainsAny: at least one of the fallback-log substrings must
-//      appear in stderr — FAIL if none match (closes the silent-pass).
+// The harness child's environment is CLEARED before spawn, so HONCHO_API_KEY is
+// unset there by construction — the fallback branch is taken deterministically
+// and does not depend on the developer's shell.
+//
+// Two independent layers, both hard:
+//   1. ready event: `capabilities.user_model_backend` MUST be "local".
+//      This is the structured protocol surface F-093 exists to populate; a
+//      missing field is now a FAIL, not a skip. (Raw spawn — the runner does
+//      not expose the ready event.)
+//   2. engine trace: the fallback decision MUST be recorded.
+// Layer 1 proves the resolved backend, layer 2 proves the decision was
+// observable. Losing either is a regression.
 
 #[tokio::test]
 #[serial]
 async fn r012_honcho_fallback_on_no_key() {
-    // Remove HONCHO_API_KEY from this process so the child inherits the
-    // absence and the local-backend fallback path fires.
+    // Remove HONCHO_API_KEY from this process so the layer-1 raw spawn (which
+    // does inherit this process's environment) takes the fallback branch.
     // SAFETY: #[serial] serializes every env-mutating test in this binary.
     unsafe { std::env::remove_var("HONCHO_API_KEY") };
-    unsafe { std::env::set_var("RUST_LOG", "info") };
 
     let scenario = Scenario::new("r012_honcho_fallback_on_no_key", Category::Coverage)
-        // No turns — we only care about bootstrap: ready event + stderr.
+        // No turns — we only care about bootstrap: ready event + trace record.
         .max_total_time(Duration::from_secs(30));
 
     let provider = ProviderConfig::new(ProviderId::Anthropic, "claude-sonnet-4-20250514")
         .with_api_key("sk-ant-harness-r012-000000".to_string());
 
-    // We still need the ready event for layer-1 check. Use the raw subprocess
-    // path for that, THEN use Scenario runner for the assertion pipeline.
-    //
-    // Strategy: run via Scenario to get ScenarioResult.stderr_tail, then
-    // additionally capture the ready event via a separate raw spawn for the
-    // user_model_backend field check. Both must pass.
-
-    // --- Layer 2: Scenario runner (StderrContainsAny on fallback log) ---
-    let result = match wcore_eval_scenarios::runner::run(&scenario, &provider).await {
+    // --- Layer 2: Scenario runner (fallback decision in the engine trace) ---
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
+    // Own the environment so the trace record survives the run — see R-011.
+    let env = owned_eval_env(&provider, &scenario);
+    let result = match wcore_eval_scenarios::runner::run_with_binary_in_environment(
+        &scenario, &provider, &bin, &env,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             panic!("R-012 FAIL: runner error: {e}");
         }
     };
 
-    // Hard assertion: at least one fallback-log substring must appear.
-    // Closes the WARN-and-return-Ok silent-pass from the old code.
-    let fallback_assert = Assertion::StderrContainsAny(vec![
-        "local backend",
-        "HONCHO_API_KEY",
-        "user-model: using local",
-        "honcho",
-    ]);
-    match fallback_assert.check_result(&result) {
+    // Hard assertion: the fallback decision must be recorded. The needle is the
+    // decision itself, not any of the words around it — "honcho" alone would
+    // also match the OPPOSITE branch ("auto-selecting honcho user-model
+    // backend"), which is precisely the failure this test exists to catch.
+    let fallback_assert = Assertion::FileContains {
+        path: ENGINE_TRACE_LOG,
+        needle: "user-model: using local backend",
+    };
+    match fallback_assert.check_artifacts(env.path()) {
         Ok(()) => {
-            eprintln!("[R-012 PASS] honcho fallback log found in stderr");
+            eprintln!("[R-012 PASS] user-model local-backend fallback recorded in engine trace");
         }
         Err(msg) => {
             panic!(
-                "R-012 FAIL: no honcho fallback log found in stderr with HONCHO_API_KEY unset.\n\
+                "R-012 FAIL: no user-model fallback record with HONCHO_API_KEY unset.\n\
                  {msg}\n\
-                 Either RUST_LOG did not propagate or F-093 regressed (user-model fallback not logged).\n\
+                 F-093 regressed: bootstrap did not fall back to the local \
+                 user-model backend, or stopped recording that it did.\n\
                  failures: {:?}",
                 result.failures
             );
@@ -1126,17 +1209,7 @@ async fn r012_honcho_fallback_on_no_key() {
     }
 
     // --- Layer 1: raw ready-event check (user_model_backend field) ---
-    // This is the inline assert path; it fires only when the ready event
-    // carries the field at all. When the field is absent the fallback
-    // assertion (layer 2 above) is sufficient to confirm the local path.
-    let Some(bin) = maybe_eval_binary() else {
-        // If we can't find the binary for the raw spawn, the Scenario runner
-        // already confirmed the fallback via layer 2.
-        eprintln!(
-            "[R-012 NOTE] skipping raw ready-event check (binary not found for second spawn)"
-        );
-        return;
-    };
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
 
     let home = TempDir::new().expect("tempdir");
     seed_json_stream_env(
@@ -1145,6 +1218,10 @@ async fn r012_honcho_fallback_on_no_key() {
         "claude-sonnet-4-20250514",
         "sk-ant-harness-r012-000000",
     );
+    // The ONLY variable that relocates the engine's home on all three
+    // platforms. See the note on `.env("WAYLAND_HOME", ...)` below.
+    let isolated_home = home.path().join("wayland-home");
+    std::fs::create_dir_all(&isolated_home).expect("create isolated WAYLAND_HOME");
 
     let mut child = AsyncCommand::new(&bin)
         .arg("--yolo")
@@ -1155,46 +1232,121 @@ async fn r012_honcho_fallback_on_no_key() {
         .arg("claude-sonnet-4-20250514")
         .current_dir(home.path())
         .env("HOME", home.path())
-        .env("RUST_LOG", "info")
+        // A fake key, in the env, NOT via the seeded config — see the caveat on
+        // `seed_json_stream_env`: the config's provider table is inert, so
+        // `env_remove("ANTHROPIC_API_KEY")` (what this used to do) left the
+        // engine with no credential at all. It then refused with `init_failed`
+        // before emitting `ready`, and the ready-event layer below — guarded by
+        // `if let` at the time — passed by never running. Hermeticity is
+        // preserved by pinning a known-fake value rather than by removing the
+        // variable; no request is made before `stop`.
+        .env("ANTHROPIC_API_KEY", "sk-ant-harness-r012-000000")
+        // PIN the home; do NOT remove it. This line used to be
+        // `.env_remove("WAYLAND_HOME")` under the comment "do not inherit a
+        // developer's or host's isolated profile" — which is exactly backwards
+        // on Windows, and is why this test was the one W9 failure in the
+        // 2026-07-31 triage.
+        //
+        // `wayland_config_dir()` (wcore-config/src/config.rs) resolves
+        // `WAYLAND_HOME` -> `XDG_DATA_HOME` -> `dirs::config_dir()`. On Windows
+        // `dirs::config_dir()` is the FOLDERID_RoamingAppData known folder,
+        // which is read from the OS and ignores `HOME` entirely. So with
+        // `WAYLAND_HOME` removed and only `HOME` set, this test did not run
+        // against an empty profile — it ran against whatever the invoking
+        // account has in `%APPDATA%\wayland-core`. Measured on the Windows box
+        // 2026-08-01: the real profile there carries
+        // `[storage.credentials] backend = "plaintext"` with
+        // `[session] enabled = true`, which `reject_backend_without_confidential_storage`
+        // refuses BY DESIGN, so the engine emitted
+        // `{"type":"error","code":"init_failed",...}` instead of `ready` and
+        // the assertion below reported "no ready event". Nothing was wrong with
+        // the engine; the test was reading someone else's config.
+        //
+        // Same binary, same box, same second, `WAYLAND_HOME` pinned to an empty
+        // directory: `{"type":"ready",...,"user_model_backend":"local",...}`.
+        //
+        // `HOME` stays set for the Unix legs (it is what `~/.wayland` and
+        // `dirs::config_dir()` resolve from there), but it is `WAYLAND_HOME`
+        // that makes the isolation real on every platform.
+        .env("WAYLAND_HOME", &isolated_home)
         .env_remove("HONCHO_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
+        .env("RUST_LOG", "info")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        // NOT `Stdio::null()`. When this wait times out, the engine's own
+        // stderr is the only thing that can distinguish "refused to start and
+        // said why" from "started fine but was not scheduled in time", and
+        // discarding it is why W9 survived two lanes as an unexplained
+        // deadline. Piped and drained concurrently below — inheriting it would
+        // interleave with nextest's capture, and leaving a piped stderr
+        // undrained deadlocks the child once the pipe buffer fills.
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .expect("spawn for ready-event check");
 
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
     let mut reader = BufReader::new(stdout).lines();
+    let stderr_pump = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut collected = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.push(line);
+        }
+        collected.join("\n")
+    });
 
-    let ready_line: Option<String> =
-        tokio::time::timeout(Duration::from_secs(10), reader.next_line())
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .flatten();
+    let started = Instant::now();
+    let ready_line: Option<String> = tokio::time::timeout(READY_DEADLINE, reader.next_line())
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten();
+    let ready_elapsed = started.elapsed();
 
     let _ = stdin.write_all(b"{\"type\":\"stop\"}\n").await;
     let _ = stdin.flush().await;
     drop(stdin);
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let engine_stderr = tokio::time::timeout(Duration::from_secs(5), stderr_pump)
+        .await
+        .map(|joined| joined.unwrap_or_default())
+        .unwrap_or_else(|_| "<engine stderr did not close>".to_string());
 
-    if let Some(line) = &ready_line
-        && let Ok(v) = serde_json::from_str::<Value>(line)
-        && let Some(backend) = v
-            .get("capabilities")
-            .and_then(|c| c.get("user_model_backend"))
-            .and_then(Value::as_str)
-    {
-        assert_eq!(
-            backend, "local",
-            "R-012 FAIL: ready event has user_model_backend={backend:?} \
-             but HONCHO_API_KEY is unset — must fall back to 'local'."
+    // Hard, all three steps. Each `if let` that used to guard this chain was a
+    // way for the layer to pass by not running: no ready line, unparseable
+    // line, or an absent `user_model_backend` field all read as success. F-093
+    // is exactly the promise that this field is populated, so its absence is
+    // the regression, not an excuse to skip.
+    let Some(line) = ready_line else {
+        panic!(
+            "R-012 FAIL: no ready event on stdout within {:?} (waited {ready_elapsed:?}) — \
+             the engine did not reach the ready state, so the F-093 backend tag could not \
+             be checked.\nengine stderr:\n{engine_stderr}",
+            READY_DEADLINE
         );
-        eprintln!("[R-012 PASS] ready event: user_model_backend='local' confirmed");
-    }
+    };
+    eprintln!("[R-012] ready event arrived in {ready_elapsed:?}");
+    let event: Value = serde_json::from_str(&line)
+        .unwrap_or_else(|e| panic!("R-012 FAIL: first stdout line is not JSON: {e}\n{line}"));
+    let backend = event
+        .get("capabilities")
+        .and_then(|c| c.get("user_model_backend"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "R-012 FAIL: ready event carries no capabilities.user_model_backend — \
+                 F-093 stopped surfacing the resolved backend to hosts.\n{line}"
+            )
+        });
+    assert_eq!(
+        backend, "local",
+        "R-012 FAIL: ready event has user_model_backend={backend:?} \
+         but HONCHO_API_KEY is unset — must fall back to 'local'."
+    );
+    eprintln!("[R-012 PASS] ready event: user_model_backend='local' confirmed");
 }
 
 // ---------------------------------------------------------------------------

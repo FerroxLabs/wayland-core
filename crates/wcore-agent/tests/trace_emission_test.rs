@@ -112,10 +112,10 @@ async fn agent_emits_one_turn_trace_per_turn() {
             stop_reason: StopReason::EndTurn,
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: TokenUsage {
-                input_tokens: 1_200,
+                input_tokens: 300,
                 output_tokens: 5,
                 cache_creation_tokens: 0,
-                cache_read_tokens: 900, // 75% of input — proves hit-rate populates
+                cache_read_tokens: 900, // 75% of 1,200 total input
             },
         },
     ];
@@ -153,14 +153,14 @@ async fn agent_emits_one_turn_trace_per_turn() {
     assert_eq!(calls[0]["call_id"], "tu_01");
     assert_eq!(calls[0]["source_product"], "wayland-core");
 
-    // Turn 1: warm cache. cache_hit_rate = 900/1200 = 0.75.
+    // Turn 1: warm cache. cache_hit_rate = 900/(300 + 900) = 0.75.
     let t1 = &traces[1];
     assert_eq!(t1["turn"], 1);
     assert_eq!(t1["cache_read"], 900);
     let hit = t1["cache_hit_rate"].as_f64().expect("cache_hit_rate f64");
     assert!(
         (hit - 0.75).abs() < 1e-9,
-        "cache_hit_rate must be cache_read/input_tokens; got {hit}"
+        "cache_hit_rate must be cache_read/total_input_tokens; got {hit}"
     );
     assert_eq!(
         t1["tool_calls"].as_array().unwrap().len(),
@@ -184,36 +184,36 @@ async fn agent_emits_one_turn_trace_per_turn() {
 /// silently-broken cache data.
 #[tokio::test]
 async fn cache_hit_rate_exceeds_threshold_from_turn_two() {
-    // Each turn after the first reports cache_read = 80% of input_tokens,
+    // Each turn after the first reports cache_read = 80% of total input,
     // mimicking the steady-state once the system + tools + tail markers
     // are in place. Turn 0 is cold (cache_read = 0). The threshold check
     // is per-turn; the assertion uses the per-turn TurnTrace, not a
     // session aggregate (ExecutionTrace lands in W6).
-    fn done_with(input: u64, cache_read: u64) -> LlmEvent {
+    fn done_with(uncached_input: u64, cache_read: u64) -> LlmEvent {
         LlmEvent::Done {
             stop_reason: StopReason::EndTurn,
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: TokenUsage {
-                input_tokens: input,
+                input_tokens: uncached_input,
                 output_tokens: 20,
                 cache_creation_tokens: 0,
                 cache_read_tokens: cache_read,
             },
         }
     }
-    fn text_turn(text: &str, input: u64, cache_read: u64) -> Vec<LlmEvent> {
+    fn text_turn(text: &str, uncached_input: u64, cache_read: u64) -> Vec<LlmEvent> {
         vec![
             LlmEvent::TextDelta(text.into()),
-            done_with(input, cache_read),
+            done_with(uncached_input, cache_read),
         ]
     }
 
     let turns = vec![
-        text_turn("t0", 2_000, 0),     // cold
-        text_turn("t1", 2_100, 1_680), // 0.80
-        text_turn("t2", 2_200, 1_760), // 0.80
-        text_turn("t3", 2_300, 1_840), // 0.80
-        text_turn("t4", 2_400, 1_920), // 0.80
+        text_turn("t0", 2_000, 0),   // cold
+        text_turn("t1", 420, 1_680), // 80% of 2,100 total
+        text_turn("t2", 440, 1_760), // 80% of 2,200 total
+        text_turn("t3", 460, 1_840), // 80% of 2,300 total
+        text_turn("t4", 480, 1_920), // 80% of 2,400 total
     ];
 
     let provider = Arc::new(MockLlmProvider::with_turns(turns));

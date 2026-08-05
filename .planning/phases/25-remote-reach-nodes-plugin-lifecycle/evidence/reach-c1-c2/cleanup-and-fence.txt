@@ -1,0 +1,46 @@
+=== pre-cleanup: my cloud machines (must already be 0) ===
+MACHINES= 0
+=== remove my sshd container + image ===
+containers named reachc1c2 remaining: 0
+=== other lanes untouched (control: their containers still there) ===
+81
+=== remove worktree + target ===
+4.7G
+Deleted branch hz/reach-c1-c2 (was 0d48b551).
+my paths remaining (evidence dir retained on purpose): /root/reachc1c2-ev
+=== disk after ===
+/dev/md2        1.8T  671G  995G  41% /
+=== stray procs carrying my markers (expect 0) ===
+1
+
+=== stray-process re-check (the '1' above was pgrep self-matching) ===
+=== raw rows for my markers ===
+---
+=== excluding this ssh session own ancestry ===
+0
+=== evidence dir size (retained) ===
+196K
+
+=== fence exposure ===
+MERGE_BASE=0d48b5515b816e8930456fcda7c91c0ec9a46ebd
+=== fence exposure: shared files (expect 0) ===
+0
+=== any crates/ change at all (expect 0) ===
+0
+=== files I changed ===
+.planning/intel/COMPETITIVE-LEDGER.md
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/REACH-C1-C2-NOTES.md
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/binary-provenance.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c1-cloud-credential-live-both-arms.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c1-credential-presence.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c1-equivalence-both-directions.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c1-four-surface-at-base.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c2-ssh-trust-negative.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c2-ssh-trust-positive.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c4-cloud-both-directions.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c4-ssh-VOID-first-attempt-resourcedenied.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c4-ssh-full-cycle.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c4-ssh-instrument-selftest.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/c4-ssh-raw-scan-and-old-instrument.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/code-presence-at-base.txt
+.planning/phases/25-remote-reach-nodes-plugin-lifecycle/evidence/reach-c1-c2/secret-sweep.txt

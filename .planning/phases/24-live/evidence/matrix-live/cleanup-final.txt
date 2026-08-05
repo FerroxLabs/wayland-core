@@ -1,0 +1,7 @@
+=== NOTE: the line above redacted an EMPTY event id and got 200 — F-ML-3 again, unprompted ===
+redact $9ztFiaA0bfjPy8iXgAgR5rtt6JAyxR2kmXkqJPWb02A http_status=200 event_id=$yKeBqQ-XQTtR7RDYHW8RLOIzTJFlMYGN8uow6P8RIk0
+=== read-back of the last control event ===
+event=$9ztFiaA0bfjPy8iXgAgR5rtt6JAyxR2kmXkqJPWb02A state=REDACTED body_present=false redacted_because=true
+=== FINAL: probe bodies remaining in the room ===
+timeline_events=26
+nonce=wayland-core live probe originals=0 all_bodies=0 ids=[]

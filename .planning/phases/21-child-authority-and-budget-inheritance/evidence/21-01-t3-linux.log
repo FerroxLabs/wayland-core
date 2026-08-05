@@ -1,0 +1,44 @@
+RUN_SHA=3d80f14662c3df9bd63aeb7ecffc144fe643a553
+HOST=Ubuntu-2404-noble-amd64-base  WORKTREE=/root/wayland-p21  DATE=2026-07-26T11:07:27Z
+GIT_STATUS_LINES=0
+CARGO=cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+==================================================================
+--- LEG CONTRACT-DIGEST: canonical Rust reproduction D1 section 3.2 records as NEVER RUN ---
+fixture_digest=sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4
+schema_digest=sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+source_inputs_digest=sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28
+generator=wcore-desktop-contract-gen/11
+--- stderr ---
+observed fixture_digest      = sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4
+observed schema_digest       = sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54
+observed source_inputs_digest= sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28
+CONTRACT-DIGEST RESULT=MATCH RC=0
+--- LEG CONTRACT-CHECK: regenerate in memory, compare byte-for-byte to checked-in corpus ---
+Desktop contract corpus is current (wcore-desktop-contract-gen/11)
+--- stderr ---
+CONTRACT-CHECK RESULT=CURRENT RC=0
+--- LEG LIVE-READY: drive the real wayland-core binary over --json-stream ---
+-rwxr-xr-x 2 root root 1026660320 Jul 26 11:03 /root/wayland-p21/target/debug/wayland-core
+WAYLAND_HOME=/tmp/tmp.fxkSw2Bdiz/.wayland-core
+live stdout lines=27  rc=0
+--- first 3 stdout lines (truncated to 400 chars each) ---
+{"type":"ready","version":"0.12.25","session_id":"15e8df1f32e3","capabilities":{"tool_approval":true,"thinking":true,"effort":false,"effort_levels":[],"modes":["default","auto_edit","force"],"current_mode":"default","mcp":false,"sub_agent_traces":true,"cost_attribution":true,"browser_suite":true,"computer_use":true,"plugins":true,"user_model_backend":"local","memory_enabled":true},"contract":{"nam
+{"type":"execution_policy","critical":true,"contract_version":"1.0","revision":0,"reason":"launch","effective_at_unix_ms":1785064057521,"policy":{"posture":"smart","approvals":"prompt","sandbox":"required","source":"desktop_local_launch","managed_floor_active":false}}
+{"type":"workspace_policy","policy":{"trust":{"level":"untrusted","source":"default","fingerprint":"4a5d561b2aab6a3ae6008a4061c140c2c5ee0d62b917e65a15775cf87583530e","explanation":"no current fingerprint-bound local trust decision"},"profile":"strict","backend":"bubblewrap","writable_roots":["/root/wayland-p21","/tmp"],"readable_roots":["/root/.cargo/bin","/root/.rustup","/root/wayland-p21","/tmp"
+--- stderr tail ---
+[2m2026-07-26T11:07:37.491751Z[0m [32m INFO[0m F-014: channels auto-registered from ~/.wayland/channels [3mcount[0m[2m=[0m0
+[2m2026-07-26T11:07:37.491834Z[0m [32m INFO[0m vision: using Anthropic (ANTHROPIC_API_KEY found)
+[2m2026-07-26T11:07:37.491969Z[0m [33m WARN[0m transcription: no API key found (GROQ_API_KEY or OPENAI_API_KEY) — tool hidden
+[2m2026-07-26T11:07:37.492005Z[0m [32m INFO[0m Phase 1B-2: inbound channel subscriber spawned
+[2m2026-07-26T11:07:37.492016Z[0m [32m INFO[0m F-014: channel_manager.start_all() complete — inbound polling active
+ready.contract = {"capabilities": {"anvil_receipts": "publication_bound", "browser_events": "shape_only", "contract_negotiation": "available", "cua_events": "shape_only", "durable_child_model_v1": "available", "effective_execution_policy_revisions": "available", "host_delegated_delivery": "available", "operator_tool_effect_resolution_v1": "available", "plugin_events": "shape_only", "runtime_diagnostics_v1": "available", "runtime_mcp_lifecycle_v1": "available", "semantic_failover_receipts": "available", "turn_recovery_v1": "available", "workflow_lifecycle_v1": "available"}, "fixture_digest": "sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4", "generator": "wcore-desktop-contract-gen/11", "major": 1, "minor": 8, "name": "wayland-desktop-core", "schema_digest": "sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54", "source_inputs_digest": "sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28"}
+manifest fixture/schema/source = sha256:42f142abf6e534e0bcb33ef7e6d9ec00c53c57938fa467f46d643d9e80e451e4 sha256:e5d1744aa6cadc46d2707a1fa190ac80ee74f13477d685bb9146a71b3fff2e54 sha256:d8b1a8b5645707225bdaafea617452fe1cf2f99556be53d7dcd35891d5e92f28
+LIVE-READY RESULT=EMITTED RC=0
+--- LEG CORPUS-PIN: toolchain-free whole-corpus pin over all files ---
+corpus files=156
+expected corpus pin = a39c13794669e1afca2218ddf3437ba967b4dceb25d9c7e669974358495821e6
+observed corpus pin = a39c13794669e1afca2218ddf3437ba967b4dceb25d9c7e669974358495821e6
+CORPUS-PIN RESULT=MATCH RC=0
+==================================================================
+ALL FOUR LEGS EMITTED. RUN_SHA=3d80f14662c3df9bd63aeb7ecffc144fe643a553
+SCRIPT_DONE_RC=0

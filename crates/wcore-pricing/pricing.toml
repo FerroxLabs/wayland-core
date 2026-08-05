@@ -134,13 +134,15 @@ output_per_mtok_usd = 15.0
 [openrouter.auto]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 # --- Flux Router tier aliases (CORE-4) ----------------------------------
-# Router-priced, same convention as [openrouter.auto]: the local rate is 0.0
+# Dynamically router-priced, same convention as [openrouter.auto]: the local rate is 0.0
 # because Flux bills per-request on whatever backend it routes to — a real
 # per-model rate here would be confidently wrong. Authoritative per-request
 # cost comes from Flux itself (FerroxLabs/wayland#319); until then a $0 row
-# marks "router-priced" and stops the W7 catalog-miss warning ("unknown model
+# plus `billing = "unpriced"` stops zero from being reported as a free call
+# while still suppressing the W7 catalog-miss warning ("unknown model
 # flux-auto for provider openai", 365 occurrences in customer logs) so the
 # engine no longer falls to the heuristic on every Flux turn.
 #
@@ -152,34 +154,42 @@ output_per_mtok_usd = 0.0
 [flux-router.flux-auto]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [flux-router.flux-fast]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [flux-router.flux-standard]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [flux-router.flux-reasoning]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [openai.flux-auto]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [openai.flux-fast]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [openai.flux-standard]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [openai.flux-reasoning]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 # Fix(pricing-audit-2026-05-24): bedrock/vertex claude-opus-4-7 corrected from $15/$75 → $5/$25.
 [bedrock.claude-opus-4-7]
@@ -197,22 +207,27 @@ cache_write_per_mtok_usd = 6.25
 [ollama.local]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "free"
 
 [vllm.local]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "free"
 
 [lmstudio.local]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "free"
 
 [litellm.proxy]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 [openai-compatible.default]
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
+billing = "unpriced"
 
 # --- v0.6.3 D.2: Tier-2 OpenAI-wire-compatible providers ---------------
 # Catalog keys are the providers' real ids (ProviderCompat.provider_type),

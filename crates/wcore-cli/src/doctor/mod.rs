@@ -135,6 +135,11 @@ pub async fn run(probe_mcp: bool) -> ExitCode {
          {skipped} skipped, {manual} manual"
     );
 
+    // Report whether durable session persistence is on, and if it is off,
+    // WHICH of the two very different reasons turned it off. Informational
+    // only — never flips the exit code below.
+    print_durable_sessions_section().await;
+
     // A4b: list declared MCP servers (and optionally probe). Informational
     // only — never flips the exit code below.
     print_mcp_section(probe_mcp).await;
@@ -474,8 +479,15 @@ async fn print_mcp_section(probe: bool) {
                                     format!("  ● {name:<20} ready ({tool_count} tools)")
                                 }
                                 Failed { reason } => format!("  ✕ {name:<20} failed: {reason}"),
-                                TimedOut { after } => {
-                                    format!("  ⏱ {name:<20} timed out after {after:?}")
+                                TimedOut {
+                                    after,
+                                    cleanup_error,
+                                } => {
+                                    let cleanup = cleanup_error
+                                        .as_ref()
+                                        .map(|error| format!("; cleanup unverified: {error}"))
+                                        .unwrap_or_default();
+                                    format!("  ⏱ {name:<20} timed out after {after:?}{cleanup}")
                                 }
                                 Skipped { reason } => format!("  ⊘ {name:<20} skipped: {reason}"),
                             };
@@ -496,6 +508,121 @@ async fn print_mcp_section(probe: bool) {
 }
 
 // -- helpers ------------------------------------------------------------
+
+/// The three distinguishable states of durable session persistence.
+///
+/// `session.enabled` alone cannot tell them apart, and the last two want
+/// OPPOSITE reporting: one is a healthy configuration the operator chose, the
+/// other is a capability they did not choose to lose.
+///
+/// `OffByHost` is GONE, and its absence is the report. A host that cannot seal
+/// a provider request no longer turns durable sessions off — it journals
+/// without the seal — so a doctor that could still print "OFF, forced by this
+/// host" would be describing a state the product cannot reach. A status surface
+/// carrying a value nothing can produce is the same defect as a status surface
+/// missing one that something can.
+#[derive(Debug, PartialEq, Eq)]
+enum DurableSessions {
+    /// Durable sessions are on, seal and all: an interrupted dispatch resumes
+    /// itself.
+    On,
+    /// The operator set `[session] enabled = false`. Normal and healthy.
+    OffByOperator,
+    /// Durable sessions are ON and the journal is complete, but this host
+    /// cannot seal a provider request, so an interrupted dispatch will ask for
+    /// a decision instead of resuming itself.
+    OnWithoutReplay,
+}
+
+/// Classify the state. Pure, so every combination can be exercised — including
+/// the one that matters most.
+///
+/// **The operator's own choice is now tested FIRST, and the reversal is
+/// deliberate.** It used to be the other way round, and had to be: a host-forced
+/// degrade set `session.enabled = false` as part of forcing itself, so reading
+/// the config value first reported every host degrade as an operator choice.
+/// That coupling is gone — the host no longer touches `session.enabled` — so
+/// `!session_enabled` now means one thing only, and reading it first is what
+/// keeps an operator who genuinely turned sessions off from being told about a
+/// replay seal for a journal they do not have.
+fn classify_durable_sessions(session_enabled: bool, replay_unavailable: bool) -> DurableSessions {
+    if !session_enabled {
+        DurableSessions::OffByOperator
+    } else if replay_unavailable {
+        DurableSessions::OnWithoutReplay
+    } else {
+        DurableSessions::On
+    }
+}
+
+/// Print the durable-session state. This is the consumer
+/// `replay_protection_unavailable()` was added for: the headless-keyring
+/// fix degrades gracefully and announces it once on stderr at startup, and the
+/// cross-audit panel's dissenting REFUSE vote rested on that not being enough —
+/// a degraded capability must be *reportable on demand*, not only printed into
+/// a log nobody kept.
+///
+/// **Printed, deliberately NOT a `CheckResult` row** — the same reason
+/// [`print_mcp_section`] is. The TUI diagnostics surface converts every
+/// `CheckResult` into a row and renders into a fixed 80x24 viewport, so adding
+/// one more system row pushes the PROVIDERS section off screen. Measured, not
+/// assumed: `doctor_shows_yellow_when_key_unset` passes at `e7bc6d88` and fails
+/// with the extra row, reporting `provider Gemini missing from /doctor output`.
+/// `crates/wcore-cli/src/tui/**` is owned by another lane this cycle, so the
+/// row stays on the CLI surface rather than being bought with a change to a
+/// fenced file or a weakened test.
+///
+/// **This resolves the config ITSELF**, and must. The flag is a side effect of
+/// `Config::resolve`; doctor's only other resolve calls are inside
+/// [`print_mcp_section`], which runs after this. A reader that merely loaded
+/// the flag would observe `false` forever — a report with no reachable
+/// degraded state, which measures nothing.
+///
+/// Informational only: like the MCP section it can never flip the exit code.
+async fn print_durable_sessions_section() {
+    println!();
+    println!("Durable sessions:");
+    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+        Err(e) => {
+            println!("  UNKNOWN  config did not resolve ({e})");
+            println!("           run `wayland-core --config-path` and check that file");
+        }
+        Ok(cfg) => match classify_durable_sessions(
+            cfg.session.enabled,
+            wcore_config::config::replay_protection_unavailable(),
+        ) {
+            DurableSessions::On => println!("  ON       conversation history is saved to disk"),
+            DurableSessions::OffByOperator => {
+                println!("  OFF      by your configuration ([session] enabled = false)");
+            }
+            DurableSessions::OnWithoutReplay => {
+                println!("  ON       but crash replay is unavailable on this host");
+                println!(
+                    "           no usable OS keyring and no unlocked credentials vault were found"
+                );
+                println!(
+                    "           conversation history IS saved and every provider call, tool call,"
+                );
+                println!(
+                    "           approval and delivery is still recorded; what is missing is the"
+                );
+                println!(
+                    "           sealed copy of the exact provider request, so a turn interrupted"
+                );
+                println!(
+                    "           mid-dispatch asks you to resume, reconcile or cancel it instead"
+                );
+                println!("           of resuming itself");
+                println!(
+                    "           to restore: set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file"
+                );
+                println!("           descriptor, preferred) or WAYLAND_VAULT_PASSPHRASE");
+                println!("           to refuse to run this way at all: set [session]");
+                println!("           require_durability = true in config.toml");
+            }
+        },
+    }
+}
 
 fn skip(label: &'static str, reason: &str) -> CheckResult {
     CheckResult {
@@ -576,6 +703,82 @@ mod tests {
     fn check_version_fails_for_empty() {
         let r = check_version("");
         assert!(matches!(r.outcome, Outcome::Fail { .. }));
+    }
+
+    /// The whole point of `replay_protection_unavailable()`: a host-forced loss
+    /// of crash replay must NOT be reported as an operator choice, and must NOT
+    /// be reported as a healthy fully-durable session either.
+    #[test]
+    fn host_forced_replay_loss_is_not_reported_as_an_operator_choice() {
+        assert_eq!(
+            classify_durable_sessions(true, true),
+            DurableSessions::OnWithoutReplay
+        );
+    }
+
+    /// The state the host CANNOT produce any more, asserted as such.
+    ///
+    /// `session_enabled == false` with the host flag set is now only reachable
+    /// if an operator turned sessions off on a keyless host: two independent
+    /// facts, and the operator's is the one that decided the outcome. Reporting
+    /// it as a host fault would tell them to go find a keyring for a journal
+    /// they asked not to have.
+    ///
+    /// This is the assertion that would red if the old ordering were restored,
+    /// so it is the one that pins the reversal rather than merely surviving it.
+    #[test]
+    fn a_keyless_host_does_not_override_an_operator_who_turned_sessions_off() {
+        assert_eq!(
+            classify_durable_sessions(false, true),
+            DurableSessions::OffByOperator
+        );
+    }
+
+    #[test]
+    fn operator_disabled_sessions_are_not_reported_as_a_host_fault() {
+        assert_eq!(
+            classify_durable_sessions(false, false),
+            DurableSessions::OffByOperator
+        );
+    }
+
+    #[test]
+    fn enabled_sessions_report_on() {
+        assert_eq!(classify_durable_sessions(true, false), DurableSessions::On);
+    }
+
+    /// All four inputs are graded, and they must produce three distinct
+    /// outputs. Without this a classifier that collapsed two states — which is
+    /// exactly what the previous ordering did to the pair below — still passes
+    /// every individual assertion above.
+    #[test]
+    fn every_input_combination_is_graded_and_the_states_stay_distinct() {
+        use std::collections::BTreeSet;
+
+        let graded = [
+            classify_durable_sessions(true, false),
+            classify_durable_sessions(true, true),
+            classify_durable_sessions(false, false),
+            classify_durable_sessions(false, true),
+        ];
+        assert_eq!(
+            graded,
+            [
+                DurableSessions::On,
+                DurableSessions::OnWithoutReplay,
+                DurableSessions::OffByOperator,
+                DurableSessions::OffByOperator,
+            ]
+        );
+        assert_eq!(
+            graded
+                .iter()
+                .map(|state| format!("{state:?}"))
+                .collect::<BTreeSet<_>>()
+                .len(),
+            3,
+            "the classifier collapsed states that need different remedies"
+        );
     }
 
     #[test]

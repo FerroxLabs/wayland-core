@@ -1,0 +1,33 @@
+file=crates/wcore-tools/src/spotify_tool.rs bytes=61398 lines=1833
+  CONTROL raw.count('fn '     ) = 102
+  CONTROL raw.count('impl '   ) = 26
+  CONTROL raw.count('spotify' ) = 102
+  CONTROL raw.count('Spotify' ) = 196
+  CONTROL raw.count('async'   ) = 23
+  --- network vocabulary, RAW (no lexer) ---
+  raw.count('reqwest' ) = 0
+  raw.count('http'    ) = 5
+  raw.count('Http'    ) = 0
+  raw.count('HTTP'    ) = 5
+  raw.count('client'  ) = 5
+  raw.count('Client'  ) = 2
+  raw.count('post'    ) = 1
+  raw.count('POST'    ) = 0
+  raw.count('url'     ) = 3
+  raw.count('Url'     ) = 0
+  raw.count('fetch'   ) = 1
+  raw.count('request' ) = 0
+  raw.count('Request' ) = 0
+  raw.count('api'     ) = 1
+  raw.count('curl'    ) = 0
+  raw.count('send'    ) = 0
+  --- what does it call out to? use/extern lines ---
+    use std::sync::Arc;
+    use async_trait::async_trait;
+    use parking_lot::Mutex;
+    use serde_json::{Map, Value, json};
+    use wcore_protocol::events::ToolCategory;
+    use wcore_types::tool::{JsonSchema, ToolResult};
+    use crate::Tool;
+    use super::*;
+    use crate::registry::ToolRegistry;
