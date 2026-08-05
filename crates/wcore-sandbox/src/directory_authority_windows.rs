@@ -390,12 +390,21 @@ pub(super) fn open_child_file(
 /// here through `remove_journal`, and both of which are the CRASH RECOVERY and
 /// ROLLBACK paths. A transient scanner handle was making durable recovery fail.
 ///
-/// The refusal is transient, so it is retried on the same bounded schedule the
-/// sibling `remove_descendants` uses. This does NOT weaken the retained-handle
-/// pin: a pin is held for the life of a lease, so it outlasts every backoff
-/// step and the open still ends in the same refusal — only ~785ms later. The
-/// gain is that a scanner's microsecond handle no longer aborts recovery; the
-/// cost is latency on a refusal that was always going to be a refusal.
+/// The retry uses the same bounded schedule as the sibling `remove_descendants`.
+/// It does NOT weaken the retained-handle pin: a pin is held for the life of a
+/// lease, so it outlasts every backoff step and the open still ends in the same
+/// refusal — only ~785ms later.
+///
+/// WHAT THE RETRY DOES NOT DO, measured. The premise above ("the refusal is
+/// transient, so backoff outlasts it") was tested and REFUTED: pinned to 2
+/// logical CPUs, 20 iterations of the full suite failed 6/20 without any retry
+/// and 5/20 with it — indistinguishable at that sample size. Whatever holds the
+/// conflicting handle survives ~785ms of backoff, so it is not a scanner's
+/// microsecond handle. The retry is kept because it is cheap and correct for the
+/// transient case it does cover; it is NOT a fix for the soak failure, and the
+/// refusal that survives it is now named (see `name_share_violation`) precisely
+/// so the next occurrence identifies its own call site instead of arriving as a
+/// bare `os error 32`.
 pub(super) fn open_child_file_for_removal(
     parent: &DirectoryAuthority,
     name: &str,
@@ -404,6 +413,19 @@ pub(super) fn open_child_file_for_removal(
         || open_child_file_with(parent, name, RelativeIntent::Mutate),
         std::thread::sleep,
     )
+    .map_err(|error| {
+        if !is_share_violation(&error) {
+            return error;
+        }
+        name_share_violation(
+            error,
+            &format!(
+                "delete-bearing open of child file ({})",
+                holders_of_child(parent, name, RelativeKind::File)
+            ),
+            &parent.display_path.join(name),
+        )
+    })
 }
 
 fn open_child_file_with(
@@ -573,6 +595,11 @@ pub(super) fn mark_open_object_for_delete(handle: &File, path: &Path, kind: &str
     {
         return Ok(());
     }
+    // Capture the EXTENDED failure before the classic fallback overwrites the
+    // thread's last-error. Without this the reported errno is only the classic
+    // attempt's, so a POSIX-semantics rejection (which is a different diagnosis
+    // entirely) is indistinguishable from a share-arbitration refusal.
+    let extended_error = std::io::Error::last_os_error();
 
     let disposition = FILE_DISPOSITION_INFO { DeleteFile: 1 };
     if unsafe {
@@ -600,10 +627,17 @@ pub(super) fn mark_open_object_for_delete(handle: &File, path: &Path, kind: &str
         // nothing retries it and a human reads it.
         let source = std::io::Error::last_os_error();
         if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
-            return Err(SandboxError::Io(source));
+            return Err(SandboxError::ShareViolation {
+                operation: format!(
+                    "delete disposition on retained {kind} (extended attempt: {extended_error}; {})",
+                    holders_of_open_object(handle)
+                ),
+                path: path.to_path_buf(),
+                source,
+            });
         }
         return Err(SandboxError::ExecFailed(format!(
-            "delete retained Windows {kind} {}: {source}",
+            "delete retained Windows {kind} {}: {source} (extended attempt: {extended_error})",
             path.display()
         )));
     }
@@ -839,10 +873,118 @@ pub(super) const SHARE_VIOLATION_BACKOFF_MS: &[u64] = &[10, 25, 50, 100, 200, 40
 /// `io::Error`'s Display carries the LOCALIZED system message and would differ
 /// on a non-English host.
 pub(super) fn is_share_violation(error: &SandboxError) -> bool {
-    matches!(
-        error,
-        SandboxError::Io(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
-    )
+    match error {
+        SandboxError::Io(error) => error.raw_os_error() == Some(ERROR_SHARING_VIOLATION),
+        // Already named by `name_share_violation`. Both spellings must match or
+        // attaching diagnostic context would silently disarm every retry that
+        // sits OUTSIDE the site that attached it.
+        SandboxError::ShareViolation { .. } => true,
+        _ => false,
+    }
+}
+
+/// Name the object and the operation in a share-arbitration refusal, keeping the
+/// errno raw so [`is_share_violation`] still matches.
+///
+/// Applied at the OUTERMOST edge of each refusal-bearing operation, never inside
+/// a retry loop's attempt: the loop's own matcher handles both spellings, and
+/// naming on every attempt would only rewrite the same value repeatedly.
+/// `FileProcessIdsUsingFileInformation`. Not re-exported by `windows_sys`, so the
+/// class number is spelled out; it is stable ABI since Vista.
+const FILE_PROCESS_IDS_USING_FILE_INFORMATION: i32 = 47;
+
+/// Name the processes holding a handle on this object, for a refusal that has
+/// ALREADY happened.
+///
+/// # Why this shape, and not handle enumeration
+///
+/// The refusal being diagnosed reproduces only under 2-core contention inside a
+/// full 3244-test run, so any probe that perturbs timing hides the thing it is
+/// meant to catch. This is ONE syscall scoped to ONE object, taken only after a
+/// terminal failure: it cannot slow a successful path because it never runs on
+/// one. The rejected alternatives all fail that constraint — Restart Manager is
+/// an RPC round trip that also refuses directories, `handle.exe` spawns a process
+/// and enumerates the whole system, and `NtQuerySystemInformation` walks the
+/// system-wide handle table behind a global lock.
+///
+/// Purely diagnostic: every failure to collect the list is reported as text and
+/// none is escalated, because this runs while a real error is already in flight
+/// and must never replace it.
+fn holders_of_open_object(handle: &File) -> String {
+    use windows_sys::Wdk::Storage::FileSystem::NtQueryInformationFile;
+
+    let mut buffer = [0u8; 512];
+    let mut status_block = zeroed_status_block();
+    let status = unsafe {
+        NtQueryInformationFile(
+            handle.as_raw_handle().cast(),
+            &mut status_block,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+            FILE_PROCESS_IDS_USING_FILE_INFORMATION,
+        )
+    };
+    if status < 0 {
+        return format!("holders unavailable (NTSTATUS {status:#010x})");
+    }
+
+    // FILE_PROCESS_IDS_USING_FILE_INFORMATION is `ULONG NumberOfProcessIdsInList`
+    // followed by `ULONG_PTR ProcessIdList[]`. The array is pointer-aligned, so
+    // the first entry starts one pointer width in, not four bytes in.
+    let stride = std::mem::size_of::<usize>();
+    let Some(count_bytes) = buffer.get(0..4) else {
+        return "holders unavailable (short buffer)".to_owned();
+    };
+    let count = u32::from_ne_bytes(count_bytes.try_into().expect("4 bytes")) as usize;
+    let mut holders = Vec::new();
+    for index in 0..count {
+        let start = stride + index * stride;
+        let Some(entry) = buffer.get(start..start + stride) else {
+            holders.push("...truncated".to_owned());
+            break;
+        };
+        let pid = usize::from_ne_bytes(entry.try_into().expect("pointer-width bytes"));
+        let own = if pid == std::process::id() as usize {
+            " (SELF)"
+        } else {
+            ""
+        };
+        holders.push(format!("{pid}{own}"));
+    }
+    if holders.is_empty() {
+        // The holder closed between the refusal and this query. That is itself
+        // the answer: a genuinely transient external handle, not a retained one.
+        return "no holders reported".to_owned();
+    }
+    format!("held by [{}]", holders.join(", "))
+}
+
+fn name_share_violation(error: SandboxError, operation: &str, path: &Path) -> SandboxError {
+    match error {
+        SandboxError::Io(source) if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+            SandboxError::ShareViolation {
+                operation: operation.to_owned(),
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+        other => other,
+    }
+}
+
+/// The refusal happened at OPEN, so there is no handle to interrogate. Reopen the
+/// same child observationally — that open shares delete, so it is not the open
+/// that was just refused and it succeeds against the very holder that caused the
+/// refusal — then ask the object who holds it.
+///
+/// Best-effort by construction: if even the observational open is refused, the
+/// reason is reported instead of the holders, and the caller's original error is
+/// still what propagates.
+fn holders_of_child(parent: &DirectoryAuthority, name: &str, kind: RelativeKind) -> String {
+    match open_relative(parent, name, kind, RelativeIntent::ReadOnly) {
+        Ok(handle) => holders_of_open_object(&handle),
+        Err(error) => format!("holders unavailable (diagnostic reopen failed: {error})"),
+    }
 }
 
 /// Run `attempt`, re-running it on the bounded schedule for as long as it is
@@ -932,7 +1074,20 @@ pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
             let handle = retry_while_share_violated(
                 || open_relative(authority, &name, kind, RelativeIntent::Mutate),
                 std::thread::sleep,
-            )?;
+            )
+            .map_err(|error| {
+                if !is_share_violation(&error) {
+                    return error;
+                }
+                name_share_violation(
+                    error,
+                    &format!(
+                        "delete-bearing open of cleanup entry ({})",
+                        holders_of_child(authority, &name, kind)
+                    ),
+                    &authority.display_path.join(&name),
+                )
+            })?;
             let metadata = handle.metadata()?;
             if is_symlink_or_reparse(&metadata) {
                 return Err(SandboxError::PathDenied(format!(

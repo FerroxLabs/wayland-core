@@ -49,6 +49,24 @@ pub enum SandboxError {
     ManifestParse(#[from] toml::de::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// Windows share arbitration refused an operation because another handle on
+    /// the object omits `FILE_SHARE_DELETE`.
+    ///
+    /// This is a DISTINCT variant, not a `SandboxError::Io`, because both
+    /// properties are load-bearing and a bare `io::Error` can only carry one of
+    /// them. The retry gate matches on `raw_os_error()`, so the errno must stay
+    /// raw — `io::Error::new(kind, message)` reports `raw_os_error() == None`
+    /// and re-hides it. But a human reading a soak failure needs to know WHICH
+    /// object was refused and by WHICH operation. Returning the bare errno to
+    /// keep the retry working cost exactly that: every Windows soak failure read
+    /// `durable recovery failed (os error 32)` with no path and no operation, so
+    /// three candidate call sites could not be told apart from the log.
+    #[error("share arbitration refused {operation} on {path}: {source}")]
+    ShareViolation {
+        operation: String,
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, SandboxError>;
