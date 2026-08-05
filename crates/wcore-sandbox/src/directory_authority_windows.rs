@@ -978,7 +978,32 @@ pub(super) fn remove_open_dir_all(
     let handle_loans = authority.handle_loans;
     let display_path = Arc::try_unwrap(authority.display_path).expect("strong count checked");
     let handle = Arc::try_unwrap(authority.handle).expect("strong count checked");
-    if let Err(error) = delete_open_object(&handle, &display_path, "directory") {
+    // The SELF-delete is retried, not just the descendants above.
+    //
+    // `remove_descendants` has been retried since the swarm-cleanup fix, but the
+    // directory's own delete disposition was not, and that is the step that
+    // survived: measured on SeanDesktop pinned to 2 logical CPUs (which is what
+    // the hosted windows-2022 runner has), `malformed_heartbeat_fails_closed_
+    // and_preserves_bounded_diagnostic` still failed 2 of 20 runs with
+    // "transaction cleanup: worktree io: ... (os error 32)" after the descendant
+    // and read-walk fixes, reaching here through `TransactionCleanup::release`
+    // -> `remove_transaction_root` -> `remove_open_dir_all`.
+    //
+    // Emptying a directory and then being refused permission to remove the
+    // directory itself is the same transient share arbitration one step later:
+    // a scanner that opened the last child can still hold the parent when the
+    // disposition is set. This retry is only reachable because the sibling
+    // `mark_open_object_for_delete` now returns the sharing violation TYPED —
+    // while it was stringified into `ExecFailed`, `is_share_violation` could not
+    // see it and this wrapper would have been dead code.
+    //
+    // The handle is reused rather than reopened: the disposition is set on the
+    // handle we already hold, so there is nothing to re-resolve between
+    // attempts and no window for the directory to be swapped underneath us.
+    if let Err(error) = retry_while_share_violated(
+        || delete_open_object(&handle, &display_path, "directory"),
+        std::thread::sleep,
+    ) {
         return Err(Box::new((
             error,
             DirectoryAuthority {
