@@ -1412,7 +1412,16 @@ fn copy_object_store(
                     "object import exceeded the entry budget".to_owned(),
                 ));
             }
-            match src_dir.open_child_directory(&name) {
+            // OBSERVATIONAL on the SOURCE side. This import reads `src_dir` and
+            // writes only into `dst_dir`, so the source walk has no reason to
+            // ask for the DELETE right that `open_child_directory`'s
+            // `RelativeIntent::Mutate` requests. On Windows that right is
+            // share-arbitrated: the open is refused with
+            // ERROR_SHARING_VIOLATION while any other handle omits
+            // FILE_SHARE_DELETE, so a transient scanner handle could fail an
+            // import that was only ever going to read. `dst_child` below stays
+            // mutating, because that side genuinely creates.
+            match src_dir.open_child_directory_observational(&name) {
                 Ok(child) => {
                     // Skip the object-store `info` directory's alternates by not
                     // copying `info` at all — a fresh store needs none of it.

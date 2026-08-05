@@ -459,7 +459,16 @@ pub(super) fn manifest_digest(checkout: &SandboxDirectoryAuthority) -> Result<St
             } else {
                 format!("{prefix}/{name}")
             };
-            match directory.open_child_directory(&name) {
+            // OBSERVATIONAL, not mutating. This walk only counts and reads the
+            // source manifest; it never removes anything. `open_child_directory`
+            // carries `RelativeIntent::Mutate`, which asks Windows for the
+            // DELETE right, and a DELETE-bearing open is refused with
+            // ERROR_SHARING_VIOLATION while any other handle omits
+            // FILE_SHARE_DELETE — including an on-access scanner's. Demanding a
+            // right this walk does not use turned a healthy read into a hard
+            // failure under contention. Same correction as the accounting walk
+            // in `logical_tree_bytes`.
+            match directory.open_child_directory_observational(&name) {
                 Ok(child) => pending.push((child, child_path, false)),
                 Err(SandboxError::Io(error))
                     if error.kind() == std::io::ErrorKind::NotADirectory =>

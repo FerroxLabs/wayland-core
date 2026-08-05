@@ -375,11 +375,35 @@ pub(super) fn open_child_file(
 ///
 /// Gated to match its only caller's configuration (see the portable wrapper).
 #[cfg(any(feature = "live-docker", test))]
+/// Open an existing child file with the DELETE right, so it can be removed
+/// through the returned authority.
+///
+/// # Why this open is retried
+///
+/// `RelativeIntent::Mutate` asks for `DELETE`, and Windows refuses a
+/// DELETE-bearing open with ERROR_SHARING_VIOLATION while ANY other handle on
+/// the object omits `FILE_SHARE_DELETE` — including a handle held for
+/// microseconds by an on-access virus scanner, which is the default posture on
+/// both a developer box and a hosted `windows-2022` runner. Measured: the
+/// nightly soak went red on `crash_after_descendant_removal_recovers_original_before_reads`
+/// and `mid_import_failure_rolls_back_to_original_tree`, both of which reach
+/// here through `remove_journal`, and both of which are the CRASH RECOVERY and
+/// ROLLBACK paths. A transient scanner handle was making durable recovery fail.
+///
+/// The refusal is transient, so it is retried on the same bounded schedule the
+/// sibling `remove_descendants` uses. This does NOT weaken the retained-handle
+/// pin: a pin is held for the life of a lease, so it outlasts every backoff
+/// step and the open still ends in the same refusal — only ~785ms later. The
+/// gain is that a scanner's microsecond handle no longer aborts recovery; the
+/// cost is latency on a refusal that was always going to be a refusal.
 pub(super) fn open_child_file_for_removal(
     parent: &DirectoryAuthority,
     name: &str,
 ) -> Result<RegularFileAuthority> {
-    open_child_file_with(parent, name, RelativeIntent::Mutate)
+    retry_while_share_violated(
+        || open_child_file_with(parent, name, RelativeIntent::Mutate),
+        std::thread::sleep,
+    )
 }
 
 fn open_child_file_with(
