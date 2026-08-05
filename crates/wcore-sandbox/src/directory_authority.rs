@@ -591,7 +591,18 @@ impl DirectoryAuthority {
         }
         #[cfg(windows)]
         {
-            windows::delete_open_object(&authority.handle, &path, "file")?;
+            // Retried, like every other delete-bearing step on Windows. This is
+            // the ROLLBACK path: `replace_from_tar_bounded_inner` hands its
+            // already-open journal authority straight here, so it never passes
+            // through `open_child_file_for_removal` and never inherited that
+            // function's backoff. The nightly soak failed exactly here —
+            // `mid_import_failure_rolls_back_to_original_tree`, reported as
+            // "durable recovery failed (os error 32)" — while the retry it was
+            // assumed to be getting was two call sites away.
+            windows::retry_while_share_violated(
+                || windows::delete_open_object(&authority.handle, &path, "file"),
+                std::thread::sleep,
+            )?;
             drop(authority);
         }
         self.handle.sync_all()?;
