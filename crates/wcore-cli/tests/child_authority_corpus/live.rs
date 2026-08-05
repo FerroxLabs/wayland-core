@@ -1251,17 +1251,33 @@ fn answer_approval_prompts(
     let mut answered = 0usize;
     let mut last_answer: Option<Instant> = None;
     while Instant::now() < deadline && answered < MAX_ANSWERS {
+        // Liveness is checked BEFORE typing, not after. The screen is a vt100
+        // buffer that retains the last painted frame, so once the child exits
+        // the `pending` predicate stays true forever against a frame nobody is
+        // updating. Typing into that is writing to a closed PTY.
+        if terminal.has_exited() {
+            break;
+        }
         let screen = terminal.screen_text();
         let settled = last_answer.is_none_or(|at| at.elapsed() >= Duration::from_millis(600));
         if pending(&screen) && settled {
-            terminal.send(b"y\r");
+            // A refused write means the child went between the liveness check
+            // above and this write. That is a normal exit, not a harness fault:
+            // stop answering and report what was answered.
+            if !terminal.send(b"y\r") {
+                break;
+            }
             last_answer = Some(Instant::now());
             answered += 1;
         }
-        if terminal
-            .wait_for_exit(Duration::from_millis(120))
-            .is_some_and(|_| stop_on_exit)
-        {
+        // `stop_on_exit` decides whether a still-running child is worth waiting
+        // out, NOT whether an exited child is worth typing at. Written as
+        // `is_some_and(|_| stop_on_exit)` this was unconditionally false for
+        // every `stop_on_exit == false` caller, so the loop ran the full budget
+        // against a dead child — the `run_tui` path that took `corpus_fan_out`
+        // red on macOS. The exit check above is now unconditional; this one only
+        // controls how long a LIVE child is polled.
+        if terminal.wait_for_exit(Duration::from_millis(120)).is_some() && stop_on_exit {
             break;
         }
     }

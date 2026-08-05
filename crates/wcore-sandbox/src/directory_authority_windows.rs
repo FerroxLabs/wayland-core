@@ -560,10 +560,27 @@ pub(super) fn mark_open_object_for_delete(handle: &File, path: &Path, kind: &str
         )
     } == 0
     {
+        // A sharing violation here MUST stay typed. The delete disposition is
+        // one of the operations Windows refuses with ERROR_SHARING_VIOLATION
+        // while another handle on the object omits FILE_SHARE_DELETE, and
+        // `is_share_violation` matches `SandboxError::Io` on a RAW errno.
+        // Stringifying it into `ExecFailed` — which is what this did — made the
+        // 32 invisible, so any retry wrapper placed around this call was dead
+        // code that could never fire.
+        //
+        // Context cannot ride along on the same value: `io::Error::new(kind,
+        // message)` reports `raw_os_error() == None`, which is exactly what
+        // re-hides the errno. So the split is by consequence, not by taste —
+        // the retryable case keeps the bare errno because a caller has to act
+        // on it, and every other failure keeps the descriptive message because
+        // nothing retries it and a human reads it.
+        let source = std::io::Error::last_os_error();
+        if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+            return Err(SandboxError::Io(source));
+        }
         return Err(SandboxError::ExecFailed(format!(
-            "delete retained Windows {kind} {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
+            "delete retained Windows {kind} {}: {source}",
+            path.display()
         )));
     }
     Ok(())

@@ -263,9 +263,35 @@ impl Pty {
         );
     }
 
-    pub fn send(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).expect("write to PTY");
+    /// Type into the terminal, reporting whether the bytes reached a live child.
+    ///
+    /// A write to the master end of a PTY whose slave has closed fails with
+    /// EIO, and that is NOT a harness failure — it is the ordinary way a driver
+    /// observes that the process under test has exited. Panicking on it made a
+    /// normal child exit indistinguishable from a broken harness, and it is how
+    /// `corpus_fan_out` went red on macOS: `answer_approval_prompts` kept typing
+    /// at a child that had already gone, and the first write after the exit
+    /// aborted the test with `write to PTY: Input/output error`.
+    ///
+    /// The return value is deliberately not `#[must_use]`: most callers type
+    /// into a terminal they have already proven live and legitimately ignore it.
+    /// Callers that loop MUST consult it, or they will spin against a dead
+    /// child until their budget expires.
+    pub fn send(&mut self, bytes: &[u8]) -> bool {
+        if self.writer.write_all(bytes).is_err() {
+            return false;
+        }
         self.writer.flush().ok();
+        true
+    }
+
+    /// Whether the child has already exited, without waiting.
+    ///
+    /// `wait_for_exit` cannot answer this cheaply: its shortest form still
+    /// sleeps. A driver that wants to know whether typing is still meaningful
+    /// needs the question answered now.
+    pub fn has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
     }
 
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
