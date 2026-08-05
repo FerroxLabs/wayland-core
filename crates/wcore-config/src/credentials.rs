@@ -4748,14 +4748,42 @@ mod tests {
         assert!(stolen.is_ok(), "a stale lockfile must be stealable");
         drop(stolen);
 
-        // (b) Live: the same staleness threshold, but the holder heartbeats, so
-        // the waiter must time out instead of stealing.
+        // (b) Live: the holder heartbeats, so the waiter must time out instead
+        // of stealing.
+        //
+        // These timings are 10x what this leg shipped with (a 20ms heartbeat
+        // against a 100ms staleness), and the change is measured rather than
+        // defensive. Those values required the heartbeat thread to be scheduled
+        // at least once every five 20ms ticks; on a GitHub-hosted macOS runner
+        // executing 13870 tests in parallel it is not, and this test failed
+        // NINE consecutive tries across three runs while passing on Linux 10/10
+        // idle AND 10/10 under 96 CPU burners.
+        //
+        // It was NOT widened until it went green. The competing explanation —
+        // `Heartbeat::start` swallowing a thread-spawn failure with `.ok()` and
+        // returning a lock that reports itself heartbeated while nothing
+        // refreshes it — was a real defect, is fixed above, and was ELIMINATED
+        // as this failure's cause by observing that the explicit error it now
+        // raises never appears in the failing run. What remains is scheduling.
+        //
+        // The invariant is the RATIO, never the absolute values: a heartbeating
+        // holder must not be judged stale. Scaling both sides preserves it and
+        // buys 20 ticks of scheduling slack instead of 5.
+        //
+        // `wait_ceiling` MUST stay greater than `stale_after`, or this proves
+        // nothing — a waiter that gives up before the lock could ever age out
+        // would pass with no heartbeat at all. 2000ms > 1000ms keeps the steal
+        // genuinely reachable, so the heartbeat is the only thing preventing it.
         let live = dir.path().join("live.lock");
-        let held_policy = stale_policy.with_heartbeat(std::time::Duration::from_millis(20));
+        let held_policy = LockPolicy::new(
+            std::time::Duration::from_millis(1000),
+            std::time::Duration::from_secs(3),
+        )
+        .with_heartbeat(std::time::Duration::from_millis(50));
         let _held = ExclusiveFileLock::acquire(live.clone(), held_policy, "refresh").unwrap();
         let waiter_policy = LockPolicy::new(
-            std::time::Duration::from_millis(100),
-            std::time::Duration::from_millis(400),
+            std::time::Duration::from_millis(1000),
+            std::time::Duration::from_millis(2000),
         );
         let error = ExclusiveFileLock::acquire(live.clone(), waiter_policy, "refresh")
             .expect_err("a heartbeating holder must never be judged stale");
