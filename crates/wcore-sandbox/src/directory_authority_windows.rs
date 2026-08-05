@@ -773,6 +773,80 @@ pub(super) fn rename_buffer_len(name_bytes: usize) -> Result<usize> {
         .ok_or_else(|| SandboxError::ExecFailed("Windows rename buffer overflowed".to_owned()))
 }
 
+/// Win32 `ERROR_SHARING_VIOLATION`.
+pub(super) const ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// Backoff schedule for a share-arbitration refusal during destructive
+/// cleanup, in milliseconds. Seven attempts, ~785 ms of patience in total.
+///
+/// MEASURED on SeanDesktop (32 CPUs, four concurrent test processes, 24 runs
+/// of the swarm output-exhaustion suite): every one of the 8 refusals observed
+/// cleared on the FIRST re-attempt 10 ms later — 8 of 8, none needing a second.
+/// The tail beyond that first step is headroom for a slower host, not an
+/// expectation. Nothing here is unbounded: once the schedule is spent the
+/// caller receives the last refusal unchanged.
+pub(super) const SHARE_VIOLATION_BACKOFF_MS: &[u64] = &[10, 25, 50, 100, 200, 400];
+
+/// Is this refusal the Windows share-arbitration transient, PROVEN by errno?
+///
+/// The proof is positive and narrow: only [`SandboxError::Io`] carries a typed
+/// `std::io::Error`, and only errno 32 is the sharing violation. Every SECURITY
+/// refusal on the cleanup path is a different variant — `PathDenied` for a
+/// linked or non-file entry and for a retained directory with outstanding
+/// authority handles, `ExecFailed` for a failed disposition — so a refusal can
+/// never be retried by accident. No string matching is involved, deliberately:
+/// `io::Error`'s Display carries the LOCALIZED system message and would differ
+/// on a non-English host.
+pub(super) fn is_share_violation(error: &SandboxError) -> bool {
+    matches!(
+        error,
+        SandboxError::Io(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+    )
+}
+
+/// Run `attempt`, re-running it on the bounded schedule for as long as it is
+/// refused by share arbitration and ONLY for that reason.
+///
+/// # Why the retry lives here and not at the swarm's cleanup call site
+///
+/// The obvious place to retry is `dispatch.rs`, around `release_transaction`.
+/// It is the wrong place twice over. First, by the time the error arrives
+/// there it has been flattened to `SwarmError::WorktreeIo(String)` and the
+/// errno is gone, so the retry could only be gated by matching a localized
+/// message. Second — and this is the one that bites — `TransactionCleanup::
+/// release` closes the transaction lease INSIDE the swarm critical section and
+/// drops the swarm sentinel when it returns. Between two attempts up there the
+/// root is observably lease-free with its reservation receipt still on disk,
+/// which is exactly the state `reclaim_abandoned_transactions` treats as
+/// abandoned. A peer PROCESS is not excluded by the in-process reservation
+/// registry, so a retry loop at that level would reopen the cross-process
+/// reclaim window that ordering was written to close.
+///
+/// Retrying here keeps both locks held for the whole sequence and keeps the
+/// error typed, so neither problem arises.
+///
+/// `sleep` is injected so the policy is provable without real time.
+pub(super) fn retry_while_share_violated<T>(
+    mut attempt: impl FnMut() -> Result<T>,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> Result<T> {
+    let mut last = match attempt() {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    for backoff in SHARE_VIOLATION_BACKOFF_MS {
+        if !is_share_violation(&last) {
+            return Err(last);
+        }
+        sleep(std::time::Duration::from_millis(*backoff));
+        last = match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+    }
+    Err(last)
+}
+
 pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
     loop {
         let entries = child_entries(authority)?;
@@ -804,7 +878,20 @@ pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
                 RelativeKind::File
             };
             let name = entry.name;
-            let handle = open_relative(authority, &name, kind, RelativeIntent::Mutate)?;
+            // The delete-bearing open is the one refusal point measured on real
+            // hardware: a process that has just been terminated has not yet
+            // dropped the handle its current directory held, and Windows refuses
+            // a `DELETE` open while any handle omits `FILE_SHARE_DELETE`. The
+            // job is drained to zero active processes before cleanup starts (see
+            // the AppContainer backend), and instrumentation showed that drain
+            // reporting zero in 0 ms on all 147 observations while the refusal
+            // still occurred — so the residual holder is outside the job and
+            // cannot be waited for directly. It can only be outlasted, and it
+            // clears in about 10 ms.
+            let handle = retry_while_share_violated(
+                || open_relative(authority, &name, kind, RelativeIntent::Mutate),
+                std::thread::sleep,
+            )?;
             let metadata = handle.metadata()?;
             if is_symlink_or_reparse(&metadata) {
                 return Err(SandboxError::PathDenied(format!(

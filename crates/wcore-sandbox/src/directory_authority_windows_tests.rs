@@ -664,3 +664,149 @@ fn windows_retained_workspace_binds_under_a_share_delete_denying_handle() {
         .expect("identity re-proof must not demand delete access on the checkout");
     drop(pin);
 }
+
+/// A read-only accounting walk must be able to descend into a child that a live
+/// process is standing in; a delete-bearing walk cannot, and must not be used.
+///
+/// WHY THIS TEST EXISTS. `wcore_swarm::worktree::logical_tree_bytes` measures a
+/// workspace by enumerating names and reading file lengths. It never deletes
+/// anything, yet it descended through `open_child_directory`, whose Windows
+/// mask adds `DELETE`. `DELETE` is share-arbitrated, so the walk was refused
+/// with ERROR_SHARING_VIOLATION whenever a `git` child — or any process whose
+/// current directory is inside the tree — held a handle omitting
+/// `FILE_SHARE_DELETE`. `WorkspaceMonitor` turns an accounting error into a
+/// dispatch refusal, so a HEALTHY worker was killed and the operator was told
+/// `workspace accounting refused ".git": ... (os error 32)`.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS. Point the walk back at
+/// `open_child_directory` and the first assertion below is what it hits.
+#[test]
+fn windows_observational_child_open_survives_a_share_delete_denying_handle() {
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("checkout");
+    let child_path = root_path.join(".git");
+    std::fs::create_dir_all(&child_path).unwrap();
+
+    let root = DirectoryAuthority::open(&root_path).unwrap();
+    let pinned = DirectoryAuthority::open_observational(&child_path).unwrap();
+    // Omits FILE_SHARE_DELETE — the same arbitration a process standing in the
+    // directory imposes, and the same one a live `git` holds on `.git`.
+    let pin = acquire_name_lease(&pinned).unwrap();
+
+    // The mutating form is the defect: it demands DELETE and is refused.
+    let refused = root.open_child_directory(".git").unwrap_err();
+    assert!(
+        is_share_violation(&refused),
+        "expected a share violation from the delete-bearing open, got {refused}"
+    );
+
+    // The observational form asks for no right it does not use, so it descends.
+    root.open_child_directory_observational(".git")
+        .expect("a read-only accounting walk must not pay a share-arbitration cost");
+
+    drop(pin);
+}
+
+/// The cleanup retry must recover a refusal that clears, and must do so on the
+/// first backoff step — the only behaviour measured on real hardware.
+#[test]
+fn windows_share_violation_retry_recovers_when_the_refusal_clears() {
+    let attempts = std::cell::Cell::new(0_usize);
+    let slept: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+
+    let outcome = retry_while_share_violated(
+        || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                Err(SandboxError::Io(std::io::Error::from_raw_os_error(
+                    ERROR_SHARING_VIOLATION,
+                )))
+            } else {
+                Ok(7_u32)
+            }
+        },
+        |duration| slept.borrow_mut().push(duration.as_millis() as u64),
+    );
+
+    assert_eq!(outcome.unwrap(), 7);
+    assert_eq!(attempts.get(), 2, "must not re-attempt after success");
+    assert_eq!(
+        slept.into_inner(),
+        vec![SHARE_VIOLATION_BACKOFF_MS[0]],
+        "recovery must cost exactly one backoff step"
+    );
+}
+
+/// A SECURITY refusal must never be retried. This is the property that makes
+/// the retry safe: `PathDenied` is what the cleanup path returns for a linked
+/// entry, a non-file entry, and a retained directory with outstanding authority
+/// handles, and re-attempting any of those would be re-attempting a denial.
+#[test]
+fn windows_share_violation_retry_never_reattempts_a_security_refusal() {
+    let attempts = std::cell::Cell::new(0_usize);
+    let slept = std::cell::Cell::new(0_usize);
+
+    let outcome = retry_while_share_violated(
+        || -> Result<()> {
+            attempts.set(attempts.get() + 1);
+            Err(SandboxError::PathDenied(
+                "refused linked Windows cleanup entry".to_owned(),
+            ))
+        },
+        |_| slept.set(slept.get() + 1),
+    );
+
+    assert!(matches!(outcome, Err(SandboxError::PathDenied(_))));
+    assert_eq!(attempts.get(), 1, "a denial must be returned immediately");
+    assert_eq!(slept.get(), 0, "a denial must not cost any wall-clock");
+}
+
+/// The errno gate must be exact. Any other OS failure — access denied, for
+/// instance — is a real error and waiting cannot help it.
+#[test]
+fn windows_share_violation_retry_ignores_other_os_errors() {
+    let attempts = std::cell::Cell::new(0_usize);
+
+    let outcome = retry_while_share_violated(
+        || -> Result<()> {
+            attempts.set(attempts.get() + 1);
+            // ERROR_ACCESS_DENIED, adjacent to but distinct from a sharing
+            // violation.
+            Err(SandboxError::Io(std::io::Error::from_raw_os_error(5)))
+        },
+        |_| panic!("must not sleep for a non-transient OS error"),
+    );
+
+    assert!(outcome.is_err());
+    assert_eq!(attempts.get(), 1);
+}
+
+/// The retry is BOUNDED, and once its budget is spent it fails exactly as the
+/// unretried code did — same error, no swallowing.
+#[test]
+fn windows_share_violation_retry_is_bounded_and_still_fails() {
+    let attempts = std::cell::Cell::new(0_usize);
+    let slept: std::cell::RefCell<Vec<u64>> = std::cell::RefCell::new(Vec::new());
+
+    let outcome = retry_while_share_violated(
+        || -> Result<()> {
+            attempts.set(attempts.get() + 1);
+            Err(SandboxError::Io(std::io::Error::from_raw_os_error(
+                ERROR_SHARING_VIOLATION,
+            )))
+        },
+        |duration| slept.borrow_mut().push(duration.as_millis() as u64),
+    );
+
+    let error = outcome.unwrap_err();
+    assert!(
+        is_share_violation(&error),
+        "the caller must receive the original refusal, got {error}"
+    );
+    assert_eq!(
+        attempts.get(),
+        SHARE_VIOLATION_BACKOFF_MS.len() + 1,
+        "one initial attempt plus exactly one per backoff step"
+    );
+    assert_eq!(slept.into_inner(), SHARE_VIOLATION_BACKOFF_MS.to_vec());
+}

@@ -589,6 +589,38 @@ fn is_legacy_linked_worktree(root: &Path) -> bool {
     RegularFileAuthority::open(&git).is_ok() && !root.join("scratch").exists()
 }
 
+/// Measure a retained tree's logical size WITHOUT asking for any right the
+/// measurement does not use.
+///
+/// # Why the child opens are observational
+///
+/// This walk only ever enumerates names and reads file lengths — two callers
+/// in `worktree_manager` already describe it in their own comments as
+/// "`logical_tree_bytes` (read-only enumeration)". The implementation did not
+/// match that description: it opened every child directory through
+/// `open_child_directory`, whose Windows access mask adds `FILE_GENERIC_WRITE |
+/// DELETE`.
+///
+/// The `DELETE` right is SHARE-ARBITRATED. Windows refuses a `DELETE`-bearing
+/// open while any existing handle on the object omits `FILE_SHARE_DELETE`, and
+/// a live process whose current directory is that object is precisely such a
+/// handle — as is a `git` child working inside `.git`. So an accounting pass
+/// that never deletes anything was nevertheless refused with
+/// ERROR_SHARING_VIOLATION whenever it raced ordinary repository activity, and
+/// because `WorkspaceMonitor` treats an accounting error as a dispatch refusal
+/// the worker was killed and reported as
+/// `workspace accounting refused ".git": ... (os error 32)` — a healthy worker
+/// failed, and told the operator the wrong reason.
+///
+/// MEASURED on SeanDesktop (32 CPUs, four concurrent test processes): 8 of 24
+/// runs of `multi_worker_output_exhaustion_fails_without_retaining_buffers`
+/// died this way. The observational sibling requests `FILE_GENERIC_READ |
+/// SYNCHRONIZE`, pays no share-arbitration cost, and keeps every other
+/// guarantee — the open is still handle-relative, still no-follow, and still
+/// validated as a real directory. On non-Windows it is the same call.
+///
+/// Do not widen these back to the mutating form: this function has no
+/// destructive step to justify it.
 fn logical_tree_bytes(
     root: wcore_sandbox::DirectoryAuthority,
     limit: u64,
@@ -615,7 +647,7 @@ fn logical_tree_bytes(
             .child_names()
             .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))?
         {
-            match directory.open_child_directory(&name) {
+            match directory.open_child_directory_observational(&name) {
                 Ok(child) => pending.push(child),
                 Err(wcore_sandbox::SandboxError::Io(error))
                     if error.kind() == std::io::ErrorKind::NotADirectory =>
