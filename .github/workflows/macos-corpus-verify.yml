@@ -107,7 +107,15 @@ jobs:
           set -euo pipefail
           status="$CORPUS_STATUS"
 
-          if ! grep -qE '^\s+PASS \[.*\] +wcore-cli::child_authority_corpus corpus_fan_out' /tmp/corpus.log; then
+          # nextest prints an optional progress counter between the timing
+          # bracket and the binary name:
+          #     PASS [  12.839s] ( 6/29) wcore-cli::child_authority_corpus corpus_fan_out
+          # A matcher anchored straight from `]` to `wcore-cli::` misses it and
+          # reports the case as absent when it actually passed. Measured on run
+          # 31057580002, which failed with CORPUS_STATUS=0 and that exact line
+          # present. Failing closed was the safe way to be wrong; this admits
+          # the counter without loosening the anchors at either end.
+          if ! grep -qE '^[[:space:]]+PASS \[[^]]*\].*[[:space:]]wcore-cli::child_authority_corpus corpus_fan_out[[:space:]]*$' /tmp/corpus.log; then
             echo "::error title=corpus_fan_out did not pass::The specific macOS red case did not report PASS. It is the reason this workflow exists; a green here without it certifies nothing."
             grep -E 'corpus_fan_out' /tmp/corpus.log || echo "(no corpus_fan_out line in the log at all)"
             exit 1
