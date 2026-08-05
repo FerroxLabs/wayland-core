@@ -1,0 +1,127 @@
+# Run the child-authority corpus on a real macOS host, on a topic branch.
+#
+# Why this workflow exists
+# ------------------------
+# `wcore-cli::child_authority_corpus::corpus_fan_out` is one of the two reds
+# holding v0.12.26. It fails ONLY on macOS: the PTY driver
+# (`answer_approval_prompts`) kept typing `y\r` at a child that had already
+# exited, and writing to a master whose slave has closed raises EIO, which the
+# driver turned into a hard panic.
+#
+# The fix cannot be verified by the normal route. `ci.yml` fires only on
+# `pull_request -> main` and `push -> main`, and its own comments record
+# `workflow_dispatch` as deliberately rejected, so verifying a branch fix would
+# need a PR to main — which is Sean's gate, not this lane's. The Phase 28
+# workflow proved the missing capability: a GitHub-hosted `macos-latest` runner
+# IS a macOS host, and it is reachable from a topic branch.
+#
+# Why `push` and not `workflow_dispatch`
+# --------------------------------------
+# The REST API resolves a dispatchable workflow by name off the DEFAULT branch,
+# so `gh workflow run` returns 404 for a workflow that has never reached `main`.
+# A scoped `push` trigger is the only thing that runs a new workflow on the
+# branch that introduces it. Paths are narrowed to the corpus surface so this
+# does not fire on unrelated lane pushes. This is the same reasoning, and the
+# same shape, as `macos-native-suites.yml`.
+#
+# Why the assertion is not just the exit status
+# ---------------------------------------------
+# A test binary that collects ZERO tests exits 0. `--no-tests=fail` makes that a
+# failure rather than a green, and the explicit `corpus_fan_out` line check below
+# pins that the specific red case ran, so a future filter change cannot quietly
+# stop exercising it while the job stays green.
+
+name: macOS child-authority corpus
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/macos-corpus-verify.yml'
+      - 'crates/wcore-cli/tests/child_authority_corpus.rs'
+      - 'crates/wcore-cli/tests/child_authority_corpus/**'
+      - 'crates/wcore-cli/tests/support/pty.rs'
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    name: wcore-cli child_authority_corpus on macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Record host identity
+        run: |
+          set -euo pipefail
+          sw_vers
+          echo "uname: $(uname -a)"
+          echo "cpus: $(sysctl -n hw.ncpu)"
+
+      # Exit status is captured out of PIPESTATUS, never off the tail of a pipe:
+      # `cmd | tee` reports tee's status, not cmd's.
+      - name: Run child_authority_corpus
+        id: corpus
+        run: |
+          set -uo pipefail
+          # `--color never` is REQUIRED, not cosmetic. nextest emits ANSI escapes
+          # on a CI terminal, and they land between the status word and the test
+          # name — so the assertion regexes below would match nothing and the
+          # gate would report a green having verified precisely nothing. The
+          # nightly Windows soak logs show exactly those escapes.
+          cargo nextest run \
+            --color never \
+            --no-tests=fail \
+            --no-fail-fast \
+            -p wcore-cli \
+            --test child_authority_corpus \
+            2>&1 | tee /tmp/corpus.log
+          echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # The load-bearing gate. Three separate properties, because the exit
+      # status alone would certify a run that collected nothing.
+      - name: Assert the red case actually executed and passed
+        # Passed through `env:` rather than interpolated into the script body.
+        # This particular value is our own numeric exit status, but a workflow
+        # that interpolates directly teaches the next author the unsafe habit.
+        env:
+          CORPUS_STATUS: ${{ steps.corpus.outputs.status }}
+        run: |
+          set -euo pipefail
+          status="$CORPUS_STATUS"
+
+          if ! grep -qE '^\s+PASS \[.*\] +wcore-cli::child_authority_corpus corpus_fan_out' /tmp/corpus.log; then
+            echo "::error title=corpus_fan_out did not pass::The specific macOS red case did not report PASS. It is the reason this workflow exists; a green here without it certifies nothing."
+            grep -E 'corpus_fan_out' /tmp/corpus.log || echo "(no corpus_fan_out line in the log at all)"
+            exit 1
+          fi
+
+          if grep -qE '^\s+(FAIL|TIMEOUT|TMT) \[' /tmp/corpus.log; then
+            echo "::error title=Corpus has failures::"
+            grep -E '^\s+(FAIL|TIMEOUT|TMT) \[' /tmp/corpus.log
+            exit 1
+          fi
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=Non-zero exit::nextest exited ${status} with no FAIL/TIMEOUT line matched; the matcher is stale."
+            exit 1
+          fi
+
+          echo "corpus_fan_out PASSED on $(sw_vers -productVersion)"
