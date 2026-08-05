@@ -251,10 +251,70 @@ jobs:
             --binary "target/${TARGET}/release/wayland-core" \
             --max-glibc "${GLIBC_FLOOR}"
 
+      # THE SECOND GATE, and the one v0.12.26-rc.1 needed.
+      #
+      # The glibc floor check above reads SYMBOL versions. It says nothing about
+      # whole SHARED OBJECTS the loader must find, so it passed while the
+      # artifact carried `NEEDED libasound.so.2` and could not start on any host
+      # without ALSA installed. The executable smoke on rockylinux:9 did catch
+      # it — but that step is `if: matrix.target == 'x86_64-unknown-linux-gnu'`,
+      # and the aarch64 artifact is never executed at all (its smoke checks file
+      # size and the ELF e_machine byte). So exactly one of two Linux targets
+      # was covered, by a check that runs after packaging.
+      #
+      # This reads DT_NEEDED directly, on BOTH Linux targets, at build time.
+      # readelf is architecture-neutral, so aarch64 gets the same guarantee
+      # without needing to run.
+      #
+      # The allowlist is what a stock enterprise Linux provides. Adding a name
+      # here is a deliberate decision to raise the runtime requirements of every
+      # Linux user, and should be argued for in the PR that does it.
+      - name: Verify no unexpected shared-library dependency (both Linux targets)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET}/release/wayland-core"
+          needed="$(readelf -d "$bin" | sed -nE 's/.*\(NEEDED\).*\[(.+)\].*/\1/p' | sort -u)"
+          echo "DT_NEEDED for ${TARGET}:"
+          echo "${needed}" | sed 's/^/  /'
+
+          # Prove the gate can fail before trusting it: a name that is NOT in
+          # the allowlist must be rejected by the same matcher used below.
+          if printf 'libasound.so.2\n' | grep -qxvF -f <(printf '%s\n' \
+                libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
+                libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 \
+                libssl.so.3 libcrypto.so.3 libseccomp.so.2 libdbus-1.so.3); then
+            echo "self-test: gate correctly rejects libasound.so.2"
+          else
+            echo "ERROR: self-test failed — this gate cannot reject anything"; exit 1
+          fi
+
+          unexpected="$(printf '%s\n' "${needed}" | grep -vxF -f <(printf '%s\n' \
+                libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 \
+                libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 \
+                libssl.so.3 libcrypto.so.3 libseccomp.so.2 libdbus-1.so.3) || true)"
+          if [ -n "${unexpected}" ]; then
+            echo "ERROR: artifact requires shared libraries outside the allowlist:"
+            echo "${unexpected}" | sed 's/^/  /'
+            echo "A Linux user without these installed cannot start the binary at all."
+            exit 1
+          fi
+          echo "OK: every DT_NEEDED entry is on the allowlist"
+
+      # `voice` is NOT a default feature — see crates/wcore-cli/Cargo.toml for
+      # why. It is enabled HERE, for macOS and Windows only, because cpal uses
+      # CoreAudio and WASAPI on those platforms and neither adds a runtime
+      # dependency that can be absent. Linux is built without it: `alsa-sys`
+      # links `libasound.so.2` as a hard `DT_NEEDED`, and v0.12.26-rc.1 shipped
+      # a Linux binary that could not start on a host without ALSA. The
+      # "no libasound in DT_NEEDED" gate below is what keeps that true.
       - name: Build release binary (macOS / Windows)
         if: runner.os != 'Linux'
         shell: bash
-        run: vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
+        run: vx cargo build --release --target ${{ matrix.target }} -p wcore-cli --features voice
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'

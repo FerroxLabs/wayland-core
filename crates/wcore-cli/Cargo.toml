@@ -28,7 +28,7 @@ harness = false
 # M5.4: remote-registry gates the network-backed `GitHubReleasesResolver`
 # behind a feature flag (default ON for v0.6) so unit tests stay offline
 # and a stripped build can disable the reqwest dep entirely.
-default = ["remote-registry", "workflow", "monitor", "review_artifact", "voice"]
+default = ["remote-registry", "workflow", "monitor", "review_artifact"]
 remote-registry = ["dep:reqwest", "dep:wcore-egress"]
 # User-flow harness Layer 3: the `harness_failure_injection` integration
 # test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
@@ -53,12 +53,31 @@ workflow = []
 monitor = []
 review_artifact = []
 # Issue #14 — re-exports wcore-agent's `voice` feature (cpal mic capture).
-# 27-C4: now ON by default. The feature only *links* the OS audio library —
-# on a host with no input device `build_voice_mode_backend` returns `None`
-# and the `voice_mode` tool hides via `Tool::is_available() == false`, so a
-# headless server still starts cleanly. Cost of the default: the Linux binary
-# gains a dynamic dependency on libasound.so.2 (ALSA), and building it needs
-# the ALSA dev headers (`libasound2-dev` / `alsa-lib-devel`).
+#
+# NOT in `default`, and that is load-bearing on Linux.
+#
+# 27-C4 put this in `default` on the reasoning that "the feature only *links*
+# the OS audio library" and that "a host with no input device" still starts,
+# because `build_voice_mode_backend` returns `None` and `voice_mode` hides via
+# `Tool::is_available() == false`. That conflates two different things. A
+# missing input DEVICE is handled. A missing ALSA LIBRARY is not: `alsa-sys`
+# links `libasound.so.2` as a hard `DT_NEEDED`, so the dynamic loader refuses
+# the process before `main` runs. Measured on rockylinux:9 at the declared
+# glibc floor, the v0.12.26-rc.1 artifact could not even print `--version`:
+#
+#   /s/wayland-core: error while loading shared libraries: libasound.so.2:
+#   cannot open shared object file: No such file or directory
+#
+# `alsa-sys` 0.3.1 offers no dlopen path — its build.rs is a bare
+# `pkg_config::probe_library("alsa")` — so the only way a Linux binary starts
+# without ALSA present is to not link it.
+#
+# macOS and Windows have no such exposure: cpal uses CoreAudio and WASAPI,
+# which are always present. `release.yml` therefore builds the four
+# macOS/Windows targets with `--features voice` and leaves Linux without it,
+# so voice stays on by default everywhere it is free. A Linux user who wants
+# it builds with `--features voice` and the ALSA dev headers
+# (`libasound2-dev` / `alsa-lib-devel`).
 voice = ["wcore-agent/voice"]
 
 [dependencies]
