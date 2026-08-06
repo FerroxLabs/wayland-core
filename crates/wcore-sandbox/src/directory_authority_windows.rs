@@ -668,6 +668,93 @@ fn rollback_created_object<T>(
     }
 }
 
+/// Hand back a publish-capable authority for a temporary this process created
+/// microseconds ago, opened WITHOUT the write bit and through a handle that
+/// never carried the creating write.
+///
+/// # Why the creating handle cannot publish its own file
+///
+/// `create_child_file` opens with `RelativeIntent::Create` —
+/// `GENERIC_READ | GENERIC_WRITE | DELETE` — writes the contents, and hands that
+/// same handle back still open. `atomic_write_child` then renamed THROUGH it,
+/// which is where the nightly `windows-2022` soak was refused with
+/// STATUS_SHARING_VIOLATION (soak 31070941379, restoring `...\checkout\keep`
+/// during an import rollback) even though the destination name did not exist.
+///
+/// Two independent audits of that measurement landed on the same object from
+/// different directions, and this open satisfies both:
+///
+/// * The write-bearing handle is the contending state. Share arbitration on
+///   Windows is symmetric — a new open must tolerate every existing handle's
+///   GRANTED ACCESS, not merely its share mode — so a handle holding
+///   `GENERIC_WRITE` over a file another opener wants exclusively is refusable
+///   in a way a `DELETE`-only handle is not.
+/// * An on-access scanner's minifilter can hold a `FILE_OBJECT` obtained with
+///   `IO_IGNORE_SHARE_ACCESS_CHECK` and completes its scan on `IRP_MJ_CLEANUP` —
+///   that is, when the last handle CLOSES. Spinning in a retry loop while still
+///   holding the handle open is therefore not merely useless but self-defeating:
+///   the scanner is waiting on us. That is the one mechanism consistent with
+///   ~785ms of backoff never once clearing the refusal, across three separate
+///   retry sites (see `open_child_file_for_removal`).
+///
+/// Dropping first serves both readings, so no adjudication between them is
+/// needed before the fix is correct.
+///
+/// # What the close-and-reopen window costs, and why it is closed
+///
+/// Between the drop and the reopen the temporary is named but unheld, so an
+/// attacker with write access to the parent could substitute a different object
+/// at that name. Three things bound that. The name is an unguessable v4 UUID.
+/// The reopen resolves ONLY through the retained parent handle
+/// (`NtCreateFile` with `RootDirectory = parent.handle`), never a pathname, so
+/// the parent itself cannot be swapped underneath it. And the reopened object's
+/// identity is re-proven against the identity recorded at creation, so a
+/// substitution fails closed rather than being published.
+///
+/// This is the same shape the unix branch of `RegularFileAuthority::rename_into`
+/// has always used — reopen the source name through the target parent, compare
+/// identity, then rename — so it converges the two platforms rather than
+/// inventing a Windows-only trust step.
+///
+/// A refusal that outlives the bounded retry LEAVES THE TEMPORARY BEHIND: the
+/// only handle that could delete it is the one this open failed to obtain. The
+/// reported operation says so rather than implying a clean rollback.
+pub(super) fn reopen_for_publish(
+    parent: &DirectoryAuthority,
+    name: &str,
+    created: RegularFileAuthority,
+) -> Result<RegularFileAuthority> {
+    let identity = created.identity;
+    // The contents crossed their durability boundary inside `create_child_file`
+    // (`handle.sync_all()` before it returned), so closing here costs no
+    // durability. The close is the POINT, not a side effect — see above.
+    drop(created);
+    let reopened = retry_while_share_violated(
+        || open_child_file_with(parent, name, RelativeIntent::Mutate),
+        std::thread::sleep,
+    )
+    .map_err(|error| {
+        if !is_share_violation(&error) {
+            return error;
+        }
+        name_share_violation(
+            error,
+            &format!(
+                "delete-only reopen of the publish temporary; it was LEFT BEHIND ({})",
+                holders_of_child(parent, name, RelativeKind::File)
+            ),
+            &parent.display_path.join(name),
+        )
+    })?;
+    if reopened.identity != identity {
+        return Err(file_identity_changed(
+            reopened.display_path(),
+            "between creating the publish temporary and reacquiring it",
+        ));
+    }
+    Ok(reopened)
+}
+
 pub(super) fn rename_file_into(
     source: &RegularFileAuthority,
     target_parent: &DirectoryAuthority,
@@ -676,23 +763,20 @@ pub(super) fn rename_file_into(
 ) -> Result<()> {
     #[cfg(test)]
     run_before_atomic_file_rename_hook();
-    // Retried, and this is the FIRST retry this path has ever had.
+    // Retried, on the same terms as every other share-arbitrated step in this
+    // file — and with the same measured caveat.
     //
-    // WHY HERE, when retrying elsewhere was measured not to help. The earlier
-    // retries were added to the DELETE sites, and the nightly soak then produced
-    // no named refusal on any of them — the refusal was never on a delete. Soak
-    // 31067604715 named this one instead: the publish rename inside
-    // `atomic_write_child`, restoring `...\checkout\keep` during an import
-    // rollback.
+    // WHAT THIS RETRY IS NOT. It was added on the theory that the contended
+    // object was a scanner's transient handle on the source, which backoff could
+    // outlast. That theory was tested at this exact call site and REFUTED: the
+    // soak failed identically with the retry in place. Whatever refuses the
+    // publish survives the full ~785ms schedule, which is what pointed at the
+    // handle being OURS — see `reopen_for_publish`, which is the actual fix.
     //
-    // WHY IT SHOULD WORK HERE, when it did not there. That run also showed the
-    // destination did not exist (`os error 2` reopening it), so the contended
-    // object is the SOURCE — a temporary file this process wrote microseconds
-    // earlier and is now unlinking by renaming. A freshly written file is what an
-    // on-access scanner opens, and a scanner's handle IS transient, which is the
-    // one shape backoff can outlast. The holders that defeated the earlier
-    // retries were a lease and a live child process, neither of which clears on
-    // its own.
+    // It is kept because it is cheap and correct for the transient case it does
+    // cover, and because removing it would leave this the only unretried
+    // share-arbitrated operation in the crate. It must not be read as the
+    // remedy for a publish refusal.
     //
     // The test hook above fires ONCE, outside the loop, so a fault-injection test
     // cannot be silently retried into passing.
@@ -873,14 +957,30 @@ fn rename_handle_into(
         // run reported `0xc0000043` (STATUS_SHARING_VIOLATION) for the extended
         // attempt, so BOTH rename classes were refused the same way and the
         // POSIX-semantics fallback is not implicated.
+        //
+        // THE TARGET PARENT IS ASKED TOO, and it is the cheap discriminator
+        // between the two live theories. With a non-NULL `RootDirectory` the
+        // kernel performs an ADDITIONAL internal relative open of the target
+        // directory (`IopOpenLinkOrRenameTarget`, requesting
+        // `FILE_WRITE_DATA | SYNCHRONIZE`), which must survive share
+        // arbitration against every handle already on that directory —
+        // including the lifetime-held authority handle this crate opens
+        // `GENERIC_READ | GENERIC_WRITE | DELETE`. If the parent names an
+        // unexpected holder the conflict is destination-side and the remedy is
+        // the long-lived authority's access mask, not the source handle. If it
+        // is clean, the conflict is source-side and `reopen_for_publish` is the
+        // remedy. Class 47 is demonstrably answerable on DIRECTORY handles even
+        // where it returns nothing for files, so this is the one end of the
+        // operation the probe can actually speak about.
         let error = ntstatus_error(classic);
         if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
             return Err(SandboxError::ShareViolation {
                 operation: format!(
                     "handle-relative publish rename (replace={replace}; extended NTSTATUS \
-                     {extended:#010x}; source {}; destination {})",
+                     {extended:#010x}; source {}; destination {}; target parent {})",
                     holders_of_open_object(source),
-                    holders_of_child(target_parent, &child_name, RelativeKind::File)
+                    holders_of_child(target_parent, &child_name, RelativeKind::File),
+                    holders_of_open_object(&target_parent.handle)
                 ),
                 path: target_parent.display_path.join(&child_name),
                 source: error,

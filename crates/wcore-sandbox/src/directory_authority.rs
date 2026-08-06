@@ -536,11 +536,23 @@ impl DirectoryAuthority {
     }
 
     /// Atomically publish one direct child through a private, unguessable
-    /// sibling retained until the final parent-relative rename.
+    /// sibling, renamed into place through a handle held on the exact object
+    /// whose identity was proven at creation.
+    ///
+    /// On unix that is the creating descriptor itself. On WINDOWS the creating
+    /// handle is deliberately closed first and the temporary reacquired
+    /// `DELETE`-only before the rename — the write-bearing handle is what share
+    /// arbitration was refusing there. `windows::reopen_for_publish` carries the
+    /// measurement, the mechanism, and what the close-and-reopen window costs.
     pub fn atomic_write_child(&self, name: &str, contents: &[u8]) -> Result<()> {
         validate_child_name(name)?;
         let temporary = format!(".wayland-write-{}", uuid::Uuid::new_v4().simple());
         let temporary_authority = self.create_child_file(&temporary, contents)?;
+        // Rebound, not merely re-borrowed: the value this shadows is CONSUMED,
+        // so the write-bearing handle cannot still be alive below.
+        #[cfg(windows)]
+        let temporary_authority =
+            windows::reopen_for_publish(self, &temporary, temporary_authority)?;
         #[cfg(any(unix, windows))]
         {
             // Publish through the unified handle-relative file rename. Overwrite
