@@ -751,9 +751,14 @@ fn open_denying_write_share(path: &Path) -> std::io::Result<File> {
 /// without an on-access scanner, at any CPU load — unlike the 35-minute soak
 /// that was until now the only thing able to observe this defect at all.
 ///
-/// HOW THIS FAILS IF THE DEFECT RETURNS. Delete the `drop(created)` in
-/// `reopen_for_publish`, or publish through the created authority again, and the
-/// middle assertion takes the same `os error 32` the first one is asserting.
+/// HOW THIS FAILS IF THE DEFECT RETURNS. Make `reopen_for_publish` return
+/// `Ok(created)` — which is exactly what `atomic_write_child` used to do — or
+/// give the reacquire a write-bearing access mask, and the middle assertion
+/// takes the same `os error 32` the first one is asserting. Note that merely
+/// deleting the `drop(created)` does NOT falsify it: `created` is owned by that
+/// function and would still fall out of scope before this probe runs. The
+/// assertion is about which handle is RETURNED, not about where the old one
+/// happens to die.
 #[test]
 fn windows_publish_reacquires_the_temporary_without_the_write_bit() {
     let temp = tempfile::tempdir().unwrap();
