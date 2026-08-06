@@ -1064,10 +1064,25 @@ fn holders_of_open_object(handle: &File) -> String {
         let pid = usize::from_ne_bytes(entry.try_into().expect("pointer-width bytes"));
         holders.push(describe_holder(pid));
     }
-    if holders.is_empty() {
-        // The holder closed between the refusal and this query. That is itself
-        // the answer: a genuinely transient external handle, not a retained one.
-        return "no holders reported".to_owned();
+    // SELF-VALIDATION. The caller passes a handle it is HOLDING OPEN, so this
+    // process must appear in any correct answer. When it does not, the result is
+    // not "nobody holds it" — it is "this query did not work", and saying the
+    // former would be a confident lie.
+    //
+    // Measured on soak 31070941379: this returned an empty list for the publish
+    // rename's source handle while that very handle was open, and the earlier
+    // wording reported it as "no holders reported", which reads as evidence of a
+    // transient holder. It is not evidence of anything. The same probe returned
+    // real pids for a directory handle on another host, so the failure is
+    // specific and not yet understood; until it is, it must announce itself.
+    let ours = std::process::id() as usize;
+    let saw_self = holders.iter().any(|h| h.starts_with(&format!("{ours} ")));
+    if !saw_self {
+        return format!(
+            "holder probe UNRELIABLE (returned {} entries and none is this process, \
+             which holds the handle) — draw no conclusion from this",
+            holders.len()
+        );
     }
     format!("held by [{}]", holders.join(", "))
 }
