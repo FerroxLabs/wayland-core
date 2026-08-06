@@ -514,7 +514,17 @@ Write-Phase "PHASE G — cargo nextest on representative crates"
 # collapses from hundreds to a handful because a crate stopped compiling its
 # test targets under a cfg. Hence the executed-count floor below.
 $NextestLog = Join-Path $ResultsDir "G-nextest.log"
-cargo nextest run --no-tests=fail `
+# `--no-fail-fast` is REQUIRED for this phase to measure what it claims to.
+# Without it nextest cancels the run at the first failure, so the log is a LOWER
+# BOUND on the failure set, not the failure set. Every inventory taken from this
+# phase has therefore been incomplete, and any future "the fix worked" reading
+# would be too: one unrelated failure early in the run would hide whether the
+# tests under repair still fail. The sibling live-acceptance suite below already
+# passes this flag; PHASE G was the one that did not.
+#
+# Exit semantics are unchanged: nextest still exits non-zero when any test
+# failed, so `Assert-NativeExit` keeps failing the phase closed.
+cargo nextest run --no-tests=fail --no-fail-fast `
     -p wcore-cron `
     -p wcore-config `
     -p wcore-providers `
