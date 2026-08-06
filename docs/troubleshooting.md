@@ -1,5 +1,78 @@
 # Troubleshooting
 
+## `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` when installing
+
+```
+npm error code UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+npm error request to https://registry.npmjs.org/@ferroxlabs%2fwayland-core failed,
+npm error reason: unable to get local issuer certificate
+```
+
+This is Node failing to verify **npm's** TLS certificate, before a single byte of
+this package is downloaded. It is not specific to `wayland-core`. Confirm that in
+one command:
+
+```bash
+npm i -g express
+```
+
+If that fails identically, nothing about this package is involved, and no version
+of it will install until the trust problem is fixed.
+
+Usual causes:
+
+- **TLS interception.** A corporate proxy or VPN (Zscaler, Netskope and similar),
+  or antivirus doing HTTPS scanning, presents its own root certificate. Node ships
+  its own CA bundle and does not consult the macOS keychain or the Windows store,
+  so a root your OS trusts is still unknown to Node.
+- **An old Node** with a stale bundled CA list.
+- **A leftover `cafile` or proxy** in `.npmrc`.
+
+Diagnose:
+
+```bash
+npm config get cafile proxy https-proxy registry
+echo "$NODE_EXTRA_CA_CERTS"
+node -v
+# who actually signs the registry from this machine:
+openssl s_client -connect registry.npmjs.org:443 -servername registry.npmjs.org </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer
+```
+
+If the issuer is your employer or an antivirus vendor rather than a public CA,
+the connection is being intercepted. Export that root certificate and point Node
+at it:
+
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/corporate-root.pem
+```
+
+**Do not set `strict-ssl=false` or `NODE_TLS_REJECT_UNAUTHORIZED=0`.** Those do
+not fix the trust problem, they switch verification off, which means you can no
+longer tell the real registry from whatever is intercepting it.
+
+If npm stays blocked, skip it. Every release ships prebuilt signed binaries for
+macOS, Linux and Windows on the
+[Releases](https://github.com/FerroxLabs/wayland-core/releases) page, each
+verifiable against `wayland-core-checksums.txt`.
+
+## Installed successfully but still on the old version
+
+`npm install -g @ferroxlabs/wayland-core` installs the **`latest`** dist-tag.
+Release candidates are published to **`next`** and are deliberately not `latest`,
+so a plain install will reinstall the version you already have and report success.
+
+```bash
+npm view @ferroxlabs/wayland-core dist-tags   # what each tag points at
+npm i -g @ferroxlabs/wayland-core@next        # the release candidate
+npm i -g @ferroxlabs/wayland-core@latest      # the current stable
+```
+
+If a release candidate has been announced but your installed version has not
+moved, check the dist-tags first: an rc that has not been promoted to `latest` is
+invisible to anything tracking the stable channel, and the install will still
+report success.
+
 ## Stale Engine via npx (already-fixed bugs reappear)
 
 ```
