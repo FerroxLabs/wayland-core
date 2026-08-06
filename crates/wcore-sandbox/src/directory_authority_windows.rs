@@ -893,6 +893,58 @@ pub(super) fn is_share_violation(error: &SandboxError) -> bool {
 /// class number is spelled out; it is stable ABI since Vista.
 const FILE_PROCESS_IDS_USING_FILE_INFORMATION: i32 = 47;
 
+/// Identify one holder: PID, image name, and whether it is still running.
+///
+/// # Why the image name and the liveness matter
+///
+/// `FileProcessIdsUsingFileInformation` answers "who has this object open". It
+/// does NOT answer "who is BLOCKING this open" — those are different questions,
+/// and conflating them reads a harmless holder as the culprit. Every handle this
+/// crate opens on a file permits deletion, so OUR OWN pid routinely appears in
+/// the list without being the blocker. A DIFFERENT process appearing is the
+/// interesting case, because a child's current-directory handle omits
+/// `FILE_SHARE_DELETE` and a virus scanner's may too.
+///
+/// Liveness separates the two remedies. A holder still RUNNING must be waited
+/// for or reaped. A holder already EXITED whose handle has not yet been torn
+/// down can only be outlasted, and tells us the drain reported zero too early.
+fn describe_holder(pid: usize) -> String {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    };
+
+    if pid == std::process::id() as usize {
+        return format!("{pid} SELF");
+    }
+    let Ok(raw) = u32::try_from(pid) else {
+        return format!("{pid} (pid out of range)");
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, raw) };
+    if handle.is_null() {
+        // Almost always "the process is gone", which is itself a result: the
+        // holder died and its handle outlived it.
+        return format!("{pid} (gone or inaccessible)");
+    }
+    let mut name = [0u16; 260];
+    let mut len = name.len() as u32;
+    let image =
+        if unsafe { QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut len) } != 0 {
+            String::from_utf16_lossy(&name[..len as usize])
+        } else {
+            "<unknown image>".to_owned()
+        };
+    let mut code: u32 = 0;
+    let alive = unsafe { GetExitCodeProcess(handle, &mut code) } != 0 && code == STILL_ACTIVE;
+    unsafe { CloseHandle(handle) };
+    let short = image.rsplit('\\').next().unwrap_or(&image).to_owned();
+    format!("{pid} {short} {}", if alive { "RUNNING" } else { "EXITED" })
+}
+
+/// `STILL_ACTIVE` is `STATUS_PENDING` reused as a process exit code.
+const STILL_ACTIVE: u32 = 259;
+
 /// Name the processes holding a handle on this object, for a refusal that has
 /// ALREADY happened.
 ///
@@ -944,12 +996,7 @@ fn holders_of_open_object(handle: &File) -> String {
             break;
         };
         let pid = usize::from_ne_bytes(entry.try_into().expect("pointer-width bytes"));
-        let own = if pid == std::process::id() as usize {
-            " (SELF)"
-        } else {
-            ""
-        };
-        holders.push(format!("{pid}{own}"));
+        holders.push(describe_holder(pid));
     }
     if holders.is_empty() {
         // The holder closed between the refusal and this query. That is itself
