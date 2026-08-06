@@ -676,7 +676,30 @@ pub(super) fn rename_file_into(
 ) -> Result<()> {
     #[cfg(test)]
     run_before_atomic_file_rename_hook();
-    rename_handle_into(&source.handle, target_parent, name, replace)
+    // Retried, and this is the FIRST retry this path has ever had.
+    //
+    // WHY HERE, when retrying elsewhere was measured not to help. The earlier
+    // retries were added to the DELETE sites, and the nightly soak then produced
+    // no named refusal on any of them — the refusal was never on a delete. Soak
+    // 31067604715 named this one instead: the publish rename inside
+    // `atomic_write_child`, restoring `...\checkout\keep` during an import
+    // rollback.
+    //
+    // WHY IT SHOULD WORK HERE, when it did not there. That run also showed the
+    // destination did not exist (`os error 2` reopening it), so the contended
+    // object is the SOURCE — a temporary file this process wrote microseconds
+    // earlier and is now unlinking by renaming. A freshly written file is what an
+    // on-access scanner opens, and a scanner's handle IS transient, which is the
+    // one shape backoff can outlast. The holders that defeated the earlier
+    // retries were a lease and a live child process, neither of which clears on
+    // its own.
+    //
+    // The test hook above fires ONCE, outside the loop, so a fault-injection test
+    // cannot be silently retried into passing.
+    retry_while_share_violated(
+        || rename_handle_into(&source.handle, target_parent, name, replace),
+        std::thread::sleep,
+    )
 }
 
 pub(super) fn rename_directory_into(
@@ -832,18 +855,31 @@ fn rename_handle_into(
         // message named no file and why the first round of instrumentation, aimed
         // at the delete sites, produced no named refusal at all.
         //
-        // A replace-rename must delete the destination, so it is share-arbitrated
-        // on the DESTINATION, not on the source being renamed.
+        // BOTH ENDS ARE REPORTED, because a rename can be refused from either.
+        // The first version of this probe asked only about the DESTINATION, on
+        // the reasoning that a replace-rename must delete it. Measured on soak
+        // run 31067604715, that was the wrong end: the destination reopen failed
+        // with os error 2 — the destination did not exist — while the rename was
+        // still refused with a sharing violation. A rename also unlinks the
+        // SOURCE name, so the source is share-arbitrated too, and here the source
+        // is a temporary file this process wrote microseconds earlier, which is
+        // exactly what an on-access scanner opens.
+        //
+        // The source handle is already in hand, so asking it costs one syscall
+        // and needs no reopen that could fail the way the destination's did.
         //
         // The extended status is carried too: the classic fallback overwrites it,
-        // so without this the reported error is only the second attempt's, and a
-        // POSIX-semantics rejection is indistinguishable from a share refusal.
+        // so without this the reported error is only the second attempt's. That
+        // run reported `0xc0000043` (STATUS_SHARING_VIOLATION) for the extended
+        // attempt, so BOTH rename classes were refused the same way and the
+        // POSIX-semantics fallback is not implicated.
         let error = ntstatus_error(classic);
         if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
             return Err(SandboxError::ShareViolation {
                 operation: format!(
                     "handle-relative publish rename (replace={replace}; extended NTSTATUS \
-                     {extended:#010x}; {})",
+                     {extended:#010x}; source {}; destination {})",
+                    holders_of_open_object(source),
                     holders_of_child(target_parent, &child_name, RelativeKind::File)
                 ),
                 path: target_parent.display_path.join(&child_name),
