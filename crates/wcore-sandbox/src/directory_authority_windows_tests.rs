@@ -26,8 +26,12 @@ use windows_sys::Wdk::Storage::FileSystem::{
 // reaches these through its own module-level import; a glob over `super::
 // windows::*` does not re-export another module's private `use`, so they are
 // imported here directly.
+// The share-mode constants belong to the same set: `open_denying_write_share`
+// asks the kernel, rather than a holder enumeration, whether write access is
+// outstanding on an object.
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, FILE_SHARE_DELETE,
+    FILE_SHARE_READ,
 };
 
 fn inject_create_failure(stage: Option<CreateValidationStage>) {
@@ -705,6 +709,122 @@ fn windows_observational_child_open_survives_a_share_delete_denying_handle() {
         .expect("a read-only accounting walk must not pay a share-arbitration cost");
 
     drop(pin);
+}
+
+/// Open a path denying WRITE sharing, which the kernel refuses while any other
+/// handle on that object has been GRANTED write access.
+///
+/// This is the whole assertion mechanism of the test below, so it is worth being
+/// precise about why it can see what a handle count cannot. Windows share
+/// arbitration is SYMMETRIC: this open succeeds only if every existing handle's
+/// granted access is permitted by the share mode asked for here. Omitting
+/// `FILE_SHARE_WRITE` therefore turns "does anyone hold write on this file?"
+/// into a boolean the kernel answers directly — no holder enumeration, no
+/// `FileProcessIdsUsingFileInformation` (which returns nothing for file handles
+/// on the affected hosts), and no dependence on a scanner being installed.
+fn open_denying_write_share(path: &Path) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(path)
+}
+
+/// The publish rename must run through a handle that holds NO write access to
+/// the temporary.
+///
+/// WHY THIS TEST EXISTS. `atomic_write_child` renamed the temporary into place
+/// through the very handle `create_child_file` returned, which is opened
+/// `GENERIC_READ | GENERIC_WRITE | DELETE`. On hosted `windows-2022` that rename
+/// was refused with STATUS_SHARING_VIOLATION while the destination name provably
+/// did NOT exist (soak 31070941379, `os error 2` reopening it), and ~785ms of
+/// bounded backoff never once cleared it — across three separate retry sites.
+/// A holder that survives every backoff step is not a transient scanner handle;
+/// it is a handle nobody is going to drop, and the one this process was holding
+/// for the whole operation was its own write-bearing creating handle.
+///
+/// WHAT IS ASSERTED, AND WHY IT IS DETERMINISTIC. The middle assertion is the
+/// regression guard: after the reacquire, an opener that refuses to share write
+/// must be admitted to the same object. That is a pure kernel-arbitration fact
+/// about access already granted, so it holds on any Windows host, with or
+/// without an on-access scanner, at any CPU load — unlike the 35-minute soak
+/// that was until now the only thing able to observe this defect at all.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS. Delete the `drop(created)` in
+/// `reopen_for_publish`, or publish through the created authority again, and the
+/// middle assertion takes the same `os error 32` the first one is asserting.
+#[test]
+fn windows_publish_reacquires_the_temporary_without_the_write_bit() {
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("root");
+    std::fs::create_dir_all(&root_path).unwrap();
+    let root = DirectoryAuthority::open(&root_path).unwrap();
+
+    let temporary = ".wayland-write-probe";
+    let temporary_path = root_path.join(temporary);
+    let created = root.create_child_file(temporary, b"payload").unwrap();
+
+    // The state the publish rename used to run in: the creating handle holds
+    // GENERIC_WRITE, so an opener that will not share write is refused.
+    let refused = open_denying_write_share(&temporary_path)
+        .expect_err("the creating handle must still hold write access here");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(ERROR_SHARING_VIOLATION),
+        "expected share arbitration to refuse the probe, got {refused}"
+    );
+
+    let publish = reopen_for_publish(&root, temporary, created).unwrap();
+
+    // THE REGRESSION GUARD. Same object, same probe, now admitted — so no write
+    // access is outstanding when the rename runs.
+    drop(
+        open_denying_write_share(&temporary_path)
+            .expect("the publish handle must hold no write access to the temporary"),
+    );
+
+    // And it is still the same object, and can still publish through it: the
+    // reacquire must not have traded the defect for a broken publish.
+    publish.rename_into(&root, "published", true).unwrap();
+    assert_eq!(
+        std::fs::read(root_path.join("published")).unwrap(),
+        b"payload",
+        "the published bytes must be the ones the temporary was created with"
+    );
+    assert!(
+        !temporary_path.exists(),
+        "the temporary name must not survive its own publish"
+    );
+}
+
+/// A substituted temporary must never be published.
+///
+/// The reacquire closes the creating handle and reopens BY NAME, which opens a
+/// window an attacker with write access to the parent could use to put a
+/// different object at that name. The identity re-proof is what closes it, and
+/// this is that proof's only executable test.
+#[test]
+fn windows_publish_refuses_a_substituted_temporary() {
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("root");
+    std::fs::create_dir_all(&root_path).unwrap();
+    let root = DirectoryAuthority::open(&root_path).unwrap();
+
+    let temporary = ".wayland-write-substituted";
+    let created = root.create_child_file(temporary, b"honest").unwrap();
+
+    // Stand in for the racing attacker: replace the object behind the name
+    // while the creating handle is still what `reopen_for_publish` will drop.
+    std::fs::remove_file(root_path.join(temporary)).unwrap();
+    std::fs::write(root_path.join(temporary), b"substituted").unwrap();
+
+    let error = reopen_for_publish(&root, temporary, created)
+        .expect_err("a substituted temporary must not be publishable");
+    assert!(
+        error.to_string().contains("identity changed"),
+        "expected an identity refusal, got {error}"
+    );
 }
 
 /// The cleanup retry must recover a refusal that clears, and must do so on the
