@@ -727,6 +727,9 @@ fn rename_handle_into(
     replace: bool,
 ) -> Result<()> {
     validate_windows_child_name(name)?;
+    // Kept before `name` is shadowed by its UTF-16 form: a refusal below has to
+    // be able to say WHICH object it was refused on.
+    let child_name = name.to_owned();
     let name: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().collect();
     // `FileNameLength` is the BYTE length of the UTF-16 name, NOT a code-unit
     // count, and the name is NOT NUL-terminated.
@@ -820,7 +823,34 @@ fn rename_handle_into(
         )
     };
     if classic < 0 {
-        return Err(ntstatus_error(classic).into());
+        // The PUBLISH refusal, named. `atomic_write_child` republishes through
+        // this rename, and `replace_tree` restores every original file through
+        // `atomic_write_child`, so this is the path an import ROLLBACK takes —
+        // the one the nightly soak fails on with
+        // "durable recovery failed (... os error 32)". Until now it returned a
+        // bare errno with no path and no operation, which is why that soak
+        // message named no file and why the first round of instrumentation, aimed
+        // at the delete sites, produced no named refusal at all.
+        //
+        // A replace-rename must delete the destination, so it is share-arbitrated
+        // on the DESTINATION, not on the source being renamed.
+        //
+        // The extended status is carried too: the classic fallback overwrites it,
+        // so without this the reported error is only the second attempt's, and a
+        // POSIX-semantics rejection is indistinguishable from a share refusal.
+        let error = ntstatus_error(classic);
+        if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+            return Err(SandboxError::ShareViolation {
+                operation: format!(
+                    "handle-relative publish rename (replace={replace}; extended NTSTATUS \
+                     {extended:#010x}; {})",
+                    holders_of_child(target_parent, &child_name, RelativeKind::File)
+                ),
+                path: target_parent.display_path.join(&child_name),
+                source: error,
+            });
+        }
+        return Err(error.into());
     }
     rename_status_completed(classic)
 }
