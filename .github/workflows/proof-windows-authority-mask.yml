@@ -1,0 +1,125 @@
+# PROOF WORKFLOW — hosted Server 2022 verdict on the DirectoryAuthority DELETE
+# mask fix. Fires only on `proof/windows-authority-mask`, never on main.
+#
+# What it proves
+# --------------
+# A retained Windows directory handle used to carry `DELETE` for the whole life
+# of the authority. Windows share arbitration then refused any later open that
+# omitted `FILE_SHARE_DELETE`, which is how `atomic_write_child`'s
+# handle-relative rename failed STATUS_SHARING_VIOLATION (0xc0000043) on
+# Server 2022. An 8-cell diagnostic matrix isolated the cause to the DELETE
+# grant alone. This job runs the two crates that own the change against a real
+# Server 2022 host, which is the only place the defect has ever reproduced.
+#
+# Why the assertions look paranoid
+# --------------------------------
+# Both traps below were paid for in this program:
+#
+#   * `cargo nextest -E 'test(=name)'` needs the FULL module path. A `=`-anchored
+#     filter silently matched 1 of 9 intended tests and exited 0. So this job
+#     runs WHOLE crates rather than a name filter, and separately asserts the
+#     executed-test count is non-zero — a suite that runs nothing must not read
+#     as a pass.
+#   * A GitHub Actions outage produced `conclusion=failure` with ZERO steps
+#     executed. The summary line is written from the real counts so a run that
+#     never got going cannot be mistaken for a verdict.
+name: proof-windows-authority-mask
+
+on:
+  push:
+    branches:
+      - proof/windows-authority-mask
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proof-windows-authority-mask-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-2022:
+    name: wcore-sandbox + wcore-swarm on Server 2022
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the host
+        shell: pwsh
+        run: |
+          Write-Output "OS=$([System.Environment]::OSVersion.VersionString)"
+          Write-Output "SHA=${{ github.sha }}"
+          try {
+            $d = Get-MpComputerStatus -ErrorAction Stop
+            Write-Output "DefenderRealTime=$($d.RealTimeProtectionEnabled)"
+          } catch {
+            Write-Output "DefenderRealTime=unknown"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: wcore-sandbox
+        shell: pwsh
+        run: |
+          cargo nextest run -p wcore-sandbox --no-fail-fast 2>&1 | Tee-Object -FilePath sandbox.log
+          Write-Output "SANDBOX_EXIT=$LASTEXITCODE"
+          "SANDBOX_EXIT=$LASTEXITCODE" | Out-File -Append -Encoding ascii exits.txt
+
+      - name: wcore-swarm
+        if: always()
+        shell: pwsh
+        run: |
+          cargo nextest run -p wcore-swarm --no-fail-fast 2>&1 | Tee-Object -FilePath swarm.log
+          Write-Output "SWARM_EXIT=$LASTEXITCODE"
+          "SWARM_EXIT=$LASTEXITCODE" | Out-File -Append -Encoding ascii exits.txt
+
+      - name: Verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $fail = 0
+          foreach ($pair in @(@('sandbox', 'sandbox.log'), @('swarm', 'swarm.log'))) {
+            $name = $pair[0]
+            $path = $pair[1]
+            if (-not (Test-Path $path)) {
+              Write-Output "$name : NO LOG — the step never produced output"
+              $fail = 1
+              continue
+            }
+            $text = Get-Content $path -Raw
+            # nextest's summary line, e.g. "Summary [ 12.345s] 279 tests run: 279 passed, 0 skipped"
+            $m = [regex]::Match($text, 'Summary \[[^\]]*\]\s+(\d+) tests run:\s+(\d+) passed')
+            if (-not $m.Success) {
+              Write-Output "$name : NO SUMMARY LINE — the suite did not complete"
+              $fail = 1
+              continue
+            }
+            $run = [int]$m.Groups[1].Value
+            $passed = [int]$m.Groups[2].Value
+            Write-Output "$name : ran=$run passed=$passed"
+            # A suite that executed nothing is not a pass.
+            if ($run -eq 0) { Write-Output "$name : ZERO TESTS EXECUTED"; $fail = 1 }
+            if ($passed -ne $run) { Write-Output "$name : FAILURES PRESENT"; $fail = 1 }
+            # The exact signature of the defect under repair.
+            if ($text -match '0xc0000043|os error 32|SHARING_VIOLATION') {
+              Write-Output "$name : SHARE VIOLATION TEXT PRESENT"
+              $fail = 1
+            }
+          }
+          if ($fail -ne 0) { Write-Output 'PROOF=FAILED'; exit 1 }
+          Write-Output 'PROOF=PASSED'
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-windows-authority-mask-logs
+          path: |
+            sandbox.log
+            swarm.log
+            exits.txt
+          if-no-files-found: warn
