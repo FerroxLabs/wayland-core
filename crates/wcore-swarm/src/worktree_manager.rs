@@ -366,42 +366,30 @@ impl WorktreeManager {
 
     /// Prove usable storage and return the bounded workspace authority used by
     /// every transaction in one admitted dispatch.
+    ///
+    /// The per-transaction budget is DERIVED from the checkout this dispatch
+    /// will actually hand each worker, not assumed at the ceiling — see
+    /// `plan_workspace_capacity` for the rule and why it cannot overcommit the
+    /// volume. The measurement is taken here, before sizing, from the same
+    /// pinned HEAD every worker is cloned from.
     pub async fn workspace_capacity(&self, active_workers: usize) -> Result<WorkspaceCapacity> {
         self.validate_repo_authority()?;
         self.validate_swarm_root()?;
-        let active_workers = u64::try_from(active_workers.max(1)).map_err(|_| {
-            SwarmError::DispatchAdmission("active worker count exceeds u64".to_owned())
-        })?;
-        let available_bytes = self.available_workspace_bytes().await?;
-        let max_transaction_bytes =
-            MAX_TRANSACTION_WORKSPACE_BYTES.min(MAX_AGGREGATE_WORKSPACE_BYTES / active_workers);
-        let existing_reservation = self.reserved_workspace_bytes()?;
-        let active_reservation = max_transaction_bytes
-            .checked_mul(active_workers)
-            .and_then(|bytes| bytes.checked_add(existing_reservation))
-            .and_then(|bytes| bytes.checked_add(WORKSPACE_SAFETY_MARGIN_BYTES))
-            .ok_or_else(|| {
-                SwarmError::DispatchAdmission("dispatch workspace capacity overflowed".to_owned())
+        let pinned_head = self.read_pinned_head().await?;
+        let closure_bytes = self.transfer_closure_bytes(&pinned_head).await?;
+        let checkout_bytes = self.checkout_logical_bytes(&pinned_head).await?;
+        let measured_checkout_bytes =
+            closure_bytes.checked_add(checkout_bytes).ok_or_else(|| {
+                SwarmError::WorktreeIo("initial workspace size overflowed".to_owned())
             })?;
-        if active_reservation > available_bytes {
-            return Err(SwarmError::DispatchAdmission(format!(
-                "dispatch requires {active_reservation} bytes for {active_workers} active workers, {existing_reservation} bytes already reserved, and its safety margin, but only {available_bytes} bytes are available"
-            )));
-        }
-        if existing_reservation
-            .checked_add(max_transaction_bytes.saturating_mul(active_workers))
-            .is_none_or(|total| total > MAX_AGGREGATE_WORKSPACE_BYTES)
-        {
-            return Err(SwarmError::DispatchAdmission(
-                "dispatch aggregate workspace budget is already committed".to_owned(),
-            ));
-        }
-        Ok(WorkspaceCapacity {
+        let available_bytes = self.available_workspace_bytes().await?;
+        let existing_reservation = self.reserved_workspace_bytes()?;
+        plan_workspace_capacity(
+            active_workers,
+            measured_checkout_bytes,
             available_bytes,
-            safety_margin_bytes: WORKSPACE_SAFETY_MARGIN_BYTES,
-            max_transaction_bytes,
-            max_aggregate_bytes: MAX_AGGREGATE_WORKSPACE_BYTES,
-        })
+            existing_reservation,
+        )
     }
 
     /// Reject an entire dispatch before any transaction is created when the
