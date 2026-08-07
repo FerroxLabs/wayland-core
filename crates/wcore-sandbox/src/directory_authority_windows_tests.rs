@@ -653,8 +653,7 @@ fn windows_retained_workspace_binds_under_a_share_delete_denying_handle() {
     std::fs::create_dir_all(&checkout_path).unwrap();
 
     let owner = DirectoryAuthority::open(&owner_path).unwrap();
-    // Observational, exactly as the delegated dispatch path retains a checkout:
-    // a delete-bearing authority cannot be name-leased at all.
+    // Observational, exactly as the delegated dispatch path retains a checkout.
     let checkout = DirectoryAuthority::open_observational(&checkout_path).unwrap();
 
     // `acquire_name_lease` omits FILE_SHARE_DELETE — the same share arbitration
@@ -678,10 +677,18 @@ fn windows_retained_workspace_binds_under_a_share_delete_denying_handle() {
 /// dispatch refusal, so a HEALTHY worker was killed and the operator was told
 /// `workspace accounting refused ".git": ... (os error 32)`.
 ///
-/// HOW THIS FAILS IF THE DEFECT RETURNS. Point the walk back at
-/// `open_child_directory` and the first assertion below is what it hits.
+/// HOW THIS FAILS IF THE DEFECT RETURNS. Re-add `DELETE` to EITHER child-open
+/// profile and that open is refused by the kernel with ERROR_SHARING_VIOLATION,
+/// which is the assertion below.
+///
+/// WHY BOTH FORMS ARE ASSERTED. The original defect was scoped to the
+/// observational walk, and this test asserted that the mutating form was
+/// REFUSED — treating the refusal as correct. It was not correct, it was the
+/// Server 2022 rename defect wearing a different hat: no long-lived directory
+/// profile has any business holding a share-arbitrated `DELETE`. Both forms
+/// must now descend, and this test is the pin for both.
 #[test]
-fn windows_observational_child_open_survives_a_share_delete_denying_handle() {
+fn windows_child_opens_survive_a_share_delete_denying_handle() {
     let temp = tempfile::tempdir().unwrap();
     let root_path = temp.path().join("checkout");
     let child_path = root_path.join(".git");
@@ -693,16 +700,14 @@ fn windows_observational_child_open_survives_a_share_delete_denying_handle() {
     // directory imposes, and the same one a live `git` holds on `.git`.
     let pin = acquire_name_lease(&pinned).unwrap();
 
-    // The mutating form is the defect: it demands DELETE and is refused.
-    let refused = root.open_child_directory(".git").unwrap_err();
-    assert!(
-        is_share_violation(&refused),
-        "expected a share violation from the delete-bearing open, got {refused}"
-    );
-
     // The observational form asks for no right it does not use, so it descends.
     root.open_child_directory_observational(".git")
         .expect("a read-only accounting walk must not pay a share-arbitration cost");
+
+    // The mutating form must descend too: it mutates THROUGH the handle and
+    // never unlinks the child, so it has no reason to request `DELETE`.
+    root.open_child_directory(".git")
+        .expect("a mutating child open must not request share-arbitrated DELETE");
 
     drop(pin);
 }

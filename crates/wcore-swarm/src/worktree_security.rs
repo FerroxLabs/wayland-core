@@ -82,11 +82,25 @@ impl DirectoryAuthority {
             .map_err(|error| SwarmError::DispatchAdmission(error.to_string()))
     }
 
-    pub(super) fn remove_open_dir_all(self) -> std::result::Result<(), (SwarmError, Self)> {
-        self.0.remove_open_dir_all().map_err(|boxed| {
-            let (error, authority) = *boxed;
-            (SwarmError::WorktreeIo(error.to_string()), Self(authority))
-        })
+    /// Destroy this retained transaction root, taking the Windows `DELETE`
+    /// right through `parent` only at the moment of destruction.
+    ///
+    /// A long-lived authority no longer carries `DELETE` on Windows — holding
+    /// it for the authority's lifetime is what refused every handle-relative
+    /// rename into the directory on Server 2022. `name` is still resolved only
+    /// against `parent`'s held handle and the reopened object's identity is
+    /// re-proven, so the anti-swap guarantee is unchanged.
+    pub(super) fn remove_open_dir_all_under(
+        self,
+        parent: &Self,
+        name: &str,
+    ) -> std::result::Result<(), (SwarmError, Self)> {
+        self.0
+            .remove_open_dir_all_under(&parent.0, name)
+            .map_err(|boxed| {
+                let (error, authority) = *boxed;
+                (SwarmError::WorktreeIo(error.to_string()), Self(authority))
+            })
     }
 
     /// Rename the exact held Windows directory object beneath a retained

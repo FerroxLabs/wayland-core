@@ -57,6 +57,37 @@ enum RelativeIntent {
     ReadOnly,
     Mutate,
     Create,
+    /// Open an object THAT IS ABOUT TO BE DESTROYED, carrying `DELETE`.
+    ///
+    /// Separate from [`Self::Mutate`] because on Windows the `DELETE` grant is
+    /// share-arbitrated for the whole life of the handle, and a directory
+    /// handle that holds it POISONS the directory: measured on hosted
+    /// windows-2022 (Server 2022, 10.0.20348), a handle-relative rename into a
+    /// directory is refused STATUS_SHARING_VIOLATION for as long as ANY handle
+    /// we hold on that directory was granted `DELETE` — regardless of what is
+    /// passed as `RootDirectory`, with the destination absent, with
+    /// `replace=false`, and with no antivirus present.
+    ///
+    /// The isolating measurement, one variable per cell, authority dropped so
+    /// the listed handle is the only one held:
+    ///
+    /// | retained mask | handle-relative rename |
+    /// |---|---|
+    /// | `GENERIC_READ \| GENERIC_WRITE` | OK |
+    /// | `GENERIC_READ \| DELETE` | REFUSED 0xc0000043 |
+    ///
+    /// So `DELETE` is the sole conflicting grant and `GENERIC_WRITE` is
+    /// innocent — which is why the durability boundary (`sync_all` is
+    /// `FlushFileBuffers`, and it needs write) survives this change untouched.
+    /// It is the same arbitration finding 20-72 already recorded against
+    /// `SetCurrentDirectory`, which opens without share-delete and is therefore
+    /// denied by a DELETE-bearing handle; that was read as a chdir quirk when
+    /// it was in fact this defect showing its other face.
+    ///
+    /// A handle opened with this intent must be SHORT-LIVED — acquired at the
+    /// point of destruction and dropped immediately after. Retaining one
+    /// reintroduces the defect.
+    Destroy,
     /// Open an EXISTING regular-file advisory-lock target. Surfaces a not-found
     /// error so a caller probing an unheld lock never mutates the directory it
     /// is merely observing.
@@ -70,10 +101,20 @@ pub(super) fn open_directory(path: &Path) -> std::io::Result<File> {
 
     let mut options = OpenOptions::new();
     options
-        // DirectoryAuthority is a mutation authority. GENERIC_WRITE is also
+        // DirectoryAuthority is a mutation authority. GENERIC_WRITE is
         // required for File::sync_all/FlushFileBuffers to provide the Windows
         // durability boundary used after relative create, rename, and delete.
-        .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+        //
+        // `DELETE` IS DELIBERATELY ABSENT, AND REMOVING IT WAS THE FIX FOR THE
+        // v0.12.26 Windows blocker. This handle lives for the whole life of the
+        // authority, and a lifetime-held DELETE grant on a DIRECTORY makes every
+        // handle-relative rename into that directory fail STATUS_SHARING_VIOLATION
+        // on Server 2022 — which broke `atomic_write_child`, and with it the
+        // heartbeat mirror, archive import and import rollback, deterministically.
+        // Destruction takes DELETE transiently instead; see
+        // `RelativeIntent::Destroy` for the isolating measurement and for why
+        // GENERIC_WRITE is provably not implicated.
+        .access_mode(GENERIC_READ | GENERIC_WRITE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(
             windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS
@@ -159,12 +200,19 @@ pub(super) fn open_directory_observational(path: &Path) -> std::io::Result<File>
 /// this exact object" form. A pathname-based reopen would be the very
 /// re-resolution this lease exists to make safe.
 ///
-/// FAILS CLOSED BY CONSTRUCTION. If the retained authority already holds
-/// `DELETE` (an authority opened through [`open_directory`] rather than
-/// [`open_directory_observational`]), this open is refused: the lease's share
-/// mode would have to permit the `DELETE` the existing handle was granted, and
-/// it deliberately does not. The caller must surface that refusal, never spawn
-/// unpinned.
+/// FAILS CLOSED BY CONSTRUCTION, AGAINST THE CASE THAT STILL EXISTS. If any
+/// live handle on this object was granted `DELETE`, this open is refused: the
+/// lease's share mode would have to permit that `DELETE`, and it deliberately
+/// does not. The caller must surface the refusal, never spawn unpinned.
+///
+/// The set of handles that can trigger that refusal NARROWED when the Server
+/// 2022 rename defect was fixed. [`open_directory`] used to carry `DELETE` for
+/// the authority's whole lifetime, so leasing a mutating authority always
+/// failed and callers were forced onto [`open_directory_observational`]. No
+/// long-lived profile carries `DELETE` any more — only the transient
+/// [`RelativeIntent::Destroy`] handle does — so a mutating authority now leases
+/// successfully. The guarantee is unchanged where it matters: a lease and an
+/// in-flight destruction of the same object remain mutually exclusive.
 pub(super) fn acquire_name_lease(authority: &DirectoryAuthority) -> Result<File> {
     let unicode_name = UNICODE_STRING {
         Length: 0,
@@ -889,7 +937,10 @@ pub(super) fn remove_descendants(authority: &DirectoryAuthority) -> Result<()> {
             // cannot be waited for directly. It can only be outlasted, and it
             // clears in about 10 ms.
             let handle = retry_while_share_violated(
-                || open_relative(authority, &name, kind, RelativeIntent::Mutate),
+                // `Destroy`, not `Mutate`: this walk exists to delete, and it is
+                // the transient acquisition of DELETE the fix depends on. The
+                // handle dies with this loop iteration.
+                || open_relative(authority, &name, kind, RelativeIntent::Destroy),
                 std::thread::sleep,
             )?;
             let metadata = handle.metadata()?;
@@ -952,8 +1003,31 @@ pub(super) fn remove_open_dir_all(
     Ok(())
 }
 
+/// Open a direct child directory WITH `DELETE`, for immediate destruction.
+///
+/// Separate from [`open_child_directory`] because that one now returns a
+/// long-lived authority without `DELETE` (see `RelativeIntent::Destroy`). The
+/// child is still resolved only through the parent's RETAINED handle, so the
+/// anti-swap guarantee is identical — the difference is purely the mask and the
+/// lifetime.
+pub(super) fn open_child_directory_for_destroy(
+    parent: &DirectoryAuthority,
+    name: &str,
+) -> Result<DirectoryAuthority> {
+    let handle = open_relative(
+        parent,
+        name,
+        RelativeKind::Directory,
+        RelativeIntent::Destroy,
+    )?;
+    let metadata = handle.metadata()?;
+    validate_real_directory(Path::new("<retained child>"), &metadata)?;
+    let identity = handle_directory_identity(&handle, &metadata)?;
+    Ok(directory_authority(parent, name, handle, identity))
+}
+
 pub(super) fn remove_empty_child_directory(parent: &DirectoryAuthority, name: &str) -> Result<()> {
-    let child = open_child_directory(parent, name)?;
+    let child = open_child_directory_for_destroy(parent, name)?;
     if !child_names(&child)?.is_empty() {
         return Err(SandboxError::PathDenied(format!(
             "refused to remove non-empty Windows directory: {}",
@@ -1003,9 +1077,27 @@ fn open_relative(
         (RelativeKind::File, RelativeIntent::Create) => {
             GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE
         }
+        // NO `DELETE` HERE, AND THAT IS THE FIX. Both of these produce
+        // LONG-LIVED directory authorities, and a retained DELETE grant on a
+        // directory is what refuses every handle-relative rename into it on
+        // Server 2022 (see `RelativeIntent::Destroy` for the measurement).
+        // `FILE_GENERIC_WRITE` stays: it is what `sync_all`/`FlushFileBuffers`
+        // requires, it was measured innocent, and removing it would move the
+        // durability boundary to a transient handle for no reason.
         (RelativeKind::Directory, RelativeIntent::Create | RelativeIntent::Mutate) => {
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE
+        }
+        // The destruction profile, and the ONLY directory profile that carries
+        // DELETE. Write is retained because the cleanup recursion flushes the
+        // directory handle before the disposition.
+        (RelativeKind::Directory, RelativeIntent::Destroy) => {
             FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | SYNCHRONIZE
         }
+        // A file's DELETE grant is NOT implicated: cell 3 renamed successfully
+        // while a DELETE-bearing FILE handle was open. Only the directory
+        // arbitration is affected, so the file profile below is unchanged and
+        // `Destroy` maps onto the same mask `Mutate` already used.
+        (RelativeKind::File, RelativeIntent::Destroy) => FILE_GENERIC_READ | DELETE | SYNCHRONIZE,
         // THE ABSENCE OF THE WRITE BIT HERE IS LOAD-BEARING. Measured on this
         // hardware against a mode-444 child: `FILE_GENERIC_READ | DELETE |
         // SYNCHRONIZE` OPENS successfully and the extended disposition (with its
@@ -1059,9 +1151,10 @@ fn open_relative(
             match intent {
                 RelativeIntent::Create => FILE_CREATE,
                 RelativeIntent::LockOpenOrCreate => FILE_OPEN_IF,
-                RelativeIntent::ReadOnly | RelativeIntent::Mutate | RelativeIntent::LockOpen => {
-                    FILE_OPEN
-                }
+                RelativeIntent::ReadOnly
+                | RelativeIntent::Mutate
+                | RelativeIntent::Destroy
+                | RelativeIntent::LockOpen => FILE_OPEN,
             },
             FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | type_options,
             std::ptr::null(),
