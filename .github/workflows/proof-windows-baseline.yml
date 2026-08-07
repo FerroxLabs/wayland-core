@@ -1,0 +1,122 @@
+# BASELINE MEASUREMENT — what is actually red on the HOSTED Windows images at
+# origin/main, with no fix applied, on Server 2022 AND Server 2025.
+#
+# Why this exists
+# ---------------
+# The DirectoryAuthority DELETE-mask fix was built to clear a Server 2022
+# STATUS_SHARING_VIOLATION on a handle-relative rename. Measured on the fix
+# branch, Server 2022 still scored 177/182 sandbox and 94/95 swarm, and the
+# same tree on real Windows 11 scored identically — so the fix does not deliver
+# a green hosted Windows and it costs two handle-bound guarantees. Before
+# choosing between "repair the fix", "retarget the runner" and "declare Server
+# 2022 unsupported", the unfixed baseline has to be on the table: nobody has
+# ever recorded WHICH tests are red on an untouched main on either image.
+#
+# Server 2025 is included because if the defect is absent there, the whole
+# problem is solved by bumping an image label, with zero product risk.
+#
+# Never merge. Fires only on proof/windows-baseline.
+name: proof-windows-baseline
+
+on:
+  push:
+    branches:
+      - proof/windows-baseline
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proof-windows-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-2022:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the host
+        shell: pwsh
+        run: |
+          Write-Output "OS=$([System.Environment]::OSVersion.VersionString)"
+          Write-Output "SHA=${{ github.sha }}"
+          try {
+            $d = Get-MpComputerStatus -ErrorAction Stop
+            Write-Output "DefenderRealTime=$($d.RealTimeProtectionEnabled)"
+          } catch {
+            Write-Output "DefenderRealTime=unknown"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: wcore-sandbox
+        shell: pwsh
+        run: |
+          cargo nextest run -p wcore-sandbox --no-fail-fast 2>&1 | Tee-Object -FilePath sandbox.log
+          Write-Output "SANDBOX_EXIT=$LASTEXITCODE"
+          "SANDBOX_EXIT=$LASTEXITCODE" | Out-File -Append -Encoding ascii exits.txt
+
+      - name: wcore-swarm
+        if: always()
+        shell: pwsh
+        run: |
+          cargo nextest run -p wcore-swarm --no-fail-fast 2>&1 | Tee-Object -FilePath swarm.log
+          Write-Output "SWARM_EXIT=$LASTEXITCODE"
+          "SWARM_EXIT=$LASTEXITCODE" | Out-File -Append -Encoding ascii exits.txt
+
+      - name: Verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $fail = 0
+          foreach ($pair in @(@('sandbox', 'sandbox.log'), @('swarm', 'swarm.log'))) {
+            $name = $pair[0]
+            $path = $pair[1]
+            if (-not (Test-Path $path)) {
+              Write-Output "$name : NO LOG — the step never produced output"
+              $fail = 1
+              continue
+            }
+            $text = Get-Content $path -Raw
+            # nextest's summary line, e.g. "Summary [ 12.345s] 279 tests run: 279 passed, 0 skipped"
+            $m = [regex]::Match($text, 'Summary \[[^\]]*\]\s+(\d+) tests run:\s+(\d+) passed')
+            if (-not $m.Success) {
+              Write-Output "$name : NO SUMMARY LINE — the suite did not complete"
+              $fail = 1
+              continue
+            }
+            $run = [int]$m.Groups[1].Value
+            $passed = [int]$m.Groups[2].Value
+            Write-Output "$name : ran=$run passed=$passed"
+            # A suite that executed nothing is not a pass.
+            if ($run -eq 0) { Write-Output "$name : ZERO TESTS EXECUTED"; $fail = 1 }
+            if ($passed -ne $run) { Write-Output "$name : FAILURES PRESENT"; $fail = 1 }
+            # The exact signature of the defect under repair.
+            if ($text -match '0xc0000043|os error 32|SHARING_VIOLATION') {
+              Write-Output "$name : SHARE VIOLATION TEXT PRESENT"
+              $fail = 1
+            }
+          }
+          if ($fail -ne 0) { Write-Output 'PROOF=FAILED'; exit 1 }
+          Write-Output 'PROOF=PASSED'
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-windows-baseline-logs-${{ matrix.os }}
+          path: |
+            sandbox.log
+            swarm.log
+            exits.txt
+          if-no-files-found: warn

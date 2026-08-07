@@ -5,7 +5,7 @@ type: software
 primary_type: software
 secondary_types: []
 confidence: 0.943
-detected_at: 2026-08-03T23:57:18.479Z
+detected_at: 2026-08-07T06:35:59.602Z
 signals:
   - kind: agents_md_frontmatter
     weight: 0.9
@@ -20,7 +20,7 @@ signals:
     weight: 0.7
     domain: software
     ratio: 0.997
-    count: 1882
+    count: 1884
 ---
 ## Coordination (READ EVERY TASK — multi-agent blackboard)
 
