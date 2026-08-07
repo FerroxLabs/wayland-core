@@ -4856,8 +4856,10 @@ fn merge_config_files_with_trust(
 
     // Compact: project overrides global for any non-default field.
     // Since CompactConfig uses serde defaults, a fully-default project config
-    // is indistinguishable from "absent". We use project if its context_window
-    // differs from the default, otherwise fall back to global.
+    // is largely indistinguishable from "absent". `context_window` is the
+    // exception (GH#635 made it a presence-aware `Option`), so it is the
+    // presence probe: use project if it set a context_window, otherwise fall
+    // back to global.
     let compact = if project.compact.context_window != CompactConfig::default().context_window
         || !project.compact.enabled
     {

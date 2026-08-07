@@ -6141,7 +6141,7 @@ impl AgentEngine {
             used_tokens,
             self.compat.provider_type(),
             effective_model,
-            self.compact_config.context_window as u64,
+            self.compact_config.fallback_context_window() as u64,
         )
         .percent()
     }
@@ -6186,7 +6186,7 @@ impl AgentEngine {
                 used_tokens,
                 self.compat.provider_type(),
                 &self.model,
-                self.compact_config.context_window as u64,
+                self.compact_config.fallback_context_window() as u64,
             )
             .fraction()
         };
@@ -9870,7 +9870,7 @@ impl AgentEngine {
                             input_token_estimate as u64,
                             self.compat.provider_type(),
                             &request.model,
-                            self.compact_config.context_window as u64,
+                            self.compact_config.fallback_context_window() as u64,
                         );
                         // #282 contract V1: once Flux has SIGNALLED-BACK the real served
                         // window (`x-flux-model-window`) on a prior turn of THIS Flux
@@ -11191,7 +11191,7 @@ impl AgentEngine {
                             input_token_estimate as u64,
                             self.compat.provider_type(),
                             &request.model,
-                            self.compact_config.context_window as u64,
+                            self.compact_config.fallback_context_window() as u64,
                         );
                         if wcore_providers::is_flux_tier_alias(&request.model)
                             && let Some(window) = self.flux_served_window
@@ -13399,14 +13399,33 @@ impl AgentEngine {
 
     // ── F23-04: cache / compaction ledger recording ─────────────────────────
 
-    /// The autocompact trigger threshold, as tokens, for this engine's config.
+    /// The autocompact trigger threshold, as tokens, for this engine's config
+    /// AND its currently-active model (GH#635).
+    ///
+    /// `self.model` is deliberately the model here — NOT the per-row
+    /// `effective_model` the ledger stamps on a turn. `run_compaction` enforces
+    /// against `self.model`, and F23-04's whole point is that the reported
+    /// number cannot drift from the enforced one; reporting a threshold for a
+    /// different model than the one the trigger tested would reintroduce
+    /// exactly that drift. (`self.model` is already post-swap — the tier swap
+    /// is applied by `apply_pre_turn_outcome` before the turn runs.)
     fn autocompact_threshold_tokens(&self) -> u64 {
-        auto::autocompact_threshold(&self.compact_config) as u64
+        auto::autocompact_threshold(
+            &self.compact_config,
+            self.compat.provider_type(),
+            &self.model,
+        ) as u64
     }
 
-    /// The emergency hard-stop limit, as tokens, for this engine's config.
+    /// The emergency hard-stop limit, as tokens, for this engine's config and
+    /// currently-active model (GH#635). Same `self.model` reasoning as
+    /// [`Self::autocompact_threshold_tokens`].
     fn emergency_limit_tokens(&self) -> u64 {
-        emergency::emergency_limit(&self.compact_config) as u64
+        emergency::emergency_limit(
+            &self.compact_config,
+            self.compat.provider_type(),
+            &self.model,
+        ) as u64
     }
 
     /// Record one completed LLM round-trip into the cache/compaction ledger.
@@ -13640,6 +13659,8 @@ impl AgentEngine {
             || auto::should_autocompact(
                 self.compact_state.last_real_input_tokens,
                 &self.compact_config,
+                self.compat.provider_type(),
+                &self.model,
             );
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
             let provider: Arc<dyn LlmProvider> = match (
@@ -13869,11 +13890,14 @@ impl AgentEngine {
                 self.compact_state.consecutive_failures, self.compact_state.last_real_input_tokens
             ));
         } else if !self.compact_config.enabled {
-            let threshold = self
-                .compact_config
-                .context_window
-                .saturating_sub(self.compact_config.output_reserve)
-                .saturating_sub(self.compact_config.autocompact_buffer);
+            // GH#635 — call the SAME extracted function the trigger uses. This
+            // was an inline re-derivation of the threshold and would have kept
+            // reporting the stale 200k-based number after the fix.
+            let threshold = auto::autocompact_threshold(
+                &self.compact_config,
+                self.compat.provider_type(),
+                &self.model,
+            );
             if self.compact_state.last_real_input_tokens as usize >= threshold {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
@@ -13888,14 +13912,19 @@ impl AgentEngine {
             && emergency::is_at_emergency_limit(
                 self.compact_state.last_input_tokens,
                 &self.compact_config,
+                self.compat.provider_type(),
+                &self.model,
             )
         {
             return Err(AgentError::ContextTooLong {
                 input_tokens: self.compact_state.last_input_tokens,
-                limit: self
-                    .compact_config
-                    .context_window
-                    .saturating_sub(self.compact_config.emergency_buffer),
+                // GH#635 — the reported limit comes from the SAME extracted
+                // function that just fired, not an inline re-derivation.
+                limit: emergency::emergency_limit(
+                    &self.compact_config,
+                    self.compat.provider_type(),
+                    &self.model,
+                ),
             });
         }
 
@@ -18726,7 +18755,7 @@ mod compact_tests {
     #[tokio::test]
     async fn emergency_fires_when_at_limit() {
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             emergency_buffer: 3_000,
             ..Default::default()
         };
@@ -18774,7 +18803,7 @@ mod compact_tests {
     #[tokio::test]
     async fn auto_does_not_fire_on_thinking_inflated_watermark() {
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -18821,7 +18850,7 @@ mod compact_tests {
     #[tokio::test]
     async fn auto_fires_on_real_usage_over_threshold() {
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -18865,7 +18894,7 @@ mod compact_tests {
     #[tokio::test]
     async fn emergency_stays_conservative_ignoring_real_watermark() {
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             emergency_buffer: 3_000,
             // Disable auto so ONLY emergency can act, isolating its path.
             enabled: false,
@@ -19019,7 +19048,7 @@ mod compact_tests {
     async fn disabled_config_still_fires_emergency() {
         let config = CompactConfig {
             enabled: false,
-            context_window: 200_000,
+            context_window: Some(200_000),
             emergency_buffer: 3_000,
             ..Default::default()
         };
@@ -19085,7 +19114,7 @@ mod compact_tests {
         // survive. Pre-fix: `self.messages` became `[boundary, summary]`
         // and the user's actual request was lost.
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -19158,7 +19187,7 @@ mod compact_tests {
         // it (and the pre-send `repair_orphaned_tool_results` is the
         // belt-and-suspenders). Assert ZERO dangling tool_result remains.
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -19242,7 +19271,7 @@ mod compact_tests {
         // `NullProvider` (from make_compact_engine) yields an empty
         // stream → autocompact returns `EmptyResponse` → failure path.
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -19288,7 +19317,7 @@ mod compact_tests {
         // not-visible and index N must report visible. A conversation reset
         // (`/clear`) must return the floor to 0.
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -19365,7 +19394,7 @@ mod compact_tests {
         // compaction pass must advance the cache's compaction generation so
         // stale read bases stop qualifying for diff-resend.
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -19479,7 +19508,7 @@ mod compact_tests {
     #[tokio::test]
     async fn circuit_broken_skips_auto_but_emergency_fires() {
         let config = CompactConfig {
-            context_window: 200_000,
+            context_window: Some(200_000),
             emergency_buffer: 3_000,
             max_failures: 3,
             ..Default::default()
@@ -21545,7 +21574,7 @@ mod approval_bridge_engine_tests {
     fn smart_fraction_uses_config_window_for_unknown_model() {
         let mut engine = make_engine();
         engine.compact_config.smart_enabled = true;
-        engine.compact_config.context_window = 200_000;
+        engine.compact_config.context_window = Some(200_000);
         engine.compact_state.last_real_input_tokens = 130_000;
         let frac = engine.smart_compact_fraction().expect("window known");
         assert!((frac - 0.65).abs() < 0.01, "frac was {frac}");
@@ -29219,7 +29248,7 @@ mod retry_wedge_protection_tests {
         e.max_turns = Some(20);
         // Unknown test model → the window falls back to compact_config.
         // Ceiling = 50_000 − 100 − 50 = 49_850.
-        e.compact_config.context_window = 50_000;
+        e.compact_config.context_window = Some(50_000);
         e.compact_config.output_reserve = 100;
         e.compact_config.emergency_buffer = 50;
         e

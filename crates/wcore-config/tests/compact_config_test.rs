@@ -11,7 +11,10 @@ use wcore_config::config::ConfigFile;
 #[test]
 fn tc_2_2_01_compact_config_defaults() {
     let cfg = CompactConfig::default();
-    assert_eq!(cfg.context_window, 200_000);
+    // GH#635: "not configured" is its own state, distinct from "configured to
+    // 200k"; the fallback NUMBER is unchanged.
+    assert_eq!(cfg.context_window, None);
+    assert_eq!(cfg.fallback_context_window(), 200_000);
     assert_eq!(cfg.output_reserve, 20_000);
     assert_eq!(cfg.autocompact_buffer, 13_000);
     assert_eq!(cfg.emergency_buffer, 3_000);
@@ -37,7 +40,7 @@ compactable_tools = ["Read", "Bash"]
 enabled = false
 "#;
     let config: ConfigFile = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.compact.context_window, 128_000);
+    assert_eq!(config.compact.context_window, Some(128_000));
     assert_eq!(config.compact.output_reserve, 15_000);
     assert_eq!(config.compact.autocompact_buffer, 10_000);
     assert_eq!(config.compact.emergency_buffer, 2_000);
@@ -56,7 +59,7 @@ fn tc_2_2_03_compact_config_partial_override() {
 context_window = 128000
 "#;
     let config: ConfigFile = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.compact.context_window, 128_000);
+    assert_eq!(config.compact.context_window, Some(128_000));
     // All other fields should be defaults
     assert_eq!(config.compact.output_reserve, 20_000);
     assert_eq!(config.compact.autocompact_buffer, 13_000);
@@ -109,7 +112,7 @@ context_window = 100000
 enabled = true
 "#;
     let config: ConfigFile = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.compact.context_window, 100_000);
+    assert_eq!(config.compact.context_window, Some(100_000));
     assert!(config.compact.enabled);
     // Other config sections should still parse
     assert_eq!(config.default.provider, "anthropic");
