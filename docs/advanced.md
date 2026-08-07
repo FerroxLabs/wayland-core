@@ -359,16 +359,20 @@ A three-tier automatic compaction strategy that prevents context window overflow
 
 - **Microcompact** runs automatically: replaces old Read/Bash/Grep/Glob/Write/Edit results with `[Tool result cleared]`, keeping the 5 most recent results intact. Triggered by count (>10 compactable results) or time (>1 hour since last assistant message).
 
-- **Autocompact** triggers when input tokens reach `context_window - output_reserve - autocompact_buffer` (default: 200,000 - 20,000 - 13,000 = 167,000 tokens). The agent calls the LLM to produce a conversation summary, then replaces history with a compact boundary marker. A circuit breaker stops retrying after 3 consecutive failures.
+- **Autocompact** triggers when input tokens reach `effective_context_window - output_reserve - autocompact_buffer`. The agent calls the LLM to produce a conversation summary, then replaces history with a compact boundary marker. A circuit breaker stops retrying after 3 consecutive failures.
 
-- **Emergency** is the last safety net at `context_window - emergency_buffer` (default: 197,000 tokens). Always active regardless of config. Blocks API calls and prompts the user to compact or start a new conversation.
+- **Emergency** is the last safety net at `effective_context_window - emergency_buffer`. Always active regardless of config. Blocks API calls and prompts the user to compact or start a new conversation.
+
+- **The effective context window** is, in order of precedence: your `context_window` setting if you set one; otherwise the active model's real window when wayland-core knows the model; otherwise 200,000. So a 1,000,000-token model autocompacts at 967,000 and hard-stops at 997,000, a 128k model at 95,000 / 125,000, and an unknown model keeps the 167,000 / 197,000 defaults. Setting `context_window` explicitly always wins — including when you set it *below* what the model allows.
 
 ### Configuration
 
 ```toml
 [compact]
 enabled = true              # Enable compaction system (default: true)
-context_window = 200000     # Context window in tokens
+context_window = 200000     # Context window in tokens. OMIT to let the active
+                            # model's real window drive compaction; setting it
+                            # pins the window and overrides the model's.
 output_reserve = 20000      # Reserved for output generation
 autocompact_buffer = 13000  # Buffer before autocompact triggers
 emergency_buffer = 3000     # Buffer before emergency block

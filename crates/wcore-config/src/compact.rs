@@ -1,14 +1,38 @@
 use serde::{Deserialize, Serialize};
 
+/// Context window assumed when the operator configured none AND the active
+/// model is unknown to [`crate::limits::model_output_ceiling`].
+///
+/// Deliberately conservative: under-estimating the window compacts early
+/// (annoying but recoverable), over-estimating it 400s the provider and drops
+/// context (data loss). Never raise this on guesswork — teach the registry
+/// about the model instead.
+pub const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
+
 /// Configuration for the multi-level context compaction system.
 ///
 /// All token-related fields are in tokens (not bytes or characters).
 /// The defaults are tuned for Claude models with a 200k context window.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactConfig {
-    /// Context window size in tokens (e.g. 200_000 for Claude).
-    #[serde(default = "default_context_window")]
-    pub context_window: usize,
+    /// Operator override of the context window, in tokens.
+    ///
+    /// `None` — the default — means **not configured**. The compaction
+    /// boundaries then divide by the ACTIVE MODEL's real window from
+    /// [`crate::limits::model_output_ceiling`], falling back to
+    /// [`DEFAULT_CONTEXT_WINDOW`] when the registry does not know the model
+    /// (GH#635). `Some(n)` is an explicit operator setting and always wins.
+    /// See [`CompactConfig::effective_context_window`].
+    ///
+    /// **The `Option` IS the distinction.** serde has no "was this key
+    /// present?" signal for a field carrying `#[serde(default = "…")]`, so
+    /// before GH#635 "took the 200k default" and "was configured to exactly
+    /// 200k" were literally the same state — and the boundaries had no way to
+    /// prefer the model's real window without silently overriding an operator.
+    /// The TOML/JSON key is unchanged (`context_window = 128000` still works);
+    /// absence now deserializes to `None` instead of `200_000`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
 
     /// Tokens reserved for output generation.
     /// Subtracted from `context_window` to get the effective input budget.
@@ -160,10 +184,69 @@ impl Default for ToolCallArgsConfig {
     }
 }
 
+impl CompactConfig {
+    /// The window to divide by when the active model's real window is unknown:
+    /// the operator's `context_window` if they set one, else
+    /// [`DEFAULT_CONTEXT_WINDOW`].
+    ///
+    /// This is the "fail open, never fabricate a bigger number" value. Callers
+    /// that KNOW the active provider/model must use
+    /// [`Self::effective_context_window`] instead.
+    pub fn fallback_context_window(&self) -> usize {
+        self.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW)
+    }
+
+    /// **THE single definition of the divisor every compaction boundary uses**
+    /// (GH#635).
+    ///
+    /// Before this existed, `autocompact_threshold` and `emergency_limit` both
+    /// divided by the raw `context_window` field, which nothing ever synced
+    /// from the model's real window: a 1.05M-window model still autocompacted
+    /// at ~177k and emergency-stopped at ~197k — a 5x premature compaction,
+    /// while `size_output_cap` and the #255 pre-flight guard were meanwhile
+    /// using the model's REAL window. This function is what brings the
+    /// boundaries into line with those two.
+    ///
+    /// Precedence, in order:
+    ///
+    /// 1. **An explicit operator setting wins.** `Some(n)` is a deliberate
+    ///    instruction (commonly "cap me below what this model allows"), and
+    ///    silently replacing it with a registry number would be a lie.
+    /// 2. **A registry-KNOWN model's real window.** This is the only source
+    ///    allowed to RAISE the boundary, because it is verified data rather
+    ///    than a guess (see the header of [`crate::limits`]).
+    /// 3. **A Flux router tier alias's conservative pool-minimum floor.** A
+    ///    tier alias is *not* a known model, so it may only ever LOWER the
+    ///    boundary — `.min(DEFAULT_CONTEXT_WINDOW)` makes that structural
+    ///    rather than a property of today's 128k value. Matching the #255
+    ///    kernel here is the point: the pre-flight guard already divides by
+    ///    this floor, and leaving autocompact on a larger window is the
+    ///    CORE-4 wedge where compaction never fires.
+    /// 4. **[`DEFAULT_CONTEXT_WINDOW`].** An unknown, unlisted or otherwise
+    ///    unroutable model keeps exactly the pre-GH#635 fallback.
+    ///
+    /// `provider` / `model` must be the POST-swap effective pair — the same
+    /// values fed to `size_output_cap` and
+    /// [`crate::context_window::ContextWindow::resolve`].
+    pub fn effective_context_window(&self, provider: &str, model: &str) -> usize {
+        if let Some(configured) = self.context_window {
+            return configured;
+        }
+        if let Some((_out_ceiling, window)) = crate::limits::model_output_ceiling(provider, model) {
+            return window as usize;
+        }
+        if let Some(floor) = crate::limits::flux_tier_context_window(model) {
+            // Router alias: conservative floor only, never a raise.
+            return (floor as usize).min(DEFAULT_CONTEXT_WINDOW);
+        }
+        DEFAULT_CONTEXT_WINDOW
+    }
+}
+
 impl Default for CompactConfig {
     fn default() -> Self {
         Self {
-            context_window: default_context_window(),
+            context_window: None,
             output_reserve: default_output_reserve(),
             autocompact_buffer: default_autocompact_buffer(),
             emergency_buffer: default_emergency_buffer(),
@@ -189,9 +272,6 @@ impl Default for CompactConfig {
 
 // --- Default value functions ---
 
-fn default_context_window() -> usize {
-    200_000
-}
 fn default_output_reserve() -> usize {
     20_000
 }
@@ -252,7 +332,10 @@ mod tests {
     #[test]
     fn default_values_match_spec() {
         let cfg = CompactConfig::default();
-        assert_eq!(cfg.context_window, 200_000);
+        // GH#635: the default is "not configured", which is a DIFFERENT state
+        // from "configured to 200k" — the fallback number is unchanged.
+        assert_eq!(cfg.context_window, None);
+        assert_eq!(cfg.fallback_context_window(), 200_000);
         assert_eq!(cfg.output_reserve, 20_000);
         assert_eq!(cfg.autocompact_buffer, 13_000);
         assert_eq!(cfg.emergency_buffer, 3_000);
@@ -280,7 +363,7 @@ compactable_tools = ["Read", "Bash"]
 enabled = false
 "#;
         let cfg: CompactConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.context_window, 128_000);
+        assert_eq!(cfg.context_window, Some(128_000));
         assert_eq!(cfg.output_reserve, 10_000);
         assert_eq!(cfg.autocompact_buffer, 8_000);
         assert_eq!(cfg.emergency_buffer, 2_000);
@@ -297,7 +380,7 @@ enabled = false
 context_window = 128000
 "#;
         let cfg: CompactConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.context_window, 128_000);
+        assert_eq!(cfg.context_window, Some(128_000));
         // Everything else should be default
         assert_eq!(cfg.output_reserve, 20_000);
         assert_eq!(cfg.autocompact_buffer, 13_000);
@@ -468,14 +551,134 @@ epoch_turns = 6
     #[test]
     fn json_serialization_roundtrip() {
         let cfg = CompactConfig {
-            context_window: 100_000,
+            context_window: Some(100_000),
             output_reserve: 15_000,
             ..Default::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: CompactConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.context_window, 100_000);
+        assert_eq!(back.context_window, Some(100_000));
         assert_eq!(back.output_reserve, 15_000);
         assert_eq!(back.autocompact_buffer, cfg.autocompact_buffer);
+    }
+
+    // ── GH#635: the effective context window ────────────────────────────
+
+    /// An UNCONFIGURED window on a registry-known large-window model resolves
+    /// to that model's real window, not the 200k fallback. This is the whole
+    /// defect: `gpt-5.4` serves 1,050,000 tokens.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+    /// `crate::limits::model_output_ceiling(provider, model)` arm of
+    /// `CompactConfig::effective_context_window` (compact.rs) and this returns
+    /// 200_000.
+    #[test]
+    fn effective_window_uses_the_models_real_window_when_unconfigured() {
+        let cfg = CompactConfig::default();
+        assert_eq!(
+            cfg.effective_context_window("openai-chatgpt", "gpt-5.4"),
+            1_050_000
+        );
+        assert_eq!(
+            cfg.effective_context_window("anthropic", "claude-opus-4-8"),
+            1_000_000
+        );
+        // A registry-known SMALL model lowers it just as readily.
+        assert_eq!(cfg.effective_context_window("openai", "gpt-4o"), 128_000);
+    }
+
+    /// An explicit operator setting beats the registry in BOTH directions —
+    /// capping a 1.05M model at 300k, and widening an unknown model.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+    /// `if let Some(configured) = self.context_window { return configured; }`
+    /// early return in `CompactConfig::effective_context_window` (compact.rs)
+    /// and the first assertion returns 1_050_000.
+    #[test]
+    fn explicit_operator_window_beats_the_registry() {
+        let cfg = CompactConfig {
+            context_window: Some(300_000),
+            ..CompactConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_context_window("openai-chatgpt", "gpt-5.4"),
+            300_000
+        );
+        assert_eq!(
+            cfg.effective_context_window("some-provider", "mystery-model"),
+            300_000
+        );
+        // Including the case that used to be indistinguishable from the
+        // serde default: an operator who deliberately pins 200k on a 1M model
+        // keeps 200k.
+        let pinned = CompactConfig {
+            context_window: Some(200_000),
+            ..CompactConfig::default()
+        };
+        assert_eq!(
+            pinned.effective_context_window("anthropic", "claude-opus-4-8"),
+            200_000
+        );
+    }
+
+    /// An unknown model keeps the pre-GH#635 fallback exactly.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: change the final
+    /// `DEFAULT_CONTEXT_WINDOW` arm of `CompactConfig::effective_context_window`
+    /// (compact.rs) to fabricate any other number.
+    #[test]
+    fn unknown_model_keeps_the_conservative_fallback() {
+        let cfg = CompactConfig::default();
+        assert_eq!(
+            cfg.effective_context_window("some-provider", "mystery-model"),
+            200_000
+        );
+        // claude-3-opus is deliberately absent from the registry (4096 output)
+        // — it must NOT inherit a 4.x window.
+        assert_eq!(
+            cfg.effective_context_window("anthropic", "claude-3-opus"),
+            200_000
+        );
+    }
+
+    /// A router tier alias may only LOWER the boundary — it is a guess about
+    /// a pool, not a known model.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+    /// `crate::limits::flux_tier_context_window(model)` arm of
+    /// `CompactConfig::effective_context_window` (compact.rs) and this returns
+    /// 200_000 for flux-auto, re-opening the CORE-4 wedge.
+    #[test]
+    fn router_alias_lowers_but_never_raises() {
+        let cfg = CompactConfig::default();
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            assert_eq!(
+                cfg.effective_context_window("flux-router", alias),
+                128_000,
+                "{alias} must use the conservative pool-minimum floor"
+            );
+        }
+        // The floor can never exceed the fallback, whatever the table says.
+        assert!(cfg.effective_context_window("flux-router", "flux-auto") <= DEFAULT_CONTEXT_WINDOW);
+    }
+
+    /// Absence must survive a serde round-trip as absence; if it collapsed
+    /// back to `Some(200_000)` every reloaded config would look explicit and
+    /// the registry would be permanently shadowed.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: drop
+    /// `skip_serializing_if = "Option::is_none"` from the `context_window`
+    /// field attribute (compact.rs) — the JSON gains `"context_window":null`.
+    #[test]
+    fn unconfigured_window_round_trips_as_unconfigured() {
+        let cfg = CompactConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !json.contains("context_window"),
+            "an unset window must not be serialized at all: {json}"
+        );
+        let back: CompactConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.context_window, None);
+        assert_eq!(back.fallback_context_window(), 200_000);
     }
 }

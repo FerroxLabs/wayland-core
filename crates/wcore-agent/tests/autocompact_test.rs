@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use wcore_agent::compact::auto::{
-    CompactError, autocompact, extract_compact_metadata, is_compact_boundary, should_autocompact,
+    CompactError, autocompact, autocompact_threshold, extract_compact_metadata,
+    is_compact_boundary, should_autocompact,
 };
 use wcore_agent::compact::prompt::{
     build_compact_prompt, build_summary_content, format_compact_summary,
@@ -116,26 +117,47 @@ fn default_config() -> CompactConfig {
     CompactConfig::default()
 }
 
+/// A provider/model pair the `wcore_config::limits` registry does NOT know, so
+/// the effective window is the configured fallback. The TC-2.4-* trigger cases
+/// specify the buffer ARITHMETIC, which is model-independent.
+const UNKNOWN_PROVIDER: &str = "test-provider";
+const UNKNOWN_MODEL: &str = "test-model";
+
 // ── TC-2.4-01: Watermark above threshold triggers ───────────────────────────
 
 #[test]
 fn tc_2_4_01_above_threshold_triggers() {
     // effective_window = 200k - 20k = 180k, threshold = 180k - 13k = 167k
-    assert!(should_autocompact(170_000, &default_config()));
+    assert!(should_autocompact(
+        170_000,
+        &default_config(),
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
 }
 
 // ── TC-2.4-02: Below threshold does not trigger ─────────────────────────────
 
 #[test]
 fn tc_2_4_02_below_threshold_does_not_trigger() {
-    assert!(!should_autocompact(160_000, &default_config()));
+    assert!(!should_autocompact(
+        160_000,
+        &default_config(),
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
 }
 
 // ── TC-2.4-03: Exact threshold triggers ─────────────────────────────────────
 
 #[test]
 fn tc_2_4_03_at_exact_threshold_triggers() {
-    assert!(should_autocompact(167_000, &default_config()));
+    assert!(should_autocompact(
+        167_000,
+        &default_config(),
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
 }
 
 // ── TC-2.4-04: Circuit breaker initial state ────────────────────────────────
@@ -285,7 +307,12 @@ fn tc_2_4_14_disabled_config_skips() {
         enabled: false,
         ..default_config()
     };
-    assert!(!should_autocompact(999_999, &config));
+    assert!(!should_autocompact(
+        999_999,
+        &config,
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
 }
 
 // ── TC-2.4-15: Prompt forbids tool calls ────────────────────────────────────
@@ -294,6 +321,87 @@ fn tc_2_4_14_disabled_config_skips() {
 fn tc_2_4_15_prompt_forbids_tool_calls() {
     let prompt = build_compact_prompt();
     assert!(prompt.contains("Do NOT call any tools"));
+}
+
+// ── GH#635: the threshold is the ACTIVE MODEL's, not a hardcoded 200k ──────
+
+/// A 1.05M-window model must not autocompact at ~177k — the reported symptom
+/// (a 5x premature compaction).
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: change
+/// `config.effective_context_window(provider, model)` back to
+/// `config.context_window` in `autocompact_threshold`
+/// (crates/wcore-agent/src/compact/auto.rs) — the threshold collapses to
+/// 167_000 and the 177k assertion fires.
+#[test]
+fn gh635_large_window_model_does_not_compact_at_the_200k_default() {
+    let config = default_config();
+    assert!(
+        !should_autocompact(177_000, &config, "openai-chatgpt", "gpt-5.4"),
+        "a 177k session on a 1,050,000-token model must not be compacted"
+    );
+    assert_eq!(
+        autocompact_threshold(&config, "openai-chatgpt", "gpt-5.4"),
+        1_017_000,
+        "1_050_000 - 20_000 - 13_000"
+    );
+    assert!(should_autocompact(
+        1_017_000,
+        &config,
+        "openai-chatgpt",
+        "gpt-5.4"
+    ));
+}
+
+/// An UNKNOWN model keeps exactly today's behaviour — the fallback is never
+/// raised on guesswork.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: replace the final
+/// `DEFAULT_CONTEXT_WINDOW` arm of `CompactConfig::effective_context_window`
+/// (crates/wcore-config/src/compact.rs) with anything model-derived.
+#[test]
+fn gh635_unknown_model_keeps_the_167k_fallback_threshold() {
+    let config = default_config();
+    assert_eq!(
+        autocompact_threshold(&config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
+        167_000
+    );
+    assert!(should_autocompact(
+        167_000,
+        &config,
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
+    assert!(!should_autocompact(
+        166_999,
+        &config,
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
+}
+
+/// An explicit operator `context_window` outranks the model's registry window.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+/// `if let Some(configured) = self.context_window { return configured; }`
+/// early return in `CompactConfig::effective_context_window`
+/// (crates/wcore-config/src/compact.rs).
+#[test]
+fn gh635_explicit_operator_window_is_honoured_over_the_registry() {
+    let config = CompactConfig {
+        context_window: Some(200_000),
+        ..default_config()
+    };
+    assert_eq!(
+        autocompact_threshold(&config, "openai-chatgpt", "gpt-5.4"),
+        167_000
+    );
+    assert!(should_autocompact(
+        170_000,
+        &config,
+        "openai-chatgpt",
+        "gpt-5.4"
+    ));
 }
 
 // ── TC-2.4-16: Success resets failure counter ───────────────────────────────

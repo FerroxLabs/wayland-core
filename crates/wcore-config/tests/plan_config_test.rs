@@ -71,5 +71,5 @@ plan_directory = ".wayland-core/custom-plans"
     assert!(config.plan.enabled);
     assert_eq!(config.plan.plan_directory, ".wayland-core/custom-plans");
     assert_eq!(config.default.provider, "anthropic");
-    assert_eq!(config.compact.context_window, 100_000);
+    assert_eq!(config.compact.context_window, Some(100_000));
 }
