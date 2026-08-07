@@ -125,6 +125,22 @@ const SWARM_LOCK_FILE: &str = ".wayland-swarm-lock";
 const WORKSPACE_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TRANSACTION_WORKSPACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_AGGREGATE_WORKSPACE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Multiplier applied to the MEASURED initial workspace (Git transfer closure
+/// plus logical checkout) when deriving the smallest per-worker share a
+/// dispatch may be admitted on.
+///
+/// A worker is expected to write — build output, generated files, a commit or
+/// two — so a share barely covering the material it was handed is not a
+/// workable workspace. This sizes the REFUSAL THRESHOLD only; it never caps a
+/// worker that the host can afford to be generous with.
+const WORKSPACE_GROWTH_MULTIPLIER: u64 = 4;
+/// Additive term in that refusal threshold.
+///
+/// A one-commit repository measures near zero, so the multiplier alone would
+/// let a nearly full volume through. Together with
+/// [`WORKSPACE_SAFETY_MARGIN_BYTES`] this is why the admission gate still
+/// REFUSES on a genuinely full volume instead of silently shrinking to fit it.
+const WORKSPACE_MIN_TRANSACTION_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RESERVATION_FILE_BYTES: u64 = 64;
 
 struct ActiveLease {
@@ -532,6 +548,110 @@ fn transaction_is_active(authority: &DirectoryAuthority, path: &Path) -> Result<
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Size one dispatch's workspace authority from the host's real free space, and
+/// refuse the dispatch when the MEASURED checkout cannot fit in the host's
+/// per-worker share.
+///
+/// # The sizing rule
+///
+/// ```text
+/// floor  = measured_checkout_bytes * WORKSPACE_GROWTH_MULTIPLIER
+///          + WORKSPACE_MIN_TRANSACTION_BYTES
+/// share  = (available_bytes - WORKSPACE_SAFETY_MARGIN_BYTES
+///           - existing_reservation_bytes) / active_workers
+/// REFUSE iff share < floor
+/// budget = min(share, MAX_TRANSACTION_WORKSPACE_BYTES,
+///              MAX_AGGREGATE_WORKSPACE_BYTES / active_workers)
+/// REFUSE iff budget * active_workers + existing_reservation_bytes
+///            > MAX_AGGREGATE_WORKSPACE_BYTES
+/// ```
+///
+/// The measurement sets the REFUSAL THRESHOLD, not the budget. A roomy host
+/// still hands every worker the full 8 GiB ceiling, so this changes nothing
+/// about what the growth observer tolerates when the disk can back it — which
+/// matters, because budget and growth ceiling are the same number and a budget
+/// sized down to the measured checkout would kill any worker that runs a build.
+/// A startup refusal is recoverable; a mid-flight kill loses work.
+///
+/// # Why this cannot admit a dispatch that runs the disk out
+///
+/// `budget` is simultaneously the reservation demanded up front AND the value
+/// written into each transaction's reservation receipt, which becomes
+/// `TransactionWorkspace::reserved_bytes` — the exact threshold the growth
+/// observer kills a transaction at. So every admitted worker is capped, at
+/// runtime, by the number this gate handed it.
+///
+/// The volume invariant then holds by construction rather than by a second
+/// test. Because `budget <= share`, it follows that
+/// `budget * active_workers + existing_reservation_bytes +
+/// WORKSPACE_SAFETY_MARGIN_BYTES <= available_bytes`.
+///
+/// There is deliberately no separate "does the total fit" branch — it could
+/// never be false, and a gate that cannot fail is as worthless as one that
+/// cannot pass. The reachable refusals are the two above: too little space per
+/// worker for the checkout at hand, and an aggregate already committed.
+///
+/// The 8 GiB per-transaction ceiling and the 64 GiB aggregate ceiling are
+/// unchanged. What changed is that the previous code demanded the
+/// per-transaction CEILING up front for every worker no matter how large the
+/// checkout was, which refused four workers on any host with under 32.5 GiB
+/// free even for a trivial repository.
+fn plan_workspace_capacity(
+    active_workers: usize,
+    measured_checkout_bytes: u64,
+    available_bytes: u64,
+    existing_reservation_bytes: u64,
+) -> Result<WorkspaceCapacity> {
+    let active_workers = u64::try_from(active_workers.max(1))
+        .map_err(|_| SwarmError::DispatchAdmission("active worker count exceeds u64".to_owned()))?;
+    // Saturating, not checked: a measurement large enough to overflow is
+    // already past any share a host can offer, so clamping reaches the same
+    // refusal without inventing an "overflow" diagnostic for it.
+    let floor_bytes = measured_checkout_bytes
+        .saturating_mul(WORKSPACE_GROWTH_MULTIPLIER)
+        .saturating_add(WORKSPACE_MIN_TRANSACTION_BYTES);
+    // Saturating subtraction is load-bearing: a volume with less free space
+    // than the safety margin, or one whose free space is already spoken for by
+    // existing reservations, must floor to a zero share and be REFUSED below.
+    // Wrapping here would turn an empty disk into an unlimited one.
+    let share_bytes = available_bytes
+        .saturating_sub(WORKSPACE_SAFETY_MARGIN_BYTES)
+        .saturating_sub(existing_reservation_bytes)
+        / active_workers;
+    if share_bytes < floor_bytes {
+        return Err(SwarmError::DispatchAdmission(format!(
+            "dispatch needs at least {floor_bytes} bytes per worker for {active_workers} active \
+             workers (derived from a {measured_checkout_bytes}-byte measured checkout), but only \
+             {share_bytes} bytes per worker remain of {available_bytes} available bytes after \
+             {existing_reservation_bytes} bytes already reserved and a \
+             {WORKSPACE_SAFETY_MARGIN_BYTES}-byte safety margin"
+        )));
+    }
+    let max_transaction_bytes = share_bytes
+        .min(MAX_TRANSACTION_WORKSPACE_BYTES)
+        // At high worker counts this divisor, not the measurement or the
+        // host's share, is what sets the budget — that path is governed by the
+        // aggregate cap and can hand a worker less than `floor_bytes`.
+        .min(MAX_AGGREGATE_WORKSPACE_BYTES / active_workers);
+    let committed_bytes = max_transaction_bytes
+        .checked_mul(active_workers)
+        .and_then(|bytes| bytes.checked_add(existing_reservation_bytes))
+        .ok_or_else(|| {
+            SwarmError::DispatchAdmission("dispatch workspace capacity overflowed".to_owned())
+        })?;
+    if committed_bytes > MAX_AGGREGATE_WORKSPACE_BYTES {
+        return Err(SwarmError::DispatchAdmission(
+            "dispatch aggregate workspace budget is already committed".to_owned(),
+        ));
+    }
+    Ok(WorkspaceCapacity {
+        available_bytes,
+        safety_margin_bytes: WORKSPACE_SAFETY_MARGIN_BYTES,
+        max_transaction_bytes,
+        max_aggregate_bytes: MAX_AGGREGATE_WORKSPACE_BYTES,
+    })
 }
 
 fn read_workspace_reservation(path: &Path) -> Result<u64> {
