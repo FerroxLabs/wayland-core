@@ -1033,7 +1033,18 @@ fn run_rename_cell(root_kind: RenameRoot) -> String {
 ///
 /// So this probes BOTH: reopen, then actually destroy through it, then confirm
 /// the object is gone from the filesystem.
-fn probe_transient_delete_reopen() -> String {
+/// `drop_retained_before_dispose` decides the ORDER, which cell 8 proved is the
+/// whole question. Holding the retained `R|W` handle open across the
+/// disposition was refused with `ACCESS_DENIED` (STATUS_CANNOT_DELETE) — the
+/// classic disposition class will not destroy an object another handle still
+/// has open, and the POSIX-semantics attempt did not cover it either.
+///
+/// So the reopen must come FIRST (it needs the retained handle as
+/// `RootDirectory`, so it cannot happen after the drop), and the retained
+/// handle must be released BEFORE the disposition, leaving the transient DELETE
+/// handle as the last one standing. That ordering constraint is not optional and
+/// is not something either auditor's design stated.
+fn probe_transient_delete_reopen(drop_retained_before_dispose: bool) -> String {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
     use windows_sys::Wdk::Storage::FileSystem::{
@@ -1103,11 +1114,13 @@ fn probe_transient_delete_reopen() -> String {
     // SAFETY: NtCreateFile returned one fresh owned handle on success.
     let reopened = unsafe { File::from_raw_handle(handle) };
 
-    // Reopen worked. Now prove the destruction actually takes through it.
+    // Reopen worked. The ORDER of the next two lines is the experiment.
+    if drop_retained_before_dispose {
+        drop(victim);
+    }
     match delete_open_object(&reopened, &victim_path, "directory") {
         Ok(()) => {
             drop(reopened);
-            drop(victim);
             if victim_path.exists() {
                 "REOPEN OK, disposition OK, but the object SURVIVED".to_owned()
             } else {
@@ -1163,8 +1176,13 @@ fn windows_rename_root_access_matrix() {
         .collect();
     report.push(format!(
         "  {:<34} => {}",
-        "8_transient_delete_self_reopen",
-        probe_transient_delete_reopen()
+        "8_transient_delete_RETAINED_ALIVE",
+        probe_transient_delete_reopen(false)
+    ));
+    report.push(format!(
+        "  {:<34} => {}",
+        "9_transient_delete_RETAINED_DROPPED",
+        probe_transient_delete_reopen(true)
     ));
     panic!(
         "RENAME-ROOT-ACCESS-MATRIX-BEGIN\n{}\nRENAME-ROOT-ACCESS-MATRIX-END",
