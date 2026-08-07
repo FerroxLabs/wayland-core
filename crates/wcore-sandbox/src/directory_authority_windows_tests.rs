@@ -874,6 +874,35 @@ enum RenameRoot {
     NullRootFullNtPath,
     /// Baseline. If even this fails, the defect is not in our rename at all.
     FsRenameBaseline,
+    /// A long-lived root handle with an EXPLICIT access mask, full-access
+    /// authority DROPPED so this handle is the only one on the directory.
+    ///
+    /// THIS IS THE CELL THE FIRST MATRIX WAS MISSING. Cells 1-5 isolated WHICH
+    /// OBJECT is contended (our own retained directory handle) but never WHICH
+    /// GRANTED BIT, because every one of them held either the full
+    /// `GENERIC_READ|GENERIC_WRITE|DELETE` mask or read-only. The whole cost of
+    /// the fix turns on that: if DELETE alone conflicts, the retained handle
+    /// keeps `GENERIC_WRITE` and all 16 `sync_all()` durability sites are
+    /// untouched; if WRITE is implicated, durability has to move to a transient
+    /// handle opened per flush, with a real flush-versus-rename window.
+    CustomRootAuthorityDropped(u32),
+}
+
+/// Open a directory handle with a caller-chosen access mask. `BACKUP_SEMANTICS`
+/// is what makes a directory openable at all; `OPEN_REPARSE_POINT` matches
+/// production so the probe cannot differ by following a link the real code
+/// refuses.
+fn open_dir_with_access(path: &Path, access: u32) -> std::io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_WRITE,
+    };
+
+    OpenOptions::new()
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
 }
 
 /// One `NtSetInformationFile(FileRenameInformation)` with a caller-chosen root
@@ -963,6 +992,14 @@ fn run_rename_cell(root_kind: RenameRoot) -> String {
             authority.handle.as_raw_handle().cast(),
             "dst",
         ),
+        RenameRoot::CustomRootAuthorityDropped(access) => {
+            drop(authority);
+            let root = match open_dir_with_access(&root_path, access) {
+                Ok(handle) => handle,
+                Err(error) => return format!("SETUP custom open failed: {error}"),
+            };
+            raw_rename_reporting(&source.handle, root.as_raw_handle().cast(), "dst")
+        }
         RenameRoot::ObservationalAuthorityAlive | RenameRoot::ObservationalAuthorityDropped => {
             // Fully qualified: the name arrives through both `super::*` and
             // `super::windows::*`, so a bare reference is ambiguous.
@@ -982,6 +1019,12 @@ fn run_rename_cell(root_kind: RenameRoot) -> String {
 /// CI log. Never merge this to a branch that gates anything.
 #[test]
 fn windows_rename_root_access_matrix() {
+    // The three access bits the pair below isolates. Production's retained
+    // handle is exactly `GENERIC_READ | GENERIC_WRITE | DELETE`
+    // (`directory_authority_windows.rs:76`); these split it.
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::DELETE;
+
     let cells = [
         (
             "1_root_authority_full_access ",
@@ -997,6 +1040,19 @@ fn windows_rename_root_access_matrix() {
         ),
         ("4_root_null_full_nt_path", RenameRoot::NullRootFullNtPath),
         ("5_fs_rename_baseline", RenameRoot::FsRenameBaseline),
+        // THE BIT-ISOLATION PAIR. Prediction, recorded BEFORE the run so the
+        // result grades a prediction instead of being narrated afterwards:
+        // if DELETE is the sole conflicting grant then 6 is OK and 7 is
+        // REFUSED. 6 REFUSED kills the cheap fix and forces transient write
+        // handles. 7 OK inverts the whole design and means WRITE is the bit.
+        (
+            "6_root_read_write_NO_delete",
+            RenameRoot::CustomRootAuthorityDropped(GENERIC_READ | GENERIC_WRITE),
+        ),
+        (
+            "7_root_read_delete_NO_write",
+            RenameRoot::CustomRootAuthorityDropped(GENERIC_READ | DELETE),
+        ),
     ];
     let report: Vec<String> = cells
         .into_iter()
