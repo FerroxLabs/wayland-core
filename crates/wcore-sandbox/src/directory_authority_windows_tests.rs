@@ -1131,6 +1131,106 @@ fn probe_transient_delete_reopen(drop_retained_before_dispose: bool) -> String {
     }
 }
 
+/// Which destructive right the `ReOpenFile` probe tries to exercise.
+#[derive(Clone, Copy)]
+enum ReopenProbe {
+    /// Set a delete disposition through the re-opened handle.
+    Dispose,
+    /// Rename the re-opened object into a different retained parent.
+    Rename,
+}
+
+/// THE LAST UNTRIED PRIMITIVE. `ReOpenFile` is the documented Win32 call for
+/// "give me another handle to THIS object with different access", taking a
+/// HANDLE and no pathname.
+///
+/// WHY IT MATTERS. Removing lifetime `DELETE` from a directory authority fixes
+/// the Server 2022 rename refusal but costs two handle-bound guarantees:
+/// destruction and rename both need `DELETE` at open time, and Windows cannot
+/// add a right to a live handle. Re-opening BY NAME reintroduces the pathname
+/// re-resolution the anti-swap design exists to avoid. If `ReOpenFile` can
+/// hand back a DELETE-bearing handle to the same object with no pathname, both
+/// properties survive and the trade disappears.
+///
+/// Cells 8 and 9 already refuted the raw `NtCreateFile` empty-`ObjectName`
+/// form of the same idea — its disposition fails os error 5 on BOTH Server
+/// 2022 and Windows 11, with the original handle alive and dropped. This is a
+/// different API, so it gets its own measurement rather than an inference.
+fn probe_reopen_file(probe: ReopenProbe) -> String {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    // Not present in the pinned windows-sys 0.59, and it is a plain kernel32
+    // export, so the diagnostic declares it rather than moving the dependency.
+    unsafe extern "system" {
+        fn ReOpenFile(
+            original: HANDLE,
+            desired_access: u32,
+            share_mode: u32,
+            flags_and_attributes: u32,
+        ) -> HANDLE;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let victim_path = temp.path().join("victim");
+    let dest_path = temp.path().join("dest");
+    std::fs::create_dir_all(&victim_path).unwrap();
+    std::fs::create_dir_all(&dest_path).unwrap();
+
+    // The POST-FIX long-lived shape: write but NOT delete.
+    let retained = match open_dir_with_access(&victim_path, GENERIC_READ | GENERIC_WRITE) {
+        Ok(handle) => handle,
+        Err(error) => return format!("SETUP retained open failed: {error}"),
+    };
+
+    // SAFETY: `retained` is a live directory handle for the duration of the
+    // call; the returned handle is owned here and wrapped exactly once below.
+    let raw = unsafe {
+        ReOpenFile(
+            retained.as_raw_handle().cast(),
+            DELETE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_FLAG_BACKUP_SEMANTICS,
+        )
+    };
+    if raw.is_null() || raw == (-1_isize as *mut std::ffi::c_void) {
+        let error = std::io::Error::last_os_error();
+        return format!("REOPENFILE REFUSED: {error}");
+    }
+    // SAFETY: ReOpenFile returned one fresh owned handle on success.
+    let reopened = unsafe { File::from_raw_handle(raw) };
+
+    match probe {
+        ReopenProbe::Dispose => match delete_open_object(&reopened, &victim_path, "directory") {
+            Ok(()) => {
+                drop(reopened);
+                if victim_path.exists() {
+                    "REOPENFILE OK, disposition OK, but the object SURVIVED".to_owned()
+                } else {
+                    "OK - handle-bound DELETE without a pathname".to_owned()
+                }
+            }
+            Err(error) => format!("REOPENFILE OK but disposition FAILED: {error}"),
+        },
+        ReopenProbe::Rename => {
+            let dest = match open_dir_with_access(&dest_path, GENERIC_READ | GENERIC_WRITE) {
+                Ok(handle) => handle,
+                Err(error) => return format!("SETUP dest open failed: {error}"),
+            };
+            let outcome = raw_rename_reporting(&reopened, dest.as_raw_handle().cast(), "landed");
+            drop(reopened);
+            if outcome == "OK" && dest_path.join("landed").is_dir() {
+                "OK - handle-bound rename without a pathname".to_owned()
+            } else {
+                format!("REOPENFILE OK but rename: {outcome}")
+            }
+        }
+    }
+}
+
 /// DIAGNOSTIC. Always fails, by design: panicking is how the matrix reaches the
 /// CI log. Never merge this to a branch that gates anything.
 #[test]
@@ -1183,6 +1283,16 @@ fn windows_rename_root_access_matrix() {
         "  {:<34} => {}",
         "9_transient_delete_RETAINED_DROPPED",
         probe_transient_delete_reopen(true)
+    ));
+    report.push(format!(
+        "  {:<34} => {}",
+        "10_reopenfile_delete_DISPOSE",
+        probe_reopen_file(ReopenProbe::Dispose)
+    ));
+    report.push(format!(
+        "  {:<34} => {}",
+        "11_reopenfile_delete_RENAME",
+        probe_reopen_file(ReopenProbe::Rename)
     ));
     panic!(
         "RENAME-ROOT-ACCESS-MATRIX-BEGIN\n{}\nRENAME-ROOT-ACCESS-MATRIX-END",
