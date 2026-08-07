@@ -2205,3 +2205,51 @@ async fn workspace_capacity_measures_the_pinned_checkout_and_feeds_the_refusal_f
          {measured} bytes, got: {error}"
     );
 }
+
+/// Regression: the per-worker floor must never exceed what the aggregate cap
+/// can grant at that worker count, or the gate becomes unsatisfiable.
+///
+/// At `MAX_RETAINED_WORKTREES` the aggregate cap allows 256 MiB per worker
+/// while `WORKSPACE_MIN_TRANSACTION_BYTES` alone is 512 MiB. Demanding the raw
+/// floor there refused EVERY request regardless of free space — including the
+/// single new allocation `AgentSpawner` asks for near quota, which passes
+/// `retained + 1` as `active_workers`. That shipped as a red
+/// `concurrent_near_cap_admits_exactly_one_retained_workspace`: both concurrent
+/// launches were refused instead of exactly one being admitted.
+#[test]
+fn near_quota_worker_counts_are_admitted_on_a_disk_that_can_hold_them() {
+    let workers = wcore_swarm::MAX_RETAINED_WORKTREES;
+    let aggregate_share = MAX_AGGREGATE_WORKSPACE_BYTES / workers as u64;
+
+    // The fixture must actually exercise the defect: the floor has to exceed
+    // the aggregate share at this worker count, or the test proves nothing.
+    // A build-time assert, so weakening it cannot be silently absorbed.
+    const {
+        assert!(
+            WORKSPACE_MIN_TRANSACTION_BYTES
+                > MAX_AGGREGATE_WORKSPACE_BYTES / wcore_swarm::MAX_RETAINED_WORKTREES as u64,
+            "the aggregate share at full quota already covers the minimum transaction, so the \
+             floor and the cap cannot disagree and this test cannot observe the defect"
+        );
+    }
+
+    // Enough free space to satisfy the aggregate cap for every worker, which is
+    // the most the policy will ever hand out here.
+    let available = MAX_AGGREGATE_WORKSPACE_BYTES + WORKSPACE_SAFETY_MARGIN_BYTES;
+    let capacity = plan_workspace_capacity(workers, ONE_COMMIT_REPO_BYTES, available, 0)
+        .expect("a disk that can cover the aggregate cap must admit a near-quota worker count");
+    assert_eq!(capacity.max_transaction_bytes, aggregate_share);
+
+    // NEGATIVE CONTROL: capping the demand must not make the gate permissive.
+    // A disk that cannot cover even the capped share is still refused.
+    let starved = plan_workspace_capacity(
+        workers,
+        ONE_COMMIT_REPO_BYTES,
+        WORKSPACE_SAFETY_MARGIN_BYTES + aggregate_share * workers as u64 / 2,
+        0,
+    );
+    assert!(
+        starved.is_err(),
+        "half the space the capped share needs must still be refused, got: {starved:?}"
+    );
+}

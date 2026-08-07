@@ -620,10 +620,28 @@ fn plan_workspace_capacity(
         .saturating_sub(WORKSPACE_SAFETY_MARGIN_BYTES)
         .saturating_sub(existing_reservation_bytes)
         / active_workers;
-    if share_bytes < floor_bytes {
+    // The aggregate cap is what a worker can EVER be granted at this worker
+    // count, so it also bounds what we are entitled to demand. Refusing on the
+    // raw `floor_bytes` made the gate unsatisfiable wherever the cap already
+    // grants less than the floor: at `MAX_RETAINED_WORKTREES` (256) the cap is
+    // 256 MiB/worker while the floor is at least
+    // `WORKSPACE_MIN_TRANSACTION_BYTES` (512 MiB), so EVERY request was
+    // refused no matter how empty the disk — including the single new
+    // allocation `AgentSpawner` asks for once the retained set is near quota
+    // (`spawner.rs` passes `retained + 1` as `active_workers`). That is the
+    // regression `concurrent_near_cap_admits_exactly_one_retained_workspace`
+    // caught: both concurrent launches were refused instead of exactly one
+    // being admitted. Demand the smaller of the two, so the measured floor
+    // governs at realistic worker counts and the aggregate cap governs at high
+    // ones — matching what `max_transaction_bytes` below actually hands out.
+    let aggregate_share_bytes = MAX_AGGREGATE_WORKSPACE_BYTES / active_workers;
+    let required_share_bytes = floor_bytes.min(aggregate_share_bytes);
+    if share_bytes < required_share_bytes {
         return Err(SwarmError::DispatchAdmission(format!(
-            "dispatch needs at least {floor_bytes} bytes per worker for {active_workers} active \
-             workers (derived from a {measured_checkout_bytes}-byte measured checkout), but only \
+            "dispatch needs at least {required_share_bytes} bytes per worker for \
+             {active_workers} active workers (a {floor_bytes}-byte floor derived from a \
+             {measured_checkout_bytes}-byte measured checkout, capped by the \
+             {aggregate_share_bytes}-byte aggregate share at this worker count), but only \
              {share_bytes} bytes per worker remain of {available_bytes} available bytes after \
              {existing_reservation_bytes} bytes already reserved and a \
              {WORKSPACE_SAFETY_MARGIN_BYTES}-byte safety margin"
@@ -634,7 +652,7 @@ fn plan_workspace_capacity(
         // At high worker counts this divisor, not the measurement or the
         // host's share, is what sets the budget — that path is governed by the
         // aggregate cap and can hand a worker less than `floor_bytes`.
-        .min(MAX_AGGREGATE_WORKSPACE_BYTES / active_workers);
+        .min(aggregate_share_bytes);
     let committed_bytes = max_transaction_bytes
         .checked_mul(active_workers)
         .and_then(|bytes| bytes.checked_add(existing_reservation_bytes))
