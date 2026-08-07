@@ -78,11 +78,39 @@ env:
   REPO_NAME: ${{ github.event.repository.name }}
 
 jobs:
+  # HOSTED IMAGE: windows-2025, NOT windows-2022. Measured 2026-08-07, both
+  # images from the same untouched main (44168dd3), same suites:
+  #
+  #   windows-2022 (NT 10.0.20348)  sandbox 176/182   swarm 92/95
+  #   windows-2025 (NT 10.0.26100)  sandbox 182/182   swarm 93/95
+  #
+  # Every failure that made this soak red was a STATUS_SHARING_VIOLATION
+  # (0xc0000043) on a handle-relative rename or delete: the DirectoryAuthority
+  # rename pair, the archive crash/mid-import recovery pair, the concurrent
+  # atomic write, the two swarm transaction-cleanup cases and the heartbeat
+  # mirror. All of them pass on 26100, and an 11-cell access-mask matrix run on
+  # both images plus a real Windows 11 box (NT 10.0.26200) puts the cause in
+  # the 20348 kernel's share arbitration, not in this product.
+  #
+  # DO NOT "FIX" THIS IN THE PRODUCT. The refusal is provoked by a retained
+  # directory handle holding DELETE for its lifetime. Dropping that grant was
+  # built and measured on branch fix/windows-authority-mask: it does NOT make
+  # 20348 green (177/182), and it costs handle-bound destruction and
+  # handle-bound rename, because Windows cannot add a right to a live handle
+  # and cannot re-acquire one without a pathname — NtCreateFile with an empty
+  # ObjectName and ReOpenFile were both measured refused. Re-opening by name
+  # reintroduces the pathname re-resolution that
+  # `transaction_cleanup_never_deletes_swap_after_validation` exists to forbid.
+  #
+  # The 2 remaining swarm failures on 26100 are a DIFFERENT problem
+  # (worker_runtime_limits::multi_worker_output_exhaustion_... and
+  # dispatch_smoke::dispatches_4_noop_workers_in_parallel) and are tracked
+  # separately; they are resource/parallelism cases, not share arbitration.
   windows-soak:
-    name: Windows soak (windows-2022)
+    name: Windows soak (windows-2025)
     # Skipped in candidate mode — only the exact F20 native jobs run then.
     if: github.event.inputs.f20_candidate != 'true'
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 60
     permissions:
       contents: read
@@ -225,13 +253,14 @@ jobs:
   # workflow so it runs on every nightly tick, not only when someone remembers
   # to dispatch it.
   #
-  # Hosted `windows-2022`, deliberately: the self-hosted msvc box is shared and
-  # contended, and this leg needs a plain interactive-logon credential store,
-  # not AppContainer capability.
+  # Hosted, deliberately: the self-hosted msvc box is shared and contended, and
+  # this leg needs a plain interactive-logon credential store, not AppContainer
+  # capability. Pinned to windows-2025 for the same reason as the soak job
+  # above — see that block for the measurement.
   keyring-blob-size:
-    name: OAuth-sized secret through the real Credential Manager (windows-2022)
+    name: OAuth-sized secret through the real Credential Manager (windows-2025)
     if: github.event.inputs.f20_candidate != 'true'
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 45
     permissions:
       contents: read
