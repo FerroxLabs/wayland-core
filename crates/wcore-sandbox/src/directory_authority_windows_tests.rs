@@ -1015,6 +1015,109 @@ fn run_rename_cell(root_kind: RenameRoot) -> String {
     }
 }
 
+/// Cell 8 — THE LAST OPEN QUESTION IN THE DESIGN.
+///
+/// Cells 6/7 say the fix is: retained handle keeps `GENERIC_WRITE`, loses
+/// `DELETE`, and DELETE is acquired transiently only at the instant of
+/// destruction. That is only viable if the transient acquisition itself works —
+/// specifically a handle-relative SELF-reopen (`RootDirectory` = the retained
+/// handle, EMPTY `ObjectName`), which is the one form that resolves no pathname
+/// and so cannot be redirected by a swap. `acquire_name_lease`
+/// (`directory_authority_windows.rs:168`) already proves that shape works
+/// asking `GENERIC_READ`; nothing proves it asking `DELETE`.
+///
+/// Two ways this could fail and sink the design:
+///   1. the reopen asking DELETE is itself refused by arbitration against the
+///      retained `GENERIC_READ|GENERIC_WRITE` handle we still hold, or
+///   2. it opens, but the delete disposition through it does not take.
+///
+/// So this probes BOTH: reopen, then actually destroy through it, then confirm
+/// the object is gone from the filesystem.
+fn probe_transient_delete_reopen() -> String {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+        NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, UNICODE_STRING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_SHARE_WRITE, SYNCHRONIZE,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("root");
+    let victim_path = root_path.join("victim");
+    std::fs::create_dir_all(&victim_path).unwrap();
+
+    // The POST-FIX shape: both handles carry write but NOT delete.
+    let _retained = match open_dir_with_access(&root_path, GENERIC_READ | GENERIC_WRITE) {
+        Ok(handle) => handle,
+        Err(error) => return format!("SETUP retained open failed: {error}"),
+    };
+    let victim = match open_dir_with_access(&victim_path, GENERIC_READ | GENERIC_WRITE) {
+        Ok(handle) => handle,
+        Err(error) => return format!("SETUP victim open failed: {error}"),
+    };
+
+    // Self-reopen the victim asking DELETE. Empty name, rooted at its own
+    // handle — the `acquire_name_lease` form, so no pathname is resolved.
+    let unicode_name = UNICODE_STRING {
+        Length: 0,
+        MaximumLength: 0,
+        Buffer: std::ptr::null_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: victim.as_raw_handle().cast(),
+        ObjectName: &unicode_name,
+        Attributes: 0,
+        SecurityDescriptor: std::ptr::null(),
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let mut handle: HANDLE = std::ptr::null_mut();
+    // SAFETY: `attributes` and `unicode_name` outlive the call; `victim` is a
+    // live File; `handle` and the status block are owned locals.
+    let status = unsafe {
+        let mut status_block = std::mem::zeroed();
+        NtCreateFile(
+            &mut handle,
+            DELETE | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT | FILE_DIRECTORY_FILE,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        return format!("REOPEN REFUSED ntstatus={status:#010x} — DESIGN IS SUNK");
+    }
+    if handle.is_null() {
+        return "REOPEN returned a null handle".to_owned();
+    }
+    // SAFETY: NtCreateFile returned one fresh owned handle on success.
+    let reopened = unsafe { File::from_raw_handle(handle) };
+
+    // Reopen worked. Now prove the destruction actually takes through it.
+    match delete_open_object(&reopened, &victim_path, "directory") {
+        Ok(()) => {
+            drop(reopened);
+            drop(victim);
+            if victim_path.exists() {
+                "REOPEN OK, disposition OK, but the object SURVIVED".to_owned()
+            } else {
+                "OK — reopen granted DELETE and the object was destroyed".to_owned()
+            }
+        }
+        Err(error) => format!("REOPEN OK but disposition FAILED: {error}"),
+    }
+}
+
 /// DIAGNOSTIC. Always fails, by design: panicking is how the matrix reaches the
 /// CI log. Never merge this to a branch that gates anything.
 #[test]
@@ -1054,10 +1157,15 @@ fn windows_rename_root_access_matrix() {
             RenameRoot::CustomRootAuthorityDropped(GENERIC_READ | DELETE),
         ),
     ];
-    let report: Vec<String> = cells
+    let mut report: Vec<String> = cells
         .into_iter()
         .map(|(label, kind)| format!("  {label:<34} => {}", run_rename_cell(kind)))
         .collect();
+    report.push(format!(
+        "  {:<34} => {}",
+        "8_transient_delete_self_reopen",
+        probe_transient_delete_reopen()
+    ));
     panic!(
         "RENAME-ROOT-ACCESS-MATRIX-BEGIN\n{}\nRENAME-ROOT-ACCESS-MATRIX-END",
         report.join("\n")
