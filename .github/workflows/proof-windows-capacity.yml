@@ -1,0 +1,114 @@
+# Does the capacity fix actually clear the two hosted-runner failures?
+#
+# Baseline on untouched main: windows-2022 swarm 92/95, windows-2025 swarm 93/95.
+# The two failures common to both images are
+# `worker_runtime_limits::multi_worker_output_exhaustion_...` (5 workers) and
+# `dispatch_smoke::dispatches_4_noop_workers_in_parallel` (4 workers). Both died
+# in the disk admission gate, which demanded 8 GiB per worker + 512 MiB against
+# a runner with ~28.6 GiB free. Success here is swarm 95/95 on BOTH images.
+#
+# Never merge. Fires only on proof/windows-capacity.
+name: proof-windows-capacity
+
+on:
+  push:
+    branches:
+      - proof/windows-capacity
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proof-windows-capacity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-2022:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the host
+        shell: pwsh
+        run: |
+          Write-Output "OS=$([System.Environment]::OSVersion.VersionString)"
+          Write-Output "SHA=${{ github.sha }}"
+          try {
+            $d = Get-MpComputerStatus -ErrorAction Stop
+            Write-Output "DefenderRealTime=$($d.RealTimeProtectionEnabled)"
+          } catch {
+            Write-Output "DefenderRealTime=unknown"
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: wcore-sandbox
+        shell: pwsh
+        run: |
+          cargo nextest run -p wcore-sandbox --no-fail-fast 2>&1 | Tee-Object -FilePath sandbox.log
+          Write-Output "SANDBOX_EXIT=$LASTEXITCODE"
+          "SANDBOX_EXIT=$LASTEXITCODE" | Out-File -Append -Encoding ascii exits.txt
+
+      - name: wcore-swarm
+        if: always()
+        shell: pwsh
+        run: |
+          cargo nextest run -p wcore-swarm --no-fail-fast 2>&1 | Tee-Object -FilePath swarm.log
+          Write-Output "SWARM_EXIT=$LASTEXITCODE"
+          "SWARM_EXIT=$LASTEXITCODE" | Out-File -Append -Encoding ascii exits.txt
+
+      - name: Verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $fail = 0
+          foreach ($pair in @(@('sandbox', 'sandbox.log'), @('swarm', 'swarm.log'))) {
+            $name = $pair[0]
+            $path = $pair[1]
+            if (-not (Test-Path $path)) {
+              Write-Output "$name : NO LOG — the step never produced output"
+              $fail = 1
+              continue
+            }
+            $text = Get-Content $path -Raw
+            # nextest's summary line, e.g. "Summary [ 12.345s] 279 tests run: 279 passed, 0 skipped"
+            $m = [regex]::Match($text, 'Summary \[[^\]]*\]\s+(\d+) tests run:\s+(\d+) passed')
+            if (-not $m.Success) {
+              Write-Output "$name : NO SUMMARY LINE — the suite did not complete"
+              $fail = 1
+              continue
+            }
+            $run = [int]$m.Groups[1].Value
+            $passed = [int]$m.Groups[2].Value
+            Write-Output "$name : ran=$run passed=$passed"
+            # A suite that executed nothing is not a pass.
+            if ($run -eq 0) { Write-Output "$name : ZERO TESTS EXECUTED"; $fail = 1 }
+            if ($passed -ne $run) { Write-Output "$name : FAILURES PRESENT"; $fail = 1 }
+            # The exact signature of the defect under repair.
+            if ($text -match '0xc0000043|os error 32|SHARING_VIOLATION') {
+              Write-Output "$name : SHARE VIOLATION TEXT PRESENT"
+              $fail = 1
+            }
+          }
+          if ($fail -ne 0) { Write-Output 'PROOF=FAILED'; exit 1 }
+          Write-Output 'PROOF=PASSED'
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-windows-capacity-logs-${{ matrix.os }}
+          path: |
+            sandbox.log
+            swarm.log
+            exits.txt
+          if-no-files-found: warn
