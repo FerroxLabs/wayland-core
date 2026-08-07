@@ -330,12 +330,13 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
 
 /// Build the status-bar [`ContextView`](app::ContextView) snapshot from a
 /// resolved engine `Config`. The window size is the compaction
-/// `context_window`; `used_tokens` starts at zero and is updated live by
-/// the protocol bridge as the session runs.
+/// `context_window` fallback (GH#635: the model-aware window arrives with the
+/// engine's live `active_window_percent` updates); `used_tokens` starts at
+/// zero and is updated live by the protocol bridge as the session runs.
 pub fn context_view_from(config: &wcore_config::config::Config) -> app::ContextView {
     app::ContextView {
         used_tokens: 0,
-        window_size: config.compact.context_window as u64,
+        window_size: config.compact.fallback_context_window() as u64,
     }
 }
 

@@ -58,28 +58,44 @@ pub enum CompactError {
 /// Check if autocompact should trigger based on the token watermark.
 ///
 /// Returns `true` when `last_input_tokens` >= the autocompact threshold:
-/// `threshold = context_window - output_reserve - autocompact_buffer`
-pub fn should_autocompact(last_input_tokens: u64, config: &CompactConfig) -> bool {
+/// `threshold = effective_context_window - output_reserve - autocompact_buffer`
+///
+/// `provider` / `model` are the POST-swap effective pair — see
+/// [`autocompact_threshold`].
+pub fn should_autocompact(
+    last_input_tokens: u64,
+    config: &CompactConfig,
+    provider: &str,
+    model: &str,
+) -> bool {
     if !config.enabled {
         return false;
     }
-    last_input_tokens as usize >= autocompact_threshold(config)
+    last_input_tokens as usize >= autocompact_threshold(config, provider, model)
 }
 
 /// The autocompact trigger threshold in tokens:
-/// `context_window - output_reserve - autocompact_buffer`.
+/// `effective_context_window - output_reserve - autocompact_buffer`.
 ///
 /// F23-04 exposes this so the cache/compaction ledger can report token pressure
 /// as a fraction of the boundary that actually fires, rather than as a raw
 /// watermark a reader has to interpret. Extracted from — not duplicated
 /// alongside — [`should_autocompact`], so the number reported to an operator is
-/// by construction the number the engine acts on.
+/// by construction the number the engine acts on. GH#635 keeps that property
+/// intact by making the *denominator* part of the shared function too: the
+/// window comes from [`CompactConfig::effective_context_window`], so the
+/// ledger cannot report a threshold derived from a different window than the
+/// one the trigger enforces.
+///
+/// `provider` / `model` must be the POST-swap effective pair (the same values
+/// fed to `size_output_cap` and the #255 pre-flight guard). Passing a stale
+/// pre-swap model is the bug class this parameter exists to prevent.
 ///
 /// Note this ignores `config.enabled`: it is the threshold's VALUE, and a
 /// disabled compactor still has one worth showing next to the watermark.
-pub fn autocompact_threshold(config: &CompactConfig) -> usize {
+pub fn autocompact_threshold(config: &CompactConfig, provider: &str, model: &str) -> usize {
     config
-        .context_window
+        .effective_context_window(provider, model)
         .saturating_sub(config.output_reserve)
         .saturating_sub(config.autocompact_buffer)
 }
@@ -685,23 +701,44 @@ mod tests {
 
     // ── should_autocompact (TC-2.4-01..03, TC-2.4-14) ──────────────────
 
+    /// A provider/model pair the `wcore_config::limits` registry does NOT
+    /// know, so the effective window is the configured fallback and these
+    /// cases exercise the arithmetic rather than the registry.
+    const UNKNOWN_PROVIDER: &str = "test-provider";
+    const UNKNOWN_MODEL: &str = "test-model";
+
     #[test]
     fn above_threshold_triggers() {
         // threshold = 200k - 20k - 13k = 167k
         let config = default_config();
-        assert!(should_autocompact(170_000, &config));
+        assert!(should_autocompact(
+            170_000,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
     }
 
     #[test]
     fn below_threshold_does_not_trigger() {
         let config = default_config();
-        assert!(!should_autocompact(160_000, &config));
+        assert!(!should_autocompact(
+            160_000,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
     }
 
     #[test]
     fn at_exact_threshold_triggers() {
         let config = default_config();
-        assert!(should_autocompact(167_000, &config));
+        assert!(should_autocompact(
+            167_000,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
     }
 
     #[test]
@@ -710,27 +747,125 @@ mod tests {
             enabled: false,
             ..default_config()
         };
-        assert!(!should_autocompact(999_999, &config));
+        assert!(!should_autocompact(
+            999_999,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
     }
 
     #[test]
     fn custom_config_threshold() {
         let config = CompactConfig {
-            context_window: 100_000,
+            context_window: Some(100_000),
             output_reserve: 10_000,
             autocompact_buffer: 5_000,
             ..default_config()
         };
         // threshold = 100k - 10k - 5k = 85k
-        assert!(!should_autocompact(80_000, &config));
-        assert!(should_autocompact(85_000, &config));
-        assert!(should_autocompact(90_000, &config));
+        assert!(!should_autocompact(
+            80_000,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
+        assert!(should_autocompact(
+            85_000,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
+        assert!(should_autocompact(
+            90_000,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
     }
 
     #[test]
     fn zero_tokens_does_not_trigger() {
         let config = default_config();
-        assert!(!should_autocompact(0, &config));
+        assert!(!should_autocompact(
+            0,
+            &config,
+            UNKNOWN_PROVIDER,
+            UNKNOWN_MODEL
+        ));
+    }
+
+    // ── GH#635: the threshold follows the MODEL's window ────────────────
+
+    /// A registry-known 1.05M-window model must not autocompact at ~177k.
+    /// The pre-fix threshold was 167k on EVERY model; the real one here is
+    /// 1_050_000 − 20_000 − 13_000 = 1_017_000.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: change
+    /// `config.effective_context_window(provider, model)` back to
+    /// `config.context_window` in `autocompact_threshold` (auto.rs) — the
+    /// threshold collapses to 167_000 and the 177k assertion below fires.
+    #[test]
+    fn large_window_model_does_not_compact_at_the_200k_threshold() {
+        let config = default_config();
+        assert_eq!(
+            autocompact_threshold(&config, "openai-chatgpt", "gpt-5.4"),
+            1_017_000
+        );
+        // The customer number: a 177k session on a 1.05M model is nowhere
+        // near needing relief.
+        assert!(!should_autocompact(
+            177_000,
+            &config,
+            "openai-chatgpt",
+            "gpt-5.4"
+        ));
+        // ...but the real boundary still fires.
+        assert!(should_autocompact(
+            1_017_000,
+            &config,
+            "openai-chatgpt",
+            "gpt-5.4"
+        ));
+    }
+
+    /// A registry-known SMALL model must compact EARLIER than the 200k
+    /// default, not later — the fix has to cut both ways or it is just a
+    /// blanket raise.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: same line as above; with the raw
+    /// `config.context_window` the threshold is 167_000 and a 110k gpt-4o
+    /// session sails past its real 105k ceiling.
+    #[test]
+    fn small_window_model_compacts_earlier_than_the_default() {
+        let config = default_config();
+        // 128_000 − 20_000 − 13_000
+        assert_eq!(autocompact_threshold(&config, "openai", "gpt-4o"), 95_000);
+        assert!(should_autocompact(100_000, &config, "openai", "gpt-4o"));
+    }
+
+    /// An explicitly configured window outranks the registry.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+    /// `if let Some(configured) = self.context_window` early return in
+    /// `CompactConfig::effective_context_window` (wcore-config/src/compact.rs)
+    /// — the threshold jumps to 1_017_000 and the operator's cap is ignored.
+    #[test]
+    fn explicit_window_outranks_a_known_models_window() {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..default_config()
+        };
+        assert_eq!(
+            autocompact_threshold(&config, "openai-chatgpt", "gpt-5.4"),
+            167_000
+        );
+        assert!(should_autocompact(
+            170_000,
+            &config,
+            "openai-chatgpt",
+            "gpt-5.4"
+        ));
     }
 
     // ── truncate_for_retry ──────────────────────────────────────────────
