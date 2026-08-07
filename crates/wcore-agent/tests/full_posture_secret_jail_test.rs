@@ -54,6 +54,26 @@ use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
 use wcore_types::tool::ToolResult;
 
+/// Canonicalize a tempdir into a form that actually reaches the secret jail.
+///
+/// On Windows `fs::canonicalize` returns the VERBATIM form
+/// (`\\?\C:\Users\...\.tmpXXXX`), and #644's device/verbatim rule in
+/// `validate_user_path` refuses that namespace outright — before
+/// `SecretDenyFs` is ever consulted. Measured on the hosted Windows runner, all
+/// three tests in this file failed with
+/// `path uses a Windows device / verbatim namespace`.
+///
+/// **This is not cosmetic, and must NOT be "fixed" by relaxing the assertion.**
+/// The secret is refused either way, so a test asserting only `is_error` would
+/// pass on Windows even with the `SecretDenyFs` wrapper deleted — a silently
+/// VACUOUS pin on that platform, which is precisely the failure mode this file
+/// exists to prevent. Simplifying the path keeps the refusal attributable to
+/// the jail, which is what `assert_secret_refusal` checks.
+fn simplified_root(dir: &std::path::Path) -> std::path::PathBuf {
+    let canonical = std::fs::canonicalize(dir).expect("canonicalize tempdir");
+    dunce::simplified(&canonical).to_path_buf()
+}
+
 /// Dead URL: `build()` never connects, these tests only dispatch tools on the
 /// resulting engine.
 fn minimal_config() -> Config {
@@ -146,7 +166,7 @@ fn assert_secret_refusal(result: &ToolResult, path: &std::path::Path, plaintext:
 #[tokio::test]
 async fn full_channel_posture_read_refuses_dotenv() {
     let tmp = tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let root = simplified_root(tmp.path());
     let secret = root.join(".env");
     std::fs::write(&secret, b"API_KEY=SUPER_SECRET_TOKEN\n").unwrap();
 
@@ -162,7 +182,7 @@ async fn full_channel_posture_read_refuses_dotenv() {
 #[tokio::test]
 async fn full_channel_posture_read_refuses_pem_private_key() {
     let tmp = tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let root = simplified_root(tmp.path());
     let secret = root.join("deploy.pem");
     // Deliberately NOT shaped like a real PEM: the deny predicate keys on the
     // PATH (`is_secret_path_static`), never on the bytes, and the commit ratchet
@@ -187,7 +207,7 @@ async fn full_channel_posture_read_refuses_pem_private_key() {
 #[tokio::test]
 async fn full_channel_posture_still_reads_non_secret_workspace_file() {
     let tmp = tempdir().unwrap();
-    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let root = simplified_root(tmp.path());
     let ordinary = root.join("README.md");
     std::fs::write(&ordinary, b"ordinary-project-content\n").unwrap();
 
