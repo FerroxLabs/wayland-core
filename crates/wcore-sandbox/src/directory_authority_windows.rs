@@ -65,14 +65,49 @@ enum RelativeIntent {
     LockOpenOrCreate,
 }
 
+/// Open the mutating directory authority handle.
+///
+/// THE LIFETIME `DELETE` GRANT IS DELIBERATE. DO NOT REMOVE IT. It was removed
+/// once, on branch `fix/windows-authority-mask`, and the removal was measured
+/// and rejected on 2026-08-07. The reasoning is recorded here because the
+/// symptom that motivates removing it is real and will be met again.
+///
+/// THE SYMPTOM. On Windows Server 2022 (NT 10.0.20348) a handle-relative
+/// rename INTO a directory whose retained handle holds `DELETE` is refused
+/// STATUS_SHARING_VIOLATION (0xc0000043) — deterministically, with no antivirus
+/// involved. An 11-cell access-mask matrix isolated the cause to the `DELETE`
+/// bit alone: `GENERIC_READ | GENERIC_WRITE` renames fine, `GENERIC_READ |
+/// DELETE` does not.
+///
+/// WHY IT IS NOT A PRODUCT DEFECT. The same matrix is clean on every rename
+/// cell on Server 2025 (NT 10.0.26100) and on real Windows 11 (NT 10.0.26200).
+/// It is a 20348-kernel share-arbitration behaviour, and 20348 is not a
+/// plausible host for this product. `nightly-windows-soak.yml` was moved to the
+/// 2025 image, where the same untouched tree scores 182/182 instead of 176/182.
+///
+/// WHY REMOVING THE GRANT IS WORSE THAN THE SYMPTOM. Windows cannot add a right
+/// to a live handle, and cannot re-acquire one from a handle either — both
+/// `NtCreateFile` with an empty `ObjectName` and the documented `ReOpenFile`
+/// were measured refused on both kernels. So a handle that never asked for
+/// `DELETE` can never destroy or rename its own object, and both operations
+/// have to fall back to reopening BY NAME through the parent. That reintroduces
+/// exactly the pathname re-resolution
+/// `wcore_swarm::worktree::tests::transaction_cleanup_never_deletes_swap_after_validation`
+/// exists to forbid: an attacker who wins a rename race against cleanup makes
+/// the identity re-proof fire and blocks cleanup of the transaction root and
+/// its capacity reservation for good. Measured cost of the removal on real
+/// Windows 11: swarm went from 65/65 to one failure, and `wcore-sandbox` gained
+/// three (create rollback, handle-relative directory rename, and the retained
+/// cwd bind) — while Server 2022 still did not go green (177/182).
+///
+/// `GENERIC_WRITE` is separately required: `File::sync_all` /
+/// `FlushFileBuffers` is the Windows durability boundary used after relative
+/// create, rename, and delete, and it needs write access.
 pub(super) fn open_directory(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     let mut options = OpenOptions::new();
     options
-        // DirectoryAuthority is a mutation authority. GENERIC_WRITE is also
-        // required for File::sync_all/FlushFileBuffers to provide the Windows
-        // durability boundary used after relative create, rename, and delete.
         .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(
