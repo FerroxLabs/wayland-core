@@ -624,6 +624,109 @@ async fn bootstrap_no_mcp_when_no_servers() {
 /// connect entirely: build() returns without dialing (the configured
 /// server here would hang the full 30s per-server budget if dialed —
 /// the exact stall that blew hosts' 30s ready timeout), registers no
+/// MCP tools, and reports has_mcp=false (the caller advertises MCP
+/// capability itself for declared-but-deferred servers).
+///
+/// What makes "did not dial" unambiguous — and why `has_mcp == false`
+/// carries it rather than merely being consistent with it:
+/// `McpManager::connect_all_with_policy` is non-fatal per-server and
+/// returns `Ok(manager)` even when every server hangs, dies, or fails to
+/// spawn (`crates/wcore-mcp/src/manager.rs`), and bootstrap pushes that
+/// manager into `mcp_managers` on the `Ok` arm unconditionally. So a build
+/// that DIALED and got nothing back still ends with a non-empty
+/// `mcp_managers` and `has_mcp == true` — the #111 case below leans on the
+/// same fact. Only a build that never entered the connect arm leaves both
+/// empty, and that holds identically on Linux, macOS and Windows whatever
+/// the fixture process happens to do.
+///
+/// The elapsed-time bound pins the user-visible half of #551 — the stall,
+/// not just the flag. The fixture spawns and then never speaks MCP, so a
+/// real dial parks for the full 30s `CONNECT_TIMEOUT`
+/// (`crates/wcore-mcp/src/manager.rs`) before the handshake is skipped.
+/// 15s is half that budget and orders of magnitude above any honest
+/// deferred build, so it cannot flake on a loaded CI box; and a fixture
+/// that dies early on some platform only makes the bound easier to pass —
+/// it can never fail spuriously, and the `mcp_managers` assertion still
+/// catches the dial there.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: delete `&& !self.defer_config_mcp`
+/// from the `let mcp_manager = if !scoped_servers.is_empty() && ...` guard
+/// in `crates/wcore-agent/src/bootstrap.rs` — the wayland#551 short-circuit
+/// — and the deferred build dials the fixture: `mcp_managers` gains the
+/// manager, `has_mcp` flips true, and on Unix the build also blows the 15s
+/// bound.
+#[tokio::test]
+#[serial]
+async fn bootstrap_defer_config_mcp_skips_connect() {
+    use wcore_config::config::{McpServerConfig, TransportType};
+
+    // A server that starts fine and never speaks MCP, so a dialed connect
+    // sits in the handshake until the per-server timeout. Unix leg matches
+    // the MCP crate's own hung-stdio-server fixture
+    // (`c2_connect_all_skips_hung_server_and_continues` in
+    // `crates/wcore-mcp/src/manager.rs`); Windows has no `sleep`, so it takes
+    // this workspace's long-lived-idler command from
+    // `crates/wcore-types/tests/real_zombie.rs` — `>NUL` keeps the child off
+    // stdout so the reader task sees silence rather than garbage.
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd",
+            vec!["/C".to_string(), "ping -n 300 127.0.0.1 >NUL".to_string()],
+        )
+    } else {
+        ("sh", vec!["-c".to_string(), "sleep 300".to_string()])
+    };
+
+    let (_plugins, _env) = isolated_plugins();
+    let mut config = minimal_config();
+    config.mcp.servers.insert(
+        "hang".into(),
+        McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some(command.to_string()),
+            args: Some(args),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+            allow_local: false,
+            only_for_assistant: None,
+        },
+    );
+    let workdir = tempfile::TempDir::new().expect("workdir");
+
+    let start = std::time::Instant::now();
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .defer_config_mcp(true)
+        .build()
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    // The connect arm was never entered. Bootstrap records a manager on that
+    // arm even when every server fails, so an empty `mcp_managers` is the
+    // signal that separates "skipped the dial" from "dialed and got nothing".
+    assert!(
+        result.mcp_managers.is_empty(),
+        "a deferred build must not construct an McpManager (build took {elapsed:?})"
+    );
+    assert!(!result.has_mcp, "deferred servers must not set has_mcp");
+    assert!(
+        !result
+            .engine
+            .tool_names()
+            .iter()
+            .any(|n| n.contains("hang")),
+        "no tools from the deferred server may be registered at build time"
+    );
+    // Generous bound: half the 30s connect budget the skipped dial would have
+    // burned, far above any honest build cost.
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "deferred build must not dial config MCP servers (took {elapsed:?})"
+    );
+}
+
 /// #111 — a config MCP server marked `only_for_assistant` must be injected
 /// ONLY for a matching active assistant. Overwatch #613 requires proving a
 /// non-Concierge (or unidentified) session does NOT receive the scoped server
@@ -703,59 +806,6 @@ async fn bootstrap_scopes_marked_mcp_server_to_matching_assistant() {
         "the Concierge session MUST receive its scoped server"
     );
     assert!(!included.mcp_managers.is_empty());
-}
-
-/// MCP tools, and reports has_mcp=false (the caller advertises MCP
-/// capability itself for declared-but-deferred servers).
-#[tokio::test]
-#[serial]
-async fn bootstrap_defer_config_mcp_skips_connect() {
-    use wcore_config::config::{McpServerConfig, TransportType};
-
-    let (_plugins, _env) = isolated_plugins();
-    let mut config = minimal_config();
-    config.mcp.servers.insert(
-        "hang".into(),
-        McpServerConfig {
-            transport: TransportType::Stdio,
-            // Starts fine, never speaks MCP — a dialed connect would sit in
-            // the handshake until the 30s per-server timeout.
-            command: Some("sleep".into()),
-            args: Some(vec!["300".into()]),
-            env: None,
-            url: None,
-            headers: None,
-            deferred: None,
-            allow_local: false,
-            only_for_assistant: None,
-        },
-    );
-    let workdir = tempfile::TempDir::new().expect("workdir");
-
-    let start = std::time::Instant::now();
-    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
-        .defer_config_mcp(true)
-        .build()
-        .await
-        .unwrap();
-
-    // Generous bound: well under the 30s connect budget the skipped dial
-    // would have burned, far above any honest build cost.
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(15),
-        "deferred build must not dial config MCP servers (took {:?})",
-        start.elapsed()
-    );
-    assert!(!result.has_mcp, "deferred servers must not set has_mcp");
-    assert!(result.mcp_managers.is_empty());
-    assert!(
-        !result
-            .engine
-            .tool_names()
-            .iter()
-            .any(|n| n.contains("hang")),
-        "no tools from the deferred server may be registered at build time"
-    );
 }
 
 #[tokio::test]
