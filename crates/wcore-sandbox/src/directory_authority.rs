@@ -785,9 +785,88 @@ impl DirectoryAuthority {
         ))
     }
 
+    /// Remove this exact retained directory object and all descendants, taking
+    /// the `DELETE` right through `parent` at the moment of destruction.
+    ///
+    /// WHY THIS EXISTS RATHER THAN JUST [`Self::remove_open_dir_all`]. On
+    /// Windows a retained directory handle no longer carries `DELETE` — holding
+    /// it for the authority's lifetime is what refused every handle-relative
+    /// rename into that directory on Server 2022 (see
+    /// `windows::RelativeIntent::Destroy`). Destruction therefore needs a fresh
+    /// DELETE-bearing handle, and the only way to obtain one WITHOUT resolving a
+    /// pathname is to open the child through its parent's retained handle.
+    ///
+    /// The anti-swap guarantee is fully preserved: `name` is resolved only
+    /// against `parent`'s held handle, and the reopened object's identity is
+    /// re-proven against this authority's before anything is destroyed, so a
+    /// substitution fails closed instead of being deleted.
+    ///
+    /// Unix ignores `parent` and `name` — `unlinkat`-based removal already
+    /// works through the held descriptor and never needed the right.
+    pub fn remove_open_dir_all_under(
+        self,
+        parent: &Self,
+        name: &str,
+    ) -> std::result::Result<(), Box<(SandboxError, Self)>> {
+        #[cfg(windows)]
+        {
+            if let Err(error) = validate_child_name(name) {
+                return Err(Box::new((error, self)));
+            }
+            let destroyable = match windows::open_child_directory_for_destroy(parent, name) {
+                Ok(authority) => authority,
+                Err(error) => return Err(Box::new((error, self))),
+            };
+            if destroyable.identity != self.identity {
+                return Err(Box::new((
+                    SandboxError::PathDenied(format!(
+                        "refused to destroy a substituted Windows directory: {}",
+                        self.display_path.display()
+                    )),
+                    self,
+                )));
+            }
+            // `self` DELIBERATELY STAYS ALIVE across the destruction, so a
+            // failure can hand the caller back the very authority it passed in
+            // rather than a re-derived one. Both handles share
+            // FILE_SHARE_DELETE, which is what Windows share arbitration
+            // actually requires of a bystander handle during a disposition.
+            //
+            // The empty-`ObjectName` self-reopen was measured to fail its
+            // disposition with os error 5 on Server 2022 (diagnostic cells 8
+            // and 9) — but that held with the retained handle BOTH alive and
+            // dropped, so it refutes that mechanism rather than proving
+            // anything about handle lifetime. This function uses the different,
+            // already-exercised mechanism: open the child BY NAME through the
+            // parent's retained handle, exactly as the descendant walk does.
+            match windows::remove_open_dir_all(destroyable) {
+                Ok(()) => {
+                    drop(self);
+                    Ok(())
+                }
+                Err(boxed) => {
+                    let (error, _destroyable) = *boxed;
+                    Err(Box::new((error, self)))
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (parent, name);
+            self.remove_open_dir_all()
+        }
+    }
+
     /// Remove this exact retained directory object and all descendants.
     /// Unix delegates to cap-std's open-directory removal, which locates the
     /// directory by the held inode rather than trusting its display path.
+    ///
+    /// ON WINDOWS this requires the handle to already carry `DELETE`, which is
+    /// now true ONLY of a handle opened with `RelativeIntent::Destroy` — i.e.
+    /// the internal cleanup recursion and
+    /// [`windows::open_child_directory_for_destroy`]. An authority obtained from
+    /// [`Self::open`] no longer qualifies; those callers must use
+    /// [`Self::remove_open_dir_all_under`].
     pub fn remove_open_dir_all(self) -> std::result::Result<(), Box<(SandboxError, Self)>> {
         #[cfg(unix)]
         {

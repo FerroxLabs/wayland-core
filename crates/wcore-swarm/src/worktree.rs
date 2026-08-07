@@ -506,7 +506,12 @@ fn remove_transaction_root_inner_with_hooks(
     // pathname is needed, so failures return the same authority and stage.
     before_transaction_delete();
     before_placeholder_delete();
-    root_authority.remove_open_dir_all()
+    // `swarm_authority` is the retained parent of `root`, and `owner` is the
+    // single validated child name under it — both already proven above. Passing
+    // them lets Windows acquire `DELETE` for the instant of destruction instead
+    // of the authority's whole lifetime, which is what refused handle-relative
+    // renames on Server 2022.
+    root_authority.remove_open_dir_all_under(swarm_authority, owner)
 }
 
 fn transaction_is_active(authority: &DirectoryAuthority, path: &Path) -> Result<bool> {
