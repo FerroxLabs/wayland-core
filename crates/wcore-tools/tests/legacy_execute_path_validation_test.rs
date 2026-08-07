@@ -127,6 +127,99 @@ async fn read_legacy_succeeds_for_ordinary_absolute_path() {
     assert!(result.content.contains("content"));
 }
 
+/// Credential disclosure via procfs: `/proc/self/environ` is the agent's OWN
+/// environment (every provider API key) and is a regular file, so it slipped
+/// past every other guard. On Linux this is a REAL file, so this is genuinely
+/// end-to-end there. `cfg(unix)` for the same reason as the `/etc/shadow`
+/// tests above — on Windows the path is not absolute and would be refused for
+/// the wrong reason.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+/// `if is_denied_proc_path(path) { return true; }` block in
+/// `is_denied_system_path` (`crates/wcore-tools/src/path_validation.rs`) and
+/// `ReadTool::execute` returns the environment block instead of a refusal.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_legacy_refuses_proc_self_environ() {
+    let tool = ReadTool::new(None);
+    let result = tool
+        .execute(json!({ "file_path": "/proc/self/environ" }))
+        .await;
+    assert!(
+        result.is_error,
+        "must refuse /proc/self/environ: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("Refused"),
+        "expected refusal message, got: {}",
+        result.content
+    );
+}
+
+/// The ctx entry is the one the ENGINE actually uses, so a fix pinned only to
+/// the legacy `execute()` path would be worthless. Drives `execute_with_ctx`
+/// against the same procfs target, plus a per-pid spelling to prove the deny
+/// is not keyed on the literal `self`.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+/// `if is_denied_proc_path(path) { return true; }` block in
+/// `is_denied_system_path` (`crates/wcore-tools/src/path_validation.rs`), or
+/// drop the `is_ascii_digit` pid arm from `is_denied_proc_path`, and
+/// `ReadTool::execute_with_ctx` stops refusing.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_ctx_variant_also_refuses_proc_environ() {
+    let tool = ReadTool::new(None);
+    let ctx = wcore_tools::context::ToolContext::test_default();
+    for p in ["/proc/self/environ", "/proc/1/environ", "/proc/self/mem"] {
+        let result = tool.execute_with_ctx(json!({ "file_path": p }), &ctx).await;
+        assert!(
+            result.is_error,
+            "ctx variant must refuse {p}: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Refused"),
+            "expected refusal for {p}, got: {}",
+            result.content
+        );
+    }
+}
+
+/// Over-match guard on the tool surface, through the ctx entry: a real
+/// workspace file literally named `proc/self/environ` must still be READABLE.
+/// A `contains()`-style deny would pass the two tests above while silently
+/// breaking legitimate reads.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: replace the component walk in
+/// `is_denied_proc_path` (`crates/wcore-tools/src/path_validation.rs`) with a
+/// substring test and this read starts returning a refusal.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_ctx_variant_allows_lookalike_proc_path() {
+    let dir = tempdir().expect("tempdir");
+    let target = dir.path().join("proc/self/environ");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, b"workspace notes").unwrap();
+
+    let tool = ReadTool::new(None);
+    let ctx = wcore_tools::context::ToolContext::test_default();
+    let result = tool
+        .execute_with_ctx(json!({ "file_path": target.to_str().unwrap() }), &ctx)
+        .await;
+    assert!(
+        !result.is_error,
+        "a workspace file named proc/self/environ must stay readable: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("workspace notes"),
+        "expected file contents, got: {}",
+        result.content
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn read_ctx_variant_also_refuses_etc_shadow() {
