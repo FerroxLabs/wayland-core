@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.12.26](https://github.com/FerroxLabs/wayland-core/compare/v0.12.25...v0.12.26) (2026-08-08)
+
+**Release highlights.** The largest release in the project's history: 2,918
+commits (250 `feat`, 629 `fix`, 519 `test`, 740 `docs`) across 5,506 files in
+26 days.
+
+Durable **Goals** that outlive the process, unified across all five loop
+owners and controllable over the host protocol. A provider-neutral **execution
+backend** contract with local, ssh, container and cloud reference backends —
+the cloud one genuinely creates, runs and hibernates a machine. An operable
+**gateway** with an exactly-once delivery ledger, a single-owner inbound lease
+and re-sendable abandoned deliveries. **Ten channels** with declared native
+actions and a cross-adapter conformance matrix. A persistent **code index**
+(`wayland-core index`). **Backup, restore and rollback** with a write-ahead
+journal and consistent live-SQLite capture. **Importers** for openclaw, grok
+and gemini-cli. A queryable **cost ledger** with a daily spend ceiling. Memory
+controls you own. Governed **skills** with atomic rollback. **Voice**
+default-on for macOS and Windows.
+
+Security: the credential deny-list is now enforced on every read tool, a
+fail-closed credential ladder replaces the plaintext fallback entirely, and
+sandbox bypass cannot be activated remotely. Windows took the largest single
+share of the release, including **140 ms → 68 ms per op at 24-way**
+concurrency. Releases ship a signed manifest, a deterministic SBOM, keyless
+Sigstore provenance and a fail-closed updater.
+
+Full notes: [docs/releases/v0.12.26.md](docs/releases/v0.12.26.md).
+Desktop integrators: [docs/releases/v0.12.26-desktop-integration.md](docs/releases/v0.12.26-desktop-integration.md).
+
 ## [0.12.25](https://github.com/FerroxLabs/wayland-core/compare/v0.12.24...v0.12.25) (2026-07-13)
 
 **Release highlights — Anvil Smart Loops.** The gated forge is on by default:
