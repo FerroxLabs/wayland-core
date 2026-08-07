@@ -832,6 +832,182 @@ fn windows_publish_refuses_a_substituted_temporary() {
     );
 }
 
+// ===========================================================================
+// DIAGNOSTIC ONLY - DO NOT MERGE. Branch `diag/rename-rootdir`.
+//
+// Soak 31136093038 refuted every source-side theory at once:
+// `windows_publish_reacquires_the_temporary_without_the_write_bit` reached its
+// RENAME and failed there, meaning the delete-only reacquire had ALREADY
+// succeeded and the "no write access outstanding" assertion had ALREADY
+// passed. The rename is refused with STATUS_SHARING_VIOLATION anyway, with
+// replace=false, with the destination absent, in 0.030s, deterministically on
+// hosted windows-2022 and never on Windows 11. That is not contention and not
+// a scanner.
+//
+// The one theory left standing is that the kernel arbitrates the TARGET
+// DIRECTORY: with a non-NULL `RootDirectory`, `IopOpenLinkOrRenameTarget`
+// performs an additional internal open of it, which must survive share
+// arbitration against our own lifetime-held authority handle
+// (GENERIC_READ | GENERIC_WRITE | DELETE, `open_directory` at the top of this
+// module's production file).
+//
+// The class-47 holder probe cannot answer this - it returned UNRELIABLE for
+// both the file and the directory on that host - so ask the KERNEL instead by
+// varying one thing at a time. Cell 3 is the one that matters: if a
+// traverse/read-only root handle succeeds where the full-access authority
+// fails, the conflicting party is our own handle's ACCESS MASK, and the fix
+// keeps `RootDirectory` a handle - so the anti-swap guarantee survives and
+// there is no security tradeoff to put to Sean.
+// ===========================================================================
+
+enum RenameRoot {
+    /// Production today: the retained authority handle, full access.
+    AuthorityFullAccess,
+    /// A separate GENERIC_READ-only handle on the same directory, opened while
+    /// the full-access authority is still ALIVE.
+    ObservationalAuthorityAlive,
+    /// The same, with the full-access authority DROPPED first. Separates "the
+    /// mask on the handle used as RootDirectory" from "any full-access handle
+    /// existing on that directory at all".
+    ObservationalAuthorityDropped,
+    /// Codex's form: no root handle, destination named by full NT path.
+    NullRootFullNtPath,
+    /// Baseline. If even this fails, the defect is not in our rename at all.
+    FsRenameBaseline,
+}
+
+/// One `NtSetInformationFile(FileRenameInformation)` with a caller-chosen root
+/// handle and name, reporting the raw outcome rather than asserting it.
+fn raw_rename_reporting(source: &File, root: *mut std::ffi::c_void, name: &str) -> String {
+    // Both are extension traits and must be in scope at the call site; kept
+    // local, matching `set_directory_case_sensitive` above.
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::{FileRenameInformation, NtSetInformationFile};
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().collect();
+    let name_bytes = wide.len() * std::mem::size_of::<u16>();
+    let bytes = match rename_buffer_len(name_bytes) {
+        Ok(bytes) => bytes,
+        Err(error) => return format!("SETUP buffer {error}"),
+    };
+    let mut storage = vec![0_usize; bytes.div_ceil(std::mem::size_of::<usize>())];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    // SAFETY: `storage` is a live usize-aligned allocation of at least `bytes`,
+    // which is the header plus exactly `name_bytes` of trailing name, so every
+    // write below stays inside it. `wide` and `storage` are distinct.
+    let status = unsafe {
+        (*info).RootDirectory = root;
+        (*info).FileNameLength = name_bytes as u32;
+        (*info).Anonymous.ReplaceIfExists = 0;
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), (*info).FileName.as_mut_ptr(), wide.len());
+        let mut status_block = std::mem::zeroed();
+        NtSetInformationFile(
+            source.as_raw_handle().cast(),
+            &mut status_block,
+            info.cast(),
+            bytes as u32,
+            FileRenameInformation,
+        )
+    };
+    if status >= 0 {
+        return "OK".to_owned();
+    }
+    // `ntstatus_error` is private to the production module, and the NTSTATUS is
+    // the more precise answer here anyway - the Win32 mapping is lossy, and
+    // STATUS_DELETE_PENDING vs STATUS_SHARING_VIOLATION is exactly the
+    // distinction this matrix has to preserve.
+    let named = match status as u32 {
+        0xc000_0043 => " STATUS_SHARING_VIOLATION",
+        0xc000_0056 => " STATUS_DELETE_PENDING",
+        0xc000_0022 => " STATUS_ACCESS_DENIED",
+        0xc000_0034 => " STATUS_OBJECT_NAME_NOT_FOUND",
+        0xc000_0035 => " STATUS_OBJECT_NAME_COLLISION",
+        0xc000_0024 => " STATUS_OBJECT_TYPE_MISMATCH",
+        _ => "",
+    };
+    format!("REFUSED ntstatus={status:#010x}{named}")
+}
+
+fn run_rename_cell(root_kind: RenameRoot) -> String {
+    use std::os::windows::io::AsRawHandle;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root_path = temp.path().join("root");
+    std::fs::create_dir_all(&root_path).unwrap();
+    let authority = DirectoryAuthority::open(&root_path).unwrap();
+
+    // Source is produced exactly the way `atomic_write_child` produces it,
+    // including the delete-only reacquire, so the only variable is the root.
+    let created = authority.create_child_file("src", b"payload").unwrap();
+    let source = match reopen_for_publish(&authority, "src", created) {
+        Ok(source) => source,
+        Err(error) => return format!("SETUP reacquire failed: {error}"),
+    };
+
+    match root_kind {
+        RenameRoot::FsRenameBaseline => {
+            drop(source);
+            drop(authority);
+            match std::fs::rename(root_path.join("src"), root_path.join("dst")) {
+                Ok(()) => "OK".to_owned(),
+                Err(error) => format!("REFUSED errno={:?} ({error})", error.raw_os_error()),
+            }
+        }
+        RenameRoot::NullRootFullNtPath => {
+            let target = format!(r"\??\{}", root_path.join("dst").display());
+            raw_rename_reporting(&source.handle, std::ptr::null_mut(), &target)
+        }
+        RenameRoot::AuthorityFullAccess => raw_rename_reporting(
+            &source.handle,
+            authority.handle.as_raw_handle().cast(),
+            "dst",
+        ),
+        RenameRoot::ObservationalAuthorityAlive | RenameRoot::ObservationalAuthorityDropped => {
+            // Fully qualified: the name arrives through both `super::*` and
+            // `super::windows::*`, so a bare reference is ambiguous.
+            let observational = match super::windows::open_directory_observational(&root_path) {
+                Ok(handle) => handle,
+                Err(error) => return format!("SETUP observational open failed: {error}"),
+            };
+            if matches!(root_kind, RenameRoot::ObservationalAuthorityDropped) {
+                drop(authority);
+            }
+            raw_rename_reporting(&source.handle, observational.as_raw_handle().cast(), "dst")
+        }
+    }
+}
+
+/// DIAGNOSTIC. Always fails, by design: panicking is how the matrix reaches the
+/// CI log. Never merge this to a branch that gates anything.
+#[test]
+fn windows_rename_root_access_matrix() {
+    let cells = [
+        (
+            "1_root_authority_full_access ",
+            RenameRoot::AuthorityFullAccess,
+        ),
+        (
+            "2_root_observational_auth_alive",
+            RenameRoot::ObservationalAuthorityAlive,
+        ),
+        (
+            "3_root_observational_auth_dropped",
+            RenameRoot::ObservationalAuthorityDropped,
+        ),
+        ("4_root_null_full_nt_path", RenameRoot::NullRootFullNtPath),
+        ("5_fs_rename_baseline", RenameRoot::FsRenameBaseline),
+    ];
+    let report: Vec<String> = cells
+        .into_iter()
+        .map(|(label, kind)| format!("  {label:<34} => {}", run_rename_cell(kind)))
+        .collect();
+    panic!(
+        "RENAME-ROOT-ACCESS-MATRIX-BEGIN\n{}\nRENAME-ROOT-ACCESS-MATRIX-END",
+        report.join("\n")
+    );
+}
+
 /// The cleanup retry must recover a refusal that clears, and must do so on the
 /// first backoff step — the only behaviour measured on real hardware.
 #[test]

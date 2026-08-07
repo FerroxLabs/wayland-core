@@ -1,0 +1,81 @@
+# DIAGNOSTIC ONLY - do not merge to main.
+#
+# Answers ONE question on the only host that exhibits the defect: which object
+# is Windows arbitrating when a handle-relative rename is refused with
+# STATUS_SHARING_VIOLATION?
+#
+# Why this exists instead of another soak run
+# -------------------------------------------
+# `nightly-windows-soak` takes ~35 minutes and runs 3246 tests. Three of those
+# runs have now been spent refuting one theory each. This runs a single test in
+# a few minutes and varies one variable at a time, so a run buys a whole matrix
+# instead of one bit.
+#
+# Why `push` and not `workflow_dispatch`
+# --------------------------------------
+# The REST API resolves a dispatchable workflow off the DEFAULT branch, so
+# `gh workflow run` 404s for a workflow that has never reached `main`. A scoped
+# `push` trigger is the only way to run a new workflow on the branch that
+# introduces it. Same reasoning and same shape as `macos-corpus-verify.yml`.
+#
+# Why the test panics on success
+# ------------------------------
+# The matrix IS the result, and a passing test prints nothing to the CI log.
+# The test panics with the matrix as its message so the outcome is always
+# captured. A green run here would mean the test did not execute.
+
+name: diag-windows-rename
+
+on:
+  push:
+    branches:
+      - 'diag/rename-rootdir'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diag-windows-rename-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rename-matrix:
+    name: Rename root-access matrix (windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the host is the one that reproduces
+        shell: pwsh
+        run: |
+          Write-Output ("OS=" + [System.Environment]::OSVersion.VersionString)
+          Write-Output ("TEMP=" + $env:TEMP)
+          try {
+            $d = Get-MpComputerStatus -ErrorAction Stop
+            Write-Output ("DefenderRealTime=" + $d.RealTimeProtectionEnabled)
+          } catch { Write-Output "DefenderRealTime=unknown" }
+
+      - name: Run the matrix
+        shell: pwsh
+        # The test panics by design, so a non-zero exit is EXPECTED here and the
+        # step must not stop the job before the matrix is extracted below.
+        continue-on-error: true
+        run: |
+          cargo test -p wcore-sandbox --lib windows_rename_root_access_matrix -- --nocapture 2>&1 |
+            Tee-Object -FilePath matrix.log
+
+      - name: Extract the matrix, and fail if it never ran
+        shell: pwsh
+        run: |
+          if (-not (Test-Path matrix.log)) { Write-Output "NO LOG"; exit 1 }
+          $t = Get-Content matrix.log -Raw
+          if ($t -notmatch "RENAME-ROOT-ACCESS-MATRIX-BEGIN") {
+            Write-Output "MATRIX ABSENT - the test did not execute. Tail follows:"
+            Get-Content matrix.log -Tail 40
+            exit 1
+          }
+          $m = [regex]::Match($t, "(?s)RENAME-ROOT-ACCESS-MATRIX-BEGIN(.*?)RENAME-ROOT-ACCESS-MATRIX-END")
+          Write-Output "================ RESULT ================"
+          Write-Output $m.Groups[1].Value.Trim()
+          Write-Output "========================================"
