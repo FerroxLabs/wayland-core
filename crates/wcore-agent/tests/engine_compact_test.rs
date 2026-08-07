@@ -191,7 +191,7 @@ async fn tc_2_6_03_emergency_returns_error() {
     let provider = Arc::new(CompactMockProvider::new(vec![turn1, turn2]));
     let mut config = test_config();
     config.compact.enabled = false; // disable auto/micro so emergency is the only gate
-    config.compact.context_window = 200_000;
+    config.compact.context_window = Some(200_000);
     config.compact.emergency_buffer = 3_000;
 
     let mut registry = ToolRegistry::new();
@@ -417,7 +417,7 @@ async fn tc_2_6_06b_disabled_still_fires_emergency() {
 
     let mut config = test_config();
     config.compact.enabled = false;
-    config.compact.context_window = 200_000;
+    config.compact.context_window = Some(200_000);
     config.compact.emergency_buffer = 3_000;
 
     let mut registry = ToolRegistry::new();
@@ -609,7 +609,7 @@ async fn tc_2_6_02_micro_before_auto_execution_order() {
     config.compact = CompactConfig {
         micro_keep_recent: 3,
         compactable_tools: vec!["mock_tool".into()],
-        context_window: 200_000,
+        context_window: Some(200_000),
         emergency_buffer: 3_000,
         ..Default::default()
     };
@@ -773,7 +773,7 @@ async fn tc_2_6_e2e_02_micro_and_auto_cooperative() {
     config.compact = CompactConfig {
         micro_keep_recent: 3,
         compactable_tools: vec!["mock_tool".into()],
-        context_window: 200_000,
+        context_window: Some(200_000),
         emergency_buffer: 3_000,
         ..Default::default()
     };
@@ -901,7 +901,7 @@ async fn tc_2_6_e2e_03_circuit_breaker_stops_retries() {
     config.compact = CompactConfig {
         max_failures: 3,
         // Set emergency very high so it doesn't interfere
-        context_window: 500_000,
+        context_window: Some(500_000),
         emergency_buffer: 3_000,
         ..Default::default()
     };
@@ -959,7 +959,7 @@ async fn tc_2_6_context_overflow_sheds_tool_output_and_continues() {
 
     let mut config = test_config();
     config.compact.enabled = false; // no auto/micro/emergency — isolate the guard
-    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.context_window = Some(60_000); // unknown model → fallback window
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000; // ceiling = 60k - 20k = 40k tokens
 
@@ -1007,7 +1007,7 @@ async fn tc_2_6_context_overflow_resumed_session_heals_and_continues() {
 
     let mut config = test_config();
     config.compact.enabled = false; // isolate the pre-flight ceiling guard
-    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.context_window = Some(60_000); // unknown model → fallback window
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000; // ceiling = 60k - 20k = 40k tokens
 
@@ -1071,7 +1071,7 @@ async fn tc_2_6_context_overflow_text_paste_truncates_and_continues() {
 
     let mut config = test_config();
     config.compact.enabled = false; // isolate the pre-flight ceiling guard
-    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.context_window = Some(60_000); // unknown model → fallback window
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000; // ceiling = 40k tokens
 
@@ -1108,7 +1108,7 @@ async fn tc_2_6_context_overflow_resumed_text_session_heals() {
 
     let mut config = test_config();
     config.compact.enabled = false;
-    config.compact.context_window = 60_000;
+    config.compact.context_window = Some(60_000);
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000; // ceiling = 40k tokens
 
@@ -1157,7 +1157,7 @@ async fn tc_2_6_context_overflow_many_small_turns_drop_oldest_and_continue() {
 
     let mut config = test_config();
     config.compact.enabled = false; // isolate the pre-flight ceiling guard
-    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.context_window = Some(60_000); // unknown model → fallback window
     config.compact.output_reserve = 10_000;
     config.compact.emergency_buffer = 10_000; // ceiling = 40k tokens
 

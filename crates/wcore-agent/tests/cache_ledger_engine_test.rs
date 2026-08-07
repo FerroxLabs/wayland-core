@@ -268,7 +268,7 @@ async fn recorded_cost_varies_with_the_tokens_and_beats_the_uncached_counterfact
         // how this first came back red. Widen the window so the cost arithmetic
         // is what is under test here; `token_pressure_*` below covers the
         // thresholds themselves.
-        config.compact.context_window = 100_000_000;
+        config.compact.context_window = Some(100_000_000);
         let mut engine = AgentEngine::new_with_provider(
             provider,
             config,
@@ -435,7 +435,7 @@ async fn token_pressure_is_recorded_against_the_thresholds_the_engine_acts_on() 
     // Compaction OFF so the watermark is free to climb and this test measures
     // the pressure recording rather than the compactor.
     config.compact.enabled = false;
-    config.compact.context_window = 200_000;
+    config.compact.context_window = Some(200_000);
     config.compact.output_reserve = 20_000;
     config.compact.autocompact_buffer = 13_000;
     config.compact.emergency_buffer = 3_000;
@@ -453,6 +453,11 @@ async fn token_pressure_is_recorded_against_the_thresholds_the_engine_acts_on() 
     let t = &ledger.turns[0];
     // 200_000 - 20_000 - 13_000 and 200_000 - 3_000: the SAME arithmetic
     // `should_autocompact` and `is_at_emergency_limit` test against.
+    //
+    // GH#635: `context_window = Some(200_000)` above is now load-bearing — it
+    // is an EXPLICIT operator setting, which outranks claude-opus-4-7's real
+    // 1,000,000-token window. Drop it and these become 967_000 / 997_000 (see
+    // `gh635_ledger_reports_the_active_models_boundaries_not_the_200k_default`).
     assert_eq!(t.autocompact_threshold_tokens, 167_000);
     assert_eq!(t.emergency_limit_tokens, 197_000);
     assert!(
@@ -494,6 +499,63 @@ async fn token_pressure_is_recorded_against_the_thresholds_the_engine_acts_on() 
         "a 1k-token session reported pressure {} — the figure is not varying",
         qs.peak_pressure_ratio()
     );
+}
+
+/// GH#635 — with NO configured `context_window`, the ledger must report the
+/// boundaries of the model that is actually running, and they must be the
+/// SAME numbers the enforcement path computes. A reported 167k/197k next to an
+/// enforced 967k/997k would send an operator hunting a compaction that is
+/// never going to fire.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: change
+/// `config.effective_context_window(provider, model)` back to
+/// `config.context_window` in either `autocompact_threshold`
+/// (crates/wcore-agent/src/compact/auto.rs) or `emergency_limit`
+/// (crates/wcore-agent/src/compact/emergency.rs) — the ledger reports
+/// 167_000 / 197_000 and the equality assertions against the enforcement
+/// functions break.
+#[tokio::test]
+#[serial_test::serial(wayland_cache_ledger_env)]
+async fn gh635_ledger_reports_the_active_models_boundaries_not_the_200k_default() {
+    use wcore_agent::compact::auto::autocompact_threshold;
+    use wcore_agent::compact::emergency::emergency_limit;
+
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_turn("t1", usage(220_000, 300, 0, 0)),
+        text_turn("done", usage(230_000, 300, 0, 0)),
+    ]));
+    let mut config = test_config();
+    // A registry-known 1,000,000-token model, with `context_window` left
+    // UNCONFIGURED so the registry supplies the window.
+    config.model = "claude-opus-4-7".to_string();
+    config.compact.enabled = false;
+    assert_eq!(
+        config.compact.context_window, None,
+        "this test is only meaningful with an unconfigured window"
+    );
+
+    // The buffers stay at their defaults; snapshot them for the expected math.
+    let expected_threshold = autocompact_threshold(&config.compact, "anthropic", &config.model);
+    let expected_limit = emergency_limit(&config.compact, "anthropic", &config.model);
+    assert_eq!(expected_threshold, 967_000, "1_000_000 - 20_000 - 13_000");
+    assert_eq!(expected_limit, 997_000, "1_000_000 - 3_000");
+
+    let mut engine = AgentEngine::new_with_provider(
+        provider,
+        config,
+        registry_with_mock_tool(),
+        silent_output(),
+    );
+    engine.set_cache_ledger_dir(dir.path());
+    // 220k input would have tripped the OLD 197k emergency hard stop before
+    // the first tool call ever returned.
+    engine.run("go", "m").await.expect("run should succeed");
+
+    let ledger = read_only_ledger(dir.path());
+    let t = &ledger.turns[0];
+    assert_eq!(t.autocompact_threshold_tokens, expected_threshold as u64);
+    assert_eq!(t.emergency_limit_tokens, expected_limit as u64);
 }
 
 #[tokio::test]

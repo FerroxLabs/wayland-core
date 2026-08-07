@@ -3,19 +3,27 @@
 //! These tests treat `is_at_emergency_limit` as a public API and verify
 //! functional requirements from test-plan.md without relying on internal details.
 
-use wcore_agent::compact::emergency::{EMERGENCY_USER_MESSAGE, is_at_emergency_limit};
+use wcore_agent::compact::emergency::{
+    EMERGENCY_USER_MESSAGE, emergency_limit, is_at_emergency_limit,
+};
 use wcore_config::compact::CompactConfig;
+
+/// A provider/model pair the `wcore_config::limits` registry does NOT know, so
+/// the effective window is the configured fallback. The TC-2.5-* cases below
+/// specify the buffer ARITHMETIC, which is model-independent.
+const UNKNOWN_PROVIDER: &str = "test-provider";
+const UNKNOWN_MODEL: &str = "test-model";
 
 // ── TC-2.5-01: Below emergency threshold ───────────────────────────────────
 
 #[test]
 fn tc_2_5_01_below_emergency_threshold() {
-    // context_window=200_000, emergency_buffer=3_000
+    // context_window=200_000 (fallback), emergency_buffer=3_000
     // emergency_limit = 200k - 3k = 197k
     // 190k < 197k → false
     let config = CompactConfig::default();
     assert!(
-        !is_at_emergency_limit(190_000, &config),
+        !is_at_emergency_limit(190_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "190k tokens should be below the 197k emergency limit"
     );
 }
@@ -27,7 +35,7 @@ fn tc_2_5_02_above_emergency_threshold() {
     // 198k >= 197k → true
     let config = CompactConfig::default();
     assert!(
-        is_at_emergency_limit(198_000, &config),
+        is_at_emergency_limit(198_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "198k tokens should exceed the 197k emergency limit"
     );
 }
@@ -39,7 +47,7 @@ fn tc_2_5_03_at_exact_emergency_threshold() {
     // 197k >= 197k → true
     let config = CompactConfig::default();
     assert!(
-        is_at_emergency_limit(197_000, &config),
+        is_at_emergency_limit(197_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "197k tokens should trigger at exactly the emergency limit"
     );
 }
@@ -52,12 +60,12 @@ fn tc_2_5_04_small_context_window() {
     // emergency_limit = 8k - 3k = 5k
     // 6k >= 5k → true
     let config = CompactConfig {
-        context_window: 8_000,
+        context_window: Some(8_000),
         emergency_buffer: 3_000,
         ..CompactConfig::default()
     };
     assert!(
-        is_at_emergency_limit(6_000, &config),
+        is_at_emergency_limit(6_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "6k tokens should exceed 5k emergency limit on an 8k context window"
     );
 }
@@ -72,7 +80,7 @@ fn emergency_check_ignores_enabled_flag() {
         ..CompactConfig::default()
     };
     assert!(
-        is_at_emergency_limit(198_000, &config),
+        is_at_emergency_limit(198_000, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "emergency check must fire regardless of the enabled flag"
     );
 }
@@ -100,8 +108,10 @@ fn autocompact_fires_before_emergency() {
 
     // Pick a token count that triggers autocompact but not emergency
     let token_count: u64 = 170_000;
-    let autocompact_triggers = should_autocompact(token_count, &config);
-    let emergency_triggers = is_at_emergency_limit(token_count, &config);
+    let autocompact_triggers =
+        should_autocompact(token_count, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
+    let emergency_triggers =
+        is_at_emergency_limit(token_count, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL);
 
     assert!(
         autocompact_triggers && !emergency_triggers,
@@ -118,6 +128,71 @@ fn both_trigger_near_limit() {
     let config = CompactConfig::default();
     let token_count: u64 = 198_000;
 
-    assert!(should_autocompact(token_count, &config));
-    assert!(is_at_emergency_limit(token_count, &config));
+    assert!(should_autocompact(
+        token_count,
+        &config,
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
+    assert!(is_at_emergency_limit(
+        token_count,
+        &config,
+        UNKNOWN_PROVIDER,
+        UNKNOWN_MODEL
+    ));
+}
+
+// ── GH#635: the hard stop is the ACTIVE MODEL's, not a hardcoded 200k ──────
+
+/// A 1.05M-window model must not be emergency-stopped ~850k tokens early.
+/// This is the reported symptom: `gpt-5.4` died at ~197k.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: change
+/// `config.effective_context_window(provider, model)` back to
+/// `config.context_window` in `emergency_limit`
+/// (crates/wcore-agent/src/compact/emergency.rs) — the limit collapses to
+/// 197_000 and the first assertion fires.
+#[test]
+fn gh635_large_window_model_is_not_stopped_at_the_200k_default() {
+    let config = CompactConfig::default();
+    assert!(
+        !is_at_emergency_limit(197_000, &config, "openai-chatgpt", "gpt-5.4"),
+        "a 197k session on a 1,050,000-token model has ~850k tokens of headroom"
+    );
+    assert_eq!(
+        emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
+        1_047_000,
+        "1_050_000 - 3_000"
+    );
+    // The real boundary still exists and still fires.
+    assert!(is_at_emergency_limit(
+        1_047_000,
+        &config,
+        "openai-chatgpt",
+        "gpt-5.4"
+    ));
+}
+
+/// The operator keeps the last word: an explicit `context_window` is honoured
+/// over the model's larger registry window.
+///
+/// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+/// `if let Some(configured) = self.context_window { return configured; }`
+/// early return in `CompactConfig::effective_context_window`
+/// (crates/wcore-config/src/compact.rs) — the operator's 200k cap is replaced
+/// by 1_050_000 and this assertion fires.
+#[test]
+fn gh635_explicit_operator_window_is_honoured_over_the_registry() {
+    let config = CompactConfig {
+        context_window: Some(200_000),
+        ..CompactConfig::default()
+    };
+    assert!(
+        is_at_emergency_limit(198_000, &config, "openai-chatgpt", "gpt-5.4"),
+        "an operator who pinned 200k must still be stopped at 197k"
+    );
+    assert_eq!(
+        emergency_limit(&config, "openai-chatgpt", "gpt-5.4"),
+        197_000
+    );
 }

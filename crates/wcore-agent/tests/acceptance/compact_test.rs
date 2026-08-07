@@ -15,6 +15,12 @@ use crate::helpers;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/// A provider/model pair the `wcore_config::limits` registry does NOT know, so
+/// the effective compaction window is whatever the config says. These cases
+/// specify buffer arithmetic, not per-model windows.
+const UNKNOWN_PROVIDER: &str = "test-provider";
+const UNKNOWN_MODEL: &str = "test-model";
+
 fn tool_use_block(id: &str, name: &str) -> ContentBlock {
     ContentBlock::ToolUse {
         id: id.to_string(),
@@ -143,7 +149,10 @@ async fn autocompact_triggers_llm_summary() {
     };
 
     let compact_config = CompactConfig {
-        context_window: 1000,
+        // Explicitly configured, so it outranks gpt-4.1-mini's real 1M window
+        // (GH#635) and the threshold below stays the small number this test
+        // needs to drive a real summarization call cheaply.
+        context_window: Some(1000),
         output_reserve: 100,
         autocompact_buffer: 100,
         // threshold = 1000 - 100 - 100 = 800
@@ -152,11 +161,11 @@ async fn autocompact_triggers_llm_summary() {
 
     // Verify should_autocompact detects the threshold is exceeded
     assert!(
-        should_autocompact(900, &compact_config),
+        should_autocompact(900, &compact_config, "openai", &config.model),
         "900 tokens should exceed the threshold of 800"
     );
     assert!(
-        !should_autocompact(700, &compact_config),
+        !should_autocompact(700, &compact_config, "openai", &config.model),
         "700 tokens should be below the threshold of 800"
     );
 
@@ -237,7 +246,7 @@ async fn autocompact_triggers_llm_summary() {
 #[test]
 fn emergency_truncation_detection() {
     let config = CompactConfig {
-        context_window: 1000,
+        context_window: Some(1000),
         emergency_buffer: 100,
         // limit = 1000 - 100 = 900
         ..CompactConfig::default()
@@ -245,30 +254,30 @@ fn emergency_truncation_detection() {
 
     // 950 >= 900 → true (at emergency limit)
     assert!(
-        is_at_emergency_limit(950, &config),
+        is_at_emergency_limit(950, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "950 tokens should be at the emergency limit (threshold = 900)"
     );
 
     // 800 < 900 → false (below emergency limit)
     assert!(
-        !is_at_emergency_limit(800, &config),
+        !is_at_emergency_limit(800, &config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "800 tokens should be below the emergency limit (threshold = 900)"
     );
 
     // Verify emergency check works even when config.enabled = false
     let disabled_config = CompactConfig {
-        context_window: 1000,
+        context_window: Some(1000),
         emergency_buffer: 100,
         enabled: false,
         ..CompactConfig::default()
     };
 
     assert!(
-        is_at_emergency_limit(950, &disabled_config),
+        is_at_emergency_limit(950, &disabled_config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "emergency limit should apply even when compact is disabled"
     );
     assert!(
-        !is_at_emergency_limit(800, &disabled_config),
+        !is_at_emergency_limit(800, &disabled_config, UNKNOWN_PROVIDER, UNKNOWN_MODEL),
         "below-limit should still return false when compact is disabled"
     );
 }
