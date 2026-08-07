@@ -272,6 +272,18 @@ fn is_denied_system_path(path: &Path) -> bool {
         return true;
     }
 
+    // Linux procfs re-exposes process-private state as ordinary regular files,
+    // so none of the guards above (or the non-regular-file guard in
+    // `validate_user_path`) sees it: `Read {file_path:"/proc/self/environ"}`
+    // returns the AGENT'S OWN environment — `ANTHROPIC_API_KEY`,
+    // `OPENAI_API_KEY` and every other provider credential — straight into
+    // model context. `BashTool` already refuses `env` / `printenv` via its
+    // credential denylist (`bash/policy.rs`), so without this the boundary was
+    // enforced on one tool and trivially walked around with another.
+    if is_denied_proc_path(path) {
+        return true;
+    }
+
     // User-home secret stashes — normalize any HOME-relative form to the
     // raw absolute path, then check suffix.
     //
@@ -384,6 +396,69 @@ fn is_denied_system_path(path: &Path) -> bool {
     }
 
     false
+}
+
+/// Does `path` name a Linux procfs location that exposes process-private
+/// state (or all of physical memory)?
+///
+/// Denies the whole PER-PROCESS subtree — `/proc/self/...`,
+/// `/proc/thread-self/...` and `/proc/<pid>/...` — rather than enumerating leaf
+/// names, because the leaf list is unwinnable: `environ` is one spelling of the
+/// hole, but `cmdline` carries secrets in argv (`mysql -p<pw>`,
+/// `--api-key=...`), `mem` is a direct read of the process's memory,
+/// `fd/<n>`/`fdinfo` re-open whatever the process already has open, `maps` is
+/// an ASLR map for a follow-up `mem` read, and `root` / `cwd` are symlinks that
+/// rebuild ANY path — including every entry denied above — through /proc.
+/// `/proc/<pid>/task/<tid>/environ` needs no special case: `<pid>` is still the
+/// second component. Both spellings matter even though `validate_user_path`
+/// re-runs this check on the canonicalized form, because canonicalizing
+/// `/proc/self/environ` yields `/proc/<pid>/environ`.
+///
+/// `/proc/kcore` is denied too. It is not per-process, but it is a regular file
+/// mapping all of physical memory — the same "read memory, recover the keys"
+/// defect as `/proc/self/mem`, and an unbounded `fs::read`.
+///
+/// Deliberately NOT denied, so the boundary is a decision rather than an
+/// accident:
+///   * The system-wide informational entries (`/proc/cpuinfo`, `/proc/meminfo`,
+///     `/proc/version`, `/proc/mounts`, …). They carry no process-private data
+///     and are legitimate agent reads.
+///   * `/proc/sys/...`. Its hazard is privileged kernel-tunable WRITES, which
+///     is a different finding from this credential-disclosure one and would
+///     need its own analysis of what the agent legitimately reads there.
+///   * `/proc/<pid>/auxv`, `/proc/kallsyms`. Address-layout / canary infoleaks,
+///     not credentials — out of scope for this fix.
+///
+/// Matching is COMPONENT-wise on the parsed path, never a substring, so it
+/// cannot over-match: a workspace file at `/tmp/proc/self/environ`, or
+/// `/procfs/self/environ`, or `/proc-notes.txt`, is not under `/proc` and stays
+/// readable. Compiled on every platform (like the POSIX entries above rather
+/// than the `cfg(windows)` block) — a `/proc/...` string is not absolute on
+/// Windows, so `validate_user_path` rejects it as `NotAbsolute` before this
+/// runs, and macOS simply has no `/proc`.
+fn is_denied_proc_path(path: &Path) -> bool {
+    let mut components = path.components();
+
+    // Must be rooted directly at `/proc` — not merely contain a `proc` segment.
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    match components.next() {
+        Some(Component::Normal(c)) if c.to_string_lossy() == "proc" => {}
+        _ => return false,
+    }
+
+    let Some(Component::Normal(second)) = components.next() else {
+        // Bare `/proc` — the directory listing itself discloses nothing.
+        return false;
+    };
+    let second = second.to_string_lossy();
+
+    second == "self"
+        || second == "thread-self"
+        || second == "kcore"
+        // `/proc/<pid>/...` for any pid.
+        || (!second.is_empty() && second.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The cron state directory(ies), resolved exactly as the cron store resolves
@@ -775,6 +850,143 @@ mod tests {
         let err =
             validate_user_path(Path::new("/home/alice/.azure/accessTokens.json")).unwrap_err();
         assert!(matches!(err, PathValidationError::SystemPath(_)));
+    }
+
+    // ----- Linux procfs (credential disclosure via /proc) -----
+    //
+    // Unix-gated for the same reason as `ssh_private_key_rejected` above: a
+    // `/proc/...` string is not an absolute path on Windows, so there it would
+    // be refused as `NotAbsolute` and the assertion would pass without ever
+    // reaching the procfs rule. On Linux `/proc/self/environ` is a REAL file,
+    // so this is genuinely end-to-end there; on macOS it simply does not exist,
+    // which the lexical rule does not care about.
+
+    /// The core defect: `/proc/self/environ` is the agent's OWN environment,
+    /// including every provider API key, and it is a regular file so no other
+    /// guard in `validate_user_path` stops it.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+    /// `if is_denied_proc_path(path) { return true; }` block in
+    /// `is_denied_system_path` and this returns `Ok` instead of `SystemPath`.
+    #[cfg(unix)]
+    #[test]
+    fn proc_self_environ_rejected() {
+        let err = validate_user_path(Path::new("/proc/self/environ")).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::SystemPath(_)),
+            "/proc/self/environ leaks the agent's own API keys, got {err:?}"
+        );
+    }
+
+    /// `/proc/self/environ` is one spelling. The whole per-process subtree is
+    /// denied, so the pid / thread / task / memory / symlink-re-entry variants
+    /// are refused too — including `/proc/self/root/...` and `/proc/self/cwd/...`,
+    /// which otherwise let an attacker rebuild ANY denied path through procfs.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the
+    /// `if is_denied_proc_path(path) { return true; }` block in
+    /// `is_denied_system_path`, or narrow the second-component match arm in
+    /// `is_denied_proc_path` (dropping `"thread-self"`, `"kcore"`, or the
+    /// `is_ascii_digit` pid arm), and the corresponding rows return `Ok`.
+    #[cfg(unix)]
+    #[test]
+    fn proc_per_process_subtree_rejected() {
+        for p in [
+            // Any pid, not just self.
+            "/proc/1/environ",
+            "/proc/12345/environ",
+            // Per-thread spellings.
+            "/proc/thread-self/environ",
+            "/proc/self/task/1/environ",
+            "/proc/self/task/1/mem",
+            // argv frequently carries secrets (`--api-key=`, `mysql -p<pw>`).
+            "/proc/self/cmdline",
+            "/proc/1/cmdline",
+            // Direct memory reads — arguably worse than environ.
+            "/proc/self/mem",
+            "/proc/12345/mem",
+            "/proc/kcore",
+            // Symlink re-entry: rebuilds any path, including ones denied above.
+            "/proc/self/root/etc/shadow",
+            "/proc/self/root/proc/self/environ",
+            "/proc/self/cwd/notes.txt",
+            "/proc/1/root/home/alice/.ssh/id_rsa",
+            // Open file descriptors of a running process.
+            "/proc/self/fd/3",
+        ] {
+            let res = validate_user_path(Path::new(p));
+            assert!(
+                matches!(res, Err(PathValidationError::SystemPath(_))),
+                "{p:?} must be denied as a system path, got {res:?}"
+            );
+        }
+    }
+
+    /// The boundary is a decision, not an accident: the system-wide procfs
+    /// entries carry no process-private data and stay READABLE. This pins the
+    /// current behaviour so widening the rule to all of `/proc` is a conscious,
+    /// test-breaking change rather than a silent one.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: replace the second-component match
+    /// arm in `is_denied_proc_path` with an unconditional `true` (i.e. deny all
+    /// of `/proc`) and these become `SystemPath` errors.
+    #[cfg(unix)]
+    #[test]
+    fn proc_system_wide_entries_still_allowed() {
+        for p in [
+            "/proc/cpuinfo",
+            "/proc/meminfo",
+            "/proc/version",
+            // `/proc/sys/...` is left readable: its hazard is privileged
+            // kernel-tunable WRITES, a separate finding from this one.
+            "/proc/sys/kernel/hostname",
+        ] {
+            let res = validate_user_path(Path::new(p));
+            assert!(
+                res.is_ok(),
+                "{p:?} carries no process-private data and must stay readable, got {res:?}"
+            );
+        }
+    }
+
+    /// Over-match guard. The rule matches path COMPONENTS rooted at `/proc`, so
+    /// an innocuous workspace file that merely contains the same text — a real
+    /// file at `<tmp>/proc/self/environ`, or one named `proc-notes.txt` — is
+    /// still readable. A sloppy `s.contains("/proc/self/environ")` or
+    /// `s.contains("proc")` implementation would pass every test above while
+    /// silently breaking legitimate reads; this is the test that catches it.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: swap the component walk in
+    /// `is_denied_proc_path` for a substring test against `s` and the
+    /// `<tmp>/proc/self/environ` row starts failing.
+    #[cfg(unix)]
+    #[test]
+    fn proc_lookalike_paths_outside_procfs_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A real workspace file literally named `proc/self/environ`.
+        let nested = dir.path().join("proc/self/environ");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, b"workspace notes").unwrap();
+        assert!(
+            validate_user_path(&nested).is_ok(),
+            "a workspace file named proc/self/environ must stay readable"
+        );
+
+        // A file whose name merely starts with `proc`.
+        let notes = dir.path().join("proc-notes.txt");
+        std::fs::write(&notes, b"notes").unwrap();
+        assert!(
+            validate_user_path(&notes).is_ok(),
+            "proc-notes.txt must stay readable"
+        );
+
+        // Root-level lookalikes: `/procfs/...` and `/proc-notes.txt` are not
+        // `/proc`. Neither exists, which is fine — the rule is lexical.
+        for p in ["/procfs/self/environ", "/proc-notes.txt", "/proconly"] {
+            let res = validate_user_path(Path::new(p));
+            assert!(res.is_ok(), "{p:?} is not under /proc, got {res:?}");
+        }
     }
 
     // M-8 / tools-io-17: an innocuously-named symlink whose canonical target
