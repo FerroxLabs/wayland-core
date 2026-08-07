@@ -46,7 +46,6 @@ use wcore_agent::output::null_sink::NullSink;
 use wcore_channels::ChannelToolPosture;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
-use wcore_tools::Tool;
 use wcore_types::tool::ToolResult;
 
 /// Script enabled (default off) on an otherwise inert config: `build()` never
