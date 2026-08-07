@@ -1904,12 +1904,19 @@ fn derived_capacity_admits_the_documented_worker_counts_on_a_windows_hosted_runn
     // Non-vacuity, anchored to the captured evidence: the pre-fix demand
     // genuinely did not fit this host, so a passing assertion below cannot be
     // an accident of a roomy fixture.
-    assert!(
-        PRE_FIX_FOUR_WORKER_DEMAND_BYTES > WINDOWS_HOSTED_AVAILABLE_BYTES
-            && PRE_FIX_FIVE_WORKER_DEMAND_BYTES > WINDOWS_HOSTED_AVAILABLE_BYTES,
-        "the fixture host is large enough for the blanket 8 GiB reservation, so this test \
-         would pass against the defect and proves nothing"
-    );
+    //
+    // A `const` block deliberately, not a runtime `assert!`: all three operands
+    // are constants, so this is decidable at compile time and belongs there.
+    // Weakening the fixture then fails the BUILD instead of failing a test that
+    // someone could later mark `#[ignore]`.
+    const {
+        assert!(
+            PRE_FIX_FOUR_WORKER_DEMAND_BYTES > WINDOWS_HOSTED_AVAILABLE_BYTES
+                && PRE_FIX_FIVE_WORKER_DEMAND_BYTES > WINDOWS_HOSTED_AVAILABLE_BYTES,
+            "the fixture host is large enough for the blanket 8 GiB reservation, so this test \
+             would pass against the defect and proves nothing"
+        );
+    }
 
     // `dispatch(brief, 4)` — the quick-start in crates/wcore-swarm/src/lib.rs.
     let four = plan_workspace_capacity(4, ONE_COMMIT_REPO_BYTES, WINDOWS_HOSTED_AVAILABLE_BYTES, 0)

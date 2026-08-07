@@ -584,13 +584,14 @@ fn transaction_is_active(authority: &DirectoryAuthority, path: &Path) -> Result<
 /// runtime, by the number this gate handed it.
 ///
 /// The volume invariant then holds by construction rather than by a second
-/// test: `budget <= share`, so
-/// `budget * active_workers + existing_reservation_bytes
-/// + WORKSPACE_SAFETY_MARGIN_BYTES <= available_bytes`. There is deliberately
-/// no separate "does the total fit" branch — it could never be false, and a
-/// gate that cannot fail is as worthless as one that cannot pass. The reachable
-/// refusals are the two above: too little space per worker for the checkout at
-/// hand, and an aggregate already committed.
+/// test. Because `budget <= share`, it follows that
+/// `budget * active_workers + existing_reservation_bytes +
+/// WORKSPACE_SAFETY_MARGIN_BYTES <= available_bytes`.
+///
+/// There is deliberately no separate "does the total fit" branch — it could
+/// never be false, and a gate that cannot fail is as worthless as one that
+/// cannot pass. The reachable refusals are the two above: too little space per
+/// worker for the checkout at hand, and an aggregate already committed.
 ///
 /// The 8 GiB per-transaction ceiling and the 64 GiB aggregate ceiling are
 /// unchanged. What changed is that the previous code demanded the
