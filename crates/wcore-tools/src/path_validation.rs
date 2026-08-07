@@ -157,6 +157,89 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
     Ok(normalized)
 }
 
+/// Validate an LLM-supplied **search root** before any filesystem touch.
+///
+/// `Grep` and `Glob` are the read-path siblings of `Read`, but they could not
+/// use [`validate_user_path`]: a search root is legitimately relative (`.` is
+/// the schema default) and legitimately a directory, so the absolute-path and
+/// regular-file rules do not apply. The consequence was that the entire
+/// credential deny-list was enforced on one read tool and walked around with
+/// another — `Grep {pattern:"root", path:"/etc/shadow"}` returned the hash
+/// line, and `Grep` returns matched line CONTENT, not just names.
+///
+/// This applies the deny-list half of `validate_user_path` to a resolved
+/// search root:
+///
+///   1. No null bytes.
+///   2. No UNC / device / verbatim namespace (#644's NetNTLM-leak reasoning
+///      applies unchanged when the path is handed to `rg` instead of `fs`).
+///   3. Resolve relative input against `base` (the sandbox jail root when the
+///      caller has one, else the process cwd) and lex-normalize, so
+///      `../../../etc/shadow` is graded as the absolute path it denotes rather
+///      than passed through as an innocuous-looking relative string.
+///   4. Deny-list the result, including through a symlinked leaf or prefix.
+///
+/// **Known residual (deliberate, not an oversight).** The deny-list matches
+/// specific credential FILES, so this refuses a denied path as the *direct*
+/// target but does not stop a recursive search of a parent directory that
+/// happens to contain one (`Grep {path:"/etc"}`). Closing that needs
+/// per-entry filtering inside the walk, which the subprocess backends
+/// (`rg`, `grep`, `findstr`) do not expose uniformly — doing it for `rg`
+/// only would make the boundary depend on which binary is installed, which
+/// is worse than a documented gap. Tracked separately.
+pub fn validate_search_root(
+    path: &Path,
+    base: Option<&Path>,
+) -> Result<PathBuf, PathValidationError> {
+    let raw = path.to_path_buf();
+
+    let path_str = path.to_string_lossy();
+    if path_str.contains('\0') {
+        return Err(PathValidationError::NullByte(raw));
+    }
+    if looks_like_unc(path, &path_str) {
+        return Err(PathValidationError::UncPath(raw));
+    }
+    if looks_like_device_or_verbatim(path, &path_str) {
+        return Err(PathValidationError::DeviceOrVerbatimPath(raw));
+    }
+
+    // An absolute `path` wins over `base`, matching `Path::join` semantics and
+    // the pre-existing search-root resolution in `run_grep`.
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match base {
+            Some(root) => root.join(path),
+            None => match std::env::current_dir() {
+                Ok(cwd) => cwd.join(path),
+                // No cwd (deleted working directory) means we cannot say what
+                // the relative path denotes, so we cannot clear it. Fail closed.
+                Err(_) => return Err(PathValidationError::NotAbsolute(raw)),
+            },
+        }
+    };
+
+    let normalized = lex_normalize(&absolute);
+
+    if is_denied_system_path(&normalized) {
+        return Err(PathValidationError::SystemPath(normalized));
+    }
+    if let Some(resolved) = canonicalize_existing_prefix(&normalized)
+        && resolved != normalized
+        && is_denied_system_path(&resolved)
+    {
+        return Err(PathValidationError::SystemPath(resolved));
+    }
+    if let Some(link_target) = resolve_symlink_target(&normalized)
+        && is_denied_system_path(&link_target)
+    {
+        return Err(PathValidationError::SystemPath(link_target));
+    }
+
+    Ok(normalized)
+}
+
 /// #644: does `path`/`s` name a Windows UNC / network path?
 ///
 /// Matches plain UNC (`\\server\share`) and verbatim UNC

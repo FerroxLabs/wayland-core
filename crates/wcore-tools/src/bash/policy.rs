@@ -137,6 +137,18 @@ fn denylist() -> &'static RegexSet {
             // credential files or .env. Closes the dodge where an
             // attacker base64s the secret to bypass a plain-read deny.
             r"(?i)\b(base64|xxd|od|hexdump|uuencode|openssl\s+enc)\b[^|;]*(\.aws/credentials|\.aws/config|\.ssh/id_[a-z0-9_]+|\.ssh/identity[^/]*|\.netrc|\.npmrc|\.pypirc|\.kube/config|\.gcloud/|\.azure/|\.config/wayland/auth|/etc/shadow|/etc/sudoers|\.env(\b|$))",
+            // Linux procfs re-exposes this process's own environment as an
+            // ordinary file, so `cat /proc/self/environ` is exactly the `env`
+            // dump the first rule in this set refuses — reached by a path the
+            // command-name rules never see. The Read tool denies this subtree
+            // (`is_denied_proc_path`) and so now do Grep/Glob; without this
+            // rule the boundary was enforced on three tools and walked around
+            // with the fourth. Deny every per-process form (`self`,
+            // `thread-self`, a literal pid) and any command that names it —
+            // reader, encoder or interpreter — since nothing legitimate needs
+            // this file. Other `/proc` entries (`cpuinfo`, `meminfo`) are
+            // untouched.
+            r"(?i)/proc/(self|thread-self|\d+)/environ",
             // macOS Keychain extraction via `security` CLI.
             r"(?i)\bsecurity\s+(find-generic-password|find-internet-password|dump-keychain|export)\b",
             // `compgen -e` enumerates exported env vars in bash.

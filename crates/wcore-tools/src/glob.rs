@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -8,6 +8,7 @@ use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResu
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::path_validation::validate_search_root;
 
 const MAX_RESULTS: usize = 100;
 
@@ -59,6 +60,43 @@ impl Tool for GlobTool {
 
         let root = input["path"].as_str().unwrap_or(".");
         let root_path = Path::new(root);
+
+        // Same deny-list Read enforces, applied to the search root. Glob only
+        // returns NAMES, so this is a smaller leak than Grep's line content —
+        // but the enumeration is still a disclosure, and leaving one read tool
+        // ungated is how the boundary got walked around in the first place.
+        //
+        // Grade the root, but keep using the caller's `root_path` below: the
+        // validated form is absolute, and substituting it would silently turn
+        // every returned path absolute. This is a deny decision, not a rewrite.
+        if let Err(e) = validate_search_root(root_path, None) {
+            return ToolResult {
+                content: format!("Refused to search {root}: {e}"),
+                is_error: true,
+            };
+        }
+
+        // An absolute PATTERN bypasses the root entirely (`Glob {pattern:
+        // "/etc/shadow*"}`). `execute_with_ctx` already refuses every anchored
+        // pattern, so this only closes the legacy `execute()` entry. Grade the
+        // literal directory prefix — the leading components before the first
+        // one carrying a glob metacharacter, which are a plain path.
+        if pattern.starts_with('/') {
+            // Truncate at the first metacharacter WITHIN the string, not at a
+            // component boundary: `/etc/shadow*` must reduce to `/etc/shadow`
+            // (deny-listed), not to `/etc` (not deny-listed, and the whole
+            // point of the rule). `is_denied_system_path` prefix-matches, so a
+            // truncation landing mid-component simply fails to match.
+            let literal_prefix = PathBuf::from(
+                &pattern[..pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len())],
+            );
+            if let Err(e) = validate_search_root(&literal_prefix, None) {
+                return ToolResult {
+                    content: format!("Refused to search {pattern}: {e}"),
+                    is_error: true,
+                };
+            }
+        }
 
         // Build full glob pattern
         let full_pattern = if pattern.starts_with('/') {

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -9,6 +9,7 @@ use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResu
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::path_validation::validate_search_root;
 
 pub struct GrepTool;
 
@@ -152,9 +153,21 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
     // Prove the target exists here instead, before any backend is chosen, so
     // the answer is the same on all three platforms and does not depend on
     // which of the three search binaries happens to be installed.
-    let resolved = match search_root {
-        Some(root) => root.join(path),
-        None => PathBuf::from(path),
+    // Grep is the read-path sibling of Read and returns matched line CONTENT,
+    // so it must honour the same credential deny-list. It could not, because
+    // `validate_user_path` refuses a relative path and a directory — both
+    // legitimate here (`.` is the schema default). `validate_search_root`
+    // applies the deny-list half to the RESOLVED root instead, which is also
+    // the resolution `try_exists` and the subprocess need, so there is exactly
+    // one place a search target is turned into a path.
+    let resolved = match validate_search_root(Path::new(path), search_root) {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolResult {
+                content: format!("Refused to search {path}: {e}"),
+                is_error: true,
+            };
+        }
     };
     match tokio::fs::try_exists(&resolved).await {
         Ok(true) => {}
