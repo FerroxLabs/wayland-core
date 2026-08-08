@@ -29,6 +29,150 @@ const DIFF_RESEND_HEADER: &str = "File changed since your last read. Showing onl
 /// fraction of the full numbered content it would replace.
 const DIFF_RESEND_MAX_RATIO: f64 = 0.6;
 
+/// Ceiling on what Read will INGEST, decided from the bytes actually read
+/// rather than from a stat it does not read from.
+///
+/// Distinct from [`ReadTool::max_result_size`] (100_000), which caps what Read
+/// RETURNS and used to fire only AFTER the whole file had been slurped,
+/// line-split, numbered into a `Vec<String>` and joined — 5.4x the file's size
+/// in RSS to deliver 100 KB.
+///
+/// This MUST stay a compile-time constant with no config or per-call override.
+/// `tool_output_limits.rs` reads `max_bytes` out of tool INPUT (model
+/// controlled) and project config is untrusted
+/// (BL-UNTRUSTED-RESOURCE-LIMITS), so wiring this to either surface would
+/// convert a DoS fix into a DoS switch. Any future tunability must be
+/// operator-owned and may only LOWER it.
+pub const MAX_READ_INGEST_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Default line window when the caller gives no `limit`. Previously
+/// `lines.len()` — i.e. "every line in the file", so the render was sized by
+/// the file rather than by what the tool can return.
+const DEFAULT_READ_LINE_LIMIT: usize = 2_000;
+
+/// Reserved out of [`ReadTool::max_result_size`] for the continuation marker,
+/// so the marker itself can never be what pushes the result into
+/// `orchestration::truncate_result`'s head/tail elision.
+const MARKER_RESERVE: usize = 256;
+
+/// What Read returns at most. The orchestrator applies the same number, but
+/// the TOOL owning it is the point: a generic middle-elider knows nothing
+/// about line numbering, so eliding a numbered body makes line numbers jump
+/// discontinuously and the tail half start mid-line.
+const READ_MAX_RESULT_SIZE: usize = 100_000;
+
+/// One bounded pass over the requested window.
+struct RenderedWindow {
+    /// Numbered lines, marker-FREE. This is what the dedup/diff cache stores;
+    /// a marker line has no `\t`, so `strip_line_numbers` would keep it
+    /// verbatim and it would become a phantom content line in every future
+    /// diff.
+    body: String,
+    /// How many lines were actually emitted.
+    lines: usize,
+    /// The window stopped early in a way the CALLER did not ask for: it hit
+    /// the byte budget, or it hit the DEFAULT line cap because no explicit
+    /// `limit` was given. An explicit `limit` honoured exactly is not a
+    /// truncation and must not be annotated — a caller that asked for 3 lines
+    /// and got 3 lines was not short-changed.
+    truncated: bool,
+}
+
+/// Render `text`'s window as numbered lines, stopping at the FIRST of
+/// `limit` lines or `byte_budget` accumulated bytes.
+///
+/// Single pass, one `String`: no `Vec<&str>` of every line in the file, no
+/// `Vec<String>` of every numbered line, no `join`.
+fn render_numbered_window(
+    text: &str,
+    offset: usize,
+    limit: Option<usize>,
+    byte_budget: usize,
+) -> RenderedWindow {
+    let max_lines = limit.unwrap_or(DEFAULT_READ_LINE_LIMIT);
+    let mut body = String::new();
+    let mut lines = 0usize;
+    let mut truncated = false;
+    let mut it = text.lines().skip(offset);
+
+    while lines < max_lines {
+        let Some(line) = it.next() else {
+            return RenderedWindow {
+                body,
+                lines,
+                truncated,
+            };
+        };
+        let entry = format!("{:>6}\t{}", offset + lines + 1, line);
+        if body.is_empty() {
+            if entry.len() > byte_budget {
+                // A single line wider than the whole budget. Emit a
+                // byte-bounded prefix rather than blowing the cap or
+                // returning nothing at all.
+                let mut cut = byte_budget;
+                while cut > 0 && !entry.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                body.push_str(&entry[..cut]);
+                return RenderedWindow {
+                    body,
+                    lines: 1,
+                    truncated: true,
+                };
+            }
+            body.push_str(&entry);
+        } else {
+            if body.len() + 1 + entry.len() > byte_budget {
+                truncated = true;
+                break;
+            }
+            body.push('\n');
+            body.push_str(&entry);
+        }
+        lines += 1;
+    }
+    // Hit the line cap with more of the file left. Only report it when the
+    // cap was OURS (no explicit `limit`), not the caller's.
+    if !truncated && limit.is_none() && it.next().is_some() {
+        truncated = true;
+    }
+    RenderedWindow {
+        body,
+        lines,
+        truncated,
+    }
+}
+
+/// Never claim a total the tool did not count — that is the same class of
+/// confident-wrong-number this bound exists to stop.
+fn continuation_marker(next_offset: usize) -> String {
+    format!(
+        "\n... [window ends here; more of this file remains — pass offset={next_offset} to \
+         continue, or use Grep to find a pattern]"
+    )
+}
+
+/// Honest refusal for a file over [`MAX_READ_INGEST_BYTES`].
+///
+/// Refusing beats serving a partial: it is the `pdf_tool::MAX_PDF_INGEST_BYTES`
+/// precedent already in the tree, it is one deterministic testable rule, and
+/// the model has two working alternatives.
+fn oversize_refusal(file_path: &str, size: Option<u64>) -> ToolResult {
+    let measured = match size {
+        Some(n) => format!("{n} bytes"),
+        None => format!("over {MAX_READ_INGEST_BYTES} bytes"),
+    };
+    ToolResult {
+        content: format!(
+            "Failed to read file {file_path}: it is {measured}, past Read's \
+             {MAX_READ_INGEST_BYTES}-byte ingest limit. Use Grep to search it for a pattern, \
+             Bash with `sed -n 'START,ENDp' <file>` to pull a line range, or doc_extract for \
+             office documents."
+        ),
+        is_error: true,
+    }
+}
+
 /// Token-opt (semantic slicing): build the Read result for a `symbol=` request.
 /// Returns the symbol's line window (numbered, with a header + expansion hint),
 /// or a recoverable message when the symbol isn't found / the language has no
@@ -43,18 +187,13 @@ fn build_symbol_result(text: &str, path: &Path, symbol: &str) -> ToolResult {
             kind,
             multiple,
         } => {
-            let lines: Vec<&str> = text.lines().collect();
-            let total = lines.len();
+            // `count()`, not `collect()`: the header needs the total, not a
+            // fat pointer per line of the file.
+            let total = text.lines().count();
             // `resolve_symbol` only returns Found for non-empty files with the
             // window inside bounds; clamp defensively anyway.
             let s = start.clamp(1, total.max(1));
             let e = end.clamp(s, total.max(1));
-            let slice = &lines[s - 1..e.min(total)];
-            let numbered: Vec<String> = slice
-                .iter()
-                .enumerate()
-                .map(|(i, line)| format!("{:>6}\t{}", s + i, line))
-                .collect();
             let mut header = format!(
                 "Symbol `{symbol}` ({kind:?}, lines {s}\u{2013}{e} of {total}). Re-read without \
                  symbol= for the full file, or with offset/limit for a different window."
@@ -64,8 +203,25 @@ fn build_symbol_result(text: &str, path: &Path, symbol: &str) -> ToolResult {
                     "\n(Multiple symbols named `{symbol}` exist; showing the first.)"
                 ));
             }
+            // The symbol window is rendered under the same byte budget as any
+            // other window. It needs its OWN marker: `execute_with_ctx`
+            // returns here BEFORE offset/limit are ever consulted, so
+            // "pass offset=N to continue" would be false advice while
+            // `symbol=` is set.
+            let budget = READ_MAX_RESULT_SIZE
+                .saturating_sub(MARKER_RESERVE + header.len())
+                .max(1);
+            let window = render_numbered_window(text, s - 1, Some(e - s + 1), budget);
+            let mut content = format!("{header}\n{}", window.body);
+            if window.truncated {
+                content.push_str(&format!(
+                    "\n... [symbol window truncated at the result byte budget; re-read \
+                     without symbol= and pass offset={} to continue]",
+                    s - 1 + window.lines
+                ));
+            }
             ToolResult {
-                content: format!("{header}\n{}", numbered.join("\n")),
+                content,
                 is_error: false,
             }
         }
@@ -118,7 +274,9 @@ impl Tool for ReadTool {
         "Reads a file from the local filesystem. Returns content with line numbers.\n\n\
          Usage:\n\
          - The file_path parameter must be an absolute path, not a relative path.\n\
-         - By default, it reads the entire file. Use offset and limit for partial reads on large files.\n\
+         - By default it reads the first 2000 lines (or 100 KB, whichever comes first) and tells \
+         you when more remains; use offset and limit to move the window.\n\
+         - A file larger than 20 MiB is refused outright — use Grep, or Bash with sed, instead.\n\
          - To read just one definition from a large Rust/TypeScript/JavaScript file, pass symbol=\"name\" \
          (a function, struct, enum, trait, impl, class, or interface). Returns only that symbol's lines \
          plus a hint for expanding back to the full file. Saves tokens when you only need one definition.\n\
@@ -210,9 +368,11 @@ impl Tool for ReadTool {
             };
         }
 
-        // Read file from disk.
-        let content = match std::fs::read(&validated) {
-            Ok(bytes) => bytes,
+        // Read file from disk, BOUNDED. The size is taken from the descriptor
+        // we opened, not from a separate stat that could name a different
+        // object.
+        let mut handle = match std::fs::File::open(&validated) {
+            Ok(f) => f,
             Err(e) => {
                 return ToolResult {
                     content: format!("Failed to read file {}: {}", file_path, e),
@@ -220,6 +380,26 @@ impl Tool for ReadTool {
                 };
             }
         };
+        let mut content = Vec::new();
+        {
+            use std::io::Read as _;
+            if let Err(e) = handle
+                .by_ref()
+                .take(MAX_READ_INGEST_BYTES.saturating_add(1))
+                .read_to_end(&mut content)
+            {
+                return ToolResult {
+                    content: format!("Failed to read file {}: {}", file_path, e),
+                    is_error: true,
+                };
+            }
+        }
+        // Refuse BEFORE the binary sniff and before any render. Declared
+        // behaviour change: a >20 MiB BINARY file now returns a hard error
+        // instead of `(binary file, N bytes)`.
+        if content.len() as u64 > MAX_READ_INGEST_BYTES {
+            return oversize_refusal(file_path, handle.metadata().ok().map(|m| m.len()));
+        }
 
         // Check if binary.
         if content.iter().take(8192).any(|&b| b == 0) {
@@ -236,21 +416,24 @@ impl Tool for ReadTool {
             return build_symbol_result(text.as_ref(), &validated, sym);
         }
 
-        let lines: Vec<&str> = text.lines().collect();
-
         let effective_offset = offset.unwrap_or(0);
-        let effective_limit = limit.unwrap_or(lines.len());
-
-        let end = (effective_offset + effective_limit).min(lines.len());
-        let slice = &lines[effective_offset.min(lines.len())..end];
-
-        let numbered: Vec<String> = slice
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}\t{}", effective_offset + i + 1, line))
-            .collect();
-
-        let result_content = numbered.join("\n");
+        let window = render_numbered_window(
+            text.as_ref(),
+            effective_offset,
+            limit,
+            READ_MAX_RESULT_SIZE.saturating_sub(MARKER_RESERVE),
+        );
+        // Marker-FREE body: this is what the cache stores and what the dedup
+        // comparison keys on.
+        let result_content = window.body;
+        let response_content = if window.truncated {
+            format!(
+                "{result_content}{}",
+                continuation_marker(effective_offset + window.lines)
+            )
+        } else {
+            result_content.clone()
+        };
 
         // Update cache after successful read.
         if let Some(cache_arc) = &self.file_cache
@@ -260,7 +443,7 @@ impl Tool for ReadTool {
             cache.insert(
                 validated.clone(),
                 FileState {
-                    content: result_content.clone(),
+                    content: result_content,
                     mtime_ms: mtime,
                     offset,
                     limit,
@@ -271,7 +454,7 @@ impl Tool for ReadTool {
         }
 
         ToolResult {
-            content: result_content,
+            content: response_content,
             is_error: false,
         }
     }
@@ -403,7 +586,11 @@ impl Tool for ReadTool {
             }
         }
 
-        let content = match ctx.vfs.read(path).await {
+        // Bounded ingest. The single error arm below is unchanged, so every
+        // existing refusal wording — including `SecretDenyFs`'s, which
+        // `full_posture_secret_jail_test` asserts starts with
+        // "Failed to read file " — stays byte-identical.
+        let content = match ctx.vfs.read_capped(path, MAX_READ_INGEST_BYTES).await {
             Ok(bytes) => bytes,
             Err(e) => {
                 return ToolResult {
@@ -412,6 +599,14 @@ impl Tool for ReadTool {
                 };
             }
         };
+        // Refuse BEFORE the binary sniff and before any render. The size for
+        // the message comes through the SAME vfs (and therefore the same
+        // jails) that produced the bytes — never a raw `std::fs::metadata`,
+        // which `SandboxedFs::contain` may have re-rooted away from.
+        if content.len() as u64 > MAX_READ_INGEST_BYTES {
+            let size = ctx.vfs.metadata(path).await.ok().map(|m| m.size);
+            return oversize_refusal(file_path, size.filter(|n| *n > 0));
+        }
 
         if content.iter().take(8192).any(|&b| b == 0) {
             return ToolResult {
@@ -427,21 +622,23 @@ impl Tool for ReadTool {
             return build_symbol_result(text.as_ref(), &validated, sym);
         }
 
-        let lines: Vec<&str> = text.lines().collect();
-
         let effective_offset = offset.unwrap_or(0);
-        let effective_limit = limit.unwrap_or(lines.len());
-
-        let end = (effective_offset + effective_limit).min(lines.len());
-        let slice = &lines[effective_offset.min(lines.len())..end];
-
-        let numbered: Vec<String> = slice
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}\t{}", effective_offset + i + 1, line))
-            .collect();
-
-        let result_content = numbered.join("\n");
+        let window = render_numbered_window(
+            text.as_ref(),
+            effective_offset,
+            limit,
+            READ_MAX_RESULT_SIZE.saturating_sub(MARKER_RESERVE),
+        );
+        // Marker-FREE body. It is what gets cached and what the dedup
+        // comparison keys on: a marker line has no `\t`, so
+        // `read_diff::strip_line_numbers` would keep it verbatim and it would
+        // become a phantom content line in every future diff, failing
+        // `build_read_diff`'s byte-exact reconstruction check and silently
+        // degrading every re-read to full content (the #182 bloat).
+        let result_content = window.body;
+        let window_marker = window
+            .truncated
+            .then(|| continuation_marker(effective_offset + window.lines));
 
         // Token-burn fix: if the exact numbered lines we would return are already
         // present verbatim in a still-current cached Read of this file, the model
@@ -465,10 +662,19 @@ impl Tool for ReadTool {
         // actually changed, try to answer with a line diff. The diff is byte-exact
         // verified to reconstruct the current content before it is emitted
         // (`build_read_diff`); any failure falls back to the full content.
-        let mut response_content = result_content.clone();
+        let mut response_content = match &window_marker {
+            Some(marker) => format!("{result_content}{marker}"),
+            None => result_content.clone(),
+        };
         if let Some(base_numbered) = &diff_base {
             let base_raw = crate::read_diff::strip_line_numbers(base_numbered);
-            let cur_raw: Vec<String> = slice.iter().map(|s| s.to_string()).collect();
+            // Bounded by the window, not by the file.
+            let cur_raw: Vec<String> = text
+                .lines()
+                .skip(effective_offset)
+                .take(window.lines)
+                .map(|s| s.to_string())
+                .collect();
             if base_raw != cur_raw
                 && let Some(diff_body) = crate::read_diff::build_read_diff(
                     &base_raw,
@@ -508,7 +714,7 @@ impl Tool for ReadTool {
     }
 
     fn max_result_size(&self) -> usize {
-        100_000
+        READ_MAX_RESULT_SIZE
     }
 
     fn category(&self) -> ToolCategory {
@@ -639,6 +845,200 @@ mod tests {
 
         assert!(!result.is_error);
         assert!(result.content.is_empty());
+    }
+
+    // ── Read bounds: ingest ceiling + windowed render ─────────────────────
+    //
+    // ReadTool used to have NO size bound of any kind: it slurped the whole
+    // file, allocated a `Vec<&str>` of every line, then a `Vec<String>` of
+    // every numbered line, then `join`ed them — and only two crates away did
+    // `orchestration::truncate_result` throw 99.9% of that away. A 120 MB file
+    // cost ~620 MiB RSS and 93 s of CPU to deliver 100 KB, and the model was
+    // then shown a head+tail elision of a NUMBERED body, so it confidently
+    // reported a "last line" under a line number that does not exist.
+
+    /// Comfortably over `MAX_READ_INGEST_BYTES` (20 MiB). Spelled as a literal
+    /// rather than derived from the constant so this test compiles — and fails
+    /// on its assertions rather than on rustc — against the unfixed tree.
+    /// `ingest_ceiling_is_the_documented_twenty_mib` pins the two together.
+    const OVERSIZE_TARGET_BYTES: usize = 21 * 1024 * 1024;
+
+    const HEAD_CANARY: &str = "WCORE_READ_HEAD_CANARY_9f3a1c";
+    const TAIL_CANARY: &str = "WCORE_READ_TAIL_CANARY_7b2e40";
+
+    /// Write `bytes_target` bytes of ASCII by looping a real buffer.
+    ///
+    /// Deliberately NOT `set_len`: a sparse hole is NUL bytes, which would trip
+    /// the binary sniff and make the test pass for the wrong reason.
+    fn write_oversized(path: &std::path::Path, bytes_target: usize) -> u64 {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
+        writeln!(f, "{HEAD_CANARY}").unwrap();
+        let filler = format!("{}\n", "f".repeat(4095));
+        let mut written = HEAD_CANARY.len() + 1;
+        while written < bytes_target {
+            f.write_all(filler.as_bytes()).unwrap();
+            written += filler.len();
+        }
+        writeln!(f, "{TAIL_CANARY}").unwrap();
+        f.into_inner().unwrap().sync_all().unwrap();
+        std::fs::metadata(path).unwrap().len()
+    }
+
+    fn head_of(s: &str) -> String {
+        s.chars().take(240).collect()
+    }
+
+    /// `OVERSIZE_TARGET_BYTES` is spelled as a literal so the oversize test
+    /// compiles against the unfixed tree. This keeps the two honest.
+    #[test]
+    fn ingest_ceiling_is_the_documented_twenty_mib() {
+        assert_eq!(MAX_READ_INGEST_BYTES, 20 * 1024 * 1024);
+        assert!(
+            (OVERSIZE_TARGET_BYTES as u64) > MAX_READ_INGEST_BYTES,
+            "the oversize fixture must actually exceed the ceiling"
+        );
+        assert_eq!(READ_MAX_RESULT_SIZE, ReadTool::new(None).max_result_size());
+    }
+
+    /// A file over the ingest ceiling is REFUSED — before the binary sniff,
+    /// before any render — and the refusal names the real size.
+    ///
+    /// Both entry points, with separate fixture files so the second leg cannot
+    /// hit the unchanged-stub.
+    #[tokio::test]
+    async fn oversized_files_are_refused_by_both_entry_points() {
+        let dir = tempdir().unwrap();
+
+        for (name, via_ctx) in [("big_legacy.txt", false), ("big_ctx.txt", true)] {
+            let file_path = dir.path().join(name);
+            let actual = write_oversized(&file_path, OVERSIZE_TARGET_BYTES);
+
+            let tool = ReadTool::new(None);
+            let input = json!({ "file_path": file_path.to_str().unwrap() });
+            let result = if via_ctx {
+                tool.execute_with_ctx(input, &ctx_main()).await
+            } else {
+                tool.execute(input).await
+            };
+
+            assert!(
+                result.is_error,
+                "{name}: an oversized read must be refused, got: {}",
+                head_of(&result.content)
+            );
+            assert!(
+                result.content.contains(&actual.to_string()),
+                "{name}: an honest refusal names the size ({actual}): {}",
+                head_of(&result.content)
+            );
+            assert!(
+                result.content.contains("limit"),
+                "{name}: the refusal must name the limit: {}",
+                head_of(&result.content)
+            );
+            assert!(
+                !result.content.contains(HEAD_CANARY),
+                "{name}: the file was rendered anyway (head canary present)"
+            );
+            assert!(
+                !result.content.contains(TAIL_CANARY),
+                "{name}: the file was rendered anyway (tail canary present)"
+            );
+        }
+    }
+
+    /// A file UNDER the ingest ceiling is served, but the render is windowed:
+    /// the tool owns its own bound instead of handing a huge string to a
+    /// generic middle-elider that knows nothing about line numbering.
+    #[tokio::test]
+    async fn an_unqualified_read_returns_a_bounded_window_with_an_honest_marker() {
+        const WINDOW_CANARY: &str = "WCORE_READ_WINDOW_CANARY_4d81ff";
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("many_lines.txt");
+        let mut body = String::new();
+        for i in 0..5_000 {
+            body.push_str(&format!("line {i}\n"));
+        }
+        body.push_str(WINDOW_CANARY);
+        body.push('\n');
+        std::fs::write(&file_path, &body).unwrap();
+
+        let tool = ReadTool::new(None);
+        let input = json!({ "file_path": file_path.to_str().unwrap() });
+        let result = tool.execute_with_ctx(input, &ctx_main()).await;
+
+        assert!(!result.is_error, "{}", head_of(&result.content));
+        assert!(
+            result.content.contains("1\tline 0"),
+            "the window still starts at the top"
+        );
+        assert!(
+            !result.content.contains(WINDOW_CANARY),
+            "the tail was not in the requested window and must not be presented \
+             as if it were"
+        );
+        assert!(
+            result.content.contains("pass offset="),
+            "the marker must exist and be actionable"
+        );
+        assert!(
+            result.content.len() <= tool.max_result_size(),
+            "the TOOL owns its bound, not the orchestrator: {} bytes",
+            result.content.len()
+        );
+
+        // The marker's advice must be true: the window is movable.
+        let tool2 = ReadTool::new(None);
+        let far = json!({ "file_path": file_path.to_str().unwrap(), "offset": 4_995 });
+        let r2 = tool2.execute_with_ctx(far, &ctx_main()).await;
+        assert!(!r2.is_error, "{}", head_of(&r2.content));
+        assert!(
+            r2.content.contains(WINDOW_CANARY),
+            "offset= must actually move the window: {}",
+            head_of(&r2.content)
+        );
+    }
+
+    /// The BYTE half of the render bound.
+    ///
+    /// Under the ingest ceiling AND under the line cap, but far over
+    /// `max_result_size()`. A line-cap-only implementation passes every other
+    /// test here and still hands the orchestrator ~1.6 MB to middle-elide —
+    /// which is the reported defect.
+    #[tokio::test]
+    async fn a_few_very_long_lines_still_respect_the_byte_budget() {
+        const BYTECAP_CANARY: &str = "WCORE_READ_BYTECAP_CANARY_c1e77a";
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("wide.txt");
+        let mut body = String::new();
+        for _ in 0..399 {
+            body.push_str(&"w".repeat(4096));
+            body.push('\n');
+        }
+        body.push_str(BYTECAP_CANARY);
+        body.push('\n');
+        std::fs::write(&file_path, &body).unwrap();
+
+        let tool = ReadTool::new(None);
+        let input = json!({ "file_path": file_path.to_str().unwrap() });
+        let result = tool.execute_with_ctx(input, &ctx_main()).await;
+
+        assert!(!result.is_error, "{}", head_of(&result.content));
+        assert!(
+            result.content.len() <= tool.max_result_size(),
+            "400 x 4 KiB lines is under the 2000-line cap but must still respect \
+             the byte budget; got {} bytes",
+            result.content.len()
+        );
+        assert!(
+            result.content.contains("pass offset="),
+            "a byte-truncated window must still say so"
+        );
+        assert!(
+            !result.content.contains(BYTECAP_CANARY),
+            "the last line was not in the window and must not be presented"
+        );
     }
 
     #[tokio::test]

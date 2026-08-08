@@ -19,6 +19,30 @@ use crate::{Tool, ToolOutputSink};
 use policy::annotate_network_block;
 pub use policy::check_denylist;
 
+/// Head of every Bash result that describes a child process which actually
+/// ran to completion, whatever it exited with.
+///
+/// This is the discriminator `result_is_tool_fault` keys on, so it must stay
+/// single-sourced: build such results with [`child_completed_result`] and
+/// never `format!` the prefix by hand. The only post-processing step,
+/// `policy::annotate_network_block`, appends a suffix and never rewrites the
+/// head. Every genuine-fault shape keeps its own distinct head
+/// ("Failed to execute command: ...", "Command timed out after ...",
+/// "Bash command cancelled ...", the credential-denylist refusal,
+/// "Missing required parameter: command") and therefore still counts as a
+/// fault. A child cannot forge or suppress the marker: the tool writes it, and
+/// child stdout/stderr are interpolated after it.
+pub(crate) const CHILD_STATUS_PREFIX: &str = "Exit code: ";
+
+/// The single constructor for "a child ran and here is what it did".
+fn child_completed_result(exit_code: i32, stdout: &str, stderr: &str) -> ToolResult {
+    ToolResult {
+        content: format!("{CHILD_STATUS_PREFIX}{exit_code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"),
+        // Unchanged and deliberate: the LLM must be told the command went red.
+        is_error: exit_code != 0,
+    }
+}
+
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -225,14 +249,7 @@ fn output_to_result(output: SandboxOutput) -> ToolResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let exit_code = output.exit_code;
-    let content = format!(
-        "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-        exit_code, stdout, stderr
-    );
-    ToolResult {
-        content,
-        is_error: exit_code != 0,
-    }
+    child_completed_result(exit_code, &stdout, &stderr)
 }
 
 pub struct BashTool;
@@ -450,17 +467,10 @@ impl Tool for BashTool {
             };
         };
 
-        let content = format!(
-            "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-            exit_code, stdout_buf, stderr_buf
-        );
         annotate_network_block(
             command,
             default_bash_network_policy(),
-            ToolResult {
-                content,
-                is_error: exit_code != 0,
-            },
+            child_completed_result(exit_code, &stdout_buf, &stderr_buf),
         )
     }
 
@@ -665,20 +675,26 @@ impl Tool for BashTool {
                         is_error: true,
                     };
                 };
-                let content = format!(
-                    "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-                    exit_code, stdout_buf, stderr_buf
-                );
                 annotate_network_block(
                     command,
                     net,
-                    ToolResult {
-                        content,
-                        is_error: exit_code != 0,
-                    },
+                    child_completed_result(exit_code, &stdout_buf, &stderr_buf),
                 )
             }
         }
+    }
+
+    /// A child that ran to completion is the tool WORKING, whatever it exited
+    /// with, so it must not open the circuit breaker — otherwise three red
+    /// test runs inside 30 s disable Bash for the rest of the session.
+    ///
+    /// Only results with no child status are tool faults. That deliberately
+    /// keeps backend errors, timeouts, cancellations and — importantly — the
+    /// Wave-SA credential-denylist refusals counting as faults, so the
+    /// breaker's incidental rate limit on a prompt-injected model grinding at
+    /// the exfiltration denylist survives.
+    fn result_is_tool_fault(&self, _input: &Value, result: &ToolResult) -> bool {
+        result.is_error && !result.content.starts_with(CHILD_STATUS_PREFIX)
     }
 
     fn supports_streaming(&self) -> bool {

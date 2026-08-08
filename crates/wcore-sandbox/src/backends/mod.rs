@@ -20,7 +20,13 @@ pub mod bwrap_seccomp;
 pub mod docker;
 pub mod no_sandbox;
 pub mod process_tree;
-#[cfg(target_os = "macos")]
+// Compiled on every platform under `cfg(test)` so the pure SBPL
+// profile builder (`SandboxExecBackend::build_profile`) can be unit-tested
+// from Linux/Windows CI. Every test in that module that needs a real macOS
+// host already carries `#[cfg_attr(not(target_os = "macos"), ignore = ...)]`
+// or a hard `#[cfg(target_os = "macos")]`, so nothing that shells out to
+// `sandbox-exec(1)` runs off-macOS.
+#[cfg(any(target_os = "macos", test))]
 pub mod sandbox_exec;
 
 /// Channel buffer for the streaming receiver. The default buffered impl

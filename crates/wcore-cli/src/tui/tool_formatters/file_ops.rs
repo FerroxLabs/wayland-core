@@ -86,7 +86,18 @@ impl ToolResultFormatter for FileOpsFormatter {
             // A `Read` result is the file itself; the first line is content,
             // not a status, so summarise rather than quote it.
             if looks_like_read_body(text) {
-                return format!("{} lines read", text.lines().count());
+                // Count only NUMBERED content lines. A windowed Read appends a
+                // one-line continuation marker (`read.rs::continuation_marker`)
+                // which is not a line of the file, and counting it would make
+                // the card report one more line than the model was shown.
+                let lines = text
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim_start();
+                        t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains('\t')
+                    })
+                    .count();
+                return format!("{lines} lines read");
             }
             return head;
         }

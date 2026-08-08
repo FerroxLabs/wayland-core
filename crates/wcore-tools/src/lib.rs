@@ -561,6 +561,24 @@ pub trait Tool: Send + Sync {
         ToolEffectContract::default()
     }
 
+    /// Does an errored result mean the TOOL ITSELF failed?
+    ///
+    /// The per-tool circuit breaker exists to back off a MALFUNCTIONING tool —
+    /// a wedged MCP server, a panicking backend, a timeout. A shell command
+    /// that exits non-zero is the tool working perfectly and faithfully
+    /// reporting the SUBJECT's failure: the red half of red -> fix -> green.
+    /// Counting that as a tool fault disables the tool exactly when the agent
+    /// needs it most (three failing test runs inside 30 s opened the Bash
+    /// breaker for the rest of a headless run).
+    ///
+    /// `is_error` stays the model-facing signal and is deliberately unchanged;
+    /// this is a separate HEALTH signal read only by the breaker. The default
+    /// preserves the historical behaviour for every tool that does not
+    /// override it.
+    fn result_is_tool_fault(&self, _input: &Value, result: &ToolResult) -> bool {
+        result.is_error
+    }
+
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     /// Override to `true` for tools with large schemas or infrequent use.
     fn is_deferred(&self) -> bool {
@@ -678,6 +696,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     }
     fn effect_contract(&self, input: &Value) -> ToolEffectContract {
         (**self).effect_contract(input)
+    }
+    fn result_is_tool_fault(&self, input: &Value, result: &ToolResult) -> bool {
+        (**self).result_is_tool_fault(input, result)
     }
     fn is_deferred(&self) -> bool {
         (**self).is_deferred()

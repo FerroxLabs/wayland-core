@@ -281,6 +281,22 @@ pub enum FileMutationOutcome {
 #[async_trait]
 pub trait VirtualFs: Send + Sync {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError>;
+
+    /// Read at most `max_bytes + 1` bytes.
+    ///
+    /// A return LONGER than `max_bytes` is the caller's "this is over your
+    /// ceiling" signal, and the excess is never materialised. Required rather
+    /// than defaulted on purpose: a default body that delegated to `read()`
+    /// would silently preserve the full slurp for any future implementor that
+    /// forgot to override it.
+    ///
+    /// A `metadata()` probe cannot substitute for this. A /proc-style regular
+    /// file reports `size = 0` and then streams, so only a bounded read
+    /// actually bounds the bytes.
+    ///
+    /// Implementors MUST apply their own guards first, in the same order as
+    /// `read`, so no jail can be bypassed through this method.
+    async fn read_capped(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, VfsError>;
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError>;
     async fn exists(&self, path: &Path) -> Result<bool, VfsError>;
     async fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, VfsError>;
@@ -348,6 +364,15 @@ pub struct RealFs;
 impl VirtualFs for RealFs {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
         Ok(tokio::fs::read(path).await?)
+    }
+    async fn read_capped(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, VfsError> {
+        use tokio::io::AsyncReadExt;
+        let file = tokio::fs::File::open(path).await?;
+        let mut buf = Vec::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut buf)
+            .await?;
+        Ok(buf)
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         if let Some(parent) = path.parent()
@@ -1214,6 +1239,16 @@ impl VirtualFs for InMemoryFs {
                 path: path.to_path_buf(),
             })
     }
+    async fn read_capped(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, VfsError> {
+        let cap = usize::try_from(max_bytes.saturating_add(1)).unwrap_or(usize::MAX);
+        self.files
+            .read()
+            .get(path)
+            .map(|file| file.bytes[..file.bytes.len().min(cap)].to_vec())
+            .ok_or_else(|| VfsError::NotFound {
+                path: path.to_path_buf(),
+            })
+    }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         self.files
             .write()
@@ -1504,6 +1539,10 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
         let p = self.contain(path).await?;
         self.inner.read(&p).await
     }
+    async fn read_capped(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, VfsError> {
+        let p = self.contain(path).await?;
+        self.inner.read_capped(&p, max_bytes).await
+    }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         let p = self.contain(path).await?;
         self.inner.write(&p, contents).await
@@ -1597,6 +1636,10 @@ impl<F: VirtualFs + 'static> VirtualFs for SecretDenyFs<F> {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
         self.guard(path)?;
         self.inner.read(path).await
+    }
+    async fn read_capped(&self, path: &Path, max_bytes: u64) -> Result<Vec<u8>, VfsError> {
+        self.guard(path)?;
+        self.inner.read_capped(path, max_bytes).await
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
         self.guard(path)?;
