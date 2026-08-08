@@ -74,6 +74,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use wcore_config::config::ConfigFile;
@@ -1199,11 +1200,21 @@ fn real_tool_names() -> BTreeSet<String> {
 /// [`advertised_tool_names_resolve_to_a_real_tool`]; the shape of this pattern
 /// is a measurement, not a guess.
 fn advertised_tool_mentions(text: &str) -> Vec<String> {
-    let via = Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap();
-    let ticked =
-        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap();
-    via.captures_iter(text)
-        .chain(ticked.captures_iter(text))
+    // Compiled ONCE. `advertised_tool_names_resolve_to_a_real_tool` calls this
+    // for every string literal in every production source in the workspace, so
+    // building the two automata inside the function meant recompiling them tens
+    // of thousands of times per run. Measured on hetzner-dsm (96 cores, warm
+    // cache, `--profile e2e`, i.e. the test alone with nothing else scheduled):
+    // 65.873s before, against a 60s harness budget the test therefore could not
+    // meet on an idle machine. The patterns and the extraction are byte-for-byte
+    // unchanged; only where they are built moved.
+    static VIA: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\bvia\s+`?([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`?").unwrap());
+    static TICKED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(?:use|using|run|invoke|call)\s+`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`").unwrap()
+    });
+    VIA.captures_iter(text)
+        .chain(TICKED.captures_iter(text))
         .map(|c| c[1].to_string())
         .collect()
 }
