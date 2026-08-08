@@ -1165,14 +1165,14 @@ pub const EXIT_BLOCKED_ON_APPROVAL: u8 = 9;
 /// for want of an approver reported success, and no script, CI job or host
 /// could tell it from a run that did the work.
 ///
-/// The trigger is that refusal COUNT and nothing else. `answer` is taken so
-/// the call sites read alike and so this doc can say why it is ignored: the
-/// audited run answered at length about being blocked and still exited 0, so
-/// answer text was never evidence either way, and its emptiness is a normal
-/// end to a tool-only or MaxTurns run that did real work.
+/// The trigger is that refusal COUNT and nothing else. The final answer is
+/// deliberately not an input: the audited run answered at length about being
+/// blocked and still exited 0, so answer text was never evidence either way,
+/// and an empty one is a normal end to a tool-only or MaxTurns run that did
+/// real work.
 ///
 /// Kept pure and separate from the call site so the condition can be tabled.
-fn headless_exit_code(no_approver_denials: usize, _answer: &str) -> ExitCode {
+fn headless_exit_code(no_approver_denials: usize) -> ExitCode {
     if no_approver_denials > 0 {
         ExitCode::from(EXIT_BLOCKED_ON_APPROVAL)
     } else {
@@ -2285,15 +2285,15 @@ async fn run() -> anyhow::Result<ExitCode> {
         && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
     {
         use wcore_agent::goal::{DirectOutcome, StrategyTermination};
-        // What the run has to show for itself, carried out of the closure so
+        // Whether the engine returned at all, carried out of the closure so
         // the exit status is decided by the same rule as the unattached path
-        // below. `None` means the engine errored.
-        let mut direct_answer: Option<String> = None;
+        // below.
+        let mut direct_ran = false;
         let cursor = driver
             .run_direct(&goal_id, |owner| async {
                 match engine.run(&prompt, "").await {
                     Ok(run_result) => {
-                        direct_answer = Some(run_result.text.clone());
+                        direct_ran = true;
                         output.emit_stream_end(
                             "",
                             run_result.turns,
@@ -2337,10 +2337,10 @@ async fn run() -> anyhow::Result<ExitCode> {
         // whose every tool call was refused for want of an approver still told
         // its caller it had worked. Same rule as the unattached path below,
         // deliberately: the two differ only in whether a Goal is attached.
-        return Ok(match direct_answer {
-            Some(answer) => headless_exit_code(engine.no_approver_denials(), &answer),
+        return Ok(match direct_ran {
+            true => headless_exit_code(engine.no_approver_denials()),
             // The engine returned an error; `emit_error` has already said so.
-            None => ExitCode::FAILURE,
+            false => ExitCode::FAILURE,
         });
     }
 
@@ -2365,7 +2365,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     run_result.usage.cache_read_tokens,
                     run_result.finish_reason,
                 );
-                headless_exit_code(engine.no_approver_denials(), &run_result.text)
+                headless_exit_code(engine.no_approver_denials())
             }
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
@@ -6296,47 +6296,25 @@ mod tests {
     }
 
     #[test]
-    fn a_run_that_did_the_work_without_a_closing_sentence_still_reports_success() {
-        // R4. Exit 9 is a claim about the APPROVAL GATE, and an empty final
-        // answer is not evidence that a run did nothing: a tool-only finish
-        // and a MaxTurns stop both routinely end with no assistant text after
-        // doing real work. Exiting non-zero there breaks every `set -e`
-        // pipeline that was exiting 0 before this branch, for a run that
-        // wrote the files it was asked to write.
-        for answer in ["", "   \n  ", "\t"] {
-            assert_eq!(
-                format!("{:?}", headless_exit_code(0, answer)),
-                format!("{:?}", ExitCode::SUCCESS),
-                "nothing was refused; answer={answer:?}"
-            );
-        }
-    }
-
-    #[test]
     fn a_headless_run_that_accomplished_nothing_does_not_report_success() {
         let blocked = ExitCode::from(EXIT_BLOCKED_ON_APPROVAL);
-        // (refusals for want of an approver, final answer) -> status
-        let table: [((usize, &str), ExitCode); 6] = [
-            // Did the work and said something: unchanged, and the row that
-            // stops this becoming an unconditional failure.
-            ((0, "here is the answer"), ExitCode::SUCCESS),
-            // Refused for want of an approver. The audited run answered at
-            // length about being blocked and still exited 0, so the answer
-            // text alone cannot be the test.
-            ((1, "I was blocked from editing the file"), blocked),
-            ((4, "here is what I would have done"), blocked),
-            ((2, ""), blocked),
-            // Nothing was refused. An empty answer is a normal end to a
-            // tool-only or MaxTurns run and says nothing about whether work
-            // happened, so it is not the trigger.
-            ((0, ""), ExitCode::SUCCESS),
-            ((0, "   \n  "), ExitCode::SUCCESS),
+        let table: [(usize, ExitCode); 4] = [
+            // Nothing was refused: the row that stops this becoming an
+            // unconditional failure. An empty final answer belongs here too —
+            // a tool-only finish and a MaxTurns stop both end without
+            // assistant text after doing real work, and failing those breaks
+            // every `set -e` pipeline that was exiting 0 before this branch.
+            (0, ExitCode::SUCCESS),
+            // Refused for want of an approver.
+            (1, blocked),
+            (2, blocked),
+            (4, blocked),
         ];
-        for ((denials, answer), expected) in table {
+        for (denials, expected) in table {
             assert_eq!(
-                format!("{:?}", headless_exit_code(denials, answer)),
+                format!("{:?}", headless_exit_code(denials)),
                 format!("{expected:?}"),
-                "denials={denials} answer={answer:?}"
+                "denials={denials}"
             );
         }
     }
