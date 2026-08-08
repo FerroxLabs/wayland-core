@@ -1755,6 +1755,11 @@ pub struct EncryptedFileCredentialsStore {
     /// Held under a mutex because the trait is `Send + Sync` and Argon2id
     /// is non-trivially expensive.
     unlocked: parking_lot::Mutex<Option<UnlockedVault>>,
+    /// Argon2id derivations THIS store has caused, counted at every site that
+    /// runs one. Per-instance rather than global so it stays correct when the
+    /// suite runs tests as threads in one process. Test builds only.
+    #[cfg(test)]
+    derivations: std::sync::atomic::AtomicUsize,
 }
 
 /// In-memory vault unlock state.
@@ -1765,6 +1770,21 @@ struct UnlockedVault {
     passphrase: std::sync::Arc<VaultPassphraseAuthority>,
     /// KDF params (salt + tuning knobs). Persisted to `key_params_path`.
     params: encrypted_file::KdfParams,
+    /// The Argon2id-derived AEAD key: derived AT MOST ONCE per unlock, and only
+    /// when something actually needs it.
+    ///
+    /// The key is a pure function of `passphrase` + `params`, both cached here
+    /// for the life of the unlock, so reusing it is behaviourally identical to
+    /// re-deriving — while re-deriving costs 64 MiB / t=3 of Argon2id on EVERY
+    /// read and EVERY write. The write path already skipped the KDF
+    /// cipher-side via `encrypt_with_key` but still re-derived the key to call
+    /// it; the read path re-derived inside `decrypt`.
+    ///
+    /// `OnceLock`, not an eager field, because a vault with no ciphertext on
+    /// disk yet did not derive at unlock before this change and must not start:
+    /// merely OPENING such a store would otherwise cost a full derivation.
+    /// Zeroized on drop.
+    key: std::sync::OnceLock<zeroize::Zeroizing<[u8; encrypted_file::KEY_LEN]>>,
 }
 
 /// Process-scoped vault passphrase authority.
@@ -1924,7 +1944,23 @@ impl EncryptedFileCredentialsStore {
             cipher_path,
             key_params_path,
             unlocked: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            derivations: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Record that a KDF run is about to happen. Compiled away outside tests.
+    #[inline]
+    fn note_derivation(&self) {
+        #[cfg(test)]
+        self.derivations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Argon2id derivations this store has caused so far.
+    #[cfg(test)]
+    fn derivations(&self) -> usize {
+        self.derivations.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Resolve a passphrase from a file descriptor, env var, or interactive prompt.
@@ -1991,24 +2027,56 @@ impl EncryptedFileCredentialsStore {
                 encrypted_file::KdfParams::default()
             };
 
+            let key: std::sync::OnceLock<zeroize::Zeroizing<[u8; encrypted_file::KEY_LEN]>> =
+                std::sync::OnceLock::new();
+
             // If a ciphertext blob already exists, verify the passphrase
             // by decrypting it — otherwise a typo would silently rotate
-            // the vault key on next write.
+            // the vault key on next write. This is the only place the
+            // derivation happens eagerly, and only because the verify below
+            // needs the key anyway; the result seeds the cache.
             if self.cipher_path.exists() {
                 let blob = std::fs::read(&self.cipher_path)?;
-                let _pt =
-                    encrypted_file::decrypt(&blob, passphrase.expose(), &params).map_err(|e| {
-                        CredentialsError::BackendUnavailable(format!(
-                            "vault unlock failed (wrong passphrase or corrupt file): {e}"
-                        ))
-                    })?;
+                self.note_derivation();
+                let derived = zeroize::Zeroizing::new(
+                    encrypted_file::derive_key(passphrase.expose(), &params).map_err(|e| {
+                        CredentialsError::BackendUnavailable(format!("derive_key: {e}"))
+                    })?,
+                );
+                encrypted_file::decrypt_with_key(&blob, &derived).map_err(|e| {
+                    CredentialsError::BackendUnavailable(format!(
+                        "vault unlock failed (wrong passphrase or corrupt file): {e}"
+                    ))
+                })?;
+                let _ = key.set(derived);
             }
 
-            *guard = Some(UnlockedVault { passphrase, params });
+            *guard = Some(UnlockedVault {
+                passphrase,
+                params,
+                key,
+            });
         }
         Ok(parking_lot::MutexGuard::map(guard, |o| {
             o.as_mut().expect("just initialized")
         }))
+    }
+
+    /// The AEAD key for this unlock, derived on first use and cached.
+    fn vault_key<'a>(
+        &self,
+        vault: &'a UnlockedVault,
+    ) -> Result<&'a [u8; encrypted_file::KEY_LEN], CredentialsError> {
+        if let Some(key) = vault.key.get() {
+            return Ok(key);
+        }
+        self.note_derivation();
+        let derived = zeroize::Zeroizing::new(
+            encrypted_file::derive_key(vault.passphrase.expose(), &vault.params)
+                .map_err(|e| CredentialsError::BackendUnavailable(format!("derive_key: {e}")))?,
+        );
+        let _ = vault.key.set(derived);
+        Ok(vault.key.get().expect("just set"))
     }
 
     /// Load and decrypt the current secrets TOML table.
@@ -2024,9 +2092,9 @@ impl EncryptedFileCredentialsStore {
         // process runs would otherwise never be noticed.
         refuse_if_world_readable(&self.cipher_path)?;
         let blob = std::fs::read(&self.cipher_path)?;
-        let pt = encrypted_file::decrypt(&blob, vault.passphrase.expose(), &vault.params).map_err(
-            |e| CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}")),
-        )?;
+        let pt = encrypted_file::decrypt_with_key(&blob, self.vault_key(vault)?).map_err(|e| {
+            CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}"))
+        })?;
         let parsed: toml::Table = std::str::from_utf8(&pt)
             .map_err(|e| {
                 CredentialsError::BackendUnavailable(format!("vault plaintext utf8: {e}"))
@@ -2042,15 +2110,14 @@ impl EncryptedFileCredentialsStore {
         table: &toml::Table,
     ) -> Result<(), CredentialsError> {
         let serialized = toml::to_string_pretty(table)?;
-        // Reuse the cached KDF params — keep the same salt across writes
-        // so the existing passphrase keeps deriving the same key. Only
-        // the AEAD nonce is rotated on each encrypt (handled inside
-        // `encrypted_file::encrypt`).
-        let key = encrypted_file::derive_key(vault.passphrase.expose(), &vault.params)
-            .map_err(|e| CredentialsError::BackendUnavailable(format!("derive_key: {e}")))?;
-        let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), &key).map_err(|e| {
-            CredentialsError::BackendUnavailable(format!("vault encrypt failed: {e}"))
-        })?;
+        // Reuse the key derived at unlock. The cached KDF params hold the
+        // vault's salt and never move, so the derivation output cannot differ.
+        // Only the AEAD nonce is rotated on each encrypt (inside
+        // `encrypt_with_key`).
+        let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), self.vault_key(vault)?)
+            .map_err(|e| {
+                CredentialsError::BackendUnavailable(format!("vault encrypt failed: {e}"))
+            })?;
 
         // Ensure both files' parent directories exist AND are 0700 before any
         // ciphertext lands in them. `atomic_write` writes a sibling temp file,
@@ -3198,6 +3265,23 @@ pub(crate) mod encrypted_file {
         Ok(out)
     }
 
+    /// Decrypt with a pre-derived key (skips the Argon2id KDF) — the
+    /// read-side mirror of [`encrypt_with_key`].
+    pub fn decrypt_with_key(
+        cipher_blob: &[u8],
+        key: &[u8; KEY_LEN],
+    ) -> Result<Vec<u8>, EncryptedFileError> {
+        if cipher_blob.len() < NONCE_LEN + TAG_LEN {
+            return Err(EncryptedFileError::TooShort);
+        }
+        let (nonce_bytes, ct) = cipher_blob.split_at(NONCE_LEN);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(key));
+        let nonce = XNonce::from_slice(nonce_bytes);
+        cipher
+            .decrypt(nonce, ct)
+            .map_err(|e| EncryptedFileError::Aead(e.to_string()))
+    }
+
     /// Decrypt a ciphertext blob produced by [`encrypt`].
     #[allow(dead_code)]
     pub fn decrypt(
@@ -3638,6 +3722,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// One unlock must cost exactly one Argon2id derivation, however many
+    /// reads and writes follow it.
+    ///
+    /// This is not a micro-optimisation. `wayland-core auth list` issues one
+    /// `get` per known provider slug (`wcore-cli/src/auth.rs::list_cmd`, over
+    /// the 14 entries of `Provider::ALL`), so a per-read derivation multiplies
+    /// the vault's deliberately-expensive KDF (64 MiB, t=3) by the number of
+    /// providers the product knows about. MEASURED on hetzner-dsm against the
+    /// debug binary, one provider configured, each command a fresh process:
+    ///     auth add     3.949s
+    ///     auth list   28.562s
+    ///     auth remove  7.874s
+    /// A single derivation costs ~3.8s of that, so `list` was paying for
+    /// roughly eight of them. That is what pushed
+    /// `wcore-cli::harness_cli_surface auth_add_list_remove_is_a_full_crud_round_trip`
+    /// to 68.330s in isolation, past its 60s harness budget.
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn one_unlock_costs_exactly_one_argon2id_derivation() {
+        // The slug set `auth list` sweeps (wcore-cli `Provider::ALL`). Spelled
+        // out rather than imported: `wcore-config` sits below `wcore-cli` in
+        // the crate graph and must not depend upward.
+        const PROVIDER_SLUGS: [&str; 14] = [
+            "anthropic",
+            "openai",
+            "openrouter",
+            "gemini",
+            "groq",
+            "xai",
+            "mistral",
+            "deepseek",
+            "fireworks",
+            "together",
+            "cerebras",
+            "perplexity",
+            "moonshot",
+            "sakana",
+        ];
+
+        let _g = EnvPassphraseGuard::set("test-passphrase-kdf-budget");
+        let dir = tempdir().unwrap();
+        let cipher = dir.path().join("vault.enc");
+        let params = dir.path().join("vault.params.json");
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+
+        // Materialize the vault. After this the store is unlocked and the
+        // derived key is fully determined by state it already holds.
+        store.put("anthropic_api_key", "sk-ant-secret").unwrap();
+        let after_unlock = store.derivations();
+
+        // Exactly what `auth list` does: one `get` per known provider slug.
+        for slug in PROVIDER_SLUGS {
+            let _ = store.get(&format!("{slug}_api_key")).unwrap();
+        }
+        // ...and a write, so the save path is covered too.
+        store.put("openai_api_key", "sk-openai").unwrap();
+
+        assert_eq!(
+            store.derivations() - after_unlock,
+            0,
+            "an already-unlocked vault re-derived its Argon2id key {} time(s) \
+             across {} reads and one write; the key is a pure function of the \
+             passphrase and salt the store already holds",
+            store.derivations() - after_unlock,
+            PROVIDER_SLUGS.len(),
+        );
+
+        // Known-positive: the counter is not stuck at zero. A brand-new store
+        // over the same files is a real unlock and MUST pay exactly one.
+        let reopened = EncryptedFileCredentialsStore::new(cipher, params);
+        assert_eq!(
+            reopened.get("openai_api_key").unwrap().as_deref(),
+            Some("sk-openai")
+        );
+        assert_eq!(
+            reopened.derivations(),
+            1,
+            "a fresh unlock must cost exactly one derivation — no more (the \
+             cache is broken) and no fewer (the counter is dead, which would \
+             make the assertion above vacuous)"
+        );
     }
 
     #[test]
