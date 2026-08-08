@@ -4232,7 +4232,10 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
 
 /// Rank 20: build the fallback provider chain fed to `ResilientProvider`.
 ///
-/// Each `provider_chain.fallback_models` entry is paired with the independently
+/// Each surviving `provider_chain.fallback_models` entry — the derived
+/// `resolved_fallback_labels`, NOT the operator's raw on-disk list, which may
+/// contain entries the credential degrade dropped — is paired with the
+/// independently
 /// resolved config produced by `Config::resolve`: same-provider entries retain
 /// the active endpoint and credentials, while cross-provider entries use that
 /// provider's own credentials, compatibility profile, organization and region.
@@ -4256,8 +4259,7 @@ fn build_fallback_providers(
     }
 
     let labels: Vec<&str> = config
-        .provider_chain
-        .fallback_models
+        .resolved_fallback_labels
         .iter()
         .map(|entry| entry.trim())
         .filter(|entry| !entry.is_empty())
@@ -4313,11 +4315,30 @@ fn build_fallback_providers(
                 tools: fallback.compat.supports_tools(),
                 vision: fallback.compat.supports_vision(),
                 structured_output: fallback.compat.supports_structured_output(),
-                context_window: wcore_config::limits::model_output_ceiling(
+                // B02-D1 — route through THE KERNEL, not one of the two
+                // tables it composes. The four Flux tier aliases are
+                // deliberately absent from `model_output_ceiling` (CORE-4:
+                // listing them would revoke `size_output_cap`'s unknown floor
+                // #426 and `should_omit_max_tokens` #112), so reading that
+                // table alone shipped `context_window: None` for every tier
+                // alias and `evaluate_candidate` refused it with
+                // `ContextWindowUnknown` before a socket was ever opened — a
+                // primary outage then killed the task outright.
+                //
+                // `config_window` is 0 on purpose: no per-fallback window
+                // exists (a same-provider fallback is a clone of the primary
+                // and a cross-provider one re-reads the same global files, so
+                // `fallback.compact` IS the primary's block). Feeding the
+                // primary's declared window in here would assert it about an
+                // unrelated fallback model. A genuinely unknown model stays
+                // `None` and stays refused.
+                context_window: wcore_config::context_window::ContextWindow::resolve(
+                    0,
                     &provider_name,
                     &fallback.model,
+                    0,
                 )
-                .map(|(_, window)| u64::from(window)),
+                .window,
             },
             pricing: PricingEvidence {
                 source: source.into(),
@@ -4648,6 +4669,7 @@ mod fallback_pricing_identity_tests {
         };
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+        config.resolved_fallback_labels = vec!["claude-haiku-4-5".into()];
         let mut fallback = config.clone();
         fallback.model = "claude-haiku-4-5".into();
         fallback.resolved_fallbacks.clear();
@@ -4670,6 +4692,8 @@ mod fallback_pricing_identity_tests {
         let mut config = Config::default();
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+        // A label with no resolved config beside it is the mismatch under test.
+        config.resolved_fallback_labels = vec!["claude-haiku-4-5".into()];
 
         let mut pricing_refresher_constructed = false;
         let error = build_fallback_providers(&config, &mut pricing_refresher_constructed)
@@ -4708,6 +4732,7 @@ mod fallback_pricing_identity_tests {
                 ..Default::default()
             };
             config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+            config.resolved_fallback_labels = vec!["claude-haiku-4-5".into()];
             let mut fallback = config.clone();
             fallback.model = "claude-haiku-4-5".into();
             fallback.resolved_fallbacks.clear();
@@ -4736,6 +4761,295 @@ mod fallback_pricing_identity_tests {
             "the early return ran, so nothing was constructed, yet the fact claimed \
              it was. `disabled_by_config` is the honest report here."
         );
+    }
+
+    // ── B02-D1: failover-candidate admission and the two window tables ──────
+    //
+    // The four Flux tier aliases are intentionally ABSENT from
+    // `wcore_config::limits::model_output_ceiling` (CORE-4). Listing them there
+    // would silently revoke `size_output_cap`'s unknown-model output floor
+    // (#426) and `should_omit_max_tokens` on the omit-safe Flux preset (#112),
+    // and `limits.rs` carries a test pinning that absence. Their INPUT window
+    // lives in the separate `flux_tier_context_window` table, and
+    // `wcore_config::context_window::ContextWindow::resolve` is the documented
+    // kernel that composes the two.
+    //
+    // `build_fallback_providers` read only the FIRST table, so every tier-alias
+    // candidate shipped `context_window: None`, `evaluate_candidate` refused it
+    // with `ContextWindowUnknown` before a socket was opened, and a primary
+    // outage killed the task with "no configured fallback candidate passed
+    // routing policy".
+
+    /// A model id present in NEITHER window table and nowhere else in the tree.
+    /// This is the can-fail control for every B02-D1 test: a "fix" that
+    /// fabricates a window for everything, or that deletes the unknown-window
+    /// rejection outright, passes the Flux assertions and fails these.
+    const UNKNOWN_MODEL_CANARY: &str = "zzz-canary-model-4471";
+
+    /// Primary on `openai` with the chain enabled and two `flux-router`
+    /// fallbacks: the tier alias under test, then the unknown-model control.
+    fn flux_chain_config() -> Config {
+        use wcore_config::config::ProviderType;
+
+        let mut config = Config {
+            provider_label: "openai".into(),
+            provider: ProviderType::OpenAI,
+            compat: wcore_config::compat::ProviderCompat::openai_defaults(),
+            ..Default::default()
+        };
+        config.provider_chain.enabled = true;
+        config.provider_chain.fallback_models = vec![
+            "flux-router:flux-standard".into(),
+            format!("flux-router:{UNKNOWN_MODEL_CANARY}"),
+        ];
+        config
+            .resolved_fallback_labels
+            .clone_from(&config.provider_chain.fallback_models);
+        config.resolved_fallbacks = ["flux-standard", UNKNOWN_MODEL_CANARY]
+            .into_iter()
+            .map(|model| Config {
+                provider_label: "flux-router".into(),
+                provider: ProviderType::OpenAI,
+                model: model.to_string(),
+                compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+                ..Default::default()
+            })
+            .collect();
+        config
+    }
+
+    fn built_flux_chain() -> Vec<(FailoverCandidateMetadata, Arc<dyn LlmProvider>)> {
+        let config = flux_chain_config();
+        let mut constructed = false;
+        build_fallback_providers(&config, &mut constructed).expect("flux chain must resolve")
+    }
+
+    /// B02-D1 cause test. The tier alias must carry the CORE-4 128k floor AND
+    /// be admitted by the real gate; the unknown model must still be refused.
+    #[test]
+    fn flux_tier_fallback_carries_the_core4_window_and_the_real_gate_admits_it() {
+        let built = built_flux_chain();
+        assert_eq!(built.len(), 2, "both fallbacks must resolve");
+
+        let requirements = wcore_providers::RequestRequirements {
+            // A real turn: engine.rs always populates `client_context_tokens`,
+            // so this arm of `evaluate_candidate` is never skipped in
+            // production. 50k is comfortably inside a 128k window.
+            context_tokens: Some(50_000),
+            tools: true,
+            vision: false,
+            structured_output: false,
+        };
+
+        // KNOWN-POSITIVE: the tier alias resolves to the exact CORE-4 floor.
+        // Asserting 128_000 rather than `is_some()` is deliberate — a fix that
+        // substitutes DEFAULT_CONTEXT_WINDOW (200_000) or u64::MAX fails here.
+        let (flux, _) = &built[0];
+        assert_eq!(flux.provider, "flux-router");
+        assert_eq!(flux.model, "flux-standard");
+        assert_eq!(
+            flux.capabilities.context_window,
+            Some(128_000),
+            "a Flux tier alias must carry the CORE-4 128k input floor"
+        );
+        assert_eq!(
+            wcore_providers::evaluate_candidate(
+                flux,
+                requirements,
+                &wcore_providers::FailoverRoutingPolicy::default(),
+            ),
+            Ok(()),
+            "the real admission gate must accept a Flux tier fallback"
+        );
+
+        // KNOWN-NEGATIVE, one variable changed: a model in neither table has no
+        // window anyone can prove, so it must STILL be refused. This is what
+        // stops "always return a window" or "delete the check" from passing.
+        let (unknown, _) = &built[1];
+        assert_eq!(
+            unknown.capabilities.context_window, None,
+            "a model absent from both window tables must stay unknown"
+        );
+        assert_eq!(
+            wcore_providers::evaluate_candidate(
+                unknown,
+                requirements,
+                &wcore_providers::FailoverRoutingPolicy::default(),
+            ),
+            Err(wcore_providers::CandidateRejection::ContextWindowUnknown),
+            "the unknown-window guard must remain live after the fix"
+        );
+    }
+
+    // ── the product outcome: does the fallback actually serve? ──────────────
+
+    /// Counts real dispatches. The counter lives inside the provider, so it can
+    /// only advance if the routing layer physically elected and called this
+    /// candidate — no assertion on an error string can fake it.
+    struct CountingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(wcore_types::llm::LlmEvent::Done {
+                        stop_reason: wcore_types::message::StopReason::EndTurn,
+                        finish_reason: wcore_types::message::FinishReason::Stop,
+                        usage: wcore_types::message::TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    struct DeadPrimary;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for DeadPrimary {
+        async fn stream(
+            &self,
+            _: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            Err(wcore_providers::ProviderError::Connection(
+                "primary is down".into(),
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct ReceiptSpy {
+        receipts: parking_lot::Mutex<Vec<wcore_providers::FailoverReceipt>>,
+    }
+
+    impl wcore_providers::CircuitReporter for ReceiptSpy {
+        fn report(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: wcore_providers::CircuitState,
+            _: Option<&str>,
+        ) {
+        }
+        fn report_failover(&self, receipt: &wcore_providers::FailoverReceipt) {
+            self.receipts.lock().push(receipt.clone());
+        }
+    }
+
+    fn turn_request(model: &str) -> wcore_types::llm::LlmRequest {
+        wcore_types::llm::LlmRequest {
+            model: model.into(),
+            system: String::new(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1024,
+            thinking: None,
+            reasoning_effort: None,
+            cache_tier: None,
+            routing_hint: None,
+            stop_sequences: Vec::new(),
+            web_search: false,
+            conversation_id: None,
+            // A real turn always carries this (engine.rs), which is exactly why
+            // the unknown-window arm fires deterministically in production.
+            client_context_tokens: Some(1_000),
+            temperature: None,
+            omit_max_tokens: false,
+        }
+    }
+
+    /// Drive the chain with the metadata `build_fallback_providers` ACTUALLY
+    /// produced. Only the `Arc<dyn LlmProvider>` half of each tuple is swapped
+    /// for a double — the metadata, the thing under test, is untouched.
+    async fn drive_chain(
+        index: usize,
+    ) -> (
+        Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        >,
+        usize,
+        wcore_providers::FailoverReceipt,
+    ) {
+        let (metadata, _) = built_flux_chain().swap_remove(index);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let spy = Arc::new(ReceiptSpy::default());
+        let resilient = ResilientProvider::new_with_policy(
+            "openai",
+            Arc::new(DeadPrimary),
+            vec![(
+                metadata,
+                Arc::new(CountingProvider {
+                    calls: Arc::clone(&calls),
+                }) as Arc<dyn LlmProvider>,
+            )],
+            CircuitConfig::default(),
+            Arc::clone(&spy) as Arc<dyn wcore_providers::CircuitReporter>,
+            FailoverRoutingPolicy::default(),
+        );
+        let outcome = resilient.stream(&turn_request("gpt-5")).await;
+        let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+        let receipt = spy.receipts.lock().first().cloned().expect(
+            "the chain must always emit exactly one failover receipt per exhausted/served turn",
+        );
+        (outcome, calls, receipt)
+    }
+
+    /// THE USER-VISIBLE OUTCOME. The repro: primary down, one Flux tier
+    /// fallback configured. Before the fix this returned
+    /// `NotAttempted { reason: "no configured fallback candidate passed
+    /// routing policy" }`, exit 1, nothing written.
+    #[tokio::test]
+    async fn a_flux_tier_fallback_actually_serves_when_the_primary_is_down() {
+        let (outcome, calls, receipt) = drive_chain(0).await;
+
+        assert_eq!(
+            calls, 1,
+            "the Flux fallback was never physically dispatched"
+        );
+        assert!(
+            outcome.is_ok(),
+            "the turn must complete over the fallback, got {:?}",
+            outcome.err()
+        );
+        assert_eq!(receipt.candidates.len(), 1);
+        assert_eq!(receipt.candidates[0].disposition, Ok(()));
+        assert_eq!(receipt.selected_provider.as_deref(), Some("flux-router"));
+        assert_eq!(receipt.selected_model.as_deref(), Some("flux-standard"));
+    }
+
+    /// THE NEGATIVE CONTROL — same harness, one variable: the model id. A model
+    /// whose window nobody can prove must still be refused, and refused for the
+    /// stated reason. Without this, deleting the guard passes the test above.
+    #[tokio::test]
+    async fn a_genuinely_unknown_fallback_model_is_still_refused() {
+        let (outcome, calls, receipt) = drive_chain(1).await;
+
+        assert_eq!(
+            calls, 0,
+            "an unprovable-window candidate must not be dispatched"
+        );
+        assert!(outcome.is_err(), "the chain must exhaust");
+        assert_eq!(receipt.candidates.len(), 1);
+        assert_eq!(
+            receipt.candidates[0].disposition,
+            Err(wcore_providers::CandidateRejection::ContextWindowUnknown),
+        );
+        assert_eq!(receipt.selected_model, None);
     }
 }
 

@@ -200,9 +200,19 @@ impl ResilientProvider {
         let candidates = fallbacks
             .into_iter()
             .map(|(label, pricing_provider, model, provider)| {
-                let context_window =
-                    wcore_config::limits::model_output_ceiling(&pricing_provider, &model)
-                        .map(|(_, window)| u64::from(window));
+                // B02-D1 — the SAME kernel the typed constructor uses. Reading
+                // `model_output_ceiling` alone here made every Flux tier alias
+                // (deliberately absent from that table, CORE-4) an inadmissible
+                // failover candidate. Two metadata builders, one resolver, so
+                // the defect cannot be reintroduced in half the tree. The
+                // legacy tuple carries no `Config`, hence `config_window = 0`.
+                let context_window = wcore_config::context_window::ContextWindow::resolve(
+                    0,
+                    &pricing_provider,
+                    &model,
+                    0,
+                )
+                .window;
                 let metadata = FailoverCandidateMetadata {
                     label,
                     provider: pricing_provider,
@@ -565,11 +575,159 @@ impl LlmProvider for ResilientProvider {
             }
         }
         self.reporter.report_failover(&receipt);
-        Err(last_error.unwrap_or_else(|| ProviderError::NotAttempted {
-            reason: "no configured fallback candidate passed routing policy".into(),
-        }))
+        Err(match last_error {
+            // B02-R3(a) — the COMMON case. On the first failing turn the
+            // primary is attempted, `last_error` is `Some`, and the chain's
+            // facts were thrown away: the operator got a bare "Connection
+            // error: ..." with no hint that two configured fallbacks had been
+            // refused. The typed error still decides retry and billing, so the
+            // VARIANT is preserved exactly and only its sentence grows.
+            Some(error) => annotate_with_chain(error, &receipt),
+            // The primary was SKIPPED (circuit open), so there is no typed
+            // error to preserve and the chain's own message is the whole story.
+            None => ProviderError::NotAttempted {
+                reason: describe_exhausted_chain(&receipt),
+            },
+        })
     }
 }
+
+/// B02-D3 — turn the receipt the chain already built into the sentence the
+/// operator reads.
+///
+/// `emit_provider_failover_receipt` is overridden only by the JSON-stream
+/// protocol sink, so on the CLI and TUI the receipt was reported and then
+/// discarded and the user got a fixed string naming no candidate, no reason
+/// and no remedy. Everything here is already on the receipt that ships to the
+/// host, so this discloses nothing new — and it deliberately carries ONLY
+/// provider, model and the rejection slug. Never a base_url, a credential, or
+/// a policy value.
+///
+/// Capped at [`MAX_DESCRIBED_CANDIDATES`] entries plus a count of the rest:
+/// this string reaches logs and the session journal, so a long chain must not
+/// become a multi-kilobyte line.
+fn describe_exhausted_chain(receipt: &FailoverReceipt) -> String {
+    format!(
+        "no fallback candidate was eligible after {}/{} failed ({}): {}{}",
+        receipt.failed_provider,
+        receipt.failed_model,
+        receipt.reason,
+        describe_chain_candidates(receipt),
+        CHAIN_REMEDY
+    )
+}
+
+/// B02-R3(a) — keep the typed error, add the chain's facts to its sentence.
+///
+/// `describe_exhausted_chain` was reachable only through
+/// `last_error.unwrap_or_else(...)`, i.e. only when the primary was SKIPPED
+/// because its circuit was already open. On the turn that actually breaks —
+/// the primary is attempted, fails, and every fallback is then refused by
+/// policy — `last_error` is `Some` and the operator saw the primary's bare
+/// message with no sign that a chain had been consulted at all.
+///
+/// The variant is preserved deliberately. `is_retryable` and
+/// `was_not_attempted` drive the retry loop and the billing disposition;
+/// rewrapping a `Connection` into a `NotAttempted` to carry a string would
+/// change both. Only the free-text field grows, so classification cannot move.
+///
+/// Variants with no free-text field to grow (`Http` and `Egress`, which wrap a
+/// foreign error; `RateLimited` and `MissingApiKey`, which are pure data) are
+/// returned untouched — the receipt still reaches the host sink.
+fn annotate_with_chain(error: ProviderError, receipt: &FailoverReceipt) -> ProviderError {
+    let suffix = format!(
+        " \u{2014} fallback chain exhausted: {}{}",
+        describe_chain_candidates(receipt),
+        CHAIN_REMEDY
+    );
+    match error {
+        ProviderError::Api { status, message } => ProviderError::Api {
+            status,
+            message: message + &suffix,
+        },
+        ProviderError::Parse(message) => ProviderError::Parse(message + &suffix),
+        ProviderError::Connection(message) => ProviderError::Connection(message + &suffix),
+        ProviderError::PromptTooLong(message) => ProviderError::PromptTooLong(message + &suffix),
+        ProviderError::NotAttempted { reason } => ProviderError::NotAttempted {
+            reason: reason + &suffix,
+        },
+        ProviderError::PremiumLocked {
+            capability,
+            message,
+        } => ProviderError::PremiumLocked {
+            capability,
+            message: message + &suffix,
+        },
+        ProviderError::UpgradeRequired { message } => ProviderError::UpgradeRequired {
+            message: message + &suffix,
+        },
+        ProviderError::SpendCeilingUnresolved {
+            reason,
+            upgrade_url,
+        } => ProviderError::SpendCeilingUnresolved {
+            reason: reason + &suffix,
+            upgrade_url,
+        },
+        ProviderError::ContextOverflow {
+            required_tokens,
+            model_window,
+            routed_model,
+            message,
+        } => ProviderError::ContextOverflow {
+            required_tokens,
+            model_window,
+            routed_model,
+            message: message + &suffix,
+        },
+        error @ (ProviderError::Http(_)
+        | ProviderError::Egress(_)
+        | ProviderError::RateLimited { .. }
+        | ProviderError::MissingApiKey) => error,
+    }
+}
+
+/// The remedy sentence shared by both terminal messages, so the operator is
+/// told the same thing whichever branch produced the error.
+const CHAIN_REMEDY: &str = ". Point [provider_chain] fallback_models at a model \
+     this build can size, or wait out the cooldown.";
+
+/// Render the candidates the chain considered: what each one was, and whether
+/// it was refused (and why) or attempted (and how it failed). Capped at
+/// [`MAX_DESCRIBED_CANDIDATES`] plus a count of the rest.
+fn describe_chain_candidates(receipt: &FailoverReceipt) -> String {
+    let mut out = String::new();
+    let shown = receipt.candidates.len().min(MAX_DESCRIBED_CANDIDATES);
+    for (i, candidate) in receipt.candidates.iter().take(shown).enumerate() {
+        if i > 0 {
+            out.push_str("; ");
+        }
+        match candidate.disposition {
+            Err(rejection) => out.push_str(&format!(
+                "{}/{} rejected \u{2014} {}",
+                candidate.provider, candidate.model, rejection
+            )),
+            Ok(()) => out.push_str(&format!(
+                "{}/{} attempted \u{2014} {}",
+                candidate.provider,
+                candidate.model,
+                candidate
+                    .failure_reason
+                    .map_or("failed", |reason| reason.as_str())
+            )),
+        }
+    }
+    if receipt.candidates.is_empty() {
+        out.push_str("no candidates were configured");
+    }
+    let elided = receipt.candidates.len().saturating_sub(shown);
+    if elided > 0 {
+        out.push_str(&format!(" (+{elided} more)"));
+    }
+    out
+}
+
+/// How many candidates the terminal error names before eliding the tail.
+const MAX_DESCRIBED_CANDIDATES: usize = 5;
 
 #[cfg(test)]
 mod tests {
@@ -1537,6 +1695,232 @@ mod tests {
         assert!(
             !models.is_empty(),
             "list_models must yield the primary's alias catalog, not an empty list"
+        );
+    }
+
+    // ── B02-D3: the terminal error must carry the receipt's facts ───────────
+    //
+    // When every candidate is refused, the receipt naming WHICH candidate was
+    // refused and WHY is handed to `report_failover` — and then thrown away.
+    // The receipt only survives if the sink renders it, and
+    // `OutputSink::emit_provider_failover_receipt` is overridden in exactly one
+    // place: the JSON-stream protocol sink. A CLI or TUI operator therefore got
+    // "Provider request was not attempted: no configured fallback candidate
+    // passed routing policy" — no candidate, no reason, no remedy.
+    //
+    // That exact string is produced on the circuit-OPEN path: the primary is
+    // skipped, so `last_error` is never set and the chain's own message is all
+    // the user gets. These tests drive that path.
+
+    /// Trip the primary's breaker, then take the circuit-open path with two
+    /// candidates refused for DIFFERENT reasons — so the assertions cannot be
+    /// satisfied by hardcoding one rejection into the message.
+    async fn exhausted_chain_error() -> ProviderError {
+        let unknown_window = candidate("flux-standard", true, None);
+        let mut denied = candidate("blocked-model", true, Some(400_000));
+        denied.provider = "denied-provider".into();
+
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![
+                (unknown_window, Arc::new(AlwaysOk) as Arc<dyn LlmProvider>),
+                (denied, Arc::new(AlwaysOk) as Arc<dyn LlmProvider>),
+            ],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(ReceiptReporter::default()),
+            FailoverRoutingPolicy {
+                denied_providers: std::collections::BTreeSet::from(["denied-provider".to_string()]),
+                ..Default::default()
+            },
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(8_000);
+
+        // Turn 1 attempts and trips the breaker; the error the user sees is the
+        // primary's own. Turn 2 skips the primary entirely — that is the state
+        // the repro was in, and the only one that reaches the chain's message.
+        let _ = resilient.stream(&request).await;
+        resilient
+            .stream(&request)
+            .await
+            .expect_err("circuit is open and every candidate is refused")
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_chain_names_each_candidate_and_why_it_was_refused() {
+        let message = exhausted_chain_error().await.to_string();
+
+        for needle in [
+            // the candidate that was refused …
+            "flux-standard",
+            // … and the reason, in the same vocabulary the receipt uses.
+            "context_window_unknown",
+            // the SECOND candidate, refused for a DIFFERENT reason — a message
+            // that names only the first candidate, or only one rejection kind,
+            // fails here.
+            "denied-provider",
+            "blocked-model",
+            "provider_denied",
+            // and what the primary was doing when the chain was entered.
+            "primary",
+        ] {
+            assert!(
+                message.contains(needle),
+                "the terminal error must name {needle:?}; got: {message}"
+            );
+        }
+    }
+
+    /// B02-R3(a). Build the same refused chain, but return the FIRST turn's
+    /// error — the primary was attempted and failed, so `last_error` is
+    /// `Some(e)` and `describe_exhausted_chain` is never consulted. This is the
+    /// COMMON case: the circuit-open path only exists after a turn has already
+    /// tripped the breaker.
+    async fn first_turn_exhausted_chain_error() -> ProviderError {
+        let unknown_window = candidate("flux-standard", true, None);
+        let mut denied = candidate("blocked-model", true, Some(400_000));
+        denied.provider = "denied-provider".into();
+
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![
+                (unknown_window, Arc::new(AlwaysOk) as Arc<dyn LlmProvider>),
+                (denied, Arc::new(AlwaysOk) as Arc<dyn LlmProvider>),
+            ],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(ReceiptReporter::default()),
+            FailoverRoutingPolicy {
+                denied_providers: std::collections::BTreeSet::from(["denied-provider".to_string()]),
+                ..Default::default()
+            },
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(8_000);
+        resilient
+            .stream(&request)
+            .await
+            .expect_err("the primary fails and every candidate is refused")
+    }
+
+    #[tokio::test]
+    async fn the_first_failing_turn_also_names_the_refused_candidates() {
+        let error = first_turn_exhausted_chain_error().await;
+        let message = error.to_string();
+
+        // The primary's own failure must still be in the sentence …
+        assert!(
+            message.contains("always-fail"),
+            "the primary's own error must survive: {message}"
+        );
+        // … and so must the chain's, which the operator otherwise never sees on
+        // the turn that actually broke.
+        for needle in [
+            "flux-standard",
+            "context_window_unknown",
+            "denied-provider",
+            "blocked-model",
+            "provider_denied",
+        ] {
+            assert!(
+                message.contains(needle),
+                "the first failing turn must name {needle:?}; got: {message}"
+            );
+        }
+
+        // CLASSIFICATION IS LOAD-BEARING and must not move. `Connection` is
+        // retryable and was genuinely attempted; converting it into
+        // `NotAttempted` to carry the text would silently change both the retry
+        // decision and the billing disposition.
+        assert!(
+            matches!(error, ProviderError::Connection(_)),
+            "the typed variant must survive annotation: {error:?}"
+        );
+        assert!(error.is_retryable(), "a Connection failure stays retryable");
+        assert!(
+            !error.was_not_attempted(),
+            "the primary WAS attempted; the request may have incurred usage"
+        );
+    }
+
+    /// LEAK GUARD — NOT a fix-proof. B02-R3(c): this test PASSES with the D3
+    /// change reverted, because the fixed string it replaced also contained no
+    /// endpoint and no policy value. It is worth keeping (it fails the day
+    /// someone interpolates a base_url or a denied-provider list into a
+    /// user-facing message) but it must never be counted as evidence that the
+    /// chain description exists. The two tests that carry that burden are
+    /// `an_exhausted_chain_names_each_candidate_and_why_it_was_refused` and
+    /// `the_first_failing_turn_also_names_the_refused_candidates`.
+    #[tokio::test]
+    async fn the_exhausted_chain_error_discloses_no_more_than_the_receipt_does() {
+        // The receipt already ships provider + model + rejection to the host,
+        // so restating them costs nothing. Endpoints, keys and policy values
+        // are NOT on the receipt and must never be interpolated here.
+        let message = exhausted_chain_error().await.to_string();
+        assert!(
+            !message.contains("http"),
+            "an endpoint leaked into a user-facing error: {message}"
+        );
+        assert!(
+            !message.contains("denied_providers"),
+            "policy configuration leaked into a user-facing error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_refused_chain_cannot_grow_an_unbounded_error_string() {
+        // The error reaches logs and the session journal, so a 40-entry chain
+        // must not become a multi-kilobyte line.
+        let fallbacks: Vec<_> = (0..40)
+            .map(|i| {
+                (
+                    candidate(&format!("model-{i}"), true, None),
+                    Arc::new(AlwaysOk) as Arc<dyn LlmProvider>,
+                )
+            })
+            .collect();
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            fallbacks,
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(ReceiptReporter::default()),
+            FailoverRoutingPolicy::default(),
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(8_000);
+        let _ = resilient.stream(&request).await;
+        let message = resilient
+            .stream(&request)
+            .await
+            .expect_err("all 40 candidates have an unknown window")
+            .to_string();
+
+        assert!(
+            message.contains("model-0"),
+            "the first refused candidate must still be named: {message}"
+        );
+        assert!(
+            message.contains("35 more"),
+            "the elided tail must be counted, not dropped: {message}"
+        );
+        assert!(
+            message.len() < 600,
+            "error length {} is unbounded by the chain length: {message}",
+            message.len()
         );
     }
 }

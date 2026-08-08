@@ -378,6 +378,21 @@ autocompact_buffer = 13000  # Buffer before autocompact triggers
 emergency_buffer = 3000     # Buffer before emergency block
 max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
+micro_pressure_fraction = 0.5  # Occupancy floor for an AUTOMATIC microcompact
+                            # Microcompact deletes tool output the model may
+                            # still be reasoning over. Below this fraction of
+                            # the effective context window the count trigger is
+                            # a no-op, because clearing there is pure context
+                            # destruction: the post-clear count re-arms the
+                            # trigger on the next fan-out and the agent re-reads
+                            # the same files forever. 0.0 restores the old
+                            # always-on behaviour. Clamped to 0.0-0.95 and
+                            # capped at the autocompact threshold. Does not
+                            # affect /compact or the idle-gap time trigger.
+                            # NOTE: a PROJECT-level config that sets only this
+                            # key is discarded — the [compact] block uses
+                            # context_window as its presence probe. Set it in
+                            # the global config.
 ```
 
 ### Smart auto-compaction (#280)

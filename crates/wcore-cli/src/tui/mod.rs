@@ -325,6 +325,11 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
         egress_allow: config.security.egress_allow.clone(),
         failover_enabled: config.provider_chain.enabled,
         fallback_models: config.provider_chain.fallback_models.clone(),
+        // B02-R2: the two derived facts the Doctor screen needs. They are NOT
+        // part of the editable model — `persist_to_disk` writes
+        // `fallback_models` only.
+        fallback_unresolved: config.unresolved_fallback_labels.clone(),
+        fallback_reinterpreted: config.reinterpreted_fallback_labels.clone(),
     }
 }
 

@@ -40,18 +40,97 @@ pub struct MicrocompactResult {
 
 // ── Trigger checks ──────────────────────────────────────────────────────────
 
-/// Decide whether microcompact should run.
+/// Growth in the REAL-pressure watermark required before an already-fired
+/// count trigger may fire again, as a fraction of the effective window.
 ///
-/// Returns `true` if **either** trigger fires:
+/// Not a config knob on purpose: it is an internal damping constant, and the
+/// operator-facing dial is `micro_pressure_fraction`.
+const MICRO_REARM_GROWTH_FRACTION: f64 = 0.1;
+
+/// Decide whether an AUTOMATIC microcompact should run.
+///
 /// - **Time**: the most recent assistant message is older than
-///   `config.micro_gap_seconds`.
+///   `config.micro_gap_seconds`. UNGATED — an idle-gap clear fires at most
+///   once per idle period and cannot sawtooth, so pressure is irrelevant to it.
 /// - **Count**: total compactable (non-cleared) tool results exceed
-///   `config.micro_keep_recent * 2`.
-pub fn should_microcompact(messages: &[Message], config: &CompactConfig) -> bool {
+///   `config.micro_keep_recent * 2`, AND the window is at least
+///   [`micro_pressure_floor`] full, AND the watermark has grown by
+///   [`MICRO_REARM_GROWTH_FRACTION`] of the window since the last fire.
+///
+/// A12-D1: the count trigger used to be the whole story, and it is
+/// context-blind. `microcompact` resets the live count to
+/// `micro_keep_recent`, so the trigger re-arms on the very next parallel
+/// fan-out — a permanent sawtooth whose period is a function of the agent's
+/// fan-out rather than of how full the window is. On a codebase-comprehension
+/// task that deletes the files the model just read, at 34% occupancy, forever.
+/// The two extra conditions make it pressure RELIEF: it only runs when there
+/// is pressure, and each fire must be at a strictly higher watermark than the
+/// last, which bounds the number of fires per session.
+///
+/// `used_tokens` is the REAL-pressure watermark (provider-reported billed
+/// input), the same value fed to [`super::auto::should_autocompact`].
+/// `last_fire_tokens` is `None` until the first fire and is reset by an
+/// autocompact.
+pub fn should_microcompact(
+    messages: &[Message],
+    config: &CompactConfig,
+    used_tokens: u64,
+    last_fire_tokens: Option<u64>,
+    provider: &str,
+    model: &str,
+) -> bool {
     if !config.enabled {
         return false;
     }
-    time_trigger(messages, config) || count_trigger(messages, config)
+    if time_trigger(messages, config) {
+        return true;
+    }
+    if !count_trigger(messages, config) {
+        return false;
+    }
+    if used_tokens < micro_pressure_floor(config, provider, model) as u64 {
+        return false;
+    }
+    match last_fire_tokens {
+        Some(previous) => {
+            used_tokens >= previous.saturating_add(micro_rearm_delta(config, provider, model))
+        }
+        None => true,
+    }
+}
+
+/// Occupancy floor, in tokens, below which an automatic count-triggered
+/// microcompact is a no-op.
+///
+/// Capped at the autocompact threshold so micro always gets a chance to
+/// relieve pressure cheaply BEFORE the LLM summarizer runs — the ladder order
+/// (micro -> auto -> emergency) is preserved by construction rather than by
+/// the happening-to-be-smaller value of a fraction.
+///
+/// SMALL WINDOWS, stated rather than left to be discovered: when the effective
+/// window is at or below `output_reserve + autocompact_buffer` (~33k on the
+/// defaults) the autocompact threshold saturates to 0, so this floor is 0 and
+/// micro is unconditional. That is correct — autocompact is unconditional
+/// there too, so the ladder order still holds, and the "delete context at 34%
+/// occupancy" defect cannot arise in a window that small.
+pub fn micro_pressure_floor(config: &CompactConfig, provider: &str, model: &str) -> usize {
+    let window = config.effective_context_window(provider, model);
+    // `f64::clamp` PROPAGATES NaN, and `NaN as usize` is 0 — an unguarded NaN
+    // from hand-edited TOML would silently restore the defect. Check finiteness
+    // first; a gate that can never fire is as worthless as one that always does.
+    let fraction = if config.micro_pressure_fraction.is_finite() {
+        config.micro_pressure_fraction.clamp(0.0, 0.95)
+    } else {
+        wcore_config::compact::default_micro_pressure_fraction()
+    };
+    let floor = (window as f64 * fraction) as usize;
+    floor.min(super::auto::autocompact_threshold(config, provider, model))
+}
+
+/// Watermark growth required to re-arm the count trigger after a fire.
+pub fn micro_rearm_delta(config: &CompactConfig, provider: &str, model: &str) -> u64 {
+    let window = config.effective_context_window(provider, model) as f64;
+    (window * MICRO_REARM_GROWTH_FRACTION) as u64
 }
 
 /// Time-based trigger: last assistant timestamp older than gap threshold.
@@ -909,7 +988,162 @@ mod tests {
             micro_gap_seconds: 3600,
             ..default_config()
         };
-        assert!(!should_microcompact(&msgs, &config));
+        // Disabled wins over everything, including a full window.
+        assert!(!should_microcompact(
+            &msgs,
+            &config,
+            190_000,
+            None,
+            "openai",
+            "unknown-model"
+        ));
+    }
+
+    // ── A12-D1: the pressure gate and its re-arm latch ───────────────────
+
+    fn twelve_read_results() -> Vec<Message> {
+        let mut msgs = Vec::new();
+        for i in 0..12 {
+            let id = format!("t{i}");
+            msgs.push(assistant_msg(vec![tool_use_block(&id, "Read")]));
+            msgs.push(user_msg(vec![tool_result_block(&id, "file body")]));
+        }
+        msgs
+    }
+
+    #[test]
+    fn low_pressure_never_microcompacts_the_live_repro_case() {
+        let cfg = CompactConfig::default();
+        let msgs = twelve_read_results();
+
+        // The OLD trigger still says yes on this exact input. Asserting that
+        // here is what pins the mechanism: the new behaviour comes from the
+        // pressure gate, not from the count rule having been weakened.
+        assert!(count_trigger(&msgs, &cfg));
+
+        // flux-standard resolves through `effective_context_window` to the
+        // CORE-4 128k floor: floor = min(0.5*128_000, 128_000-20_000-13_000)
+        // = min(64_000, 95_000) = 64_000.
+        assert_eq!(
+            micro_pressure_floor(&cfg, "flux-router", "flux-standard"),
+            64_000
+        );
+
+        // 43_288 is the watermark measured in the reported repro — 34% of the
+        // window, with 85k of headroom, and it cleared the transcript anyway.
+        assert!(!should_microcompact(
+            &msgs,
+            &cfg,
+            43_288,
+            None,
+            "flux-router",
+            "flux-standard"
+        ));
+        assert!(should_microcompact(
+            &msgs,
+            &cfg,
+            90_000,
+            None,
+            "flux-router",
+            "flux-standard"
+        ));
+    }
+
+    #[test]
+    fn a_fired_trigger_re_arms_only_after_the_watermark_grows() {
+        let cfg = CompactConfig::default();
+        let msgs = twelve_read_results();
+        // 0.1 * 128_000
+        assert_eq!(
+            micro_rearm_delta(&cfg, "flux-router", "flux-standard"),
+            12_800
+        );
+
+        // Fired at 90_000. Re-arming needs 102_800.
+        for (used, expected) in [(90_000, false), (102_799, false), (102_800, true)] {
+            assert_eq!(
+                should_microcompact(
+                    &msgs,
+                    &cfg,
+                    used,
+                    Some(90_000),
+                    "flux-router",
+                    "flux-standard"
+                ),
+                expected,
+                "watermark {used} against a 90_000 fire latch"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_never_outruns_the_autocompact_threshold() {
+        // 0.95 * 128_000 = 121_600, but autocompact fires at 95_000 — micro
+        // must always get first crack, before the LLM summarizer.
+        let cfg = CompactConfig {
+            micro_pressure_fraction: 0.95,
+            ..Default::default()
+        };
+        assert_eq!(
+            micro_pressure_floor(&cfg, "flux-router", "flux-standard"),
+            95_000
+        );
+    }
+
+    #[test]
+    fn a_non_finite_fraction_falls_back_instead_of_disabling_the_gate() {
+        // `f64::clamp` propagates NaN and `NaN as usize` is 0, so an unguarded
+        // NaN from hand-edited TOML would silently restore the defect.
+        for fraction in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let cfg = CompactConfig {
+                micro_pressure_fraction: fraction,
+                ..Default::default()
+            };
+            assert_eq!(
+                micro_pressure_floor(&cfg, "flux-router", "flux-standard"),
+                64_000,
+                "fraction {fraction} must fall back to the shipped default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tiny_window_leaves_the_gate_open_and_that_is_stated_not_accidental() {
+        // At or below output_reserve + autocompact_buffer the autocompact
+        // threshold saturates to 0, so the cap drives the floor to 0 and micro
+        // is unconditional. Correct — autocompact is unconditional there too,
+        // so the ladder order still holds — but pinned so it is a decision
+        // rather than a silently vanishing gate.
+        let cfg = CompactConfig {
+            context_window: Some(30_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::super::auto::autocompact_threshold(&cfg, "openai", "x"),
+            0
+        );
+        assert_eq!(micro_pressure_floor(&cfg, "openai", "x"), 0);
+    }
+
+    #[test]
+    fn a_zero_fraction_restores_the_pre_fix_always_on_behaviour() {
+        let cfg = CompactConfig {
+            micro_pressure_fraction: 0.0,
+            ..Default::default()
+        };
+        let msgs = twelve_read_results();
+        assert_eq!(
+            micro_pressure_floor(&cfg, "flux-router", "flux-standard"),
+            0
+        );
+        assert!(should_microcompact(
+            &msgs,
+            &cfg,
+            0,
+            None,
+            "flux-router",
+            "flux-standard"
+        ));
     }
 
     #[test]

@@ -4258,6 +4258,118 @@ mod tests {
         }
     }
 
+    // ── B02-R1: a save must never delete a configured fallback ─────────
+    //
+    // `Config::resolve` DROPS a `provider_chain.fallback_models` entry it
+    // cannot resolve (no credential for the named provider) — which is the
+    // whole point of the B02-D2 degrade: a flat spare tyre must not stop the
+    // car. But the Config tab seeds `fallback_models` from that RESOLVED
+    // config (`config_view_from`) and writes it straight back to the
+    // operator's global `config.toml` on ANY save. So a fallback dropped for
+    // a missing credential is permanently deleted from disk the next time the
+    // operator saves anything at all on this tab — the fix's own degrade path
+    // becomes silent data loss.
+    //
+    // The kept set belongs on a separate vector for bootstrap to zip;
+    // `provider_chain.fallback_models` must stay byte-for-byte what the
+    // operator wrote.
+    #[test]
+    #[serial]
+    fn saving_the_config_tab_cannot_delete_an_unresolvable_fallback() {
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[default]
+provider = "openai"
+model = "gpt-5"
+
+[providers.openai]
+api_key = "openai-canary-key-r1"
+
+[provider_chain]
+enabled = true
+fallback_models = ["groq:llama-3.3-70b-versatile", "gpt-4o-2024-11-20"]
+"#,
+        )
+        .expect("write config");
+
+        let saved_home = std::env::var_os("WAYLAND_HOME");
+        let saved_groq = std::env::var_os("GROQ_API_KEY");
+        let saved_any = std::env::var_os("API_KEY");
+        // SAFETY: process-global env mutation is serialised by EXPERT_ENV_LOCK;
+        // every previous value is restored before the lock is released.
+        unsafe {
+            std::env::set_var("WAYLAND_HOME", dir.path());
+            // A resolvable groq credential would mask the defect entirely.
+            std::env::remove_var("GROQ_API_KEY");
+            std::env::remove_var("API_KEY");
+        }
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let resolved =
+                wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
+                    .expect("an unresolvable fallback must not block startup");
+
+            // Precondition: the degrade really did drop the groq candidate, so
+            // this test is exercising the lossy path and not a no-op.
+            assert_eq!(
+                resolved.resolved_fallbacks.len(),
+                1,
+                "the groq entry has no credential and must be dropped from the \
+                 RESOLVED chain (otherwise this test proves nothing)"
+            );
+
+            let mut app = App::new();
+            app.config = crate::tui::config_view_from(&resolved);
+            let mut surface = ConfigSurface::new();
+            surface.on_enter(&mut app);
+
+            // Edit something completely unrelated to failover and save. An
+            // operator toggling long-term memory has not asked to touch their
+            // provider chain.
+            while surface.focused_row() != Row::LongTerm {
+                surface.handle_key(key(KeyCode::Down), &mut app);
+            }
+            surface.handle_key(ch(' '), &mut app);
+            assert!(surface.is_dirty(), "the toggle must make the surface dirty");
+            surface.save();
+            assert_eq!(surface.save_error, None, "the save must succeed");
+
+            let on_disk = std::fs::read_to_string(&config_path).expect("re-read config.toml");
+            assert!(
+                on_disk.contains("groq:llama-3.3-70b-versatile"),
+                "saving an unrelated toggle deleted a configured fallback from \
+                 the operator's config.toml; on disk now:\n{on_disk}"
+            );
+            assert!(
+                on_disk.contains("gpt-4o-2024-11-20"),
+                "the resolvable fallback must survive too:\n{on_disk}"
+            );
+        }));
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match saved_home {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+            match saved_groq {
+                Some(v) => std::env::set_var("GROQ_API_KEY", v),
+                None => std::env::remove_var("GROQ_API_KEY"),
+            }
+            match saved_any {
+                Some(v) => std::env::set_var("API_KEY", v),
+                None => std::env::remove_var("API_KEY"),
+            }
+        }
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
     #[test]
     fn esc_on_a_clean_surface_closes_to_workspace() {
         let mut app = App::new();

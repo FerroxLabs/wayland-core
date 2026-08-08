@@ -177,7 +177,17 @@ fn tc_2_3_04_time_trigger_exceeds_threshold() {
         micro_gap_seconds: 3600,
         ..Default::default()
     };
-    assert!(should_microcompact(&msgs, &config));
+    // A12-D1: the idle-gap TIME trigger is deliberately NOT pressure-gated —
+    // it fires at most once per idle period and cannot sawtooth. A watermark of
+    // 0 must therefore still trigger, and that is what this pins.
+    assert!(should_microcompact(
+        &msgs,
+        &config,
+        0,
+        None,
+        "openai",
+        "unknown-model"
+    ));
 }
 
 // ── TC-2.3-05: Time trigger — within threshold ─────────────────────────────
@@ -190,7 +200,15 @@ fn tc_2_3_05_time_trigger_within_threshold() {
         micro_gap_seconds: 3600,
         ..Default::default()
     };
-    assert!(!should_microcompact(&msgs, &config));
+    // Below the gap threshold: false regardless of pressure.
+    assert!(!should_microcompact(
+        &msgs,
+        &config,
+        0,
+        None,
+        "openai",
+        "unknown-model"
+    ));
 }
 
 // ── TC-2.3-06: Count trigger ────────────────────────────────────────────────
@@ -209,7 +227,31 @@ fn tc_2_3_06_count_trigger() {
         micro_keep_recent: 5,
         ..Default::default()
     };
-    assert!(should_microcompact(&msgs, &config));
+    // A12-D1 SEMANTIC UPDATE, not a mechanical one. The count trigger now
+    // additionally requires real context pressure. With the default config the
+    // effective window is 200_000, so the floor is
+    // min(0.5*200_000, 200_000-20_000-13_000) = 100_000. Passing 0 here would
+    // flip this POSITIVE assertion to failing, and inverting it would silently
+    // delete the count-trigger coverage this test exists for. So supply a
+    // watermark ABOVE the floor and keep asserting TRUE.
+    assert!(should_microcompact(
+        &msgs,
+        &config,
+        120_000,
+        None,
+        "openai",
+        "unknown-model"
+    ));
+    // The pressure gate is a real gate: the same messages below the floor
+    // must NOT trigger. One variable changed.
+    assert!(!should_microcompact(
+        &msgs,
+        &config,
+        20_000,
+        None,
+        "openai",
+        "unknown-model"
+    ));
 }
 
 // ── TC-2.3-07: No timestamp — time check skipped ───────────────────────────
@@ -231,7 +273,16 @@ fn tc_2_3_07_no_timestamp_skips_time_check() {
     };
     // No timestamp → time trigger skipped.
     // 2 results ≤ 5*2=10 → count trigger false.
-    assert!(!should_microcompact(&msgs, &config));
+    // A12-D1: the count trigger is now pressure-gated, but this case asserts
+    // FALSE on both triggers, so the watermark is irrelevant. 0 keeps it that way.
+    assert!(!should_microcompact(
+        &msgs,
+        &config,
+        0,
+        None,
+        "openai",
+        "unknown-model"
+    ));
 }
 
 // ── TC-2.3-08: Token estimation after clearing ──────────────────────────────
