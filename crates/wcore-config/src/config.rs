@@ -3924,28 +3924,45 @@ fn resolve_config_files(cli: &CliArgs) -> Result<ResolvedConfigFiles, ConfigReso
         project_source.add_disposition(ConfigSourceDisposition::Restricted);
     }
 
+    // Captured BEFORE the merge consumes `project`. Without it, a profile the
+    // workspace declared and trust then stripped is indistinguishable from one
+    // that was never written, and `resolve_profile` reports the latter — which
+    // is what the Desktop lane spent hours chasing on 0.12.26: the file existed,
+    // the profile was in it, Core parsed it, discarded it on a trust decision,
+    // and then said "not found in config". The real explanation was a
+    // `tracing::warn!` nobody sees at default verbosity.
+    let profiles_stripped_by_trust: Vec<String> = if workspace_trust.is_trusted() {
+        Vec::new()
+    } else {
+        let mut names: Vec<String> = project.profiles.keys().cloned().collect();
+        names.sort();
+        names
+    };
+
     let mut merged = merge_config_files_with_trust(global, project, workspace_trust.is_trusted());
     match &cli.profile {
-        Some(profile_name) => match apply_profile(merged, profile_name) {
-            Ok(profiled) => {
-                merged = profiled;
-                provenance.sources.push(ConfigSourceEvidence::new(
-                    ConfigSourceRole::Profile,
-                    None,
-                    PROFILE_PRECEDENCE,
-                    ConfigSourceDisposition::Loaded,
-                ));
+        Some(profile_name) => {
+            match apply_profile(merged, profile_name, &profiles_stripped_by_trust) {
+                Ok(profiled) => {
+                    merged = profiled;
+                    provenance.sources.push(ConfigSourceEvidence::new(
+                        ConfigSourceRole::Profile,
+                        None,
+                        PROFILE_PRECEDENCE,
+                        ConfigSourceDisposition::Loaded,
+                    ));
+                }
+                Err(source) => {
+                    provenance.sources.push(ConfigSourceEvidence::new(
+                        ConfigSourceRole::Profile,
+                        None,
+                        PROFILE_PRECEDENCE,
+                        ConfigSourceDisposition::Invalid,
+                    ));
+                    return Err(ConfigResolutionError::new(provenance, source));
+                }
             }
-            Err(source) => {
-                provenance.sources.push(ConfigSourceEvidence::new(
-                    ConfigSourceRole::Profile,
-                    None,
-                    PROFILE_PRECEDENCE,
-                    ConfigSourceDisposition::Invalid,
-                ));
-                return Err(ConfigResolutionError::new(provenance, source));
-            }
-        },
+        }
         None => provenance.sources.push(ConfigSourceEvidence::new(
             ConfigSourceRole::Profile,
             None,
@@ -5377,10 +5394,16 @@ fn restrict_untrusted_project_config(project: ConfigFile, global: &ConfigFile) -
 }
 
 /// Resolve a profile with inheritance chain (with cycle detection)
+/// `stripped_by_trust` names the profiles the workspace declared and the trust
+/// gate removed. It exists so a miss can say WHY: a profile that was read and
+/// then discarded is a different fact from one that was never written, and
+/// reporting the second when the first happened sends the user looking at their
+/// file, their path, and their spelling — none of which are wrong.
 fn resolve_profile(
     profiles: &HashMap<String, ProfileConfig>,
     name: &str,
     visited: &mut Vec<String>,
+    stripped_by_trust: &[String],
 ) -> anyhow::Result<ProfileConfig> {
     if visited.contains(&name.to_string()) {
         anyhow::bail!(
@@ -5393,11 +5416,23 @@ fn resolve_profile(
 
     let profile = profiles
         .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", name))?
+        .ok_or_else(|| {
+            if stripped_by_trust.iter().any(|stripped| stripped == name) {
+                anyhow::anyhow!(
+                    "Profile '{name}' was ignored because this workspace is not trusted.\n\
+                     It is declared in the workspace's project config, but `[profiles.*]` \
+                     expands authority, so it is stripped until the workspace is trusted.\n\
+                     Run once with --trust-workspace to trust this workspace, or move the \
+                     profile into your global config."
+                )
+            } else {
+                anyhow::anyhow!("Profile '{name}' not found in config")
+            }
+        })?
         .clone();
 
     if let Some(parent_name) = &profile.extends {
-        let parent = resolve_profile(profiles, parent_name, visited)?;
+        let parent = resolve_profile(profiles, parent_name, visited, stripped_by_trust)?;
         Ok(merge_profiles(parent, profile))
     } else {
         Ok(profile)
@@ -5421,9 +5456,18 @@ fn merge_profiles(base: ProfileConfig, overlay: ProfileConfig) -> ProfileConfig 
     }
 }
 
-fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<ConfigFile> {
+fn apply_profile(
+    mut config: ConfigFile,
+    profile_name: &str,
+    stripped_by_trust: &[String],
+) -> anyhow::Result<ConfigFile> {
     let mut visited = Vec::new();
-    let profile = resolve_profile(&config.profiles, profile_name, &mut visited)?;
+    let profile = resolve_profile(
+        &config.profiles,
+        profile_name,
+        &mut visited,
+        stripped_by_trust,
+    )?;
 
     if let Some(provider) = profile.provider {
         config.default.provider = provider;
@@ -7188,7 +7232,7 @@ mod tests {
         );
 
         let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "child", &mut visited).unwrap();
+        let result = resolve_profile(&profiles, "child", &mut visited, &[]).unwrap();
 
         // Child's model wins
         assert_eq!(result.model, Some("claude-4".to_string()));
@@ -7220,7 +7264,7 @@ mod tests {
         );
 
         let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "a", &mut visited);
+        let result = resolve_profile(&profiles, "a", &mut visited, &[]);
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -7231,11 +7275,75 @@ mod tests {
     fn test_profile_not_found() {
         let profiles: HashMap<String, ProfileConfig> = HashMap::new();
         let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "nonexistent", &mut visited);
+        let result = resolve_profile(&profiles, "nonexistent", &mut visited, &[]);
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("nonexistent"));
+    }
+
+    /// A profile the workspace declared and the trust gate stripped must be
+    /// reported as STRIPPED, not as absent.
+    ///
+    /// Reported by the Desktop lane against 0.12.26: Desktop writes a
+    /// launch-local `[profiles.__wayland_desktop_session]` into a directory it
+    /// creates per chat, passes `--profile`, and got
+    /// `Profile '...' not found in config` — for a profile that was in a file
+    /// Core had just parsed. The only true explanation was a `tracing::warn!`
+    /// at default-invisible verbosity, and it cost them hours in the wrong
+    /// layer.
+    #[test]
+    fn stripped_profile_says_untrusted_not_missing() {
+        let profiles: HashMap<String, ProfileConfig> = HashMap::new();
+        let mut visited = Vec::new();
+        let stripped = vec!["__wayland_desktop_session".to_string()];
+        let result = resolve_profile(
+            &profiles,
+            "__wayland_desktop_session",
+            &mut visited,
+            &stripped,
+        );
+
+        let msg = result
+            .expect_err("a stripped profile must still fail")
+            .to_string();
+        assert!(
+            msg.contains("not trusted"),
+            "the refusal must name the trust decision as the cause, got: {msg}"
+        );
+        assert!(
+            msg.contains("--trust-workspace"),
+            "the refusal must name the remedy, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not found in config"),
+            "the refusal must NOT claim the profile is absent — it was read, then \
+             discarded. Got: {msg}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the above. A profile that genuinely was never
+    /// written must still get the plain not-found message. Without this, an
+    /// error arm that blamed trust unconditionally would satisfy the test
+    /// above and mislead in the opposite direction.
+    #[test]
+    fn genuinely_absent_profile_does_not_blame_trust() {
+        let profiles: HashMap<String, ProfileConfig> = HashMap::new();
+        let mut visited = Vec::new();
+        // Something WAS stripped, but not the profile being asked for.
+        let stripped = vec!["some_other_profile".to_string()];
+        let result = resolve_profile(&profiles, "typo_in_the_name", &mut visited, &stripped);
+
+        let msg = result.expect_err("an absent profile must fail").to_string();
+        assert!(
+            msg.contains("not found in config"),
+            "a profile nobody declared must read as absent, got: {msg}"
+        );
+        assert!(
+            !msg.contains("not trusted"),
+            "a profile nobody declared must NOT be blamed on trust — that would send \
+             the user to --trust-workspace over a typo. Got: {msg}"
+        );
     }
 
     // -------------------------------------------------------------------------

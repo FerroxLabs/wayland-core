@@ -263,9 +263,51 @@ impl Pty {
         );
     }
 
+    /// Type at the terminal.
+    ///
+    /// A PTY master write fails with `EIO` once no process holds the slave
+    /// open, and on macOS that lands the instant the child exits. Two callers
+    /// race it by design: `answer_approval_prompts` runs its full budget with
+    /// `stop_on_exit: false` and keeps typing `y\r` after the TUI has gone,
+    /// and `quit` sends `exit\r` 300ms after `/` — by which time the child may
+    /// already have quit for its own reasons. Both are the desired end state,
+    /// not a fault, so `corpus_fan_out` panicking here was the harness
+    /// reporting a race as a failure.
+    ///
+    /// The tolerance is deliberately narrow. A write that fails while the
+    /// child is STILL RUNNING is a real defect and still panics — blanket
+    /// `.ok()` here would make every drive step in this harness vacuous, since
+    /// a test could "type" at a terminal that never received a byte and still
+    /// pass. A tolerated write is also not a silent pass: nothing was
+    /// delivered, so any `wait_for` that depended on it still fails, with its
+    /// screen dump intact.
     pub fn send(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).expect("write to PTY");
+        if let Err(e) = self.writer.write_all(bytes) {
+            assert!(
+                self.child_has_exited(),
+                "write to PTY failed while the child was STILL RUNNING: {e}"
+            );
+            return;
+        }
         self.writer.flush().ok();
+    }
+
+    /// Has the child gone? Bounded rather than a single `try_wait`: the failed
+    /// write can beat reaping by a few milliseconds, and reading "not yet
+    /// exited" in that window would turn the race back into the panic this
+    /// exists to remove.
+    fn child_has_exited(&mut self) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true,
+                // The child cannot be observed at all, so it cannot be
+                // asserted to be running.
+                Err(_) => return true,
+                Ok(None) if Instant::now() >= deadline => return false,
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
     }
 
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
