@@ -576,10 +576,66 @@ impl LlmProvider for ResilientProvider {
         }
         self.reporter.report_failover(&receipt);
         Err(last_error.unwrap_or_else(|| ProviderError::NotAttempted {
-            reason: "no configured fallback candidate passed routing policy".into(),
+            reason: describe_exhausted_chain(&receipt),
         }))
     }
 }
+
+/// B02-D3 — turn the receipt the chain already built into the sentence the
+/// operator reads.
+///
+/// `emit_provider_failover_receipt` is overridden only by the JSON-stream
+/// protocol sink, so on the CLI and TUI the receipt was reported and then
+/// discarded and the user got a fixed string naming no candidate, no reason
+/// and no remedy. Everything here is already on the receipt that ships to the
+/// host, so this discloses nothing new — and it deliberately carries ONLY
+/// provider, model and the rejection slug. Never a base_url, a credential, or
+/// a policy value.
+///
+/// Capped at [`MAX_DESCRIBED_CANDIDATES`] entries plus a count of the rest:
+/// this string reaches logs and the session journal, so a long chain must not
+/// become a multi-kilobyte line.
+fn describe_exhausted_chain(receipt: &FailoverReceipt) -> String {
+    let mut out = format!(
+        "no fallback candidate was eligible after {}/{} failed ({}): ",
+        receipt.failed_provider, receipt.failed_model, receipt.reason
+    );
+    let shown = receipt.candidates.len().min(MAX_DESCRIBED_CANDIDATES);
+    for (i, candidate) in receipt.candidates.iter().take(shown).enumerate() {
+        if i > 0 {
+            out.push_str("; ");
+        }
+        match candidate.disposition {
+            Err(rejection) => out.push_str(&format!(
+                "{}/{} rejected \u{2014} {}",
+                candidate.provider, candidate.model, rejection
+            )),
+            Ok(()) => out.push_str(&format!(
+                "{}/{} attempted \u{2014} {}",
+                candidate.provider,
+                candidate.model,
+                candidate
+                    .failure_reason
+                    .map_or("failed", |reason| reason.as_str())
+            )),
+        }
+    }
+    if receipt.candidates.is_empty() {
+        out.push_str("no candidates were configured");
+    }
+    let elided = receipt.candidates.len().saturating_sub(shown);
+    if elided > 0 {
+        out.push_str(&format!(" (+{elided} more)"));
+    }
+    out.push_str(
+        ". Point [provider_chain] fallback_models at a model this build can size, \
+         or wait out the cooldown.",
+    );
+    out
+}
+
+/// How many candidates the terminal error names before eliding the tail.
+const MAX_DESCRIBED_CANDIDATES: usize = 5;
 
 #[cfg(test)]
 mod tests {
@@ -1547,6 +1603,150 @@ mod tests {
         assert!(
             !models.is_empty(),
             "list_models must yield the primary's alias catalog, not an empty list"
+        );
+    }
+
+    // ── B02-D3: the terminal error must carry the receipt's facts ───────────
+    //
+    // When every candidate is refused, the receipt naming WHICH candidate was
+    // refused and WHY is handed to `report_failover` — and then thrown away.
+    // The receipt only survives if the sink renders it, and
+    // `OutputSink::emit_provider_failover_receipt` is overridden in exactly one
+    // place: the JSON-stream protocol sink. A CLI or TUI operator therefore got
+    // "Provider request was not attempted: no configured fallback candidate
+    // passed routing policy" — no candidate, no reason, no remedy.
+    //
+    // That exact string is produced on the circuit-OPEN path: the primary is
+    // skipped, so `last_error` is never set and the chain's own message is all
+    // the user gets. These tests drive that path.
+
+    /// Trip the primary's breaker, then take the circuit-open path with two
+    /// candidates refused for DIFFERENT reasons — so the assertions cannot be
+    /// satisfied by hardcoding one rejection into the message.
+    async fn exhausted_chain_error() -> ProviderError {
+        let unknown_window = candidate("flux-standard", true, None);
+        let mut denied = candidate("blocked-model", true, Some(400_000));
+        denied.provider = "denied-provider".into();
+
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![
+                (unknown_window, Arc::new(AlwaysOk) as Arc<dyn LlmProvider>),
+                (denied, Arc::new(AlwaysOk) as Arc<dyn LlmProvider>),
+            ],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(ReceiptReporter::default()),
+            FailoverRoutingPolicy {
+                denied_providers: std::collections::BTreeSet::from(["denied-provider".to_string()]),
+                ..Default::default()
+            },
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(8_000);
+
+        // Turn 1 attempts and trips the breaker; the error the user sees is the
+        // primary's own. Turn 2 skips the primary entirely — that is the state
+        // the repro was in, and the only one that reaches the chain's message.
+        let _ = resilient.stream(&request).await;
+        resilient
+            .stream(&request)
+            .await
+            .err()
+            .expect("circuit is open and every candidate is refused")
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_chain_names_each_candidate_and_why_it_was_refused() {
+        let message = exhausted_chain_error().await.to_string();
+
+        for needle in [
+            // the candidate that was refused …
+            "flux-standard",
+            // … and the reason, in the same vocabulary the receipt uses.
+            "context_window_unknown",
+            // the SECOND candidate, refused for a DIFFERENT reason — a message
+            // that names only the first candidate, or only one rejection kind,
+            // fails here.
+            "denied-provider",
+            "blocked-model",
+            "provider_denied",
+            // and what the primary was doing when the chain was entered.
+            "primary",
+        ] {
+            assert!(
+                message.contains(needle),
+                "the terminal error must name {needle:?}; got: {message}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_exhausted_chain_error_discloses_no_more_than_the_receipt_does() {
+        // The receipt already ships provider + model + rejection to the host,
+        // so restating them costs nothing. Endpoints, keys and policy values
+        // are NOT on the receipt and must never be interpolated here.
+        let message = exhausted_chain_error().await.to_string();
+        assert!(
+            !message.contains("http"),
+            "an endpoint leaked into a user-facing error: {message}"
+        );
+        assert!(
+            !message.contains("denied_providers"),
+            "policy configuration leaked into a user-facing error: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_refused_chain_cannot_grow_an_unbounded_error_string() {
+        // The error reaches logs and the session journal, so a 40-entry chain
+        // must not become a multi-kilobyte line.
+        let fallbacks: Vec<_> = (0..40)
+            .map(|i| {
+                (
+                    candidate(&format!("model-{i}"), true, None),
+                    Arc::new(AlwaysOk) as Arc<dyn LlmProvider>,
+                )
+            })
+            .collect();
+        let resilient = ResilientProvider::new_with_policy(
+            "primary",
+            Arc::new(AlwaysFail),
+            fallbacks,
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(ReceiptReporter::default()),
+            FailoverRoutingPolicy::default(),
+        );
+        let mut request = dummy_request();
+        request.client_context_tokens = Some(8_000);
+        let _ = resilient.stream(&request).await;
+        let message = resilient
+            .stream(&request)
+            .await
+            .err()
+            .expect("all 40 candidates have an unknown window")
+            .to_string();
+
+        assert!(
+            message.contains("model-0"),
+            "the first refused candidate must still be named: {message}"
+        );
+        assert!(
+            message.contains("35 more"),
+            "the elided tail must be counted, not dropped: {message}"
+        );
+        assert!(
+            message.len() < 600,
+            "error length {} is unbounded by the chain length: {message}",
+            message.len()
         );
     }
 }

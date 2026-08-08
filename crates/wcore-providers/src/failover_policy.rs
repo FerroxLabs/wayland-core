@@ -105,6 +105,35 @@ pub enum CandidateRejection {
     BudgetDenied,
 }
 
+impl CandidateRejection {
+    /// The wire slug, shared by the failover receipt and the human-facing
+    /// terminal error so an operator and a host log say the same word about
+    /// the same decision. Mirrors `FailoverReason::as_str`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ProviderNotAllowed => "provider_not_allowed",
+            Self::ProviderDenied => "provider_denied",
+            Self::RegionNotAllowed => "region_not_allowed",
+            Self::OrganizationMismatch => "organization_mismatch",
+            Self::ToolsUnsupported => "tools_unsupported",
+            Self::VisionUnsupported => "vision_unsupported",
+            Self::StructuredOutputUnsupported => "structured_output_unsupported",
+            Self::ContextWindowUnknown => "context_window_unknown",
+            Self::ContextWindowTooSmall => "context_window_too_small",
+            Self::PricingStale => "pricing_stale",
+            Self::PricingUnavailable => "pricing_unavailable",
+            Self::CooldownActive => "cooldown_active",
+            Self::BudgetDenied => "budget_denied",
+        }
+    }
+}
+
+impl std::fmt::Display for CandidateRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CandidateReceipt {
     pub provider: String,
