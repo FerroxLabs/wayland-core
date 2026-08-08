@@ -353,6 +353,23 @@ pub(crate) fn build_contents(
         Some(system_parts.join("\n\n"))
     };
 
+    // Gemini pairs `functionResponse` to `functionCall` by NAME, and the name
+    // must be the same wire-encoded function name the call went out with. The
+    // engine's `ToolResult` block carries only `tool_use_id`, so resolve the
+    // name from the `ToolUse` that requested it — one pass over history, built
+    // before the render loop so a result can reference a call in ANY earlier
+    // message. Falls back to the id (wire-encoded, so it can never exceed
+    // Gemini's name budget) for a result with no matching call in this window,
+    // e.g. a compaction-trimmed or host-synthesized round.
+    let mut call_names: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block {
+                call_names.insert(id.as_str(), encode_tool_name(name));
+            }
+        }
+    }
+
     let mut contents: Vec<Value> = Vec::new();
 
     for msg in messages {
@@ -402,16 +419,25 @@ pub(crate) fn build_contents(
                     is_error,
                 } => {
                     // Gemini's functionResponse uses the function NAME, not the
-                    // call ID — but we don't carry the name back through the
-                    // engine's ToolResult block. Use the id as a stable label;
-                    // the model only cares about pairing by position.
+                    // call ID. Resolve it from the `ToolUse` this result
+                    // answers (`call_names`, built above) so the name matches
+                    // the `functionCall` byte-for-byte. Emitting the raw id
+                    // here — as this builder used to — produced a
+                    // `functionResponse` Gemini cannot pair with any call, and
+                    // for the synthesized Gemini ids (`gemini_call_<tool>_
+                    // <nanos>_<tokens>`) it also blew past the 63-character
+                    // name budget for any non-trivial tool name.
+                    let response_name = call_names
+                        .get(tool_use_id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| encode_tool_name(tool_use_id));
                     let mut response_obj = json!({ "content": content });
                     if *is_error {
                         response_obj["isError"] = json!(true);
                     }
                     parts.push(json!({
                         "functionResponse": {
-                            "name": tool_use_id,
+                            "name": response_name,
                             "response": response_obj,
                         }
                     }));
@@ -1244,6 +1270,197 @@ mod tests {
         let part = &contents[0]["parts"][0];
         assert_eq!(part["functionResponse"]["name"], "Read");
         assert_eq!(part["functionResponse"]["response"]["content"], "file body");
+    }
+
+    // ── C-4 triage: multi-call Gemini histories ────────────────────────────
+    //
+    // The two tests above cover exactly ONE tool call, with a hand-picked
+    // `tool_use_id` ("Read") that happens to spell a function name. Every
+    // defect below hides in the second call, or in an id that looks like the
+    // real ones the Gemini stream synthesizes
+    // (`make_tool_id` → `gemini_call_<tool>_<nanos>_<output_tokens>`).
+
+    /// Realistic Gemini call id — the exact shape `make_tool_id` produces.
+    fn gemini_id(tool: &str) -> String {
+        format!("gemini_call_{tool}_1785432109876543210_42")
+    }
+
+    fn call(id: &str, name: &str, sig: Option<&str>) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: json!({}),
+            extra: sig.map(|s| json!({ "thoughtSignature": s })),
+        }
+    }
+
+    fn result_for(id: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content: "ok".into(),
+            is_error: false,
+        }
+    }
+
+    /// Collect `(content_index, part_index, functionCall name)` for every
+    /// functionCall part, and the same for functionResponse parts. Written
+    /// independently of the builder so it measures the payload, not the code.
+    fn calls_and_responses(contents: &[Value]) -> (Vec<(usize, usize, String)>, Vec<String>) {
+        let mut calls = Vec::new();
+        let mut responses = Vec::new();
+        for (ci, content) in contents.iter().enumerate() {
+            for (pi, part) in content["parts"].as_array().unwrap().iter().enumerate() {
+                if let Some(fc) = part.get("functionCall") {
+                    calls.push((ci, pi, fc["name"].as_str().unwrap().to_string()));
+                }
+                if let Some(fr) = part.get("functionResponse") {
+                    responses.push(fr["name"].as_str().unwrap().to_string());
+                }
+            }
+        }
+        (calls, responses)
+    }
+
+    /// Gemini pairs `functionResponse` ⇄ `functionCall` BY NAME. The builder
+    /// used to emit the raw `tool_use_id` as the response name, so with a real
+    /// synthesized id no response could ever be matched to its call.
+    #[test]
+    fn build_contents_function_response_name_matches_its_function_call() {
+        let read_id = gemini_id("Read");
+        let search_id = gemini_id("ToolSearch");
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    call(&read_id, "Read", Some("sig-1")),
+                    call(&search_id, "ToolSearch", None),
+                ],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![result_for(&read_id), result_for(&search_id)],
+            ),
+        ];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let (calls, responses) = calls_and_responses(&contents);
+        let call_names: Vec<String> = calls.iter().map(|(_, _, n)| n.clone()).collect();
+
+        assert_eq!(call_names, vec!["Read", "ToolSearch"]);
+        assert_eq!(
+            responses, call_names,
+            "each functionResponse.name must equal the functionCall.name it answers; \
+             got responses={responses:?} for calls={call_names:?}"
+        );
+    }
+
+    /// An MCP tool name plus the synthesized-id wrapper blows past Gemini's
+    /// 64-character name budget, so the old id-as-name emitted a
+    /// `functionResponse` the API rejects outright — while the matching
+    /// `functionCall` went out correctly encoded.
+    #[test]
+    fn build_contents_function_response_name_stays_within_the_wire_budget() {
+        let tool = "mcp__io-github-taylorwilsdon-google-workspace-mcp__search_gmail_messages";
+        let id = gemini_id(tool);
+        assert!(
+            id.len() > 64,
+            "instrument check: the synthesized id must be over-budget to measure anything \
+             (len={})",
+            id.len()
+        );
+        let messages = vec![
+            Message::new(Role::Assistant, vec![call(&id, tool, Some("sig-1"))]),
+            Message::new(Role::Tool, vec![result_for(&id)]),
+        ];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let (calls, responses) = calls_and_responses(&contents);
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].len() <= 64,
+            "functionResponse.name exceeds Gemini's 64-char budget: {} chars ({})",
+            responses[0].len(),
+            responses[0]
+        );
+        assert_eq!(
+            responses[0], calls[0].2,
+            "the over-budget name must be encoded the SAME way the call was"
+        );
+    }
+
+    /// C-4 gate. Google's rule: the signature must come back "in the exact
+    /// part where it was received", and in a parallel batch only the FIRST
+    /// functionCall part carries one. Prove the builder holds that across a
+    /// three-step history — the multi-call shape the single-call tests above
+    /// never exercised — and that it never interleaves a functionResponse
+    /// between two functionCalls of the same step (also a documented 400).
+    #[test]
+    fn build_contents_round_trips_every_signature_in_a_multi_call_history() {
+        let a = gemini_id("Read");
+        let b = gemini_id("Grep");
+        let c = gemini_id("ToolSearch");
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            // Step 1 — single call, signed.
+            Message::new(Role::Assistant, vec![call(&a, "Read", Some("sig-a"))]),
+            Message::new(Role::Tool, vec![result_for(&a)]),
+            // Step 2 — parallel batch: Gemini signs only the first part.
+            Message::new(
+                Role::Assistant,
+                vec![
+                    call(&b, "Grep", Some("sig-b")),
+                    call(&c, "ToolSearch", None),
+                ],
+            ),
+            Message::new(Role::Tool, vec![result_for(&b), result_for(&c)]),
+        ];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let (calls, _) = calls_and_responses(&contents);
+        assert_eq!(calls.len(), 3, "all three calls must survive the rebuild");
+
+        // Every signature present in history reaches the wire, on its own part.
+        let sig_at = |ci: usize, pi: usize| -> Option<String> {
+            contents[ci]["parts"][pi]
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        assert_eq!(
+            sig_at(calls[0].0, calls[0].1).as_deref(),
+            Some("sig-a"),
+            "step 1's signature was dropped"
+        );
+        assert_eq!(
+            sig_at(calls[1].0, calls[1].1).as_deref(),
+            Some("sig-b"),
+            "step 2's FIRST functionCall lost its signature — the exact shape of the \
+             live 400 (\"missing a thought_signature ... position N\")"
+        );
+        assert_eq!(
+            sig_at(calls[2].0, calls[2].1),
+            None,
+            "the builder must not invent a signature Gemini never issued"
+        );
+
+        // Within a step, all functionCalls precede all functionResponses:
+        // Gemini 400s on FC1, FR1, FC2, FR2 interleaving.
+        for content in &contents {
+            let mut seen_response = false;
+            for part in content["parts"].as_array().unwrap() {
+                if part.get("functionResponse").is_some() {
+                    seen_response = true;
+                } else if part.get("functionCall").is_some() {
+                    assert!(
+                        !seen_response,
+                        "functionCall emitted after a functionResponse in the same content \
+                         block: {content}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
