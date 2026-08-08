@@ -19,6 +19,16 @@ pub struct CompactState {
     /// pressure here — rather than the inflated `max()` — stops auto
     /// compaction from firing prematurely.
     pub last_real_input_tokens: u64,
+    /// A12-D1 — the REAL-pressure watermark at the last automatic microcompact
+    /// fire, or `None` if none has fired since the last autocompact.
+    ///
+    /// The count trigger re-arms off its own post-clear count, so the pressure
+    /// floor alone converts "clear every fan-out" into "clear every few
+    /// fan-outs above the floor" — the same read/clear/re-read loop, slower.
+    /// Requiring the watermark to have GROWN since the last fire makes the
+    /// fire points monotonic and therefore bounded. Reset after an autocompact,
+    /// which collapses the context and legitimately re-arms micro.
+    pub last_micro_fire_tokens: Option<u64>,
 }
 
 impl CompactState {
@@ -27,6 +37,7 @@ impl CompactState {
             consecutive_failures: 0,
             last_input_tokens: 0,
             last_real_input_tokens: 0,
+            last_micro_fire_tokens: None,
         }
     }
 

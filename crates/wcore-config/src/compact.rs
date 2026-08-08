@@ -62,6 +62,28 @@ pub struct CompactConfig {
     #[serde(default = "default_micro_gap_seconds")]
     pub micro_gap_seconds: u64,
 
+    /// Microcompact: fraction of the effective context window that must be
+    /// OCCUPIED before an AUTOMATIC count-triggered microcompact may run.
+    ///
+    /// Microcompact DELETES tool output the model may still be reasoning over.
+    /// Below this floor there is no pressure to relieve and clearing is pure
+    /// context destruction: the post-clear live count resets to
+    /// `micro_keep_recent`, so the count trigger re-arms on the very next
+    /// fan-out and the agent re-reads the same files forever. `0.0` restores
+    /// the pre-fix always-on behaviour. Clamped to `0.0..=0.95` at the use
+    /// site and capped there at the autocompact threshold, so micro always
+    /// gets first crack before the LLM summarizer.
+    ///
+    /// Does NOT gate the explicit `/compact` verb (a user instruction, not a
+    /// heuristic) nor the idle-gap time trigger.
+    ///
+    /// NOTE: `merge_config_files_with_trust` uses `context_window` as the
+    /// presence probe for the whole `[compact]` block, so a PROJECT config
+    /// that sets only this key is discarded unless it also sets
+    /// `context_window` or `enabled`. Global config works normally.
+    #[serde(default = "default_micro_pressure_fraction")]
+    pub micro_pressure_fraction: f64,
+
     /// Tool names whose results are eligible for microcompact content clearing.
     #[serde(default = "default_compactable_tools")]
     pub compactable_tools: Vec<String>,
@@ -253,6 +275,7 @@ impl Default for CompactConfig {
             max_failures: default_max_failures(),
             micro_keep_recent: default_micro_keep_recent(),
             micro_gap_seconds: default_micro_gap_seconds(),
+            micro_pressure_fraction: default_micro_pressure_fraction(),
             compactable_tools: default_compactable_tools(),
             enabled: default_true(),
             cache_diagnostics: false,
@@ -287,6 +310,14 @@ fn default_max_failures() -> u32 {
 fn default_micro_keep_recent() -> usize {
     5
 }
+/// 0.5 — half the window. Chosen so the floor is always at or below the
+/// autocompact threshold for every default config (0.5*W <= W-33k for
+/// W >= 66k), and so the 43,288/128,000 = 34% occupancy at which the reported
+/// re-read loop was measured sits clearly below it.
+pub fn default_micro_pressure_fraction() -> f64 {
+    0.5
+}
+
 fn default_micro_gap_seconds() -> u64 {
     3600
 }
@@ -342,6 +373,7 @@ mod tests {
         assert_eq!(cfg.max_failures, 3);
         assert_eq!(cfg.micro_keep_recent, 5);
         assert_eq!(cfg.micro_gap_seconds, 3600);
+        assert_eq!(cfg.micro_pressure_fraction, 0.5);
         assert!(cfg.enabled);
         assert_eq!(
             cfg.compactable_tools,
@@ -388,6 +420,7 @@ context_window = 128000
         assert_eq!(cfg.max_failures, 3);
         assert_eq!(cfg.micro_keep_recent, 5);
         assert_eq!(cfg.micro_gap_seconds, 3600);
+        assert_eq!(cfg.micro_pressure_fraction, 0.5);
         assert!(cfg.enabled);
     }
 
@@ -402,6 +435,7 @@ context_window = 128000
         assert_eq!(cfg.max_failures, default.max_failures);
         assert_eq!(cfg.micro_keep_recent, default.micro_keep_recent);
         assert_eq!(cfg.micro_gap_seconds, default.micro_gap_seconds);
+        assert_eq!(cfg.micro_pressure_fraction, default.micro_pressure_fraction);
         assert_eq!(cfg.enabled, default.enabled);
     }
 

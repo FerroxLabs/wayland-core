@@ -13617,9 +13617,23 @@ impl AgentEngine {
         }
 
         // 1. Microcompact (lightweight, no LLM call)
-        if micro::should_microcompact(&self.messages, &self.compact_config) {
+        // A12-D1 — the same watermark/provider/model triple `should_autocompact`
+        // receives below, so the two rungs of the ladder cannot disagree about
+        // which window they are gating on.
+        if micro::should_microcompact(
+            &self.messages,
+            &self.compact_config,
+            self.compact_state.last_real_input_tokens,
+            self.compact_state.last_micro_fire_tokens,
+            self.compat.provider_type(),
+            &self.model,
+        ) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
             if result.cleared_count > 0 {
+                // Latch the fire watermark so the count trigger cannot re-arm
+                // off its own post-clear count on the next fan-out.
+                self.compact_state.last_micro_fire_tokens =
+                    Some(self.compact_state.last_real_input_tokens);
                 self.output.emit_info(&format!(
                     "Microcompact: cleared {} tool results (~{} tokens freed)",
                     result.cleared_count, result.estimated_tokens_freed
@@ -13770,6 +13784,10 @@ impl AgentEngine {
                     self.compaction_floor += collapsed;
                     self.messages = vec![Message::now(Role::User, folded)];
                     compacted = true;
+                    // A12-D1 — the context was just collapsed to a summary, so
+                    // the micro re-arm latch is stale-high and would hold micro
+                    // shut for the rest of the session. Clear it.
+                    self.compact_state.last_micro_fire_tokens = None;
                     // #279(d): signal the host a compaction fired. Gated host-side
                     // by capabilities.non_destructive_compact; dormant unless the
                     // sink was built with with_non_destructive_compact(true).
@@ -18934,7 +18952,18 @@ mod compact_tests {
             micro_keep_recent: 3,
             ..Default::default()
         };
-        let state = CompactState::new();
+        // A12-D1 SEMANTIC UPDATE, not a mechanical one. The count trigger now
+        // additionally requires real context pressure; with the default config
+        // the floor is min(0.5*200_000, 200_000-20_000-13_000) = 100_000. A
+        // fresh `CompactState` reports a 0 watermark, so leaving it would flip
+        // this POSITIVE assertion to failing and the tempting "repair" is to
+        // assert 0 cleared — silently deleting the clearing coverage this test
+        // exists for. Report a watermark above the floor and below the 167_000
+        // autocompact threshold, so this still isolates microcompact.
+        let state = CompactState {
+            last_real_input_tokens: 120_000,
+            ..CompactState::new()
+        };
 
         let mut engine = make_compact_engine(config, state, messages);
         engine.run_compaction().await.unwrap();
