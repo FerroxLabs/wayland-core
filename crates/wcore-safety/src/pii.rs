@@ -83,7 +83,16 @@ static PATTERNS: &[(&str, &str)] = &[
     // readable while unknown credential values are still scrubbed.
     (
         "SECRET_ASSIGNMENT",
-        r"(?im)^\s*(?:export\s+)?(?:[A-Z][A-Z0-9]*_)*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?|AUTH)(?:_[A-Z0-9]+)*\s*[:=]\s*[^#\r\n]+",
+        // The key prefix is BOUNDED on purpose. Unbounded (`(?:[A-Z][A-Z0-9]*_)*`
+        // / `(?:_[A-Z0-9]+)*`) it is an amplifier: whitespace-normalized text has
+        // exactly one `^` anchor, at offset 0, so a single trailing `TOKEN=` let
+        // the prefix walk forward across an entire 34 KB blob and the whole thing
+        // was replaced by one marker. Caps the key at ~248 chars per side. This
+        // IS a coverage narrowing at the extremes — an env key with more than 8
+        // underscore-separated segments, or a single segment over 31 chars, stops
+        // matching — and it is stated rather than assumed; see
+        // `a_realistically_long_key_still_matches`.
+        r"(?im)^\s*(?:export\s+)?(?:[A-Z][A-Z0-9]{0,30}_){0,8}(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?|AUTH)(?:_[A-Z0-9]{1,30}){0,8}\s*[:=]\s*[^#\r\n]+",
     ),
     // E.164 phone numbers: +<country><6-14 digits>. Negative lookahead via
     // word boundary so adjacent alphanumerics don't reach in.
@@ -160,6 +169,106 @@ fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
     Cow::Owned(result)
 }
 
+/// Byte spans `(start, end, label)` of every direct pattern match in `input`,
+/// sorted ascending and merged.
+///
+/// Deliberately NOT the implementation of `scrub_direct`. Those two are not
+/// equivalent: `scrub_direct` is a cascade of sequential `replace_all`s, and its
+/// `[REDACTED:` guard exists so `SECRET_ASSIGNMENT` preserves a line an earlier
+/// pattern already marked. In a single merged pass no marker exists yet, so the
+/// guard would be vacuous and the leftmost label would win —
+/// `API_KEY=ghp_aaaa...` would go from `API_KEY=[REDACTED:GITHUB_PAT]` to
+/// `[REDACTED:SECRET_ASSIGNMENT]`, new over-redaction on the path every consumer
+/// uses. This function is used ONLY by the whitespace-normalized re-scan.
+fn direct_match_spans(input: &str) -> Vec<(usize, usize, &'static str)> {
+    if !fast_set().is_match(input) {
+        return Vec::new();
+    }
+    let mut spans: Vec<(usize, usize, &'static str)> = Vec::new();
+    for (idx, rx) in compiled().iter().enumerate() {
+        let label = PATTERNS[idx].0;
+        for m in rx.find_iter(input) {
+            // Same guard `scrub_direct` applies, or a second pass re-matches its
+            // own marker and shifts every subsequent offset.
+            if label == "SECRET_ASSIGNMENT" && m.as_str().contains("[REDACTED:") {
+                continue;
+            }
+            spans.push((m.start(), m.end(), label));
+        }
+    }
+    spans.sort_by_key(|(start, end, _)| (*start, std::cmp::Reverse(*end)));
+    let mut merged: Vec<(usize, usize, &'static str)> = Vec::new();
+    for (start, end, label) in spans {
+        match merged.last_mut() {
+            // Overlapping OR adjacent: an unmerged pair would splice a
+            // backwards slice and either panic or emit matched bytes.
+            Some(prev) if start <= prev.1 => prev.1 = prev.1.max(end),
+            _ => merged.push((start, end, label)),
+        }
+    }
+    merged
+}
+
+/// Delete ASCII whitespace, recording for each byte of the result the
+/// `(start, end)` byte range of the ORIGINAL char it came from.
+fn normalize_with_map(src: &str) -> (String, Vec<(usize, usize)>) {
+    let mut out = String::with_capacity(src.len());
+    let mut map = Vec::with_capacity(src.len());
+    for (i, ch) in src.char_indices() {
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+        let len = ch.len_utf8();
+        out.push(ch);
+        for _ in 0..len {
+            map.push((i, i + len));
+        }
+    }
+    (out, map)
+}
+
+/// Whitespace-normalize `src`, find the direct matches in that normalized
+/// space, and splice their markers back into ORIGINAL coordinates.
+///
+/// The redaction unit is the MATCH, not the candidate. Everything outside a
+/// match stays byte-identical — line numbers, tabs and newlines included.
+/// Returns `None` when there is nothing to redact, which is the common path and
+/// allocates only the normalized copy.
+///
+/// Bound honesty: the span is the bound of the match IN NORMALIZED SPACE. Every
+/// open-ended pattern (GITHUB_PAT `{20,}`, OPENAI `{32,}`, ANTHROPIC `+`, SLACK,
+/// GOOGLE) still extends to the next non-alphanumeric character with whitespace
+/// deleted. Tightening that needs trailing anchors on the pattern set, which is
+/// a bigger change than this.
+fn splice_normalized_spans(src: &str) -> Option<String> {
+    let (normalized, map) = normalize_with_map(src);
+    let spans = direct_match_spans(&normalized);
+    if spans.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut last = 0usize;
+    for (start, end, label) in spans {
+        if end == 0 || end > map.len() {
+            continue;
+        }
+        let origin_start = map[start].0;
+        let origin_end = map[end - 1].1;
+        debug_assert!(
+            origin_start >= last,
+            "direct_match_spans must return sorted, merged spans"
+        );
+        if origin_start < last {
+            continue;
+        }
+        out.push_str(&src[last..origin_start]);
+        out.push_str(&format!("[REDACTED:{label}]"));
+        last = origin_end;
+    }
+    out.push_str(&src[last..]);
+    Some(out)
+}
+
 fn decoded_contains_secret(candidate: &str) -> bool {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 
@@ -200,13 +309,19 @@ impl PIIScrubber {
                     || matches!(byte, b'+' | b'/' | b'_' | b'-' | b'=')
             });
         if wrapped_record {
+            // Span-accurate: replace each MATCH in original coordinates instead
+            // of returning the whole whitespace-stripped record. Returning the
+            // normalized record destroyed every newline, tab and indent in the
+            // output even when the actual secret was 40 bytes.
+            if let Some(spliced) = splice_normalized_spans(direct.as_ref()) {
+                return Cow::Owned(spliced);
+            }
             let normalized_record: String = direct
                 .chars()
                 .filter(|ch| !ch.is_ascii_whitespace())
                 .collect();
-            if let Cow::Owned(redacted) = scrub_direct(&normalized_record) {
-                return Cow::Owned(redacted);
-            }
+            // Whole-record decode branch, deliberately unchanged: a blob that
+            // base64-decodes to a secret genuinely IS the unit.
             if normalized_record.len() >= 24 && decoded_contains_secret(&normalized_record) {
                 return Cow::Owned("[REDACTED:ENCODED_SECRET]".to_string());
             }
@@ -232,24 +347,30 @@ impl PIIScrubber {
         let mut last = 0;
         let mut wrapped = None::<String>;
         for candidate in wrapped_base64_candidates().find_iter(continuous.as_ref()) {
+            // The candidate regex matches any run of alphanumerics + ASCII
+            // whitespace + `+/_=`, unbounded — ordinary punctuation-free prose
+            // IS such a run, so a 2000-line numbered Read result is ONE
+            // candidate. Replacing the candidate therefore sized the redaction
+            // by the surrounding benign text: 49,995 bytes became 34. Replace
+            // only the matched spans, in original coordinates.
+            if let Some(spliced) = splice_normalized_spans(candidate.as_str()) {
+                let out = wrapped.get_or_insert_with(|| String::with_capacity(continuous.len()));
+                out.push_str(&continuous[last..candidate.start()]);
+                out.push_str(&spliced);
+                last = candidate.end();
+                continue;
+            }
             let normalized: String = candidate
                 .as_str()
                 .chars()
                 .filter(|ch| !ch.is_ascii_whitespace())
                 .collect();
-            let contains_direct_secret = matches!(scrub_direct(&normalized), Cow::Owned(_));
-            if !contains_direct_secret
-                && (normalized.len() < 24 || !decoded_contains_secret(&normalized))
-            {
+            if normalized.len() < 24 || !decoded_contains_secret(&normalized) {
                 continue;
             }
             let out = wrapped.get_or_insert_with(|| String::with_capacity(continuous.len()));
             out.push_str(&continuous[last..candidate.start()]);
-            out.push_str(if contains_direct_secret {
-                "[REDACTED:WHITESPACE_SPLIT_SECRET]"
-            } else {
-                "[REDACTED:ENCODED_SECRET]"
-            });
+            out.push_str("[REDACTED:ENCODED_SECRET]");
             last = candidate.end();
         }
         if let Some(mut wrapped) = wrapped {
