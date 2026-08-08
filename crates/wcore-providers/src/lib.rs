@@ -75,7 +75,7 @@ pub use openai_chatgpt::{AsyncBearerSource, BearerCreds, OpenAIChatGptProvider};
 pub use registry::{ProviderFactory, ProviderRegistry, RegistryError, WaylandProviderRegistry};
 pub use resilient::{
     CircuitBreaker, CircuitConfig, CircuitReporter, CircuitState, NoOpCircuitReporter,
-    ResilientProvider,
+    ResilientProvider, describe_failover_receipt,
 };
 pub use routing::{
     RequestShape, RoutingDecision, RoutingHeuristics, RoutingTier, route, select_tier,

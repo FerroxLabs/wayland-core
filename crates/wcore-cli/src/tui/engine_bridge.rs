@@ -486,6 +486,14 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    /// R3(b) — forward the failover receipt so the bridge can render it.
+    /// Left at the no-op trait default, an in-process TUI session never even
+    /// produced the event, so the operator had no way to learn that a turn
+    /// had been rerouted or that every fallback had been refused.
+    fn emit_provider_failover_receipt(&self, receipt: serde_json::Value) {
+        self.send(ProtocolEvent::ProviderFailoverReceipt { receipt });
+    }
+
     fn emit_provider_attempt(&self, failure: Option<&str>) {
         self.send(ProtocolEvent::ProviderAttempt {
             failure: failure.map(String::from),
@@ -3771,6 +3779,24 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
     use wcore_protocol::events::FinishReason;
+
+    /// R3(b) — the TUI's own sink must forward the failover receipt. Without
+    /// this the bridge's rendering is unreachable: `ChannelSink` left
+    /// `emit_provider_failover_receipt` at its no-op trait default, so an
+    /// in-process TUI session never produced the event at all.
+    #[test]
+    fn channel_sink_forwards_the_provider_failover_receipt() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = ChannelSink::new(tx);
+        sink.emit_provider_failover_receipt(serde_json::json!({"reason": "rate_limit"}));
+
+        match rx.try_recv() {
+            Ok(ProtocolEvent::ProviderFailoverReceipt { receipt }) => {
+                assert_eq!(receipt["reason"], "rate_limit");
+            }
+            other => panic!("the TUI sink swallowed the failover receipt: {other:?}"),
+        }
+    }
 
     #[test]
     fn context_checkpoint_blocker_offers_safe_cancel() {

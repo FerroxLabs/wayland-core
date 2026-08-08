@@ -329,6 +329,31 @@ impl OutputSink for TerminalSink {
         self.formatter.session_info(msg);
     }
 
+    /// R3(b) — render the failover receipt for the human at the terminal.
+    ///
+    /// The trait default is a no-op and only the JSON-stream sink overrode it,
+    /// so Desktop was told which fallback candidates were refused and why
+    /// while a CLI or TUI user was told nothing: on an exhausted chain they
+    /// got a bare error, and on a SUCCESSFUL failover they were silently moved
+    /// to another provider — different cost, different context window — with
+    /// no notice at all.
+    ///
+    /// The receipt arrives as the same `serde_json::Value` that ships to the
+    /// host, produced by `FailoverReceipt`'s own `Serialize`, so decoding it
+    /// back is total by construction. If that ever stops being true the raw
+    /// JSON is printed rather than dropped — an unreadable receipt is still
+    /// strictly more than silence.
+    fn emit_provider_failover_receipt(&self, receipt: serde_json::Value) {
+        match serde_json::from_value::<wcore_providers::FailoverReceipt>(receipt.clone()) {
+            Ok(receipt) => self
+                .formatter
+                .provider_notice(&wcore_providers::describe_failover_receipt(&receipt)),
+            Err(error) => self.formatter.provider_notice(&format!(
+                "provider failover receipt could not be decoded ({error}): {receipt}"
+            )),
+        }
+    }
+
     /// Once per sink, which for a CLI/REPL/TUI run is once per process.
     ///
     /// The condition is `durable_sessions_disabled_by_host()` — a host fact

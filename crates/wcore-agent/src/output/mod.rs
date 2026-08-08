@@ -651,6 +651,32 @@ impl OutputFormatter {
         }
     }
 
+    /// R3(b) — a provider routing/failover notice, possibly multi-line.
+    ///
+    /// Distinct from [`Self::session_info`] in two ways that both matter here.
+    /// It is Yellow, not Blue: a turn served by a provider the operator did
+    /// not choose is a deviation, not chatter. And it writes straight to
+    /// `io::stderr()` in BOTH branches — the colour branch already does, and
+    /// making the plain branch match means the bytes land on fd 2 rather than
+    /// in libtest's thread-local capture, so a test can read what the operator
+    /// would actually see.
+    pub fn provider_notice(&self, msg: &str) {
+        let mut stderr = io::stderr();
+        if self.color_enabled {
+            let _ = execute!(
+                stderr,
+                SetForegroundColor(Color::Yellow),
+                SetAttribute(Attribute::Dim),
+                Print(format!("{msg}\n")),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+            );
+        } else {
+            let _ = writeln!(stderr, "{msg}");
+            let _ = stderr.flush();
+        }
+    }
+
     /// Print session info
     pub fn session_info(&self, msg: &str) {
         if self.color_enabled {

@@ -952,6 +952,23 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         ProtocolEvent::CuaPolicyDenied { op, reason, .. } => {
             push_system(app, format!("Computer-use op `{op}` blocked: {reason}"));
         }
+        // R3(b) — the failover receipt used to be accepted and dropped here,
+        // so only a JSON-stream host ever learned which fallback candidates
+        // were refused and why. A TUI operator saw either a bare error or —
+        // on a SUCCESSFUL failover — nothing at all, while the turn was
+        // served by a provider they did not choose.
+        ProtocolEvent::ProviderFailoverReceipt { receipt } => {
+            let rendered = match serde_json::from_value::<wcore_providers::FailoverReceipt>(
+                receipt.clone(),
+            ) {
+                Ok(decoded) => wcore_providers::describe_failover_receipt(&decoded),
+                // An unreadable receipt is still strictly more than silence.
+                Err(error) => {
+                    format!("provider failover receipt could not be decoded ({error}): {receipt}")
+                }
+            };
+            push_system(app, rendered);
+        }
         ProtocolEvent::CapabilityActivation { activation } => {
             app.capability_status
                 .insert(activation.capability, activation);
@@ -976,9 +993,6 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::ProviderAttempt { .. }
         | ProtocolEvent::ProviderRetry { .. }
         | ProtocolEvent::ProviderFailure { .. }
-        // Failover receipts are authoritative host/protocol evidence. The TUI
-        // has no receipt view yet, so accepting one must not mutate local state.
-        | ProtocolEvent::ProviderFailoverReceipt { .. }
         | ProtocolEvent::RuntimeDiagnosticsSnapshot { .. }
         | ProtocolEvent::RuntimeDiagnosticsUnavailable { .. }
         | ProtocolEvent::MidFlightMonitorDecision { .. }
@@ -3798,15 +3812,82 @@ mod tests {
                 resume_token: "t".into(),
             },
         );
+        assert!(app.session.turns.is_empty());
+        assert!(app.session.tool_cards.is_empty());
+        assert!(!app.session.streaming_active);
+    }
+
+    /// R3(b) — a TUI operator must be told which fallback candidates were
+    /// refused and why. The receipt used to be accepted and dropped here, so
+    /// the only surface that saw it was a JSON-stream host.
+    #[test]
+    fn a_failover_receipt_reaches_the_transcript_with_its_refusals() {
+        use wcore_providers::{
+            CandidateReceipt, CandidateRejection, FailoverReason, FailoverReceipt, PricingEvidence,
+        };
+
+        let mut receipt =
+            FailoverReceipt::new(FailoverReason::RateLimit, "anthropic", "claude-sonnet-4-6");
+        receipt.candidates.push(CandidateReceipt {
+            provider: "openai".into(),
+            model: "gpt-5".into(),
+            region: None,
+            disposition: Err(CandidateRejection::ContextWindowUnknown),
+            failure_reason: None,
+            cooldown_reason: None,
+            retry_after_ms: None,
+            pricing: PricingEvidence::default(),
+        });
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::ProviderFailoverReceipt {
+                receipt: serde_json::to_value(&receipt).expect("receipt serializes"),
+            },
+        );
+
+        let rendered = match app.session.turns.first() {
+            Some(turn) => {
+                assert_eq!(turn.role, TurnRole::System);
+                match &turn.elements[0] {
+                    TurnElement::Markdown(text) => text.clone(),
+                    other => panic!("expected markdown, got {other:?}"),
+                }
+            }
+            None => panic!("the failover receipt produced no transcript turn at all"),
+        };
+        for needle in [
+            "anthropic",
+            "claude-sonnet-4-6",
+            "openai",
+            "gpt-5",
+            "context_window_unknown",
+            "provider_chain",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "the TUI receipt never mentioned {needle:?}: {rendered}"
+            );
+        }
+    }
+
+    /// A receipt whose payload this build cannot decode must still say
+    /// something. Silently dropping it is the defect being closed.
+    #[test]
+    fn an_undecodable_failover_receipt_is_surfaced_rather_than_dropped() {
+        let mut app = App::new();
         apply_event(
             &mut app,
             ProtocolEvent::ProviderFailoverReceipt {
                 receipt: json!({"selected_provider": "fallback"}),
             },
         );
-        assert!(app.session.turns.is_empty());
-        assert!(app.session.tool_cards.is_empty());
-        assert!(!app.session.streaming_active);
+        assert_eq!(
+            app.session.turns.len(),
+            1,
+            "an unparseable receipt was dropped without a word to the operator"
+        );
     }
 
     // ── Fixture-driven end-to-end checks ─────────────────────────────

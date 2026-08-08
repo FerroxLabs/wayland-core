@@ -701,20 +701,7 @@ fn describe_chain_candidates(receipt: &FailoverReceipt) -> String {
         if i > 0 {
             out.push_str("; ");
         }
-        match candidate.disposition {
-            Err(rejection) => out.push_str(&format!(
-                "{}/{} rejected \u{2014} {}",
-                candidate.provider, candidate.model, rejection
-            )),
-            Ok(()) => out.push_str(&format!(
-                "{}/{} attempted \u{2014} {}",
-                candidate.provider,
-                candidate.model,
-                candidate
-                    .failure_reason
-                    .map_or("failed", |reason| reason.as_str())
-            )),
-        }
+        out.push_str(&describe_candidate(candidate));
     }
     if receipt.candidates.is_empty() {
         out.push_str("no candidates were configured");
@@ -726,8 +713,204 @@ fn describe_chain_candidates(receipt: &FailoverReceipt) -> String {
     out
 }
 
+/// One candidate's line: what it was, and whether it was refused before any
+/// call (and why) or physically attempted (and how that ended).
+///
+/// Shared by the single-line error suffix and the multi-line terminal receipt
+/// so an operator reading either one sees the same word for the same decision.
+fn describe_candidate(candidate: &CandidateReceipt) -> String {
+    match candidate.disposition {
+        Err(rejection) => format!(
+            "{}/{} rejected \u{2014} {}",
+            candidate.provider, candidate.model, rejection
+        ),
+        Ok(()) => format!(
+            "{}/{} attempted \u{2014} {}",
+            candidate.provider,
+            candidate.model,
+            match candidate.failure_reason {
+                Some(reason) => reason.as_str(),
+                // Reachable only from the receipt of a SUCCESSFUL failover,
+                // where the last candidate is the one that served the turn.
+                // The error paths never build such a candidate, so the
+                // single-line suffix above is unchanged by this arm.
+                None => "succeeded",
+            }
+        ),
+    }
+}
+
+/// R3(b) — render one failover receipt as the block a terminal operator reads.
+///
+/// `OutputSink::emit_provider_failover_receipt` is overridden only by the
+/// JSON-stream sink, so a Desktop host saw which candidates were refused and
+/// why while a CLI or TUI user saw nothing at all. This is the CLI/TUI
+/// rendering of the SAME receipt that already ships to the host, so it
+/// discloses nothing new — and like [`describe_chain_candidates`] it carries
+/// ONLY provider, model, the rejection slug and the retry hint. Never a
+/// base_url, a credential, or a policy value.
+///
+/// Capped at [`MAX_DESCRIBED_CANDIDATES`] entries plus a count of the rest:
+/// this text reaches the session journal, so a long chain must not become a
+/// multi-kilobyte block.
+pub fn describe_failover_receipt(receipt: &FailoverReceipt) -> String {
+    let mut out = format!(
+        "provider failover: {}/{} failed ({})",
+        receipt.failed_provider, receipt.failed_model, receipt.reason
+    );
+    let shown = receipt.candidates.len().min(MAX_DESCRIBED_CANDIDATES);
+    for candidate in receipt.candidates.iter().take(shown) {
+        out.push_str("\n  - ");
+        out.push_str(&describe_candidate(candidate));
+        if let Some(retry_after_ms) = candidate.retry_after_ms {
+            out.push_str(&format!(" (retry after {retry_after_ms}ms)"));
+        }
+    }
+    if receipt.candidates.is_empty() {
+        out.push_str("\n  - no candidates were configured");
+    }
+    let elided = receipt.candidates.len().saturating_sub(shown);
+    if elided > 0 {
+        out.push_str(&format!("\n  - (+{elided} more)"));
+    }
+    match (&receipt.selected_provider, &receipt.selected_model) {
+        // The turn was served, by something other than what the operator
+        // asked for. Naming it is the whole point: cost, context window and
+        // tool support all just changed under them.
+        (Some(provider), Some(model)) => {
+            out.push_str(&format!("\n  -> routed to {provider}/{model}"));
+        }
+        // Nothing served the turn. Same remedy sentence the error carries, so
+        // the two never disagree.
+        _ => out.push_str(&format!(
+            "\n  -> no fallback candidate was eligible{CHAIN_REMEDY}"
+        )),
+    }
+    out
+}
+
 /// How many candidates the terminal error names before eliding the tail.
 const MAX_DESCRIBED_CANDIDATES: usize = 5;
+
+#[cfg(test)]
+mod receipt_rendering_tests {
+    use super::*;
+
+    fn refused(provider: &str, model: &str, why: CandidateRejection) -> CandidateReceipt {
+        CandidateReceipt {
+            provider: provider.into(),
+            model: model.into(),
+            region: None,
+            disposition: Err(why),
+            failure_reason: None,
+            cooldown_reason: None,
+            retry_after_ms: None,
+            pricing: PricingEvidence::default(),
+        }
+    }
+
+    /// Platform-neutral coverage of the block a CLI/TUI operator reads. The
+    /// terminal wiring itself is proven on unix by
+    /// `wcore-agent/tests/terminal_failover_receipt_test.rs`, which reads fd 2.
+    #[test]
+    fn an_exhausted_chain_renders_every_refusal_and_the_remedy() {
+        let mut receipt =
+            FailoverReceipt::new(FailoverReason::RateLimit, "anthropic", "claude-sonnet-4-6");
+        receipt.candidates.push(refused(
+            "openai",
+            "gpt-5",
+            CandidateRejection::ContextWindowUnknown,
+        ));
+        receipt.candidates.push(refused(
+            "google",
+            "gemini-3-pro",
+            CandidateRejection::CooldownActive,
+        ));
+
+        assert_eq!(
+            describe_failover_receipt(&receipt),
+            "provider failover: anthropic/claude-sonnet-4-6 failed (rate_limit)\n  \
+             - openai/gpt-5 rejected \u{2014} context_window_unknown\n  \
+             - google/gemini-3-pro rejected \u{2014} cooldown_active\n  \
+             -> no fallback candidate was eligible. Point [provider_chain] \
+             fallback_models at a model this build can size, or wait out the cooldown."
+        );
+    }
+
+    /// A SUCCESSFUL failover is the case with no error to piggyback on: the
+    /// operator is silently on another provider unless this block says so.
+    #[test]
+    fn a_successful_failover_names_the_route_and_omits_the_reconfigure_remedy() {
+        let mut receipt =
+            FailoverReceipt::new(FailoverReason::Overloaded, "anthropic", "claude-opus-4-1");
+        receipt.candidates.push(CandidateReceipt {
+            provider: "openai".into(),
+            model: "gpt-5".into(),
+            region: Some("us-east".into()),
+            disposition: Ok(()),
+            failure_reason: None,
+            cooldown_reason: None,
+            retry_after_ms: None,
+            pricing: PricingEvidence::default(),
+        });
+        receipt.selected_provider = Some("openai".into());
+        receipt.selected_model = Some("gpt-5".into());
+
+        assert_eq!(
+            describe_failover_receipt(&receipt),
+            "provider failover: anthropic/claude-opus-4-1 failed (overloaded)\n  \
+             - openai/gpt-5 attempted \u{2014} succeeded\n  \
+             -> routed to openai/gpt-5"
+        );
+    }
+
+    /// The block reaches the session journal, so a long chain must be bounded.
+    /// A cooling candidate must also carry its retry hint — "wait out the
+    /// cooldown" is not actionable without knowing how long.
+    #[test]
+    fn a_long_chain_is_elided_and_a_cooling_candidate_carries_its_retry_hint() {
+        let mut receipt = FailoverReceipt::new(FailoverReason::Timeout, "anthropic", "claude");
+        let mut cooling = refused("p0", "m0", CandidateRejection::CooldownActive);
+        cooling.retry_after_ms = Some(1_500);
+        receipt.candidates.push(cooling);
+        for i in 1..8 {
+            receipt.candidates.push(refused(
+                &format!("p{i}"),
+                &format!("m{i}"),
+                CandidateRejection::ProviderDenied,
+            ));
+        }
+
+        let rendered = describe_failover_receipt(&receipt);
+        assert!(
+            rendered.contains("p0/m0 rejected \u{2014} cooldown_active (retry after 1500ms)"),
+            "the retry hint is missing: {rendered}"
+        );
+        assert!(
+            rendered.contains("(+3 more)"),
+            "8 candidates were not elided to {MAX_DESCRIBED_CANDIDATES}: {rendered}"
+        );
+        assert!(
+            !rendered.contains("p6/"),
+            "an elided candidate was still printed: {rendered}"
+        );
+    }
+
+    /// An empty chain must still say something an operator can act on.
+    #[test]
+    fn an_empty_chain_says_so_rather_than_rendering_a_bare_header() {
+        let receipt = FailoverReceipt::new(FailoverReason::Auth, "anthropic", "claude");
+        let rendered = describe_failover_receipt(&receipt);
+        assert!(
+            rendered.contains("no candidates were configured"),
+            "an empty chain rendered nothing actionable: {rendered}"
+        );
+        assert!(
+            rendered.contains("provider_chain"),
+            "an empty chain did not name the setting to fix: {rendered}"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
