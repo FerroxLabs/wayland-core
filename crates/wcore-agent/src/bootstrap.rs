@@ -4232,7 +4232,10 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
 
 /// Rank 20: build the fallback provider chain fed to `ResilientProvider`.
 ///
-/// Each `provider_chain.fallback_models` entry is paired with the independently
+/// Each surviving `provider_chain.fallback_models` entry — the derived
+/// `resolved_fallback_labels`, NOT the operator's raw on-disk list, which may
+/// contain entries the credential degrade dropped — is paired with the
+/// independently
 /// resolved config produced by `Config::resolve`: same-provider entries retain
 /// the active endpoint and credentials, while cross-provider entries use that
 /// provider's own credentials, compatibility profile, organization and region.
@@ -4256,8 +4259,7 @@ fn build_fallback_providers(
     }
 
     let labels: Vec<&str> = config
-        .provider_chain
-        .fallback_models
+        .resolved_fallback_labels
         .iter()
         .map(|entry| entry.trim())
         .filter(|entry| !entry.is_empty())
@@ -4667,6 +4669,7 @@ mod fallback_pricing_identity_tests {
         };
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+        config.resolved_fallback_labels = vec!["claude-haiku-4-5".into()];
         let mut fallback = config.clone();
         fallback.model = "claude-haiku-4-5".into();
         fallback.resolved_fallbacks.clear();
@@ -4689,6 +4692,8 @@ mod fallback_pricing_identity_tests {
         let mut config = Config::default();
         config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+        // A label with no resolved config beside it is the mismatch under test.
+        config.resolved_fallback_labels = vec!["claude-haiku-4-5".into()];
 
         let mut pricing_refresher_constructed = false;
         let error = build_fallback_providers(&config, &mut pricing_refresher_constructed)
@@ -4727,6 +4732,7 @@ mod fallback_pricing_identity_tests {
                 ..Default::default()
             };
             config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+            config.resolved_fallback_labels = vec!["claude-haiku-4-5".into()];
             let mut fallback = config.clone();
             fallback.model = "claude-haiku-4-5".into();
             fallback.resolved_fallbacks.clear();
@@ -4796,6 +4802,9 @@ mod fallback_pricing_identity_tests {
             "flux-router:flux-standard".into(),
             format!("flux-router:{UNKNOWN_MODEL_CANARY}"),
         ];
+        config
+            .resolved_fallback_labels
+            .clone_from(&config.provider_chain.fallback_models);
         config.resolved_fallbacks = ["flux-standard", UNKNOWN_MODEL_CANARY]
             .into_iter()
             .map(|model| Config {

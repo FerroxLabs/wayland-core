@@ -1315,6 +1315,18 @@ pub struct Config {
     /// Independently resolved provider configurations for semantic failover.
     /// Children carry an empty list so construction cannot recurse.
     pub resolved_fallbacks: Vec<Config>,
+    /// B02-R1 — the `provider_chain.fallback_models` entries that actually
+    /// resolved, in order, parallel to [`Config::resolved_fallbacks`].
+    ///
+    /// This is a DERIVED view and MUST NOT be written back to disk.
+    /// `provider_chain.fallback_models` stays byte-for-byte what the operator
+    /// configured, because the TUI Config surface seeds itself from the
+    /// resolved config and writes that list straight back into the global
+    /// `config.toml` on any save (`tui::config_view_from` →
+    /// `ConfigSurface::persist_to_disk` → `patch_global_config`). Overwriting
+    /// it with the surviving subset silently and permanently deleted the very
+    /// fallbacks the credential degrade exists to tolerate.
+    pub resolved_fallback_labels: Vec<String>,
     /// W8a A.5/A.6: ExecutionBudget caps. Resolved-config copy of the
     /// merged `ConfigFile.budget`; bootstrap converts this into a
     /// `wcore_agent::budget::ExecutionBudgetView` via the `From` impl.
@@ -1517,6 +1529,7 @@ impl Default for Config {
             provider_chain: ProviderChainConfig::default(),
             provider_policy: ProviderRoutingPolicyConfig::default(),
             resolved_fallbacks: Vec::new(),
+            resolved_fallback_labels: Vec::new(),
             budget: wcore_budget::BudgetConfig::default(),
             storage: StorageConfig::default(),
             memory: MemoryConfig::default(),
@@ -2631,6 +2644,7 @@ impl Config {
             provider_chain: merged.provider_chain,
             provider_policy: merged.provider_policy,
             resolved_fallbacks: Vec::new(),
+            resolved_fallback_labels: Vec::new(),
             budget: merged.budget,
             storage: merged.storage,
             // Absent `[memory]` resolves to the (memory-ON) default; see the
@@ -2743,13 +2757,19 @@ impl Config {
                 }
             }
         }
-        // The label list and the resolved list MUST stay in lockstep:
-        // `build_fallback_providers` zips them and hard-fails on a length
-        // mismatch, so a drop that kept its label would turn this degrade into
-        // the startup abort it exists to prevent.
-        if resolve_fallbacks {
-            resolved.provider_chain.fallback_models = kept_fallback_entries;
-        }
+        // B02-R1 — the kept set lands on its OWN vector.
+        //
+        // `build_fallback_providers` zips the labels against
+        // `resolved_fallbacks` and hard-fails on a length mismatch, so a drop
+        // that kept its label would turn this degrade into the startup abort it
+        // exists to prevent. But the labels may NOT come from
+        // `provider_chain.fallback_models`: that field is the operator's
+        // on-disk configuration, and the TUI Config surface reads it out of the
+        // RESOLVED config and writes it back to the global `config.toml` on any
+        // save. Narrowing it here deleted a fallback that was merely missing a
+        // credential — permanently, from the user's own file, on an unrelated
+        // edit.
+        resolved.resolved_fallback_labels = kept_fallback_entries;
         Ok(resolved)
     }
 
@@ -10020,15 +10040,30 @@ fallback_models = ["groq:llama-3.3-70b-versatile", "llama:3.3-70b", "gpt-4o-2024
         assert_eq!(resolved.resolved_fallbacks[0].provider_label, "openai");
         assert_eq!(resolved.resolved_fallbacks[0].model, "gpt-4o-2024-11-20");
 
-        // LOCKSTEP. `build_fallback_providers` zips `provider_chain
-        // .fallback_models` against `resolved_fallbacks` and hard-fails on a
-        // length mismatch ("fallback configuration resolution mismatch"), so a
-        // drop that forgets its label converts this defect into a startup
-        // abort — the exact failure the degrade exists to prevent.
+        // LOCKSTEP. `build_fallback_providers` zips the labels against
+        // `resolved_fallbacks` and hard-fails on a length mismatch ("fallback
+        // configuration resolution mismatch"), so a drop that forgets its label
+        // converts this defect into a startup abort — the exact failure the
+        // degrade exists to prevent.
         assert_eq!(
-            resolved.provider_chain.fallback_models,
+            resolved.resolved_fallback_labels,
             vec!["gpt-4o-2024-11-20".to_string()],
             "a dropped fallback must drop its label too"
+        );
+
+        // B02-R1 — and the label it drops is from the DERIVED list only. The
+        // operator's configured list is what the TUI Config surface writes back
+        // to `config.toml` on any save, so narrowing it here deletes a
+        // credential-less fallback from the user's own file on an unrelated
+        // edit. It must survive resolution byte-for-byte.
+        assert_eq!(
+            resolved.provider_chain.fallback_models,
+            vec![
+                "groq:llama-3.3-70b-versatile".to_string(),
+                "llama:3.3-70b".to_string(),
+                "gpt-4o-2024-11-20".to_string(),
+            ],
+            "resolution must not edit the operator's configured fallback list"
         );
     }
 

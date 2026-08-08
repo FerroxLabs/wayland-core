@@ -276,6 +276,9 @@ mod tests {
             .provider_chain
             .fallback_models
             .push("anthropic:haiku".into());
+        session_cfg
+            .resolved_fallback_labels
+            .push("anthropic:haiku".into());
         session_cfg.resolved_fallbacks.clear();
         assert!(crate::bootstrap::create_provider_with_oauth(&session_cfg).is_err());
 
