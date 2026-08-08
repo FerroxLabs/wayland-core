@@ -1122,7 +1122,8 @@ const NON_TTY_NO_PROMPT_ADVICE: &str = "wayland-core: stdin is not a terminal an
 /// enforces that mechanically against the real clap definition.
 const HEADLESS_NO_APPROVER_ADVICE: &str = "wayland-core: this run has no interactive approver (stdin is not a terminal),\n\
      so any tool that needs approval will be refused and the run may accomplish\n\
-     nothing. Pass --auto-approve to approve tool calls for this run, or add the\n\
+     nothing. Any run that is refused this way exits with status 9.\n\
+     Pass --auto-approve to approve tool calls for this run, or add the\n\
      tools you trust to [tools] allow_list in your global config.toml.";
 
 /// Whether to print [`HEADLESS_NO_APPROVER_ADVICE`].
@@ -1144,25 +1145,36 @@ fn headless_approval_advisory(
     Some(HEADLESS_NO_APPROVER_ADVICE)
 }
 
-/// The one-shot run finished without accomplishing anything: it produced no
-/// answer, or it hit the approval gate with nobody there to answer it.
+/// The one-shot run reached the approval gate and nobody answered it, so one
+/// or more tool calls were refused.
 ///
 /// Distinct from `ExitCode::FAILURE` (1), which means the run itself errored,
 /// and from the subcommand codes 3-8 in `session_cmd` / `index_cmd` /
 /// `cache_cmd`. A caller that only wants "did it work" can keep testing for
 /// zero; a caller that wants to distinguish "refused" from "crashed" now can.
-pub const EXIT_RUN_COMPLETED_NOTHING: u8 = 9;
+///
+/// It is deliberately NOT "the run produced no output". An empty final answer
+/// is not evidence that a run did nothing — a tool-only finish and a MaxTurns
+/// stop both end without assistant text after doing real work — and turning
+/// that into a non-zero status would fail pipelines for runs that succeeded.
+pub const EXIT_BLOCKED_ON_APPROVAL: u8 = 9;
 
 /// The exit status of a headless one-shot run.
 ///
-/// Exit 0 used to be unconditional: a run whose every tool call was refused,
-/// or that produced no answer at all, reported success and no script, CI job
-/// or host could tell it from a run that did the work.
+/// Exit 0 used to be unconditional: a run whose every tool call was refused
+/// for want of an approver reported success, and no script, CI job or host
+/// could tell it from a run that did the work.
 ///
-/// Kept pure and separate from the call site so both conditions can be tabled.
-fn headless_exit_code(no_approver_denials: usize, answer: &str) -> ExitCode {
-    if no_approver_denials > 0 || answer.trim().is_empty() {
-        ExitCode::from(EXIT_RUN_COMPLETED_NOTHING)
+/// The trigger is that refusal COUNT and nothing else. `answer` is taken so
+/// the call sites read alike and so this doc can say why it is ignored: the
+/// audited run answered at length about being blocked and still exited 0, so
+/// answer text was never evidence either way, and its emptiness is a normal
+/// end to a tool-only or MaxTurns run that did real work.
+///
+/// Kept pure and separate from the call site so the condition can be tabled.
+fn headless_exit_code(no_approver_denials: usize, _answer: &str) -> ExitCode {
+    if no_approver_denials > 0 {
+        ExitCode::from(EXIT_BLOCKED_ON_APPROVAL)
     } else {
         ExitCode::SUCCESS
     }
@@ -6284,8 +6296,25 @@ mod tests {
     }
 
     #[test]
+    fn a_run_that_did_the_work_without_a_closing_sentence_still_reports_success() {
+        // R4. Exit 9 is a claim about the APPROVAL GATE, and an empty final
+        // answer is not evidence that a run did nothing: a tool-only finish
+        // and a MaxTurns stop both routinely end with no assistant text after
+        // doing real work. Exiting non-zero there breaks every `set -e`
+        // pipeline that was exiting 0 before this branch, for a run that
+        // wrote the files it was asked to write.
+        for answer in ["", "   \n  ", "\t"] {
+            assert_eq!(
+                format!("{:?}", headless_exit_code(0, answer)),
+                format!("{:?}", ExitCode::SUCCESS),
+                "nothing was refused; answer={answer:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_headless_run_that_accomplished_nothing_does_not_report_success() {
-        let nothing = ExitCode::from(EXIT_RUN_COMPLETED_NOTHING);
+        let blocked = ExitCode::from(EXIT_BLOCKED_ON_APPROVAL);
         // (refusals for want of an approver, final answer) -> status
         let table: [((usize, &str), ExitCode); 6] = [
             // Did the work and said something: unchanged, and the row that
@@ -6294,12 +6323,14 @@ mod tests {
             // Refused for want of an approver. The audited run answered at
             // length about being blocked and still exited 0, so the answer
             // text alone cannot be the test.
-            ((1, "I was blocked from editing the file"), nothing),
-            ((4, "here is what I would have done"), nothing),
-            // No answer at all.
-            ((0, ""), nothing),
-            ((0, "   \n  "), nothing),
-            ((2, ""), nothing),
+            ((1, "I was blocked from editing the file"), blocked),
+            ((4, "here is what I would have done"), blocked),
+            ((2, ""), blocked),
+            // Nothing was refused. An empty answer is a normal end to a
+            // tool-only or MaxTurns run and says nothing about whether work
+            // happened, so it is not the trigger.
+            ((0, ""), ExitCode::SUCCESS),
+            ((0, "   \n  "), ExitCode::SUCCESS),
         ];
         for ((denials, answer), expected) in table {
             assert_eq!(

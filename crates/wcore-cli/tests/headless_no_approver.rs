@@ -43,7 +43,7 @@ const CANARY: &str = "QUOKKA-7F3A9C";
 /// names; this only has to recognise it on stderr.
 const ADVISORY_CLAUSE: &str = "no interactive approver (stdin is not a terminal)";
 
-/// "The run completed nothing" — see `EXIT_RUN_COMPLETED_NOTHING` in the CLI.
+/// "Refused at the approval gate" — see `EXIT_BLOCKED_ON_APPROVAL` in the CLI.
 const EXPECTED_BLOCKED_EXIT: i32 = 9;
 
 fn binary() -> &'static str {
