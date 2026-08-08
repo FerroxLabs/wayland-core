@@ -426,16 +426,6 @@ fn env_set_nonempty(name: &str) -> bool {
     matches!(std::env::var(name), Ok(v) if !v.is_empty())
 }
 
-/// S8: build the **config-posture** health rows from the resolved
-/// [`ConfigView`](crate::tui::app::ConfigView) snapshot on `App`.
-///
-/// These are coherence/safety checks on the user's *configuration* — distinct
-/// from the SYSTEM (binaries), PROVIDERS (live HTTP), and TOOLS (env gates)
-/// sections, which probe the runtime environment. Every row reads real config
-/// values plumbed by S5–S7 (egress allowlist, credential backend, spend cap,
-/// failover chain, tool-approval posture) plus one cheap filesystem resolve
-/// for the memory directory. A valid-but-permissive state is surfaced as
-/// `Warn` (never a fake `Fail`); a benign "off" state is an honest `Ok`.
 /// Join `entries` for a one-line health detail, naming at most
 /// [`MAX_NAMED_FALLBACK_ENTRIES`] and counting the rest. A fallback chain is
 /// operator-authored and unbounded; a health row is one line.
@@ -452,6 +442,16 @@ fn join_capped(entries: &[String]) -> String {
 /// How many fallback entries a health row names before eliding the tail.
 const MAX_NAMED_FALLBACK_ENTRIES: usize = 3;
 
+/// S8: build the **config-posture** health rows from the resolved
+/// [`ConfigView`](crate::tui::app::ConfigView) snapshot on `App`.
+///
+/// These are coherence/safety checks on the user's *configuration* — distinct
+/// from the SYSTEM (binaries), PROVIDERS (live HTTP), and TOOLS (env gates)
+/// sections, which probe the runtime environment. Every row reads real config
+/// values plumbed by S5–S7 (egress allowlist, credential backend, spend cap,
+/// failover chain, tool-approval posture) plus one cheap filesystem resolve
+/// for the memory directory. A valid-but-permissive state is surfaced as
+/// `Warn` (never a fake `Fail`); a benign "off" state is an honest `Ok`.
 fn scan_config_health(app: &App) -> Vec<HealthCheck> {
     let c = &app.config;
     let mut rows = Vec::new();
@@ -521,7 +521,7 @@ fn scan_config_health(app: &App) -> Vec<HealthCheck> {
                     "provider failover",
                     HealthState::Warn,
                     format!(
-                        "on · {n} fallback model{plural} · {dead} unusable                          (no credential): {}",
+                        "on · {n} fallback model{plural} · {dead} unusable (no credential): {}",
                         join_capped(&c.fallback_unresolved)
                     ),
                 )
