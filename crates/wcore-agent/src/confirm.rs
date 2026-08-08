@@ -860,6 +860,59 @@ mod tests {
     }
 
     #[test]
+    fn the_bound_reaches_the_reader_from_the_gate_that_ships() {
+        // A RATCHET, not a restatement. The bound was live and every test of
+        // it passed while the CALL SITE handed the reader `None` instead: the
+        // parser was tested, the waiter was tested, and the one line joining
+        // them to `check_for` was not. Replacing `self.approval_timeout` with
+        // `None` here restores the unbounded wait, and nothing went red.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = std::sync::Arc::clone(&seen);
+        let bound = std::time::Duration::from_secs(7);
+
+        let mut gate = gate();
+        gate.set_interactive_approver(true);
+        gate.set_approval_timeout(Some(bound));
+        gate.set_answers(Box::new(move |handed| {
+            recorder.lock().expect("recorder").push(handed);
+            ApprovalReply::Line("n\n".to_string())
+        }));
+
+        assert_eq!(
+            gate.check_for("Bash", ToolCategory::Exec, "rm -rf /"),
+            ConfirmResult::Denied,
+            "positive control: the answer still decides the gate"
+        );
+        assert_eq!(
+            *seen.lock().expect("recorder"),
+            vec![Some(bound)],
+            "the production call site must hand the reader the configured \
+             bound; `None` there is the unbounded wait this closed"
+        );
+    }
+
+    #[test]
+    fn a_new_gate_is_born_with_the_configured_bound() {
+        // The other half of the ratchet: wiring the field through to the
+        // reader is worth nothing if construction leaves the field empty.
+        for gate in [
+            ToolConfirmer::new(false, vec![]),
+            ToolConfirmer::with_policy(ApprovalPolicy::Prompt, vec![]),
+            ToolConfirmer::with_policy(ApprovalPolicy::AutoEdit, vec![]),
+        ] {
+            assert_eq!(
+                gate.approval_timeout,
+                approval_timeout(),
+                "a confirmer must be born with the bound the environment says"
+            );
+            assert!(
+                gate.approval_timeout.is_some(),
+                "and on a host that has not switched it off, that is a bound"
+            );
+        }
+    }
+
+    #[test]
     fn tool_name_allow_list_remains_deliberately_unbound() {
         let confirmer =
             ToolConfirmer::with_policy(ApprovalPolicy::Prompt, vec!["TrustedLocalTool".into()]);
