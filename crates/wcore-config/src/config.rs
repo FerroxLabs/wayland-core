@@ -1198,6 +1198,8 @@ fn default_allow_list() -> Vec<String> {
         "WebFetch".into(),
         "vision_analyze".into(),
         "transcribe_audio".into(),
+        "pdf_extract".into(),
+        "doc_extract".into(),
         "ToolSearch".into(),
         "Skill".into(),
         "wayland_status".into(),
