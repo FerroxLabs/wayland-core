@@ -810,6 +810,37 @@ pub enum ExecutionControl {
     Quit,
 }
 
+/// The `tool_result` content for a call a human refused at the prompt.
+pub const TOOL_DENIED_BY_USER: &str = "Tool execution denied by user";
+
+/// The `tool_result` content for a call that could not be approved because
+/// the run has no interactive approver at all.
+///
+/// Deliberately names NO command-line flag. This text goes into the model's
+/// context, and the same confirmer backs channel-driven turns (Discord,
+/// Slack, email, Matrix) where no CLI flag is reachable by the person who
+/// sent the message. Naming a bypass flag here would also put "here is how
+/// to escalate privileges" one prompt-injection away. The operator-facing
+/// half, which does name `--auto-approve`, is
+/// `HEADLESS_NO_APPROVER_ADVICE` in the CLI and goes to stderr.
+pub const TOOL_BLOCKED_NO_APPROVER: &str = "BLOCKED: this run has no interactive approver, so every tool that needs \
+     approval is refused automatically. This is a property of the whole run, \
+     not of these arguments — retrying, with these or any other arguments, \
+     will be refused identically. Do not retry. Say what you would have done \
+     and which tools need to be approved.";
+
+/// The `tool_result` content for a call whose approval prompt went unanswered.
+///
+/// Deliberately NOT [`TOOL_BLOCKED_NO_APPROVER`]: that text tells the model
+/// the property holds for the whole run and that retrying is pointless, which
+/// is true when there is no approver and false when there is one who was
+/// merely slow. Naming no flag, for the same reason as its sibling.
+pub const TOOL_BLOCKED_NO_ANSWER: &str = "BLOCKED: the approval prompt for this call went unanswered within the time \
+     limit, so the call was refused. This is not a judgement on the arguments, \
+     and it is not permanent: approval is still live for this run and the next \
+     prompt can be answered. Do not retry in a loop - say what you need \
+     approved and why.";
+
 /// Confirm a single tool call and record whether approval was granted for the
 /// displayed arguments rather than inherited from an automatic allow rule.
 enum ConfirmedCall {
@@ -853,7 +884,17 @@ fn confirm_call(
         ConfirmResult::Approved => Ok(ConfirmedCall::Execute { approval_bound }),
         ConfirmResult::Denied => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
-            content: "Tool execution denied by user".to_string(),
+            content: TOOL_DENIED_BY_USER.to_string(),
+            is_error: true,
+        })),
+        ConfirmResult::DeniedNoApprover => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: TOOL_BLOCKED_NO_APPROVER.to_string(),
+            is_error: true,
+        })),
+        ConfirmResult::DeniedNoAnswer => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: TOOL_BLOCKED_NO_ANSWER.to_string(),
             is_error: true,
         })),
         ConfirmResult::Quit => Err(ExecutionControl::Quit),

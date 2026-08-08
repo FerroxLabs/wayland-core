@@ -67,7 +67,15 @@ impl CapturingSink {
             .unwrap()
             .iter()
             .any(|(name, is_error, content)| {
-                name == tool && *is_error && content.to_ascii_lowercase().contains("denied")
+                // Matched against the two refusal constants the product
+                // actually emits rather than the word "denied": a refusal
+                // for want of an approver says BLOCKED, not denied, and a
+                // substring match on one English word would score any
+                // unrelated tool error as a gate decision.
+                name == tool
+                    && *is_error
+                    && (content == wcore_agent::orchestration::TOOL_DENIED_BY_USER
+                        || content == wcore_agent::orchestration::TOOL_BLOCKED_NO_APPROVER)
             })
     }
 }

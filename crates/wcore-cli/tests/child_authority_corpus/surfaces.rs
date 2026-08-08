@@ -470,14 +470,16 @@ pub enum SandboxChoice {
 /// `Config::default()` resolves to `ApprovalPolicy::Prompt`
 /// (`Config::smart_approval_policy`), `AgentSpawner::child_config` deliberately
 /// hands the child the parent's posture unchanged (audit H-7 / M-9), and
-/// `ToolConfirmer::check_for` returns `Denied` unconditionally when stdin is not
-/// a terminal. Under a CI runner that is EVERY tool call a delegated child makes.
+/// `ToolConfirmer::check_for` returns `DeniedNoApprover` unconditionally when
+/// stdin is not a terminal. Under a CI runner that is EVERY tool call a
+/// delegated child makes.
 ///
 /// The consequence was measured, not theorised. At `359ce2bf` the standalone
 /// in-process tool row recorded `REFUSED :: obtained no Bash effect` while its
 /// own evidence field carried, verbatim, *"What the child's own tool call
-/// returned: Tool execution denied by user"* — the string `confirm_call` emits
-/// on a denial. The child's Bash call never reached the tool registry, the
+/// returned: Tool execution denied by user"* — the string `confirm_call` emitted
+/// on a denial at the time (it is now `TOOL_BLOCKED_NO_APPROVER` for the
+/// no-approver case, which is what a non-tty CI runner hits). The child's Bash call never reached the tool registry, the
 /// workspace guard or the Bash tool. `21-04-PHASE-VERDICT.md` records that
 /// refusal as *"jointly attributable to tool authority and to workspace
 /// containment"*; neither of those two was exercised, and the cause that fired

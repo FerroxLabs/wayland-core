@@ -137,9 +137,12 @@ async fn concurrent_confirmation_preserves_original_result_order() {
         make_tool_use("id-allowed", "allowed"),
         make_tool_use("id-denied", "denied"),
     ];
-    let confirmer = std::sync::Arc::new(std::sync::Mutex::new(
-        wcore_agent::confirm::ToolConfirmer::new(false, vec!["allowed".into()]),
-    ));
+    // Pin approver presence rather than inheriting the runner's stdin: under
+    // `cargo test` from a real terminal `check_for` would otherwise print a
+    // prompt and block on `read_line` forever.
+    let mut inner = wcore_agent::confirm::ToolConfirmer::new(false, vec!["allowed".into()]);
+    inner.set_interactive_approver(false);
+    let confirmer = std::sync::Arc::new(std::sync::Mutex::new(inner));
 
     let results = execute_tool_calls(
         &registry,
@@ -172,10 +175,110 @@ async fn concurrent_confirmation_preserves_original_result_order() {
             is_error,
         } => {
             assert_eq!(tool_use_id, "id-denied");
-            assert_eq!(content, "Tool execution denied by user");
+            assert_eq!(
+                content,
+                wcore_agent::orchestration::TOOL_BLOCKED_NO_APPROVER
+            );
             assert!(*is_error);
         }
         other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
+/// A run with no interactive approver must SAY that, not blame a user who was
+/// never asked, and must tell the model the refusal is a property of the whole
+/// run so it stops retrying. The gate itself must not move.
+///
+/// The canary names and payloads appear nowhere else in the workspace, so no
+/// incidental string match can satisfy these assertions.
+#[tokio::test]
+async fn no_approver_denial_states_its_cause_and_still_refuses() {
+    use wcore_agent::orchestration::{TOOL_BLOCKED_NO_APPROVER, TOOL_DENIED_BY_USER};
+
+    for sequential in [false, true] {
+        let mut registry = ToolRegistry::new();
+        let (probe, mutate) = if sequential {
+            (
+                MockTool::sequential("ZephyrProbe", "ZEPHYR_PROBE_RAN"),
+                MockTool::sequential("ZephyrMutate", "ZEPHYR_SIDE_EFFECT_FIRED"),
+            )
+        } else {
+            (
+                MockTool::new("ZephyrProbe", "ZEPHYR_PROBE_RAN", false),
+                MockTool::new("ZephyrMutate", "ZEPHYR_SIDE_EFFECT_FIRED", false),
+            )
+        };
+        registry.register(Box::new(probe));
+        registry.register(Box::new(mutate));
+
+        let calls = vec![
+            make_tool_use("id-probe", "ZephyrProbe"),
+            make_tool_use("id-mutate", "ZephyrMutate"),
+        ];
+
+        // Prompt policy, one allow-listed read-only tool, and NO interactive
+        // approver. Pinned explicitly rather than inherited from whatever
+        // stdin the test runner happened to get.
+        let mut confirmer =
+            wcore_agent::confirm::ToolConfirmer::new(false, vec!["ZephyrProbe".into()]);
+        confirmer.set_interactive_approver(false);
+        let confirmer = std::sync::Arc::new(std::sync::Mutex::new(confirmer));
+
+        let results = execute_tool_calls(
+            &registry,
+            &calls,
+            &confirmer,
+            None,
+            CompactionLevel::Off,
+            false,
+        )
+        .await
+        .expect("dispatch should complete");
+
+        assert_eq!(results.len(), 2, "sequential={sequential}");
+
+        // POSITIVE CONTROL. Without this, "the mutating tool did not run" is
+        // an absence of effect from a dispatcher that may never have acted.
+        match &results[0] {
+            ContentBlock::ToolResult { content, .. } => assert_eq!(
+                content, "ZEPHYR_PROBE_RAN",
+                "the allow-listed tool must still execute (sequential={sequential})"
+            ),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        match &results[1] {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "id-mutate");
+                assert_ne!(
+                    content, TOOL_DENIED_BY_USER,
+                    "no user was ever asked, so the refusal must not be \
+                     attributed to one (sequential={sequential})"
+                );
+                assert_eq!(content, TOOL_BLOCKED_NO_APPROVER);
+                assert!(content.contains("no interactive approver"));
+                assert!(content.contains("Do not retry"));
+                assert!(*is_error, "a refusal is still an error result");
+                // THE GATE MUST NOT HAVE MOVED. A "fix" that approves
+                // headlessly would put the payload here instead.
+                assert!(
+                    !content.contains("ZEPHYR_SIDE_EFFECT_FIRED"),
+                    "the refused tool executed (sequential={sequential})"
+                );
+                // The model-facing text must name no command-line flag: it
+                // also reaches channel turns, and it must not read as
+                // escalation instructions.
+                assert!(
+                    !content.contains("--"),
+                    "the model-facing refusal must not name a flag: {content}"
+                );
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 }
 
