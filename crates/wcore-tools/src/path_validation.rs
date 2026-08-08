@@ -447,6 +447,14 @@ fn is_denied_system_path(path: &Path) -> bool {
             r"\wayland-core\credentials.enc",
             r"\wayland-core\credentials.key.json",
             r"\.wayland\cron\",
+            // Mirror of the POSIX `/.git-credentials` entry above. The first
+            // cut of this fix added only the forward-slash form, which gives
+            // ZERO protection on Windows — `%USERPROFILE%\.git-credentials`
+            // matched nothing and stayed readable. The tests that would have
+            // caught it were `#[cfg(unix)]`, so the guard was enforced on the
+            // one platform it worked on and the gap was invisible. They are
+            // no longer gated.
+            r"\.git-credentials",
             r"\.netrc",
             r"\.npmrc",
             r"\.pypirc",

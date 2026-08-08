@@ -73,6 +73,14 @@ pub fn build_write_denied_paths(home: &Path, wayland_home: &Path) -> Vec<PathBuf
         home.join(".bash_profile"),
         home.join(".zprofile"),
         home.join(".netrc"),
+        // The write half of the `~/.git-credentials` gap. #644 part 3 named
+        // this file as denied NOWHERE — not the read path, not `bash/policy`,
+        // and not here. The other two are closed in this change; this closes
+        // the third, so an agent can neither read a stored push credential
+        // back nor plant one for git's `store` helper to hand out later.
+        // `home.join` emits the host's own separator, so this covers
+        // `%USERPROFILE%\.git-credentials` as well.
+        home.join(".git-credentials"),
         home.join(".pgpass"),
         home.join(".npmrc"),
         home.join(".pypirc"),
@@ -426,6 +434,7 @@ mod tests {
         assert!(strs.iter().any(|s| s.ends_with(".ssh/authorized_keys")));
         assert!(strs.iter().any(|s| s.ends_with(".bashrc")));
         assert!(strs.iter().any(|s| s.ends_with(".netrc")));
+        assert!(strs.iter().any(|s| s.ends_with(".git-credentials")));
         assert!(strs.iter().any(|s| s.ends_with("/etc/shadow")));
         assert!(strs.iter().any(|s| s.ends_with("/etc/passwd")));
         assert!(strs.iter().any(|s| s.ends_with("wayland-core/.env")));
@@ -450,6 +459,7 @@ mod tests {
         assert!(strs.iter().any(|s| s.ends_with(r".ssh\authorized_keys")));
         assert!(strs.iter().any(|s| s.ends_with(".bashrc")));
         assert!(strs.iter().any(|s| s.ends_with(".netrc")));
+        assert!(strs.iter().any(|s| s.ends_with(".git-credentials")));
         assert!(strs.iter().any(|s| s.ends_with(r"wayland-core\.env")));
         // Windows-specific paths come from the host's WINDIR/APPDATA at
         // runtime; spot-check only when both are present in CI.

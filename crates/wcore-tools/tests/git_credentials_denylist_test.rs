@@ -9,6 +9,11 @@
 //! bare `https://user:token@host` lines in cleartext, so a single read returns
 //! a usable push credential for every remote the user has authenticated to.
 //!
+//! These run on EVERY platform. An earlier cut gated the Read and Grep cases
+//! `#[cfg(unix)]`, which hid that only the forward-slash suffix had been added
+//! to the deny list — `%USERPROFILE%\.git-credentials` stayed readable on
+//! Windows and no test could say so.
+//!
 //! Each refusal is paired with a negative control that must still SUCCEED, so
 //! a guard that refuses everything cannot pass this file.
 
@@ -39,7 +44,6 @@ fn planted_git_credentials(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Read is the tool the deny-list was originally written for.
-#[cfg(unix)]
 #[tokio::test]
 async fn read_refuses_git_credentials() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -64,7 +68,6 @@ async fn read_refuses_git_credentials() {
 
 /// Grep returns matched LINE CONTENT, so an ungated search is a direct
 /// credential disclosure, not merely an enumeration.
-#[cfg(unix)]
 #[tokio::test]
 async fn grep_ctx_refuses_git_credentials() {
     let dir = tempfile::tempdir().expect("tempdir");
