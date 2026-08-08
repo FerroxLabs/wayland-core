@@ -169,6 +169,134 @@ pub struct WaveOutcome {
     pub delivered: Vec<String>,
 }
 
+/// Why a declared task carried no durable completion.
+///
+/// The set is closed and the distinction is the point: "nothing is claimable"
+/// is a statement about the CLAIM pool, and four different facts produce it.
+/// Reporting them with one sentence is what let a crashed-and-restarted Goal
+/// announce it was finished.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnfinishedReason {
+    /// Held by a claim whose lease has not lapsed. Immediately after a crash
+    /// this is the DEAD parent's claim: the task is untouchable until the lease
+    /// expires, and that window is exactly when a real person restarts.
+    Leased {
+        worker_id: String,
+        lease_expires_unix_ms: u64,
+    },
+    /// The attempt's outcome could not be established. Parked for explicit
+    /// resolution, never silently retried.
+    AwaitingResolution,
+    /// A dependency carries no durable completion yet.
+    DependenciesUnmet,
+    /// Claimable right now — the loop stopped for some other reason, such as
+    /// its authorized iteration bound.
+    Claimable,
+}
+
+impl std::fmt::Display for UnfinishedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Leased {
+                worker_id,
+                lease_expires_unix_ms,
+            } => write!(f, "leased to {worker_id} until {lease_expires_unix_ms}"),
+            Self::AwaitingResolution => f.write_str("awaiting resolution"),
+            Self::DependenciesUnmet => f.write_str("dependencies unmet"),
+            Self::Claimable => f.write_str("claimable"),
+        }
+    }
+}
+
+/// One declared task with no durable completion, and why it has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnfinishedTask {
+    pub task_id: String,
+    pub reason: UnfinishedReason,
+}
+
+/// What the CHAIN says about a Goal's declared tasks — counted per task, across
+/// every process that has ever run it.
+///
+/// This is deliberately not derived from [`FleetRun::waves`]. A Goal that
+/// survived a crash has most of its completions in the chain and none of them in
+/// the surviving process's waves, so any count taken from the waves describes
+/// the last slice of the job rather than the job.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoalTally {
+    /// Tasks declared in the ledger.
+    pub declared: u64,
+    /// Tasks carrying a durable completion.
+    pub completed: u64,
+    /// Every task that does not, in deterministic task-id order.
+    pub unfinished: Vec<UnfinishedTask>,
+}
+
+impl GoalTally {
+    /// Whether every declared task carries a durable completion.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.unfinished.is_empty()
+    }
+
+    #[must_use]
+    pub fn unfinished_count(&self) -> u64 {
+        self.unfinished.len() as u64
+    }
+
+    /// One line stating what is outstanding, and for a leased task how long the
+    /// operator must wait before a restart can reclaim it.
+    ///
+    /// The remaining time is rendered rather than the raw expiry, because the
+    /// actionable question after a crash is "when can I re-run this?" and a unix
+    /// millisecond does not answer it.
+    #[must_use]
+    pub fn summary(&self, now_unix_ms: u64) -> String {
+        if self.is_complete() {
+            return format!(
+                "all {} declared tasks carry a durable completion",
+                self.declared
+            );
+        }
+        let detail = self
+            .unfinished
+            .iter()
+            .map(|task| match &task.reason {
+                UnfinishedReason::Leased {
+                    worker_id,
+                    lease_expires_unix_ms,
+                } => format!(
+                    "{} ({})",
+                    task.task_id,
+                    lease_detail(worker_id, *lease_expires_unix_ms, now_unix_ms)
+                ),
+                other => format!("{} ({other})", task.task_id),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} of {} tasks unfinished: {detail}",
+            self.unfinished_count(),
+            self.declared
+        )
+    }
+}
+
+/// Render a live claim as the wait it imposes on a restart.
+fn lease_detail(worker_id: &str, lease_expires_unix_ms: u64, now_unix_ms: u64) -> String {
+    if let Some(remaining) = lease_expires_unix_ms
+        .checked_sub(now_unix_ms)
+        .filter(|r| *r > 0)
+    {
+        format!(
+            "held by claim {worker_id}, reclaimable in {}s",
+            remaining.div_ceil(1_000)
+        )
+    } else {
+        format!("held by claim {worker_id}, lease already expired — re-run to reclaim it")
+    }
+}
+
 /// The result of driving a Goal to a standstill.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FleetRun {
@@ -176,6 +304,12 @@ pub struct FleetRun {
     pub iterations_consumed: u32,
     /// Why the loop stopped. Always populated.
     pub stopped_because: String,
+    /// What the chain said about every declared task when the loop stopped.
+    ///
+    /// The completeness verdict lives here rather than being inferred from
+    /// `stopped_because`, so a caller decides its exit code from a value it can
+    /// match on rather than from a sentence it has to parse.
+    pub tally: GoalTally,
 }
 
 impl FleetRun {
@@ -187,6 +321,14 @@ impl FleetRun {
     #[must_use]
     pub fn delivered(&self) -> usize {
         self.waves.iter().map(|wave| wave.delivered.len()).sum()
+    }
+
+    /// Whether the GOAL is finished — not whether this run had anything left to
+    /// claim. Those are different questions and conflating them is what let a
+    /// resume inside the claim-lease window report success over undone work.
+    #[must_use]
+    pub fn goal_complete(&self) -> bool {
+        self.tally.is_complete()
     }
 }
 
@@ -467,9 +609,12 @@ impl GoalFleetDriver {
         clock: &dyn Fn() -> u64,
     ) -> Result<FleetRun, JournalError> {
         let mut run = FleetRun::default();
+        // Set only by the claim-pool-exhausted break, whose honest reason cannot
+        // be written until the chain has been asked what is actually left.
+        let mut claim_pool_exhausted = false;
         loop {
             if self.ledger.claimable(&self.goal)?.is_empty() {
-                run.stopped_because = "no claimable task remains".to_owned();
+                claim_pool_exhausted = true;
                 break;
             }
             if let Err(error) = self.kernel.start_iteration(&self.goal) {
@@ -490,6 +635,20 @@ impl GoalFleetDriver {
                 break;
             }
         }
+        // Asked of the CHAIN, once, after the loop — so every exit path reports
+        // the same completeness verdict and none of them can report the job
+        // finished on the strength of an empty claim pool.
+        run.tally = self.tally()?;
+        if claim_pool_exhausted {
+            run.stopped_because = if run.tally.is_complete() {
+                run.tally.summary(clock())
+            } else {
+                format!(
+                    "no claimable task remains, but {}",
+                    run.tally.summary(clock())
+                )
+            };
+        }
         if run.stopped_because.is_empty() {
             run.stopped_because = "loop exited without a recorded reason".to_owned();
         }
@@ -499,6 +658,50 @@ impl GoalFleetDriver {
     /// The reduced Goal, replayed.
     pub fn goal_state(&self) -> Result<Option<super::GoalState>, JournalError> {
         self.kernel.goal(&self.goal)
+    }
+
+    /// What the chain says about every declared task, counted PER TASK across
+    /// every process that has ever run this Goal.
+    ///
+    /// This is the answer to "is the job done", and it is a different question
+    /// from "does this process have anything left to claim". A parent killed
+    /// mid-wave leaves its claims live until their leases lapse, so a successor
+    /// that starts inside that window has nothing claimable and everything
+    /// unfinished — measured on the shipped binary, where the restart printed
+    /// `no claimable task remains` and exited 0 over four undone tasks.
+    pub fn tally(&self) -> Result<GoalTally, JournalError> {
+        let Some(goal) = self.goal_state()? else {
+            return Ok(GoalTally::default());
+        };
+        let mut tally = GoalTally {
+            declared: goal.tasks.len() as u64,
+            ..GoalTally::default()
+        };
+        // `tasks` is a BTreeMap, so the unfinished list is in task-id order and
+        // two replays of the same chain render the same sentence.
+        for task in goal.tasks.values() {
+            if task.completion.is_some() {
+                tally.completed += 1;
+                continue;
+            }
+            let reason = if let Some(attempt) = task.live_attempt() {
+                UnfinishedReason::Leased {
+                    worker_id: attempt.worker_id.clone(),
+                    lease_expires_unix_ms: attempt.lease_expires_unix_ms,
+                }
+            } else if task.requires_resolution() {
+                UnfinishedReason::AwaitingResolution
+            } else if goal.dependencies_met(task) {
+                UnfinishedReason::Claimable
+            } else {
+                UnfinishedReason::DependenciesUnmet
+            };
+            tally.unfinished.push(UnfinishedTask {
+                task_id: task.task_id.clone(),
+                reason,
+            });
+        }
+        Ok(tally)
     }
 
     /// Build the one agent that owns `authority`.

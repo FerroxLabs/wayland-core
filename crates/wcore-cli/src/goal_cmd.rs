@@ -44,8 +44,8 @@ use std::time::Duration;
 use clap::{Args, Subcommand, ValueEnum};
 
 use wcore_agent::goal::{
-    FleetOutcome, GoalFleetDriver, GoalKernel, GoalLoop, StrategyTermination, TaskAssignment,
-    TaskExecution, TaskExecutor, WaveOutcome, event_line, goal_stream,
+    FleetOutcome, FleetRun, GoalFleetDriver, GoalKernel, GoalLoop, GoalTally, StrategyTermination,
+    TaskAssignment, TaskExecution, TaskExecutor, WaveOutcome, event_line, goal_stream,
 };
 use wcore_agent::session_journal::SessionJournal;
 use wcore_swarm::fleet::{FleetDispatcher, ShardSummary};
@@ -652,6 +652,12 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
     // `StrategyTermination::from_fleet` after the last. The closure's return
     // type is `StrategyTermination`, so there is no path out of it that reaches
     // a terminal state any other way.
+    // A second handle on the same journal, kept OUTSIDE the loop-owner closure
+    // so the completeness verdict can be read back after the Goal terminates.
+    // `GoalFleetDriver` is `Clone` over one `SessionJournal`, so this is the same
+    // writer lease rather than a second open.
+    let reporter = driver.clone();
+
     if options.terminate {
         let goal_id = GoalId::new(&options.goal);
         let cursor = loop_driver
@@ -664,15 +670,7 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
                         for (index, wave) in run.waves.iter().enumerate() {
                             print_wave(index, wave);
                         }
-                        println!(
-                            "GOAL: run_complete waves={} iterations={} completed={} \
-                             delivered={} stopped_because={}",
-                            run.waves.len(),
-                            run.iterations_consumed,
-                            run.completed(),
-                            run.delivered(),
-                            run.stopped_because
-                        );
+                        print_run_complete(&run);
                         // Bound at shard level, never at a caller-chosen `T`:
                         // one `ShardSummary` per wave, carrying the
                         // completed/failed counts the driver itself measured.
@@ -718,7 +716,10 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
             "GOAL: canonical_transition strategy=fleet terminal={terminal} cursor_seq={:?}",
             cursor.journal_sequence
         );
-        return Ok(());
+        let tally = reporter
+            .tally()
+            .map_err(|e| anyhow::anyhow!("failed to read goal {}: {e}", options.goal))?;
+        return refuse_to_report_an_unfinished_goal(&options.goal, &tally);
     }
 
     let run = driver
@@ -729,15 +730,48 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
     for (index, wave) in run.waves.iter().enumerate() {
         print_wave(index, wave);
     }
+    print_run_complete(&run);
+    refuse_to_report_an_unfinished_goal(&options.goal, &run.tally)
+}
+
+fn print_run_complete(run: &FleetRun) {
     println!(
-        "GOAL: run_complete waves={} iterations={} completed={} delivered={} stopped_because={}",
+        "GOAL: run_complete waves={} iterations={} completed={} delivered={} \
+         goal_complete={} goal_completed={} goal_declared={} stopped_because={}",
         run.waves.len(),
         run.iterations_consumed,
         run.completed(),
         run.delivered(),
+        run.goal_complete(),
+        run.tally.completed,
+        run.tally.declared,
         run.stopped_because
     );
-    Ok(())
+}
+
+/// Exit non-zero when the Goal still has work, naming every outstanding task.
+///
+/// Both halves matter and neither substitutes for the other. Driving the shipped
+/// binary, a restart inside the claim-lease window printed
+/// `stopped_because=no claimable task remains` **and exited 0** over four undone
+/// tasks of six — so a script that checked the status code was told the job had
+/// finished, and an operator reading the line was told the same. An empty claim
+/// pool is a statement about claims; only the chain can say whether the job is
+/// done.
+fn refuse_to_report_an_unfinished_goal(goal: &str, tally: &GoalTally) -> anyhow::Result<()> {
+    for task in &tally.unfinished {
+        println!(
+            "GOAL: unfinished task={} reason={}",
+            task.task_id, task.reason
+        );
+    }
+    if tally.is_complete() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "goal {goal} is NOT complete: {}",
+        tally.summary(now_unix_ms())
+    )
 }
 
 fn print_wave(index: usize, wave: &WaveOutcome) {
