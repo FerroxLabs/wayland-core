@@ -1656,8 +1656,7 @@ mod tests {
         resilient
             .stream(&request)
             .await
-            .err()
-            .expect("circuit is open and every candidate is refused")
+            .expect_err("circuit is open and every candidate is refused")
     }
 
     #[tokio::test]
@@ -1731,8 +1730,7 @@ mod tests {
         let message = resilient
             .stream(&request)
             .await
-            .err()
-            .expect("all 40 candidates have an unknown window")
+            .expect_err("all 40 candidates have an unknown window")
             .to_string();
 
         assert!(
