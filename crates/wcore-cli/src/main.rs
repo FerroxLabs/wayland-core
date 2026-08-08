@@ -2273,10 +2273,15 @@ async fn run() -> anyhow::Result<ExitCode> {
         && let Some((driver, goal_id)) = wcore_cli::goal_cmd::GoalAttachArgs::default().resolve()?
     {
         use wcore_agent::goal::{DirectOutcome, StrategyTermination};
+        // What the run has to show for itself, carried out of the closure so
+        // the exit status is decided by the same rule as the unattached path
+        // below. `None` means the engine errored.
+        let mut direct_answer: Option<String> = None;
         let cursor = driver
             .run_direct(&goal_id, |owner| async {
                 match engine.run(&prompt, "").await {
                     Ok(run_result) => {
+                        direct_answer = Some(run_result.text.clone());
                         output.emit_stream_end(
                             "",
                             run_result.turns,
@@ -2313,7 +2318,18 @@ async fn run() -> anyhow::Result<ExitCode> {
         for mgr in &result.mcp_managers {
             mgr.shutdown().await;
         }
-        return Ok(ExitCode::SUCCESS);
+        // The Goal's canonical transition is one question ("how did the loop
+        // owner terminate") and the process exit status is another ("did this
+        // invocation accomplish anything"). This branch used to answer the
+        // second with an unconditional SUCCESS, so a Goal-attached headless run
+        // whose every tool call was refused for want of an approver still told
+        // its caller it had worked. Same rule as the unattached path below,
+        // deliberately: the two differ only in whether a Goal is attached.
+        return Ok(match direct_answer {
+            Some(answer) => headless_exit_code(engine.no_approver_denials(), &answer),
+            // The engine returned an error; `emit_error` has already said so.
+            None => ExitCode::FAILURE,
+        });
     }
 
     let exit_code = if prompt.is_empty() {

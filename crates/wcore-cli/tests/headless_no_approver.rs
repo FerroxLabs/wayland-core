@@ -19,6 +19,13 @@
 //! `QUOKKA-7F3A9C` appears nowhere else in the workspace, so the byte-exact
 //! content check cannot be satisfied by a stale file or by anything the
 //! harness itself wrote.
+//!
+//! Both legs run TWICE: unattached, and attached to a durable Goal through
+//! `WAYLAND_GOAL_ID` + `WAYLAND_GOAL_JOURNAL`. The Goal-attached branch is a
+//! second, earlier exit path through the same engine call, and it had its own
+//! unconditional `ExitCode::SUCCESS`. A unit test over `headless_exit_code` is
+//! blind to which call sites consult it, so this is the level the wiring has
+//! to be proven at.
 
 use std::process::Stdio;
 
@@ -43,6 +50,12 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
 }
 
+/// A durable Goal for the run to attach to, and the journal holding it.
+struct Attached {
+    journal: std::path::PathBuf,
+    goal: String,
+}
+
 struct Outcome {
     status: Option<i32>,
     stdout: String,
@@ -55,6 +68,38 @@ struct Outcome {
 /// above the retry burn observed in the audit, so a build that still treats
 /// the refusal as retryable cannot exhaust the script and look calm.
 async fn run(extra_args: &[&str]) -> Outcome {
+    run_attached(extra_args, None).await
+}
+
+/// Open a durable Goal for the Direct loop owner, in the run's own home.
+async fn open_goal(home: &std::path::Path, cwd: &std::path::Path, attach: &Attached) {
+    let out = Command::new(binary())
+        .arg("goal")
+        .arg("open")
+        .arg("--journal")
+        .arg(&attach.journal)
+        .arg("--goal")
+        .arg(&attach.goal)
+        .arg("--objective")
+        .arg("write the canary under a Goal")
+        .arg("--strategy")
+        .arg("direct")
+        .current_dir(cwd)
+        .env("HOME", home)
+        .env("WAYLAND_HOME", home)
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("open the Goal");
+    assert!(
+        out.status.success(),
+        "goal open failed: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+async fn run_attached(extra_args: &[&str], goal: Option<&str>) -> Outcome {
     // The workspace is built FIRST: `Write` requires an absolute path, and the
     // fixture has to name it before it can be served. The base_url in the
     // written config is a placeholder — the real one is passed on the command
@@ -83,7 +128,26 @@ async fn run(extra_args: &[&str]) -> Outcome {
         .await
         .expect("start loopback fixture");
 
+    // `main.rs` attaches Direct to a Goal through the environment, so this is
+    // the production route, not a harness convenience: `goal_cmd::ENV_GOAL` +
+    // `ENV_JOURNAL` is how this codebase already hands a Goal to a child.
+    let attach = match goal {
+        Some(id) => {
+            let attached = Attached {
+                journal: env.path().join(format!("{id}.journal")),
+                goal: id.to_string(),
+            };
+            open_goal(env.home(), env.path(), &attached).await;
+            Some(attached)
+        }
+        None => None,
+    };
+
     let mut cmd = Command::new(binary());
+    if let Some(attached) = &attach {
+        cmd.env("WAYLAND_GOAL_ID", &attached.goal)
+            .env("WAYLAND_GOAL_JOURNAL", &attached.journal);
+    }
     cmd.arg("--provider")
         .arg("openai")
         .arg("--model")
@@ -181,5 +245,62 @@ async fn a_run_with_no_approver_refuses_says_why_and_does_not_exit_zero() {
         Some(EXPECTED_BLOCKED_EXIT),
         "a run whose tool calls were all refused for want of an approver must \
          not report success"
+    );
+}
+
+/// The same two legs, attached to a durable Goal.
+///
+/// `main.rs` has a SECOND headless exit, forty lines above the one the test
+/// above covers: the Direct-attached branch, reached whenever `WAYLAND_GOAL_ID`
+/// and `WAYLAND_GOAL_JOURNAL` are both set. It ran the same engine, printed the
+/// same canonical transition, and then returned `ExitCode::SUCCESS`
+/// unconditionally — so every refusal in a Goal-attached CI job still reported
+/// success.
+#[tokio::test]
+async fn a_goal_attached_run_with_no_approver_also_does_not_report_success() {
+    // LEG B FIRST — the positive control, so leg A cannot pass by the Goal
+    // attachment simply breaking the run.
+    let allowed = run_attached(&["--auto-approve"], Some("goal-control")).await;
+    assert!(
+        allowed.canary_exists && allowed.canary_contents.contains(CANARY),
+        "POSITIVE CONTROL FAILED: a Goal-attached run with --auto-approve must \
+         still write the canary.\nstatus={:?}\nstdout:\n{}\nstderr:\n{}",
+        allowed.status,
+        allowed.stdout,
+        allowed.stderr
+    );
+    assert_eq!(
+        allowed.status,
+        Some(0),
+        "a Goal-attached run that did the work must still exit 0\nstderr:\n{}",
+        allowed.stderr
+    );
+    // Anti-vacuity: the Goal really was driven, not silently ignored. The
+    // canonical transition is printed by `print_canonical_transition`, which
+    // reads the terminal state back out of the durable journal.
+    assert!(
+        allowed.stdout.contains("direct"),
+        "the run never reported a canonical Goal transition:\n{}",
+        allowed.stdout
+    );
+
+    // LEG A — the default posture, attached.
+    let blocked = run_attached(&[], Some("goal-blocked")).await;
+    assert!(
+        !blocked.canary_exists,
+        "the refused tool executed: canary.txt exists"
+    );
+    assert!(
+        blocked.stdout.contains("direct"),
+        "the run never reported a canonical Goal transition:\n{}",
+        blocked.stdout
+    );
+    assert_eq!(
+        blocked.status,
+        Some(EXPECTED_BLOCKED_EXIT),
+        "a Goal-attached run whose tool calls were all refused for want of an \
+         approver must not report success\nstdout:\n{}\nstderr:\n{}",
+        blocked.stdout,
+        blocked.stderr
     );
 }
