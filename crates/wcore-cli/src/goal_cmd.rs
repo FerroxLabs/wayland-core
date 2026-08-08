@@ -48,7 +48,7 @@ use wcore_agent::goal::{
     TaskAssignment, TaskExecution, TaskExecutor, WaveOutcome, event_line, goal_stream,
 };
 use wcore_agent::session_journal::SessionJournal;
-use wcore_swarm::fleet::{FleetDispatcher, ShardSummary};
+use wcore_swarm::fleet::FleetDispatcher;
 use wcore_types::goal::{
     GoalAuthorityRequest, GoalId, GoalStrategy, GoalTerminalState, LoopPolicy, TaskId,
     TaskUnknownReason, resolve_goal_authority,
@@ -671,23 +671,25 @@ async fn run_goal(options: RunOptions) -> anyhow::Result<()> {
                             print_wave(index, wave);
                         }
                         print_run_complete(&run);
-                        // Bound at shard level, never at a caller-chosen `T`:
-                        // one `ShardSummary` per wave, carrying the
-                        // completed/failed counts the driver itself measured.
-                        // Nothing here invents a number or rounds the split away.
-                        let shards: Vec<ShardSummary> = run
-                            .waves
-                            .iter()
-                            .enumerate()
-                            .map(|(index, wave)| ShardSummary {
-                                shard_id: index,
-                                agent_count: wave.claimed,
-                                successes: wave.completed,
-                                failures: wave.failed,
-                                payload: serde_json::Value::Null,
-                            })
-                            .collect();
-                        StrategyTermination::from_fleet(owner, FleetOutcome::Dispatched(&shards))
+                        // Counted from the CHAIN, per declared task, across
+                        // every process that has ever run this Goal — never
+                        // from the waves this process happened to dispatch.
+                        //
+                        // The shard sums that used to be handed over describe
+                        // one run, and `goal run` is by design re-enterable
+                        // after a kill: measured on the shipped binary, a
+                        // 6-task Goal resumed to 6-of-6 with six distinct
+                        // effects on disk recorded
+                        // `partially_completed { completed: 2, failed: 0 }`,
+                        // and that durable record is what the host protocol
+                        // serves to a Desktop for the rest of the Goal's life.
+                        StrategyTermination::from_fleet(
+                            owner,
+                            FleetOutcome::Ledger {
+                                completed: run.tally.completed,
+                                failed: run.tally.unfinished_count(),
+                            },
+                        )
                     }
                     // Carried into the terminal transition as a stated reason,
                     // never swallowed into a clean terminal and never squeezed
