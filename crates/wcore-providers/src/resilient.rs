@@ -200,9 +200,19 @@ impl ResilientProvider {
         let candidates = fallbacks
             .into_iter()
             .map(|(label, pricing_provider, model, provider)| {
-                let context_window =
-                    wcore_config::limits::model_output_ceiling(&pricing_provider, &model)
-                        .map(|(_, window)| u64::from(window));
+                // B02-D1 — the SAME kernel the typed constructor uses. Reading
+                // `model_output_ceiling` alone here made every Flux tier alias
+                // (deliberately absent from that table, CORE-4) an inadmissible
+                // failover candidate. Two metadata builders, one resolver, so
+                // the defect cannot be reintroduced in half the tree. The
+                // legacy tuple carries no `Config`, hence `config_window = 0`.
+                let context_window = wcore_config::context_window::ContextWindow::resolve(
+                    0,
+                    &pricing_provider,
+                    &model,
+                    0,
+                )
+                .window;
                 let metadata = FailoverCandidateMetadata {
                     label,
                     provider: pricing_provider,
