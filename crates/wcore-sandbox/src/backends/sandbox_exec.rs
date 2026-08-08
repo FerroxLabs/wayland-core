@@ -28,6 +28,8 @@ use crate::error::{Result, SandboxError};
 use crate::manifest::{NetworkPolicy, SandboxManifest};
 use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
 
@@ -74,6 +76,38 @@ fn reject_unsafe_path(path: &std::path::Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Proper ancestor directories of `paths`, excluding the filesystem root
+/// (already granted by the static profile head) and excluding anything at or
+/// under an `fs_read_deny` entry.
+///
+/// Ordered + deduplicated via `BTreeSet` so the emitted profile text is stable
+/// for tests and does not grow quadratically when several manifest roots share
+/// most of their ancestry (`WorkspacePolicy::readable_roots` routinely returns
+/// root + writable_extra + readable_extra + session_read_grants).
+fn ancestor_dirs<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+    deny: &[PathBuf],
+) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    for path in paths {
+        for anc in path.ancestors().skip(1) {
+            // `parent()` is `None` only for the filesystem root and the empty
+            // path. The root already has `(allow file-read* (literal "/"))`.
+            if anc.parent().is_none() {
+                continue;
+            }
+            if deny
+                .iter()
+                .any(|d| !d.as_os_str().is_empty() && anc.starts_with(d))
+            {
+                continue;
+            }
+            out.insert(anc.to_path_buf());
+        }
+    }
+    out
 }
 
 impl SandboxExecBackend {
@@ -172,6 +206,48 @@ impl SandboxExecBackend {
             p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
             p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
+        // Ancestor traversal metadata (macOS `cd <abs path>` fix).
+        //
+        // Seatbelt is PATH-based, not component-based: `(subpath "<ws>")`
+        // authorizes operations whose resolved path is at or under `<ws>` and
+        // says nothing about the directories between `/` and `<ws>`. chdir(2)
+        // into the workspace was therefore never denied — but macOS `/bin/sh`
+        // is bash 3.2, whose *logical* `cd` runs the operand through
+        // `sh_canonpath(PATH_CHECKDOTDOT|PATH_CHECKEXISTS)` and stat(2)s EVERY
+        // intermediate prefix first. Each of those is a distinct
+        // `file-read-metadata` check on a path no rule matches, so deny-default
+        // returns EPERM, and bash renders a prefix it cannot stat as ENOTDIR
+        // against the ORIGINAL operand. The result is
+        // `cd: /abs/path: Not a directory` for a directory that is the
+        // process's own cwd — and `cd sub` fails identically, because bash
+        // canonicalizes `$PWD/sub` and stats the same ancestors.
+        //
+        // `file-read-metadata` is the minimum that fixes it: it permits
+        // stat/lstat/access of the directory inode and nothing else — no
+        // content read, no directory listing, no write. The grant is a closed
+        // set of literals derived from the manifest, so it is not an
+        // enumeration primitive.
+        //
+        // Ancestors at or under an `fs_read_deny` entry are subtracted here,
+        // and a same-operation `(deny file-read-metadata ...)` backstop is
+        // emitted after the deny loop below. BOTH are required: Seatbelt
+        // resolves per OPERATION NODE, so a rule on `file-read-metadata` beats
+        // a rule on the parent operation `file-read*` regardless of textual
+        // order. Emitting these allows before the denies is house style, not a
+        // control.
+        for anc in ancestor_dirs(
+            manifest
+                .fs_read_allow
+                .iter()
+                .chain(&manifest.fs_write_allow),
+            &manifest.fs_read_deny,
+        ) {
+            reject_unsafe_path(&anc)?;
+            p.push_str(&format!(
+                "(allow file-read-metadata (literal \"{}\"))\n",
+                escape_sbpl_string(&anc.to_string_lossy())
+            ));
+        }
         // Secret-read-deny: emitted AFTER all allows so SBPL last-match-wins
         // semantics make the deny authoritative even under an allowed subtree.
         // Paths must be canonicalized by the caller (WorkspacePolicy) before
@@ -181,6 +257,19 @@ impl SandboxExecBackend {
             reject_unsafe_path(path)?;
             p.push_str(&format!(
                 "(deny file-read* (subpath \"{}\"))\n",
+                escape_sbpl_string(&path.to_string_lossy())
+            ));
+        }
+        // Same-operation backstop for the deny list. `file-read-metadata` is a
+        // SUBSET operation of `file-read*`; because Seatbelt resolves per
+        // operation node, the ancestor metadata allows above would otherwise
+        // punch a stat/lstat/access hole through a `file-read*` deny that
+        // happens to sit on (or above) a granted root — no matter where the
+        // allows were emitted. This line re-closes it. Paths were already
+        // validated by the deny loop above.
+        for path in &manifest.fs_read_deny {
+            p.push_str(&format!(
+                "(deny file-read-metadata (subpath \"{}\"))\n",
                 escape_sbpl_string(&path.to_string_lossy())
             ));
         }
@@ -408,6 +497,115 @@ mod tests {
         assert!(
             deny_line.contains("\\\""),
             "expected escaped quote in: {deny_line}"
+        );
+    }
+
+    /// The ancestor directories of a granted workspace must be stat-able, and
+    /// stat-able is ALL they may become.
+    ///
+    /// Seatbelt is path-based, not component-based: `(subpath "<ws>")` says
+    /// nothing about the directories between `/` and `<ws>`. bash's *logical*
+    /// `cd` stat()s every one of those prefixes before calling chdir(2) and
+    /// renders a prefix it cannot stat as ENOTDIR against the original
+    /// operand, so `cd /abs/path` fails with a false "Not a directory" even
+    /// when the target is the process's own cwd.
+    #[test]
+    fn profile_grants_metadata_only_on_ancestors() {
+        // A workspace nested well below any statically granted root. `/Users`
+        // is deliberately NOT one of the head's grants, so the "no widened
+        // grant" assertion below is satisfiable.
+        const ANCESTORS: [&str; 6] = [
+            "/Users",
+            "/Users/x",
+            "/Users/x/proj",
+            "/Users/x/proj/a",
+            "/Users/x/proj/a/b",
+            "/Users/x/proj/a/b/c",
+        ];
+        let m = SandboxManifest {
+            fs_write_allow: vec!["/Users/x/proj/a/b/c/ws".into()],
+            fs_read_deny: vec!["/Users/x/proj/a/b/c/ws/.env".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+
+        for anc in ANCESTORS {
+            let line = format!("(allow file-read-metadata (literal \"{anc}\"))");
+            assert_eq!(
+                p.matches(&line).count(),
+                1,
+                "expected exactly one metadata grant for {anc}; profile:\n{p}"
+            );
+        }
+
+        // The workspace itself is already covered by its own subpath grant.
+        assert!(
+            !p.contains("(allow file-read-metadata (literal \"/Users/x/proj/a/b/c/ws\"))"),
+            "the granted root must not be re-emitted as an ancestor:\n{p}"
+        );
+        // The root is granted by the static head; do not re-emit it.
+        assert!(
+            !p.contains("(allow file-read-metadata (literal \"/\"))"),
+            "`/` must not be re-emitted:\n{p}"
+        );
+
+        // No ancestor may receive a WIDER grant than metadata. Scoped to the
+        // manifest-derived block: the static head unconditionally grants
+        // `file-read*` on `/`, `/var`, `/tmp`, `/etc`, `/usr` ... and those
+        // are not what this test is about.
+        let manifest_block = &p[p
+            .find("(allow file-read* (subpath \"/Users/x/proj/a/b/c/ws\"))")
+            .expect("the manifest allow line must exist")..];
+        for line in manifest_block.lines() {
+            if line.contains("file-read-metadata") {
+                continue;
+            }
+            for anc in ANCESTORS {
+                assert!(
+                    !line.contains(&format!("\"{anc}\"")),
+                    "ancestor {anc} must not receive a non-metadata grant: {line}"
+                );
+            }
+        }
+    }
+
+    /// The ancestor grant must not punch a hole through `fs_read_deny`.
+    ///
+    /// Seatbelt resolves per OPERATION NODE, not by textual last-match across
+    /// different operations: a rule written on `file-read-metadata` beats a
+    /// rule on the parent operation `file-read*` REGARDLESS of order. So
+    /// emitting the metadata allows "before the denies" is house style, not a
+    /// control. Two things are required, and this test pins both.
+    #[test]
+    fn denied_ancestors_get_no_metadata_grant_and_a_same_operation_deny() {
+        let m = SandboxManifest {
+            fs_write_allow: vec!["/Users/x/proj/a/b/c/ws".into()],
+            fs_read_deny: vec!["/Users/x/proj/a/b".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+
+        // 1. Subtraction: neither the denied directory nor anything under it
+        //    may be handed a metadata grant.
+        for denied in ["/Users/x/proj/a/b", "/Users/x/proj/a/b/c"] {
+            assert!(
+                !p.contains(&format!(
+                    "(allow file-read-metadata (literal \"{denied}\"))"
+                )),
+                "denied ancestor {denied} must not receive a metadata grant:\n{p}"
+            );
+        }
+        // Ancestors ABOVE the deny root still get one — otherwise the
+        // subtraction could be implemented by emitting nothing at all.
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/x/proj/a\"))"),
+            "ancestors above the deny root must still be stat-able:\n{p}"
+        );
+
+        // 2. Same-operation backstop for every deny entry.
+        assert!(
+            p.contains("(deny file-read-metadata (subpath \"/Users/x/proj/a/b\"))"),
+            "fs_read_deny needs an explicit file-read-metadata deny:\n{p}"
         );
     }
 
