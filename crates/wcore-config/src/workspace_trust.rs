@@ -157,13 +157,16 @@ pub fn fingerprint_workspace(
         .last()
         .cloned()
         .unwrap_or_else(|| root.clone());
-    let mut candidates = Vec::new();
+    // (logical, resolved). They differ only for a symlink: `logical` is the
+    // path as it appears under the workspace and names the entry in the hash,
+    // `resolved` is where the bytes actually live and is what gets read.
+    let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
     for path in [
         root.join(".wayland-core.toml"),
         root.join(".wayland-core").join("config.toml"),
     ] {
         if path.exists() {
-            candidates.push(path);
+            candidates.push((path.clone(), path));
         }
     }
     for ancestor in skill_ancestors {
@@ -183,16 +186,18 @@ pub fn fingerprint_workspace(
     let mut hasher = Sha256::new();
     hasher.update(b"wayland-workspace-executable-surface-v1\0");
     let mut total = 0_u64;
-    for path in candidates {
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(WorkspaceTrustError::ExecutableSymlink(path));
-        }
+    for (logical, resolved) in candidates {
+        // `metadata`, not `symlink_metadata`: a link has already been resolved
+        // into `resolved` by the collector, which refuses anything that is not
+        // a regular file. Reading through the link is the point — hashing the
+        // link's own bytes would fingerprint a pointer, and what executes is
+        // whatever the target holds.
+        let metadata = fs::metadata(&resolved)?;
         if !metadata.is_file() {
             continue;
         }
         if metadata.len() > MAX_EXECUTABLE_FILE_BYTES {
-            return Err(WorkspaceTrustError::FileTooLarge(path));
+            return Err(WorkspaceTrustError::FileTooLarge(logical));
         }
         total = total
             .checked_add(metadata.len())
@@ -200,10 +205,10 @@ pub fn fingerprint_workspace(
         if total > MAX_EXECUTABLE_TOTAL_BYTES {
             return Err(WorkspaceTrustError::SurfaceTooLarge);
         }
-        let relative = path
+        let relative = logical
             .strip_prefix(&scope_boundary)
             .map_err(|_| WorkspaceTrustError::InvalidRoot(root.clone()))?;
-        let bytes = fs::read(&path)?;
+        let bytes = fs::read(&resolved)?;
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update([0]);
         hasher.update((bytes.len() as u64).to_le_bytes());
@@ -248,40 +253,105 @@ fn canonical_workspace_root(workspace: &Path) -> Result<PathBuf, WorkspaceTrustE
     Ok(root)
 }
 
+/// Walk the executable surface, following symlinks and recording where their
+/// bytes really live.
+///
+/// ## Why links are followed rather than refused
+///
+/// This used to return `ExecutableSymlink` for any link. That made Wayland
+/// Core unusable from any host that composes a workspace out of assets it owns
+/// — Wayland Desktop links builtin and user skill directories into a per-chat
+/// workspace, so `--trust-workspace` cleared the profile error and then the
+/// fingerprint refused, with no third path.
+///
+/// Refusing links bought nothing that survives inspection. **This fingerprint
+/// is only ever compared against an EXPLICIT trust grant.** With no grant the
+/// workspace is untrusted whatever the walk returns, so following a link
+/// changes nothing observable. With a grant, the user has already said this
+/// workspace's executable surface is theirs — and a workspace that can run
+/// skills at all can read any file the user can, so a link to
+/// `~/.ssh/id_rsa` buys an attacker nothing they did not already have the
+/// moment trust was granted.
+///
+/// What the ban DID buy, and what is preserved here, is that trust must not
+/// survive a change to what actually executes. That is why `resolved` is
+/// hashed by CONTENT: rewrite the target, or repoint the link at different
+/// bytes, and the fingerprint moves and the grant is void. Hashing the link
+/// itself would fingerprint a pointer and let the executed content drift for
+/// free — the property the ban existed to protect, lost by the cheaper fix.
+///
+/// Fail-closed cases kept: a link that cannot be resolved (including a cycle,
+/// which surfaces as an `ELOOP` error from `canonicalize`), and a target that
+/// is not a regular file or directory — so a device or FIFO cannot be read
+/// into the hash and cannot hang the walk.
 fn collect_regular_files(
     root: &Path,
     directory: &Path,
-    output: &mut Vec<PathBuf>,
+    output: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), WorkspaceTrustError> {
-    if !directory.exists() {
+    collect_from(root, directory, directory, output, 0)
+}
+
+/// `logical_dir` is the path under the workspace; `real_dir` is where to read.
+/// They diverge once a directory link has been followed.
+fn collect_from(
+    root: &Path,
+    logical_dir: &Path,
+    real_dir: &Path,
+    output: &mut Vec<(PathBuf, PathBuf)>,
+    depth: usize,
+) -> Result<(), WorkspaceTrustError> {
+    // A link cycle normally surfaces as ELOOP from `canonicalize`, but a chain
+    // of distinct directories each linking one level deeper does not. Bound it.
+    const MAX_LINK_DEPTH: usize = 32;
+    if depth > MAX_LINK_DEPTH {
+        return Err(WorkspaceTrustError::SurfaceTooLarge);
+    }
+    if !real_dir.exists() {
         return Ok(());
     }
-    let metadata = fs::symlink_metadata(directory)?;
-    if metadata.file_type().is_symlink() {
-        return Err(WorkspaceTrustError::ExecutableSymlink(
-            directory.to_path_buf(),
-        ));
-    }
+    let metadata = match fs::metadata(real_dir) {
+        Ok(metadata) => metadata,
+        // Resolution failed: a dangling link, a cycle, a permission wall. The
+        // surface cannot be established, so it cannot be certified.
+        Err(_) => {
+            return Err(WorkspaceTrustError::ExecutableSymlink(
+                logical_dir.to_path_buf(),
+            ));
+        }
+    };
     if !metadata.is_dir() {
         return Ok(());
     }
-    for entry in fs::read_dir(directory)? {
+    for entry in fs::read_dir(real_dir)? {
         let entry = entry?;
-        let path = entry.path();
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() {
-            return Err(WorkspaceTrustError::ExecutableSymlink(path));
-        }
-        if metadata.is_dir() {
-            collect_regular_files(root, &path, output)?;
-        } else if metadata.is_file() {
-            if !path.starts_with(root) {
-                return Err(WorkspaceTrustError::InvalidRoot(path));
+        let real = entry.path();
+        let logical = logical_dir.join(entry.file_name());
+
+        // `metadata` follows the link; `symlink_metadata` would report the
+        // link itself.
+        let resolved = match fs::metadata(&real) {
+            Ok(resolved) => resolved,
+            Err(_) => return Err(WorkspaceTrustError::ExecutableSymlink(logical)),
+        };
+
+        if resolved.is_dir() {
+            collect_from(root, &logical, &real, output, depth + 1)?;
+        } else if resolved.is_file() {
+            // The LOGICAL path is what must stay inside the workspace; the
+            // resolved target is allowed to live elsewhere precisely because
+            // its bytes, not its location, are what get hashed.
+            if !logical.starts_with(root) {
+                return Err(WorkspaceTrustError::InvalidRoot(logical));
             }
-            output.push(path);
+            output.push((logical, real));
             if output.len() > MAX_EXECUTABLE_FILES {
                 return Err(WorkspaceTrustError::SurfaceTooLarge);
             }
+        } else {
+            // Not a regular file and not a directory: a device, socket or
+            // FIFO. Reading it into the hash could block forever.
+            return Err(WorkspaceTrustError::ExecutableSymlink(logical));
         }
     }
     Ok(())
@@ -362,15 +432,18 @@ mod tests {
         ));
     }
 
+    /// A DANGLING link still fails closed. This is what remains of
+    /// `executable_surface_symlinks_fail_closed`: the surface cannot be
+    /// established, so it cannot be certified.
     #[cfg(unix)]
     #[test]
-    fn executable_surface_symlinks_fail_closed() {
+    fn unresolvable_symlink_fails_closed() {
         use std::os::unix::fs::symlink;
 
         let workspace = tempfile::tempdir().unwrap();
         fs::create_dir_all(workspace.path().join(".wayland-core/skills")).unwrap();
         symlink(
-            workspace.path().join("outside"),
+            workspace.path().join("does-not-exist"),
             workspace.path().join(".wayland-core/skills/escape"),
         )
         .unwrap();
@@ -378,5 +451,125 @@ mod tests {
             fingerprint_workspace(workspace.path()),
             Err(WorkspaceTrustError::ExecutableSymlink(_))
         ));
+    }
+
+    /// A link to a FIFO fails closed. Without this, the hash walk would block
+    /// forever on `fs::read`.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_non_regular_file_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let fifo = outside.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(
+            status.success(),
+            "mkfifo must succeed or this test is vacuous"
+        );
+
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".wayland-core/skills")).unwrap();
+        symlink(&fifo, workspace.path().join(".wayland-core/skills/pipe")).unwrap();
+        assert!(matches!(
+            fingerprint_workspace(workspace.path()),
+            Err(WorkspaceTrustError::ExecutableSymlink(_))
+        ));
+    }
+
+    /// POSITIVE CONTROL, and the case that unbreaks every host composing a
+    /// workspace from its own assets. A linked-in skill DIRECTORY fingerprints
+    /// rather than refusing.
+    #[cfg(unix)]
+    #[test]
+    fn linked_skill_directory_fingerprints() {
+        use std::os::unix::fs::symlink;
+
+        let assets = tempfile::tempdir().unwrap();
+        let skill = assets.path().join("office-cli");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), b"# office\n").unwrap();
+
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".wayland-core/skills")).unwrap();
+        symlink(
+            &skill,
+            workspace.path().join(".wayland-core/skills/office-cli"),
+        )
+        .unwrap();
+
+        fingerprint_workspace(workspace.path())
+            .expect("a resolvable linked skill directory must fingerprint");
+    }
+
+    /// THE property the old ban existed to protect, and the one a naive fix
+    /// loses. Rewriting the LINK TARGET's bytes must move the fingerprint, or
+    /// a granted trust would survive a change to what actually executes.
+    ///
+    /// Hashing the link itself would pass `linked_skill_directory_fingerprints`
+    /// above and fail here, which is exactly why both exist.
+    #[cfg(unix)]
+    #[test]
+    fn rewriting_a_link_target_moves_the_fingerprint() {
+        use std::os::unix::fs::symlink;
+
+        let assets = tempfile::tempdir().unwrap();
+        let skill = assets.path().join("office-cli");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), b"# original\n").unwrap();
+
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".wayland-core/skills")).unwrap();
+        symlink(
+            &skill,
+            workspace.path().join(".wayland-core/skills/office-cli"),
+        )
+        .unwrap();
+
+        let before = fingerprint_workspace(workspace.path()).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            b"# rewritten to do something else\n",
+        )
+        .unwrap();
+        let after = fingerprint_workspace(workspace.path()).unwrap();
+
+        assert_ne!(
+            before.digest, after.digest,
+            "rewriting the target of a linked skill MUST invalidate the fingerprint; \
+             otherwise trust granted over one executable surface silently covers another"
+        );
+    }
+
+    /// Repointing the link at different content must also move it.
+    #[cfg(unix)]
+    #[test]
+    fn repointing_a_link_moves_the_fingerprint() {
+        use std::os::unix::fs::symlink;
+
+        let assets = tempfile::tempdir().unwrap();
+        for (dir, body) in [("one", "# one\n"), ("two", "# two\n")] {
+            let d = assets.path().join(dir);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("SKILL.md"), body).unwrap();
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".wayland-core/skills")).unwrap();
+        let link = workspace.path().join(".wayland-core/skills/s");
+        symlink(assets.path().join("one"), &link).unwrap();
+        let before = fingerprint_workspace(workspace.path()).unwrap();
+
+        fs::remove_file(&link).unwrap();
+        symlink(assets.path().join("two"), &link).unwrap();
+        let after = fingerprint_workspace(workspace.path()).unwrap();
+
+        assert_ne!(
+            before.digest, after.digest,
+            "repointing a linked skill at different content MUST invalidate the fingerprint"
+        );
     }
 }
