@@ -230,8 +230,9 @@ impl LiveTransport {
     ///
     /// This is a PRODUCT fact, not a harness preference, and it is the single
     /// reason the piped headless surface could never get a delegated child to
-    /// act: `wcore_agent::confirm::ToolConfirmer::check_for` returns `Denied`
-    /// unconditionally when `io::stdin()` is not a terminal, so a `Delegate`
+    /// act: `wcore_agent::confirm::ToolConfirmer::check_for` returns
+    /// `DeniedNoApprover` unconditionally when `io::stdin()` is not a
+    /// terminal, so a `Delegate`
     /// call issued over pipes is refused before any child exists. Every verdict
     /// the corpus recorded from such a run was an absence of effect from an
     /// actor that never acted.
