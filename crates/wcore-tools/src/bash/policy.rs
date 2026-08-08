@@ -132,11 +132,11 @@ fn denylist() -> &'static RegexSet {
             // rather than env-var-based — closes the gap where an
             // attacker `cat`s the on-disk secret instead of echoing
             // an env var.
-            r"(?i)\b(cat|less|more|head|tail|tee|bat)\b[^|;]*(\.aws/credentials|\.aws/config|\.ssh/id_[a-z0-9_]+|\.ssh/identity[^/]*|\.netrc|\.npmrc|\.pypirc|\.kube/config|\.gcloud/|\.azure/|\.config/wayland/auth|/etc/shadow|/etc/sudoers)",
+            r"(?i)\b(cat|less|more|head|tail|tee|bat)\b[^|;]*(\.git-credentials|\.aws/credentials|\.aws/config|\.ssh/id_[a-z0-9_]+|\.ssh/identity[^/]*|\.netrc|\.npmrc|\.pypirc|\.kube/config|\.gcloud/|\.azure/|\.config/wayland/auth|/etc/shadow|/etc/sudoers)",
             // Encoding-based exfil: base64/xxd/od/hexdump/uuencode of
             // credential files or .env. Closes the dodge where an
             // attacker base64s the secret to bypass a plain-read deny.
-            r"(?i)\b(base64|xxd|od|hexdump|uuencode|openssl\s+enc)\b[^|;]*(\.aws/credentials|\.aws/config|\.ssh/id_[a-z0-9_]+|\.ssh/identity[^/]*|\.netrc|\.npmrc|\.pypirc|\.kube/config|\.gcloud/|\.azure/|\.config/wayland/auth|/etc/shadow|/etc/sudoers|\.env(\b|$))",
+            r"(?i)\b(base64|xxd|od|hexdump|uuencode|openssl\s+enc)\b[^|;]*(\.git-credentials|\.aws/credentials|\.aws/config|\.ssh/id_[a-z0-9_]+|\.ssh/identity[^/]*|\.netrc|\.npmrc|\.pypirc|\.kube/config|\.gcloud/|\.azure/|\.config/wayland/auth|/etc/shadow|/etc/sudoers|\.env(\b|$))",
             // Linux procfs re-exposes this process's own environment as an
             // ordinary file, so `cat /proc/self/environ` is exactly the `env`
             // dump the first rule in this set refuses — reached by a path the
