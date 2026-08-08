@@ -239,8 +239,26 @@ pub enum DirectOutcome<'a> {
 /// so it gets its own carrier and lands in `Blocked` with a stated reason.
 #[derive(Debug)]
 pub enum FleetOutcome<'a> {
-    /// Shards came back. Bound at [`ShardSummary`] — see [`StrategyTermination::from_fleet`].
+    /// Shards came back and the dispatch IS the whole run — there is no durable
+    /// record of work done before it. Bound at [`ShardSummary`] — see
+    /// [`StrategyTermination::from_fleet`].
     Dispatched(&'a [ShardSummary]),
+    /// The Goal's own durable task ledger, counted PER TASK across every process
+    /// that has ever run it.
+    ///
+    /// The right carrier whenever a durable Goal outlives the process
+    /// dispatching it, which for `goal run` is always. Shards describe one run;
+    /// a Goal that survived a crash has most of its completions in the chain and
+    /// none of them in the surviving run's shards, so terminating from shards
+    /// records a finished job as a partial one. Measured on the shipped binary:
+    /// a 6-task Goal resumed to 6-of-6 wrote `completed: 2`.
+    ///
+    /// `failed` is the count of declared tasks carrying NO durable completion.
+    /// The canonical taxonomy has two numbers and this is the honest split for
+    /// them — the same reasoning that makes a council's `skipped` land in
+    /// `failed`: `completed + failed` is then the declared task count, which is
+    /// the denominator a host needs and cannot reconstruct from anything else.
+    Ledger { completed: u64, failed: u64 },
     /// The dispatcher itself failed.
     Failed(&'a FleetError),
     /// The Goal's fleet driver failed around dispatch, for a stated reason.
@@ -430,12 +448,20 @@ impl StrategyTermination {
     /// when `failed == 0`. 97-of-100 is neither success nor failure, and Fleet's
     /// "verification owner" is a count of `succeeded` booleans — nothing checked
     /// whether the work was right — so no evidence-bearing category is honest.
+    ///
+    /// **Shards describe ONE run.** When a durable Goal outlives the process
+    /// dispatching it, the caller must hand over [`FleetOutcome::Ledger`]
+    /// instead: the shard sums are then a count of the last slice of the job,
+    /// and a Goal that finished 6 of 6 across a crash records `completed: 2`.
     pub fn from_fleet(owner: LoopOwner<FleetTag>, outcome: FleetOutcome<'_>) -> Self {
         let terminal = match outcome {
             FleetOutcome::Dispatched(shards) => GoalTerminalState::PartiallyCompleted {
                 completed: shards.iter().map(|s| s.successes as u64).sum(),
                 failed: shards.iter().map(|s| s.failures as u64).sum(),
             },
+            FleetOutcome::Ledger { completed, failed } => {
+                GoalTerminalState::PartiallyCompleted { completed, failed }
+            }
             FleetOutcome::Failed(FleetError::Timeout(_)) => GoalTerminalState::TimedOut,
             FleetOutcome::Failed(other) => GoalTerminalState::Blocked {
                 reason: other.to_string(),
