@@ -156,6 +156,60 @@ To keep the bearer token out of `config.toml`, a header value may use a
 — the literal reference is stored on disk and the secret is resolved from the
 credentials store at connect time. See [Token storage](#token-storage-cred-references).
 
+## Assistant scoping
+
+A host can give a session an **assistant identity** with `--assistant NAME` (or
+`WAYLAND_ASSISTANT=NAME`). It is a plain label for *who is running this session*.
+It is **not** `--agent`, which picks a built-in persona and system prompt; the
+two are independent and may both be set.
+
+The identity does two different things depending on where a server was declared.
+
+### Config-declared servers — `only_for_assistant` narrows, and only narrows
+
+```toml
+[mcp.servers.concierge-diag]
+transport = "stdio"
+command = "wayland-concierge-diag"
+only_for_assistant = ["concierge"]   # visible ONLY to --assistant concierge
+```
+
+| `only_for_assistant` | Behavior |
+|---|---|
+| omitted, or `[]` (**the default**) | **Global.** The server is injected into every session, whatever the active identity is — including a session with no identity. |
+| `["a", "b"]` | Injected only when the active identity is `a` or `b`. **Fail-closed**: a session with no identity, or a different one, does not get it. |
+
+This is a *restrict-only* marker. It can say "only these identities may see
+server X"; it cannot say "identity Y sees only servers X and Z", because an
+unmarked server is still injected. If you want a session narrowed to an exact
+set of servers, marking is not the tool — every server would have to be marked,
+including ones added later.
+
+The filter is applied at both injection points (the startup connect and the
+deferred background connect), so a marked server cannot slip in through the
+deferred path.
+
+### Runtime servers added over the wire — an identity is **required**
+
+An MCP server injected by a host through the json-stream `add_mcp_server`
+command (see [json-stream-protocol.md §2.8](json-stream-protocol.md#28-add_mcp_server))
+is automatically scoped to the identity that declared it. A session with no
+identity therefore has nothing to scope to, and the declaration is refused:
+
+```
+active assistant identity is required for a runtime MCP declaration
+```
+
+**This changed in 0.12.26.** In 0.12.25 the same command produced an unscoped,
+global server and connected unconditionally. Spawn the engine with
+`--assistant NAME` and the command behaves as before, with the server now bound
+to `NAME`.
+
+The refusal is reported as an `error` frame **and** an `mcp_failed` frame naming
+the server, and it is not fatal — the session continues without that server's
+tools. A host that renders neither frame will show a session with no MCP tools
+and no stated cause.
+
 ## Tool Naming
 
 - MCP tool names are used directly when there's no conflict

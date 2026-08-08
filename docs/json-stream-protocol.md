@@ -939,6 +939,40 @@ Client → stdin:  {"type":"message","msg_id":"m1","content":"Hello"}
                   ↑ first message ends the injection window
 ```
 
+#### Requires an assistant identity (changed in 0.12.26)
+
+**A host that spawns the engine without an assistant identity has every
+`add_mcp_server` refused.** Pass `--assistant NAME` on the launch argv, or set
+`WAYLAND_ASSISTANT=NAME` in the child's environment. Any stable, non-blank name
+works — it is the same identity `only_for_assistant` matches against in config
+(see [mcp.md](mcp.md#assistant-scoping)). It is *not* `--agent`, which selects a
+persona.
+
+The engine binds each wire-added server to the declaring identity, so a session
+with no identity has nothing to bind to and the declaration is rejected before
+any transport is started:
+
+```
+Agent → stdout: {"type":"error","error":{"code":"protocol_error","message":"AddMcpServer 'tools': active assistant identity is required for a runtime MCP declaration","retryable":false}}
+Agent → stdout: {"type":"mcp_failed","name":"tools","reason":"active assistant identity is required for a runtime MCP declaration"}
+```
+
+**This is not a fatal error and it is the failure a host is most likely to
+misread.** The session proceeds normally; it simply has none of that server's
+tools. A host that does not surface `mcp_failed` presents a conversation with
+zero tools and no stated cause, which looks like a broken MCP subsystem rather
+than a missing launch flag. `mcp_failed` is a `safety`-criticality frame in the
+Desktop contract — render it.
+
+In 0.12.25 the same command produced an unscoped, globally visible server and
+connected unconditionally, so a host upgrading from 0.12.25 that never passed
+`--assistant` will see this refusal on every runtime server it declares.
+
+`mcp_failed` carries `{name, reason}` and is also emitted for the other
+`add_mcp_server` refusals — an invalid request, a name that collides with a
+config declaration, a failed `${cred:}` resolution, and a transport that fails to
+connect.
+
 ### 2.9 `ping`
 
 Heartbeat probe. The agent responds immediately with a `pong` event.
@@ -1159,6 +1193,9 @@ wayland-core --json-stream \
   --auto-approve          # Approvals bypassed; the OS sandbox stays on
   --allow-host-workspace-grants # Optional local read-only runtime approvals
   --workspace <PATH>      # Working directory for file operations
+  --assistant <NAME>      # Host's assistant identity. REQUIRED if the host will
+                          # send add_mcp_server (§2.8); also selects which
+                          # only_for_assistant config servers are injected.
 ```
 
 **Environment variables** (set by client before spawn):
