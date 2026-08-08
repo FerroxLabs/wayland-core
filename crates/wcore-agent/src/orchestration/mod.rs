@@ -829,6 +829,18 @@ pub const TOOL_BLOCKED_NO_APPROVER: &str = "BLOCKED: this run has no interactive
      will be refused identically. Do not retry. Say what you would have done \
      and which tools need to be approved.";
 
+/// The `tool_result` content for a call whose approval prompt went unanswered.
+///
+/// Deliberately NOT [`TOOL_BLOCKED_NO_APPROVER`]: that text tells the model
+/// the property holds for the whole run and that retrying is pointless, which
+/// is true when there is no approver and false when there is one who was
+/// merely slow. Naming no flag, for the same reason as its sibling.
+pub const TOOL_BLOCKED_NO_ANSWER: &str = "BLOCKED: the approval prompt for this call went unanswered within the time \
+     limit, so the call was refused. This is not a judgement on the arguments, \
+     and it is not permanent: approval is still live for this run and the next \
+     prompt can be answered. Do not retry in a loop - say what you need \
+     approved and why.";
+
 /// Confirm a single tool call and record whether approval was granted for the
 /// displayed arguments rather than inherited from an automatic allow rule.
 enum ConfirmedCall {
@@ -878,6 +890,11 @@ fn confirm_call(
         ConfirmResult::DeniedNoApprover => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
             content: TOOL_BLOCKED_NO_APPROVER.to_string(),
+            is_error: true,
+        })),
+        ConfirmResult::DeniedNoAnswer => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: TOOL_BLOCKED_NO_ANSWER.to_string(),
             is_error: true,
         })),
         ConfirmResult::Quit => Err(ExecutionControl::Quit),

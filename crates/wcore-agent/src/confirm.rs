@@ -4,6 +4,14 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use wcore_protocol::events::ToolCategory;
 use wcore_types::execution_policy::ApprovalPolicy;
 
+/// Where the gate gets one approval answer from, given the bound it may wait.
+///
+/// Production reads the process stdin through the single reader thread in
+/// [`stdin_answer`]. A field rather than a hard-wired call so the gate's own
+/// call site — the bound it passes, the decision it takes — is observable
+/// without a terminal.
+type AnswerSource = Box<dyn FnMut(Option<std::time::Duration>) -> ApprovalReply + Send>;
+
 pub struct ToolConfirmer {
     approval_policy: ApprovalPolicy,
     allow_list: HashSet<String>,
@@ -22,6 +30,13 @@ pub struct ToolConfirmer {
     /// accomplished anything. Counted here rather than plumbed through the
     /// dispatcher because this is the only place the fact exists.
     no_approver_denials: usize,
+    /// How long a prompt waits for an answer before refusing the call.
+    ///
+    /// Resolved once, at construction, so the bound a test pins is the bound
+    /// `check_for` uses. `None` waits forever.
+    approval_timeout: Option<std::time::Duration>,
+    /// Where answers come from. Defaults to the process stdin.
+    answers: AnswerSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +49,16 @@ pub enum ConfirmResult {
     /// A separate variant because the two are not the same fact and the
     /// message the operator and the model see must not claim they are.
     DeniedNoApprover,
+    /// The call was refused because the approver did not answer in time.
+    ///
+    /// Distinct from [`ConfirmResult::DeniedNoApprover`] for the same reason
+    /// that one is distinct from [`ConfirmResult::Denied`]: an approver
+    /// exists, the terminal is live, and the next prompt can still be
+    /// answered. Telling this operator "this run has no interactive approver"
+    /// is simply false, and acting on it — disabling the gate for the rest of
+    /// the process — turns one slow answer into a run that can never approve
+    /// anything again.
+    DeniedNoAnswer,
     Quit,
 }
 
@@ -54,6 +79,8 @@ impl ToolConfirmer {
             allow_list: allow_list.into_iter().collect(),
             interactive_approver: io::stdin().is_terminal(),
             no_approver_denials: 0,
+            approval_timeout: approval_timeout(),
+            answers: Box::new(stdin_answer),
         }
     }
 
@@ -172,13 +199,7 @@ impl ToolConfirmer {
             return ConfirmResult::DeniedNoApprover;
         }
 
-        self.prompt_and_decide(
-            tool_name,
-            tool_input_display,
-            &mut io::stderr(),
-            approval_timeout(),
-            || read_reply(&mut io::stdin().lock()),
-        )
+        self.prompt_and_decide(tool_name, tool_input_display, &mut io::stderr())
     }
 
     /// Turn one approval answer into a decision.
@@ -192,14 +213,21 @@ impl ToolConfirmer {
             // Nobody answered. NOT an empty answer: falling through to the
             // `"y" | "yes" | ""` arm below — the bare-Enter default — would
             // APPROVE the call. Fail closed.
-            ApprovalReply::Ended | ApprovalReply::TimedOut => {
-                // There is no approver on the other end of this terminal any
-                // more, and asking again would either hang or abandon another
-                // thread on the stdin lock. Latch it so every later call takes
-                // the non-tty guard above.
+            // The answering stream ended or broke. There is no approver on
+            // the other end of this terminal any more and there will not be
+            // one again, so latch it: every later call takes the non-tty
+            // guard above instead of asking a terminal that is gone.
+            ApprovalReply::Ended => {
                 self.interactive_approver = false;
                 self.no_approver_denials += 1;
                 return ConfirmResult::DeniedNoApprover;
+            }
+            // Nobody answered inside the bound. Refuse THIS call and nothing
+            // more: the terminal is still there, the human was slow, and the
+            // gate must still be usable when they come back.
+            ApprovalReply::TimedOut => {
+                self.no_approver_denials += 1;
+                return ConfirmResult::DeniedNoAnswer;
             }
         };
 
@@ -227,20 +255,33 @@ impl ToolConfirmer {
     /// a read of the process stdin. Tests call it with in-memory handles, so
     /// the prompt, the bound and the decision they exercise are the ones that
     /// ship.
-    fn prompt_and_decide<W: Write, F>(
+    fn prompt_and_decide<W: Write>(
         &mut self,
         tool_name: &str,
         tool_input_display: &str,
         prompt_out: &mut W,
-        timeout: Option<std::time::Duration>,
-        read: F,
-    ) -> ConfirmResult
-    where
-        F: FnOnce() -> ApprovalReply + Send + 'static,
-    {
+    ) -> ConfirmResult {
         print_prompt(tool_name, tool_input_display, prompt_out);
-        let reply = read_within(timeout, read);
+        let reply = (self.answers)(self.approval_timeout);
+        if reply == ApprovalReply::TimedOut {
+            print_timeout_notice(self.approval_timeout, prompt_out);
+        }
         self.decide_reply(tool_name, reply)
+    }
+
+    /// Pin the bound. Tests only: production resolves it once, from the
+    /// environment, at construction.
+    #[cfg(test)]
+    fn set_approval_timeout(&mut self, timeout: Option<std::time::Duration>) {
+        self.approval_timeout = timeout;
+    }
+
+    /// Answer the gate from somewhere other than the process stdin. Tests
+    /// only — it is how the decision, the bound and the latch are observable
+    /// without a terminal.
+    #[cfg(test)]
+    fn set_answers(&mut self, answers: AnswerSource) {
+        self.answers = answers;
     }
 }
 
@@ -305,33 +346,94 @@ fn parse_approval_timeout(raw: Option<&str>) -> Option<std::time::Duration> {
     (secs > 0).then(|| std::time::Duration::from_secs(secs))
 }
 
-/// Run `read` on a helper thread and give up after `timeout`.
+/// Tell the operator what the refusal was, and what their terminal will do.
 ///
-/// `None` runs the read inline and waits forever, which is what the whole
-/// process used to do unconditionally.
+/// The reader is still inside its `read_line` while this prints. The next line
+/// typed finishes THAT read and is discarded — an answer aimed at a prompt
+/// that has already been decided must not be applied to the next one, which
+/// the operator had not seen when they typed it. So exactly one line is
+/// swallowed, once, and then the terminal behaves normally; saying so turns a
+/// confusing swallow into an instruction.
+fn print_timeout_notice<W: Write>(timeout: Option<std::time::Duration>, out: &mut W) {
+    let waited = timeout.map(|t| t.as_secs()).unwrap_or_default();
+    let _ = write!(
+        out,
+        "\n[tool] no answer in {waited}s - this call was refused. Approval is \
+         still live for the rest of this run; press Enter once to clear the \
+         stale prompt before answering the next one.\n"
+    );
+    let _ = out.flush();
+}
+
+/// One request for a line from the process's stdin.
+struct AnswerRequest(std::sync::mpsc::SyncSender<ApprovalReply>);
+
+/// The one thread in this process that reads stdin for an approval answer.
 ///
-/// On the timeout path the helper thread is deliberately ABANDONED rather than
-/// joined: there is no portable way to cancel a blocking read on stdin, and
-/// waiting for it is exactly the hang being fixed. The abandoned thread holds
-/// the process-wide `Stdin` lock until a line finally arrives, so the caller
-/// must not prompt again — `decide_reply` latches `interactive_approver` to
-/// false on this path, which routes every later call to the non-tty guard
-/// instead of back into `read_line`. Bounded at one abandoned thread per
-/// process for that reason.
-fn read_within<F>(timeout: Option<std::time::Duration>, read: F) -> ApprovalReply
-where
-    F: FnOnce() -> ApprovalReply + Send + 'static,
-{
-    let Some(timeout) = timeout else {
-        return read();
-    };
+/// There is no portable way to cancel a blocking read, so a prompt that times
+/// out necessarily leaves its read outstanding — and that read holds the
+/// process-wide `Stdin` lock. A thread per prompt therefore piles up threads
+/// all queued on that lock, and every one of them is a line the operator will
+/// type and lose. One long-lived reader can only ever have a single read
+/// outstanding: it takes the lock per request and releases it before waiting
+/// for the next one, so the REPL's own `read_line` is blocked only while a
+/// prompt is genuinely waiting, and the cost of a timeout is bounded at the
+/// one line that finishes the stale read.
+fn stdin_reader() -> &'static std::sync::mpsc::Sender<AnswerRequest> {
+    static READER: std::sync::OnceLock<std::sync::mpsc::Sender<AnswerRequest>> =
+        std::sync::OnceLock::new();
+    READER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<AnswerRequest>();
+        // A thread that cannot be spawned drops `rx` with the closure, so every
+        // later request fails to send and is reported as `Ended`. Fail closed,
+        // rather than panicking in the middle of a tool call.
+        let _ = std::thread::Builder::new()
+            .name("wayland-approval-stdin".to_string())
+            .spawn(move || {
+                for AnswerRequest(answer) in rx {
+                    let reply = read_reply(&mut io::stdin().lock());
+                    let stream_ended = !matches!(reply, ApprovalReply::Line(_));
+                    // The requester may have given up. A late answer is
+                    // dropped here, never handed to the next prompt.
+                    let _ = answer.send(reply);
+                    if stream_ended {
+                        // stdin will not produce another line; leaving the loop
+                        // drops the receiver so later requests fail fast rather
+                        // than spinning on EOF.
+                        break;
+                    }
+                }
+            });
+        tx
+    })
+}
+
+/// Ask the process's stdin for one answer, bounded by `timeout`.
+fn stdin_answer(timeout: Option<std::time::Duration>) -> ApprovalReply {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        // The receiver may already be gone; a late answer is discarded, not
-        // applied to a decision that has been taken.
-        let _ = tx.send(read());
-    });
-    rx.recv_timeout(timeout).unwrap_or(ApprovalReply::TimedOut)
+    if stdin_reader().send(AnswerRequest(tx)).is_err() {
+        return ApprovalReply::Ended;
+    }
+    await_answer(&rx, timeout)
+}
+
+/// Wait for one answer, giving up after `timeout`.
+///
+/// `None` waits forever, which is what the whole process used to do
+/// unconditionally.
+fn await_answer(
+    rx: &std::sync::mpsc::Receiver<ApprovalReply>,
+    timeout: Option<std::time::Duration>,
+) -> ApprovalReply {
+    let Some(timeout) = timeout else {
+        return rx.recv().unwrap_or(ApprovalReply::Ended);
+    };
+    match rx.recv_timeout(timeout) {
+        Ok(reply) => reply,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => ApprovalReply::TimedOut,
+        // The reader is gone: stdin ended, or it could not be spawned at all.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => ApprovalReply::Ended,
+    }
 }
 
 #[cfg(test)]
@@ -502,11 +604,11 @@ mod tests {
     /// Returns the decision and everything the gate printed.
     fn ask(confirmer: &mut ToolConfirmer, answer: &str) -> (ConfirmResult, String) {
         let bytes = answer.as_bytes().to_vec();
+        confirmer.set_answers(Box::new(move |_| {
+            read_reply(&mut std::io::Cursor::new(bytes.clone()))
+        }));
         let mut prompt = Vec::new();
-        let result =
-            confirmer.prompt_and_decide("Bash", "rm -rf /", &mut prompt, None, move || {
-                read_reply(&mut std::io::Cursor::new(bytes))
-            });
+        let result = confirmer.prompt_and_decide("Bash", "rm -rf /", &mut prompt);
         (result, String::from_utf8(prompt).expect("prompt is utf8"))
     }
 
@@ -561,11 +663,13 @@ mod tests {
                 Err(std::io::Error::other("terminal went away"))
             }
         }
+        let mut gate = gate();
+        gate.set_answers(Box::new(|_| {
+            read_reply(&mut std::io::BufReader::new(Broken))
+        }));
         let mut prompt = Vec::new();
         assert_eq!(
-            gate().prompt_and_decide("Bash", "x", &mut prompt, None, || {
-                read_reply(&mut std::io::BufReader::new(Broken))
-            }),
+            gate.prompt_and_decide("Bash", "x", &mut prompt),
             ConfirmResult::DeniedNoApprover
         );
     }
@@ -579,14 +683,29 @@ mod tests {
     // writes to it. There the prompt waited forever, so the turn, the run and
     // any budget or lease it held waited forever too.
 
+    /// Drive the real wait with an answer that arrives after `delay`.
+    fn wait_for(
+        delay: std::time::Duration,
+        answer: ApprovalReply,
+        timeout: Option<std::time::Duration>,
+    ) -> ApprovalReply {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _ = tx.send(answer);
+        });
+        await_answer(&rx, timeout)
+    }
+
     #[test]
     fn an_answer_that_never_comes_is_bounded_and_refused() {
         let started = std::time::Instant::now();
-        let reply = read_within(Some(std::time::Duration::from_millis(150)), || {
-            // Stands in for a terminal that is open and silent.
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            ApprovalReply::Line("y\n".to_string())
-        });
+        // Stands in for a terminal that is open and silent.
+        let reply = wait_for(
+            std::time::Duration::from_secs(30),
+            ApprovalReply::Line("y\n".to_string()),
+            Some(std::time::Duration::from_millis(150)),
+        );
         let waited = started.elapsed();
 
         assert_eq!(
@@ -601,7 +720,7 @@ mod tests {
         // And the bound must fail CLOSED, not inherit the bare-Enter default.
         assert_eq!(
             gate().decide_reply("Bash", ApprovalReply::TimedOut),
-            ConfirmResult::DeniedNoApprover
+            ConfirmResult::DeniedNoAnswer
         );
     }
 
@@ -609,23 +728,27 @@ mod tests {
     fn an_answer_that_arrives_inside_the_bound_is_honoured() {
         // The positive control. Without it, "always time out" passes the test
         // above, and that would break every interactive approval there is.
-        let reply = read_within(Some(std::time::Duration::from_secs(30)), || {
-            ApprovalReply::Line("n\n".to_string())
-        });
+        let reply = wait_for(
+            std::time::Duration::ZERO,
+            ApprovalReply::Line("n\n".to_string()),
+            Some(std::time::Duration::from_secs(30)),
+        );
         assert_eq!(reply, ApprovalReply::Line("n\n".to_string()));
 
         // A slow but real answer, well inside a generous bound.
-        let reply = read_within(Some(std::time::Duration::from_secs(30)), || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            ApprovalReply::Line("y\n".to_string())
-        });
+        let reply = wait_for(
+            std::time::Duration::from_millis(200),
+            ApprovalReply::Line("y\n".to_string()),
+            Some(std::time::Duration::from_secs(30)),
+        );
         assert_eq!(reply, ApprovalReply::Line("y\n".to_string()));
 
         // And the documented escape hatch: no bound at all still waits.
-        let reply = read_within(None, || {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            ApprovalReply::Line("a\n".to_string())
-        });
+        let reply = wait_for(
+            std::time::Duration::from_millis(200),
+            ApprovalReply::Line("a\n".to_string()),
+            None,
+        );
         assert_eq!(reply, ApprovalReply::Line("a\n".to_string()));
     }
 
@@ -658,6 +781,81 @@ mod tests {
                     .ok()
                     .as_deref()
             )
+        );
+    }
+
+    /// Answer each prompt from a fixed script, one answer per prompt.
+    fn scripted(answers: Vec<ApprovalReply>) -> AnswerSource {
+        let mut answers = answers.into_iter();
+        Box::new(move |_| answers.next().expect("one scripted answer per prompt"))
+    }
+
+    #[test]
+    fn a_second_prompt_after_a_timeout_is_still_answerable() {
+        // The whole point of not latching. Driven through `check_for`, which
+        // is where the latch is read, so a fix that only changes the variant
+        // cannot pass this.
+        let mut gate = gate();
+        gate.set_interactive_approver(true);
+        gate.set_answers(scripted(vec![
+            ApprovalReply::TimedOut,
+            ApprovalReply::Line("y\n".to_string()),
+        ]));
+
+        assert_eq!(
+            gate.check_for("Bash", ToolCategory::Exec, "rm -rf /"),
+            ConfirmResult::DeniedNoAnswer,
+            "an unanswered prompt refuses THIS call"
+        );
+        assert!(
+            gate.has_interactive_approver(),
+            "the terminal is still there; the human was slow"
+        );
+        assert_eq!(
+            gate.check_for("Bash", ToolCategory::Exec, "ls"),
+            ConfirmResult::Approved,
+            "the operator came back and approved the next call; a latched gate \
+             would refuse it and tell them the run has no interactive approver"
+        );
+    }
+
+    #[test]
+    fn an_answering_stream_that_ended_does_latch() {
+        // The other half of the distinction: this one is not coming back, and
+        // asking a terminal that is gone once per tool call is pointless.
+        let mut gate = gate();
+        gate.set_interactive_approver(true);
+        gate.set_answers(Box::new(|_| ApprovalReply::Ended));
+
+        assert_eq!(
+            gate.check_for("Bash", ToolCategory::Exec, "rm -rf /"),
+            ConfirmResult::DeniedNoApprover
+        );
+        assert!(
+            !gate.has_interactive_approver(),
+            "an ended answering stream never produces another answer"
+        );
+    }
+
+    #[test]
+    fn a_timeout_tells_the_operator_the_gate_is_still_live() {
+        // The refusal the operator reads must not claim the run has no
+        // approver: it has one, and it is still usable.
+        let mut gate = gate();
+        gate.set_interactive_approver(true);
+        gate.set_approval_timeout(Some(std::time::Duration::from_secs(300)));
+        gate.set_answers(Box::new(|_| ApprovalReply::TimedOut));
+        let mut prompt = Vec::new();
+        assert_eq!(
+            gate.prompt_and_decide("Bash", "rm -rf /", &mut prompt),
+            ConfirmResult::DeniedNoAnswer
+        );
+        let shown = String::from_utf8(prompt).expect("prompt is utf8");
+        assert!(shown.contains("no answer in 300s"), "{shown:?}");
+        assert!(shown.contains("still live"), "{shown:?}");
+        assert!(
+            !shown.contains("no interactive approver"),
+            "the operator is at a live terminal; {shown:?}"
         );
     }
 
