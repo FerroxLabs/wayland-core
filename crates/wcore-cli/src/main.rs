@@ -1144,6 +1144,30 @@ fn headless_approval_advisory(
     Some(HEADLESS_NO_APPROVER_ADVICE)
 }
 
+/// The one-shot run finished without accomplishing anything: it produced no
+/// answer, or it hit the approval gate with nobody there to answer it.
+///
+/// Distinct from `ExitCode::FAILURE` (1), which means the run itself errored,
+/// and from the subcommand codes 3-8 in `session_cmd` / `index_cmd` /
+/// `cache_cmd`. A caller that only wants "did it work" can keep testing for
+/// zero; a caller that wants to distinguish "refused" from "crashed" now can.
+pub const EXIT_RUN_COMPLETED_NOTHING: u8 = 9;
+
+/// The exit status of a headless one-shot run.
+///
+/// Exit 0 used to be unconditional: a run whose every tool call was refused,
+/// or that produced no answer at all, reported success and no script, CI job
+/// or host could tell it from a run that did the work.
+///
+/// Kept pure and separate from the call site so both conditions can be tabled.
+fn headless_exit_code(no_approver_denials: usize, answer: &str) -> ExitCode {
+    if no_approver_denials > 0 || answer.trim().is_empty() {
+        ExitCode::from(EXIT_RUN_COMPLETED_NOTHING)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
     // Record protocol mode before ANY fallible startup work, so every refusal
@@ -2298,9 +2322,9 @@ async fn run() -> anyhow::Result<ExitCode> {
     } else {
         // v0.8.0 N.* — pre-process via the slash dispatcher first; only
         // forward to the engine when the input is NOT a known slash command.
-        match handle_slash_or_run(&slash_dispatcher, &mut engine, &prompt, "", output.as_ref())
-            .await
-        {
+        let outcome =
+            handle_slash_or_run(&slash_dispatcher, &mut engine, &prompt, "", output.as_ref()).await;
+        match outcome {
             SlashOrRun::Slash => ExitCode::SUCCESS,
             SlashOrRun::Exit => ExitCode::SUCCESS,
             SlashOrRun::Engine(Ok(run_result)) => {
@@ -2313,7 +2337,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     run_result.usage.cache_read_tokens,
                     run_result.finish_reason,
                 );
-                ExitCode::SUCCESS
+                headless_exit_code(engine.no_approver_denials(), &run_result.text)
             }
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
@@ -6241,6 +6265,33 @@ mod tests {
             "a run that already bypasses approvals must not be told to pass \
              --auto-approve"
         );
+    }
+
+    #[test]
+    fn a_headless_run_that_accomplished_nothing_does_not_report_success() {
+        let nothing = ExitCode::from(EXIT_RUN_COMPLETED_NOTHING);
+        // (refusals for want of an approver, final answer) -> status
+        let table: [((usize, &str), ExitCode); 6] = [
+            // Did the work and said something: unchanged, and the row that
+            // stops this becoming an unconditional failure.
+            ((0, "here is the answer"), ExitCode::SUCCESS),
+            // Refused for want of an approver. The audited run answered at
+            // length about being blocked and still exited 0, so the answer
+            // text alone cannot be the test.
+            ((1, "I was blocked from editing the file"), nothing),
+            ((4, "here is what I would have done"), nothing),
+            // No answer at all.
+            ((0, ""), nothing),
+            ((0, "   \n  "), nothing),
+            ((2, ""), nothing),
+        ];
+        for ((denials, answer), expected) in table {
+            assert_eq!(
+                format!("{:?}", headless_exit_code(denials, answer)),
+                format!("{expected:?}"),
+                "denials={denials} answer={answer:?}"
+            );
+        }
     }
 
     #[test]

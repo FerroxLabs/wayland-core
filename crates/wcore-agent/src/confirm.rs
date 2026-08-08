@@ -16,6 +16,12 @@ pub struct ToolConfirmer {
     /// can pin the condition with `set_interactive_approver` instead of
     /// depending on whatever stdin the test runner happened to inherit.
     interactive_approver: bool,
+    /// How many calls this confirmer refused for want of an approver.
+    ///
+    /// The CLI reads it once, after the run, to decide whether the process
+    /// accomplished anything. Counted here rather than plumbed through the
+    /// dispatcher because this is the only place the fact exists.
+    no_approver_denials: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +53,13 @@ impl ToolConfirmer {
             approval_policy: policy,
             allow_list: allow_list.into_iter().collect(),
             interactive_approver: io::stdin().is_terminal(),
+            no_approver_denials: 0,
         }
+    }
+
+    /// How many tool calls were refused because no approver could be reached.
+    pub fn no_approver_denials(&self) -> usize {
+        self.no_approver_denials
     }
 
     /// Whether this session can reach an interactive approver.
@@ -156,6 +168,7 @@ impl ToolConfirmer {
                 tool = %tool_name,
                 "tool needs confirmation but stdin is not a terminal; denying (no interactive approver)"
             );
+            self.no_approver_denials += 1;
             return ConfirmResult::DeniedNoApprover;
         }
 
@@ -201,9 +214,15 @@ impl ToolConfirmer {
             // between "the operator pressed Enter" and "the operator's
             // terminal went away", and only the byte count can tell them
             // apart.
-            Ok(0) => return ConfirmResult::DeniedNoApprover,
+            Ok(0) => {
+                self.no_approver_denials += 1;
+                return ConfirmResult::DeniedNoApprover;
+            }
             Ok(_) => {}
-            Err(_) => return ConfirmResult::DeniedNoApprover,
+            Err(_) => {
+                self.no_approver_denials += 1;
+                return ConfirmResult::DeniedNoApprover;
+            }
         }
 
         match input.trim().to_lowercase().as_str() {

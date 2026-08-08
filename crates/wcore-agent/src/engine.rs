@@ -14290,6 +14290,20 @@ impl AgentEngine {
     }
 
     /// Run stop hooks when the agent session ends
+    /// How many tool calls this engine refused because the run had no
+    /// interactive approver.
+    ///
+    /// Sub-agents build their own confirmers, so a child's refusals are not
+    /// counted here; and `recover_*` rebuilds the confirmer, which resets it.
+    /// Both are fine for the only consumer: the CLI asking, once at the end of
+    /// a one-shot run, "did this run hit the approval gate with nobody there?"
+    pub fn no_approver_denials(&self) -> usize {
+        self.confirmer
+            .lock()
+            .map(|c| c.no_approver_denials())
+            .unwrap_or(0)
+    }
+
     pub async fn run_stop_hooks(&self) {
         if let Some(hook_engine) = &self.hooks {
             let mut outcome = hook_engine.run_stop().await;
