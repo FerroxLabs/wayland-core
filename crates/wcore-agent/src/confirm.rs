@@ -131,22 +131,51 @@ impl ToolConfirmer {
             return ConfirmResult::Denied;
         }
 
-        eprint!(
+        self.prompt_and_decide(
+            tool_name,
+            tool_input_display,
+            &mut io::stdin().lock(),
+            &mut io::stderr(),
+        )
+    }
+
+    /// Print the approval prompt on `prompt_out`, read one answer from
+    /// `answers`, and decide.
+    ///
+    /// This is the whole interactive gate. `check_for` calls it with the
+    /// process's real stdin/stderr; tests call it with in-memory handles so
+    /// the decision for every possible answer — including "no answer ever
+    /// arrives" — is observable without a terminal.
+    fn prompt_and_decide<R: BufRead, W: Write>(
+        &mut self,
+        tool_name: &str,
+        tool_input_display: &str,
+        answers: &mut R,
+        prompt_out: &mut W,
+    ) -> ConfirmResult {
+        let _ = write!(
+            prompt_out,
             "\n[tool] {}({})\nAllow? [y]es / [n]o / [a]lways / [q]uit > ",
             tool_name, tool_input_display
         );
-        // SAFETY: flushing stderr can fail only if stderr is closed
-        // (e.g. parent piped to a sink that disconnected). The very
-        // next `read_line` on stdin would also fail in that scenario
-        // and bail with `Denied`, so a panic here would simply
-        // accelerate the same outcome by one cycle. Keeping the
-        // panic preserves the existing "abort if I/O is hosed"
-        // semantics for interactive callers.
-        let _ = io::stderr().flush();
+        // SAFETY: flushing can fail only if the sink is closed (e.g. parent
+        // piped to something that disconnected). The very next read on
+        // `answers` would also fail in that scenario and bail with `Denied`,
+        // so ignoring the error simply defers the same outcome by one cycle.
+        let _ = prompt_out.flush();
 
         let mut input = String::new();
-        if io::stdin().lock().read_line(&mut input).is_err() {
-            return ConfirmResult::Denied;
+        match answers.read_line(&mut input) {
+            // End of input. NOT an error, and NOT an empty answer: nobody
+            // ever answered. Falling through would hand `""` to the
+            // `"y" | "yes" | ""` arm below — the bare-Enter default — and
+            // APPROVE the call. Fail closed instead. This is the difference
+            // between "the operator pressed Enter" and "the operator's
+            // terminal went away", and only the byte count can tell them
+            // apart.
+            Ok(0) => return ConfirmResult::Denied,
+            Ok(_) => {}
+            Err(_) => return ConfirmResult::Denied,
         }
 
         match input.trim().to_lowercase().as_str() {
@@ -306,6 +335,91 @@ mod tests {
             assert!(confirmer.requires_confirmation_for("AskUserQuestion", ToolCategory::Info));
             assert!(confirmer.approval_is_input_bound("AskUserQuestion"));
         }
+    }
+
+    // ---- The interactive gate must fail CLOSED when no answer arrives ----
+    //
+    // `BufRead::read_line` returns `Ok(0)` at end-of-input — not an `Err` —
+    // leaving the buffer empty, and the empty string is matched by the
+    // `"y" | "yes" | ""` arm that exists so a bare Enter means yes. So
+    // "the answering terminal went away" was decided as "the operator
+    // pressed Enter" and the call was APPROVED. Reachable whenever the
+    // answering side disappears: an ssh disconnect mid-run, a harness that
+    // writes its answer and then closes the pty master (macOS surfaces that
+    // as EOF, so an answer supplied before the prompt was printed is
+    // discarded and the tool the operator meant to refuse then runs), or a
+    // closed ConPTY on Windows.
+
+    fn gate() -> ToolConfirmer {
+        ToolConfirmer::new(false, vec![])
+    }
+
+    /// Drive the real interactive gate with an in-memory answer stream.
+    /// Returns the decision and everything the gate printed.
+    fn ask(confirmer: &mut ToolConfirmer, answer: &str) -> (ConfirmResult, String) {
+        let mut answers = std::io::Cursor::new(answer.as_bytes().to_vec());
+        let mut prompt = Vec::new();
+        let result = confirmer.prompt_and_decide("Bash", "rm -rf /", &mut answers, &mut prompt);
+        (result, String::from_utf8(prompt).expect("prompt is utf8"))
+    }
+
+    #[test]
+    fn end_of_input_without_an_answer_is_never_approval() {
+        let (result, prompt) = ask(&mut gate(), "");
+        // Anti-vacuity: the gate really did reach the prompt and ask. A
+        // decision taken before asking would leave this empty.
+        assert!(
+            prompt.contains("Allow?"),
+            "the gate must ask before it decides; it printed {prompt:?}"
+        );
+        assert_ne!(
+            result,
+            ConfirmResult::Approved,
+            "end-of-input with no answer must not approve the tool call"
+        );
+        assert_eq!(result, ConfirmResult::Denied);
+    }
+
+    #[test]
+    fn eof_is_not_the_bare_enter_default() {
+        // A real empty line (the operator pressed Enter) still means yes.
+        assert_eq!(ask(&mut gate(), "\n").0, ConfirmResult::Approved);
+        // The stream simply ending must NOT be read as the same thing.
+        assert_eq!(ask(&mut gate(), "").0, ConfirmResult::Denied);
+    }
+
+    #[test]
+    fn typed_answers_still_decide_the_gate() {
+        // Positive controls: a blanket "deny everything" would pass the two
+        // tests above, so pin that every real answer still works.
+        assert_eq!(ask(&mut gate(), "y\n").0, ConfirmResult::Approved);
+        assert_eq!(ask(&mut gate(), "YES\n").0, ConfirmResult::Approved);
+        assert_eq!(ask(&mut gate(), "n\n").0, ConfirmResult::Denied);
+        assert_eq!(ask(&mut gate(), "no\n").0, ConfirmResult::Denied);
+        assert_eq!(ask(&mut gate(), "q\n").0, ConfirmResult::Quit);
+        // A last answer with no trailing newline is still an answer.
+        assert_eq!(ask(&mut gate(), "n").0, ConfirmResult::Denied);
+        assert_eq!(ask(&mut gate(), "y").0, ConfirmResult::Approved);
+
+        let mut always = gate();
+        assert_eq!(ask(&mut always, "a\n").0, ConfirmResult::Approved);
+        assert!(always.allow_list.contains("Bash"));
+    }
+
+    #[test]
+    fn a_broken_answer_stream_is_denied() {
+        struct Broken;
+        impl std::io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("terminal went away"))
+            }
+        }
+        let mut answers = std::io::BufReader::new(Broken);
+        let mut prompt = Vec::new();
+        assert_eq!(
+            gate().prompt_and_decide("Bash", "x", &mut answers, &mut prompt),
+            ConfirmResult::Denied
+        );
     }
 
     #[test]
