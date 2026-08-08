@@ -210,6 +210,18 @@ the server, and it is not fatal — the session continues without that server's
 tools. A host that renders neither frame will show a session with no MCP tools
 and no stated cause.
 
+The scope attached here is **provenance, not enforcement.** The runtime connect
+path does not consult `only_for_assistant` as a gate — it hands the config
+straight to the MCP manager. The value records *who declared the server*; it does
+not restrict who can then use it within that session.
+
+> **Known inconsistency (0.12.26).** The TUI's equivalent runtime-add path does
+> *not* refuse. With no active identity it scopes the server to a private
+> sentinel owner instead, so the add succeeds. Only the json-stream
+> `add_mcp_server` command refuses. The two paths should agree; which way they
+> should agree is an open question — see
+> `.planning/ANSWER-desktop-mcp-scoping-2026-08-08.md`.
+
 ## Tool Naming
 
 - MCP tool names are used directly when there's no conflict

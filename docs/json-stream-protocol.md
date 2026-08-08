@@ -501,16 +501,27 @@ An error occurred. The agent may or may not continue depending on severity.
 
 | Error Code | Description |
 |------------|-------------|
-| `provider_error` | LLM API error (rate limit, etc.) |
 | `auth_required` | Provider rejected the credential (HTTP 401). Refreshable — the host should re-auth / refresh the OAuth token and re-send the turn. `retryable` is left as the engine set it (typically `false`, since re-sending the same credential just burns budget), so hosts drive retry off the **code**, not the flag. |
 | `auth_invalid` | Provider denied access (HTTP 403). Hard failure — do not retry. |
-| `tool_error` | Built-in tool execution error |
-| `config_error` | Configuration or initialization error |
-| `protocol_error` | Invalid command from client |
-| `internal_error` | Unexpected internal error |
-| `engine_error` | Fallback code for any error not matched to a more specific code above. |
+| `init_failed` | The engine failed during startup and is exiting. Terminal. |
+| `recovery_busy` | A recovery action was refused because another is active. Resync and retry. |
+| `engine_error` | **The default.** Every error that is not one of the above arrives with this code, including all tool, config, provider and `add_mcp_server` failures. |
 
-> Hosts should branch on `error.code`, not parse `error.message`.
+> Hosts should branch on `error.code` where a specific code exists — but note
+> that `engine_error` is by far the most common code, and it is not a
+> classification. To distinguish causes within `engine_error` you must either
+> match the message text or correlate with the typed frame that accompanies it
+> (for example `mcp_failed`).
+
+**Codes this document used to list that the engine has never emitted:**
+`tool_error`, `config_error`, `protocol_error`, `internal_error`. They were
+aspirational and are removed rather than left to be branched on. A host with a
+`case "protocol_error"` arm has dead code.
+
+One further caveat, stated because it is confusing rather than because it is
+correct: the Desktop contract corpus ships `events/error.json` with
+`"code": "provider_error"`, and no production path emits that code either — it
+is a fixture value. Do not infer the emitted vocabulary from that one fixture.
 
 ### 1.11 `info`
 
@@ -953,9 +964,15 @@ with no identity has nothing to bind to and the declaration is rejected before
 any transport is started:
 
 ```
-Agent → stdout: {"type":"error","error":{"code":"protocol_error","message":"AddMcpServer 'tools': active assistant identity is required for a runtime MCP declaration","retryable":false}}
+Agent → stdout: {"type":"error","error":{"code":"engine_error","message":"AddMcpServer 'tools': active assistant identity is required for a runtime MCP declaration","retryable":false}}
 Agent → stdout: {"type":"mcp_failed","name":"tools","reason":"active assistant identity is required for a runtime MCP declaration"}
 ```
+
+The `error` frame carries no `msg_id` (the refusal is not turn-scoped), and its
+code is the generic `engine_error` — this refusal has no code of its own. **Do
+not branch on the code to detect it.** Branch on `mcp_failed`, which names the
+server, or match the message text if you must distinguish it from other
+`engine_error`s.
 
 **This is not a fatal error and it is the failure a host is most likely to
 misread.** The session proceeds normally; it simply has none of that server's
@@ -968,10 +985,23 @@ In 0.12.25 the same command produced an unscoped, globally visible server and
 connected unconditionally, so a host upgrading from 0.12.25 that never passed
 `--assistant` will see this refusal on every runtime server it declares.
 
-`mcp_failed` carries `{name, reason}` and is also emitted for the other
+`mcp_failed` carries `{name, reason}` and is also emitted for most other
 `add_mcp_server` refusals — an invalid request, a name that collides with a
 config declaration, a failed `${cred:}` resolution, and a transport that fails to
 connect.
+
+**One refusal is `error`-only and emits no `mcp_failed`:** a malformed transport
+spec (an unknown `transport` value, or a stdio entry with no `command`) is
+rejected while the server config is still being built, before the name is bound
+to anything, so only the `error` frame is sent:
+
+```
+Agent → stdout: {"type":"error","error":{"code":"engine_error","message":"AddMcpServer 'tools': unknown transport: foo","retryable":false}}
+```
+
+A host that renders **only** `mcp_failed` therefore still drops this one
+silently. Render `engine_error` messages prefixed `AddMcpServer '<name>':` as
+well, or you reproduce the same invisible-failure trap one layer down.
 
 ### 2.9 `ping`
 
@@ -991,12 +1021,14 @@ After the first `message`, any further `add_mcp_server` commands are rejected:
 {
   "type": "error",
   "error": {
-    "code": "protocol_error",
+    "code": "engine_error",
     "message": "AddMcpServer 'name': rejected — only allowed before first Message",
     "retryable": false
   }
 }
 ```
+
+This frame carries no `msg_id` field at all (it is omitted, not null).
 
 ### 2.10 `approval_resume` (W7)
 
@@ -1112,19 +1144,19 @@ Client closes stdin (EOF) or sends SIGTERM. Agent cleans up and exits.
 
 ### 4.1 Invalid Command
 
-If client sends malformed JSON or unknown command type:
+**A malformed or unrecognised command produces no wire response at all.** The
+reader fails to deserialize the line, writes a `tracing::warn!` to the agent's
+own log, and drops it (`crates/wcore-protocol/src/reader.rs`). Nothing is
+emitted on stdout.
 
-```json
-{
-  "type": "error",
-  "msg_id": null,
-  "error": {
-    "code": "protocol_error",
-    "message": "Unknown command type: foo",
-    "retryable": false
-  }
-}
-```
+This is a silent failure by design of the current implementation, and hosts must
+account for it: a command that is never acknowledged may have been malformed
+rather than slow. Do not wait on an `error` frame to detect a bad command —
+correlate on the response you expected instead, and time out.
+
+An unknown `type`, an unknown field, a bad field type, and an over-long
+`request_id` all take this same path. There is no `protocol_error` code; the
+engine has never emitted one.
 
 ### 4.2 Provider Errors
 
@@ -1164,19 +1196,24 @@ Any error not matched to a specific code falls back to `engine_error`.
 
 ### 4.3 Fatal Errors
 
-For unrecoverable errors, agent emits error and exits with non-zero status:
+When the engine cannot start, it emits one terminal frame and exits non-zero.
+The code is `init_failed`, and the message is the full failure chain behind a
+fixed `Engine failed to start: ` prefix:
 
 ```json
 {
   "type": "error",
-  "msg_id": null,
   "error": {
-    "code": "config_error",
-    "message": "ANTHROPIC_API_KEY not set",
+    "code": "init_failed",
+    "message": "Engine failed to start: ANTHROPIC_API_KEY not set",
     "retryable": false
   }
 }
 ```
+
+`init_failed` is emitted at most once per process, and `msg_id` is omitted (the
+failure precedes any turn). Treat it as terminal: no further frames follow, and
+the process is already exiting.
 
 ## 5. Configuration via CLI Flags
 

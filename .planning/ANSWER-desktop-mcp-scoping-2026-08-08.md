@@ -62,21 +62,41 @@ it as a security boundary.
 
 ## Q1 — Is mandatory assistant scoping the intended long-term contract for host-provided runtime MCP?
 
-### Answer: yes, keep it — with one correction to how it is described.
+### Answer: keep it for 0.12.26 — but the reasoning below is weaker than the first draft claimed, and there is a third option that was missed.
 
-Recommendation: **keep the refusal**, and keep it fail-closed. Reasons, in order
-of weight:
+Recommendation: **keep the refusal for this release**, because it ships, it is
+fail-closed, and changing host-visible behaviour again inside a patch release is
+worse than documenting it. But this is now a *provisional* pick, not a settled
+contract, and Sean should read option (c) below before treating it as one.
 
-1. **It is the only point where a wire-added declaration acquires provenance.**
-   Before `scoped_to_assistant`, a runtime server is byte-identical to a global
-   config server (`to_mcp_server_config`, `main.rs:3569-3592`, sets
-   `only_for_assistant: None`). Once the identity is attached, the diagnostics
-   snapshot can tell an operator *who* introduced a server. Dropping the
-   requirement re-erases that, and it cannot be recovered later.
-2. **The alternative is silent widening.** Making the identity optional means
-   `only_for_assistant: None`, i.e. global — the v0.12.25 behaviour. A host that
-   forgot to pass an identity would get a *broader* server than it asked for,
-   which is the wrong direction for a default.
+Reasons, in order of weight — two of which have been corrected downward:
+
+1. **It attaches an identity to a wire-added declaration.** Before
+   `scoped_to_assistant`, a runtime server is byte-identical to a global config
+   server (`to_mcp_server_config`, `main.rs:3569-3592`, sets
+   `only_for_assistant: None`); afterwards the diagnostics snapshot can name
+   *which* assistant it belongs to.
+   **Correction to an earlier draft of this note and of the release notes:** this
+   is *not* what distinguishes a runtime declaration from a config one. That is
+   carried by `McpDeclarationOrigin::RuntimeCommand`, set by
+   `record_runtime_declaration` (`runtime_diagnostics.rs:98-106`) with no
+   reference to any assistant identity, and it survives whatever we decide here.
+   So "provenance would be lost" is not an argument for refusal — only "the
+   server would not be scoped" is.
+2. **The alternative is *not* a binary between refuse and go-global.** An earlier
+   draft claimed making the identity optional means `only_for_assistant: None`,
+   i.e. the v0.12.25 global behaviour. That is false, and the counter-example is
+   already in this codebase: the TUI's equivalent path,
+   `scope_tui_runtime_mcp` (`tui/engine_bridge.rs:832-842`), scopes an
+   identity-less runtime add to a private sentinel
+   `"\0wayland:tui:standalone-runtime"` — neither refused nor global. The server
+   works, and it is scoped to something no config file can name (a `\0` prefix is
+   unwriteable in TOML), so it cannot be widened by accident.
+
+   This means Core currently behaves **two different ways for the same
+   operation**: the TUI accepts and sentinel-scopes, the json-stream host is
+   refused. That inconsistency is itself undocumented and is exactly the class of
+   defect this whole exercise was opened to fix.
 3. **The refusal is already observable.** It emits both an `error` and an
    `mcp_failed` (`main.rs:4863-4870`); `mcp_failed` is in the shipped contract at
    `criticality: "safety"`. Desktop confirmed it handles both. The cost of the
@@ -87,6 +107,21 @@ consults the value. Core will document it as a provenance requirement. If we
 later want it to be enforcement, the work is to route the runtime connect through
 the same `servers_for_assistant` choke point the config path uses — that is a
 real change, not a doc change, and it is not scheduled.
+
+### The three options, costed
+
+| | Behaviour with no identity | Cost | Verdict |
+|---|---|---|---|
+| **(a) Refuse** — ships today | `add_mcp_server` rejected; `error` + `mcp_failed` | Breaks every 0.12.25 host that never passed `--assistant`. Fail-closed and loud. | **Provisional pick for 0.12.26.** It is what shipped. |
+| **(b) Go global** | `only_for_assistant: None`, v0.12.25 behaviour | Silently widens scope for a host that simply forgot a flag. | Rejected. Wrong direction for a default. |
+| **(c) Sentinel-scope** — *already implemented for the TUI* | scoped to `"\0wayland:tui:standalone-runtime"`-style private owner | The server works, is scoped, and cannot be named by any config file. Host needs no flag. Cost is one more scope value to reason about, and it makes "who declared this" less specific than a real identity. | **The strongest candidate for 0.12.27**, and the one the first draft failed to consider. It removes the breaking change entirely while still being fail-closed. |
+
+The honest position: (a) is what we shipped and it is defensible, but (c) would
+have achieved the same scoping goal *without* a breaking change, and Core is
+already running (c) on the TUI path. If Sean prefers (c), the change is small —
+give `scope_host_runtime_mcp` the same sentinel fallback
+`scope_tui_runtime_mcp` already has — but it is another host-visible behaviour
+change and should not be made twice in one release.
 
 ### Q1b — Does a host-supplied PER-CHAT assistant identity deliver the per-chat MCP narrowing `--mcp-server` / `--no-mcp-servers` was asking for?
 
