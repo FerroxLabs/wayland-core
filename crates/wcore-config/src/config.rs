@@ -2525,16 +2525,40 @@ impl Config {
                     if entry.is_empty() {
                         return None;
                     }
+                    // B02-D2 — `known_providers()` is the SEVEN-name
+                    // `/model`-picker catalog (model_aliases.rs: "the built-in
+                    // providers WITH A MODEL CATALOG"), NOT the set of names
+                    // that resolve to a provider. `resolve_provider_alias` is
+                    // that set — a built-in slug or documented alias, a
+                    // user-declared `[providers.<name>]` table, or a bundled
+                    // catalog id — and `resolve_council_provider` already uses
+                    // it for this identical parse. Gating on the picker catalog
+                    // silently reinterpreted `flux-router:flux-standard` as a
+                    // model id ON THE PRIMARY, so the configured cross-provider
+                    // failover pointed straight back at the dead primary.
                     if let Some((prefix, role)) = entry.split_once(':')
-                        && (wcore_types::model_aliases::known_providers().contains(&prefix)
-                            || merged.providers.contains_key(prefix))
+                        && !prefix.is_empty()
+                        && !role.is_empty()
+                        && resolve_provider_alias(&merged.providers, prefix).is_ok()
                     {
                         let model = wcore_types::model_aliases::expand_short_form(entry)
                             .map(str::to_string)
                             .unwrap_or_else(|| role.to_string());
-                        return Some((Some(prefix.to_string()), model));
+                        return Some((entry.to_string(), Some(prefix.to_string()), model));
                     }
-                    Some((None, entry.to_string()))
+                    if entry.contains(':') {
+                        // The defect's other half: this reinterpretation was
+                        // completely silent. Names only the entry — never a
+                        // resolved key or endpoint.
+                        tracing::warn!(
+                            entry,
+                            "provider_chain.fallback_models entry looks like \
+                             <provider>:<model> but the prefix is not a known provider, \
+                             alias or catalog id; the whole string is being used as a \
+                             model id on the primary provider"
+                        );
+                    }
+                    Some((entry.to_string(), None, entry.to_string()))
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -2673,7 +2697,8 @@ impl Config {
             }
         }
 
-        for (fallback_provider, fallback_model) in fallback_specs {
+        let mut kept_fallback_entries: Vec<String> = Vec::new();
+        for (entry, fallback_provider, fallback_model) in fallback_specs {
             if fallback_provider
                 .as_deref()
                 .is_none_or(|provider| provider == resolved.provider_label)
@@ -2682,6 +2707,7 @@ impl Config {
                 fallback.model = fallback_model;
                 fallback.resolved_fallbacks.clear();
                 resolved.resolved_fallbacks.push(fallback);
+                kept_fallback_entries.push(entry);
                 continue;
             }
             let fallback_cli = CliArgs {
@@ -2690,9 +2716,39 @@ impl Config {
                 project_dir: cli.project_dir.clone(),
                 ..Default::default()
             };
-            resolved
-                .resolved_fallbacks
-                .push(Self::resolve_inner(&fallback_cli, false)?);
+            // B02-D2 — DEGRADE, do not abort. Widening the prefix predicate
+            // above means many more entries now reach `resolve_inner`, and a
+            // cross-provider fallback with no resolvable credential returns
+            // `MissingApiKey`. Propagating that would make `Config::resolve`
+            // fail and the product refuse to START over a spare tyre that is
+            // flat — including for a dormant chain that `build_fallback_
+            // providers` would never have built (it early-returns unless
+            // `provider_chain.enabled`). Mirrors the council's `Keyless`
+            // disposition (`resolve_council_provider`), which skips rather
+            // than aborts.
+            match Self::resolve_inner(&fallback_cli, false) {
+                Ok(fallback) => {
+                    resolved.resolved_fallbacks.push(fallback);
+                    kept_fallback_entries.push(entry);
+                }
+                Err(error) => {
+                    // Names the entry and the reason only — never a resolved
+                    // key or endpoint.
+                    tracing::warn!(
+                        entry,
+                        %error,
+                        "provider_chain.fallback_models entry could not be resolved; \
+                         dropping it from the chain"
+                    );
+                }
+            }
+        }
+        // The label list and the resolved list MUST stay in lockstep:
+        // `build_fallback_providers` zips them and hard-fails on a length
+        // mismatch, so a drop that kept its label would turn this degrade into
+        // the startup abort it exists to prevent.
+        if resolve_fallbacks {
+            resolved.provider_chain.fallback_models = kept_fallback_entries;
         }
         Ok(resolved)
     }
@@ -9788,6 +9844,191 @@ skills_lifecycle = true
         assert!(
             out.contains("gpt-sentinel"),
             "CLI model override not stamped:\n{out}"
+        );
+    }
+
+    // ── B02-D2: which `<provider>:<model>` prefixes actually name a provider ─
+    //
+    // `fallback_specs` gated the split on
+    // `wcore_types::model_aliases::known_providers()` — the SEVEN-name
+    // `/model`-picker catalog, whose own doc says every member must list models
+    // in `models_for_provider`. That is not the set of names that resolve to a
+    // provider: `resolve_provider_alias` accepts 22 built-in slugs and aliases,
+    // any user-declared `[providers.<name>]` table, and 104 bundled catalog
+    // ids. A prefix outside the seven fell through to
+    // `Some((None, entry.to_string()))`, and the consumption loop reads
+    // `None` as "same provider as the primary" — so the configured
+    // cross-provider failover silently pointed back at the DEAD PRIMARY, with
+    // the whole `flux-router:flux-standard` label as its model id.
+
+    /// Set `vars` for the duration of `body`, then restore. `None` removes.
+    /// Mirrors the save/restore shape of the sibling `WAYLAND_HOME` tests;
+    /// callers MUST be `#[serial_test::serial(wayland_home_env)]`.
+    fn with_env<T>(vars: &[(&str, Option<&str>)], body: impl FnOnce() -> T) -> T {
+        let saved: Vec<_> = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        let out = body();
+        for (key, value) in saved {
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn cross_provider_fallback_splits_for_a_provider_outside_the_picker_catalog() {
+        let sandbox = tempfile::tempdir().expect("tempdir sandbox");
+        std::fs::write(
+            sandbox.path().join("config.toml"),
+            r#"
+[default]
+provider = "openai"
+model = "gpt-5"
+
+[providers.openai]
+api_key = "openai-canary-key-b02"
+
+[provider_chain]
+enabled = true
+fallback_models = [
+  "flux-router:flux-standard",
+  "gpt-4o-2024-11-20",
+  "ollama:mistral:7b",
+  ":gpt-4o",
+  "openai:",
+]
+"#,
+        )
+        .expect("write config");
+
+        // NOTE: there is deliberately NO `[providers.flux-router]` table. The
+        // old predicate's second arm (`merged.providers.contains_key`) is an
+        // accidental escape hatch, so declaring the table would hide the bug.
+        let resolved = with_env(
+            &[
+                ("WAYLAND_HOME", sandbox.path().to_str()),
+                ("FLUX_API_KEY", Some("flux-canary-key-b02")),
+                // A blanket API_KEY would resolve every provider and mask the
+                // per-provider credential assertion below.
+                ("API_KEY", None),
+            ],
+            || Config::resolve(&CliArgs::default()),
+        )
+        .expect("an unresolvable fallback must never block startup");
+
+        assert_eq!(resolved.resolved_fallbacks.len(), 5);
+
+        // KNOWN-POSITIVE: `flux-router` is a built-in slug (config.rs
+        // `parse_builtin_provider`) but not one of the seven picker names, so
+        // this is the entry the defect mis-parsed.
+        let flux = &resolved.resolved_fallbacks[0];
+        assert_eq!(flux.provider_label, "flux-router");
+        assert_eq!(flux.model, "flux-standard");
+        assert_eq!(flux.compat.provider_type(), "flux-router");
+        // The bug's exact signature is that the fallback inherits the DEAD
+        // primary's endpoint and credential. Relabelling alone does not pass.
+        assert_ne!(
+            flux.api_key, "openai-canary-key-b02",
+            "the fallback must resolve its OWN credential, not the primary's"
+        );
+        assert_eq!(flux.api_key, "flux-canary-key-b02");
+        assert!(
+            !flux.base_url.contains("openai.com"),
+            "the fallback must not point at the dead primary's endpoint: {}",
+            flux.base_url
+        );
+
+        // NEGATIVE CONTROLS. An over-broad "always split on the first colon"
+        // fix is a different, worse bug; these are what refuse it.
+        let same_provider = |index: usize, model: &str| {
+            let fallback = &resolved.resolved_fallbacks[index];
+            assert_eq!(
+                fallback.provider_label, "openai",
+                "entry {index} must stay on the primary"
+            );
+            assert_eq!(fallback.model, model, "entry {index} model");
+        };
+        // no colon at all
+        same_provider(1, "gpt-4o-2024-11-20");
+        // `ollama` is neither a built-in slug nor a catalog id (the catalog has
+        // `ollama-cloud`, not `ollama`), so the canonical `ollama:<name>:<tag>`
+        // spelling must survive whole. Pinned permanently: it holds by the
+        // catalog's contents, not by construction.
+        same_provider(2, "ollama:mistral:7b");
+        // empty prefix
+        same_provider(3, ":gpt-4o");
+        // empty model half — previously resolved a fallback with an EMPTY
+        // model id, which is a request nothing can serve.
+        same_provider(4, "openai:");
+    }
+
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn an_unresolvable_cross_provider_fallback_degrades_instead_of_blocking_startup() {
+        let sandbox = tempfile::tempdir().expect("tempdir sandbox");
+        std::fs::write(
+            sandbox.path().join("config.toml"),
+            r#"
+[default]
+provider = "openai"
+model = "gpt-5"
+
+[providers.openai]
+api_key = "openai-canary-key-b02"
+
+[provider_chain]
+enabled = true
+fallback_models = ["groq:llama-3.3-70b-versatile", "llama:3.3-70b", "gpt-4o-2024-11-20"]
+"#,
+        )
+        .expect("write config");
+
+        let resolved = with_env(
+            &[
+                ("WAYLAND_HOME", sandbox.path().to_str()),
+                ("API_KEY", None),
+                ("GROQ_API_KEY", None),
+                ("LLAMA_API_KEY", None),
+            ],
+            || Config::resolve(&CliArgs::default()),
+        )
+        .expect(
+            "a fallback with no credential is a missing spare tyre, not a reason \
+             to refuse to start the car",
+        );
+
+        // The groq entry now genuinely resolves as a CROSS-provider fallback,
+        // finds no credential, and is dropped — instead of being silently
+        // reinterpreted as the literal model id `groq:llama-3.3-70b-versatile`
+        // on the dead primary. `llama` is one of the 104 BUNDLED CATALOG ids
+        // (data/providers.toml), not a built-in slug, so it pins the catalog
+        // arm of `resolve_provider_alias` — and it is the collision a reviewer
+        // should see: `llama:3.3-70b` used to be a model id on the primary and
+        // is now a cross-provider fallback that needs LLAMA_API_KEY.
+        assert_eq!(resolved.resolved_fallbacks.len(), 1);
+        assert_eq!(resolved.resolved_fallbacks[0].provider_label, "openai");
+        assert_eq!(resolved.resolved_fallbacks[0].model, "gpt-4o-2024-11-20");
+
+        // LOCKSTEP. `build_fallback_providers` zips `provider_chain
+        // .fallback_models` against `resolved_fallbacks` and hard-fails on a
+        // length mismatch ("fallback configuration resolution mismatch"), so a
+        // drop that forgets its label converts this defect into a startup
+        // abort — the exact failure the degrade exists to prevent.
+        assert_eq!(
+            resolved.provider_chain.fallback_models,
+            vec!["gpt-4o-2024-11-20".to_string()],
+            "a dropped fallback must drop its label too"
         );
     }
 
