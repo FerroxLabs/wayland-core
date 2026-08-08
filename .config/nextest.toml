@@ -185,6 +185,34 @@ slow-timeout = { period = "120s", terminate-after = 2 }
 filter = 'binary(packaged_driver_gate)'
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# `packaged_f04_run_is_repeatable_and_content_addressed` drives the sealed F04
+# artifact through TWO complete packaged runs and cross-checks every
+# content-addressed digest between them. `[profile.ci]` below already carries a
+# measured budget for it. THIS PROFILE DID NOT, and this profile is the one every
+# local and pre-merge `cargo nextest run` uses — so against the global default
+# (30s x kill-after-2 = 60s) the test was terminated on a completely idle
+# machine. A gate that cannot reach a pass state proves as little as one that
+# cannot fail.
+#
+# RE-MEASURED 2026-08-08 on hetzner-dsm (96 cores, warm cache, `--profile ci`,
+# the test alone with nothing else scheduled), branch integration/corpus-fixes
+# @ a925ad71:
+#     PASS [ 60.457s] wcore-cli::deterministic_openai_loop
+#                     packaged_f04_run_is_repeatable_and_content_addressed
+# It passes, by 0.457s over the default kill line. The 188s figure recorded in
+# the ci override below is STALE (it was taken at 60565c53); it is left in place
+# because shrinking a CI ceiling on a contended hosted runner buys nothing and
+# risks a new red.
+#
+# Ceiling matched to the ci override (480s) so the two profiles cannot disagree
+# again. `period` is set BELOW the measured runtime on purpose, so nextest keeps
+# printing the "running for over 60 seconds" notice and the cost stays visible
+# instead of being silently absorbed. Scoped to the one test; nothing else's
+# budget moves, and no assertion is touched.
+[[profile.default.overrides]]
+filter = 'test(=packaged_f04_run_is_repeatable_and_content_addressed)'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
 # ── CI profile ─────────────────────────────────────────────────────────────
 [profile.ci]
 # In CI: always show output for failed tests, machine-readable JUnit
