@@ -398,6 +398,15 @@ fn is_denied_system_path(path: &Path) -> bool {
         // agent-facing file tools refuse to touch it.
         "/.wayland/cron/",
         // Broad per-app credential files used by common developer tooling.
+        //
+        // #644 part 3 named `~/.git-credentials` as readable, and it stayed
+        // readable while its whole class — `.netrc`, `.npmrc`, `.pypirc`,
+        // `.docker/config.json` — was denied. It is the most direct of them:
+        // git's `store` helper writes bare `https://user:token@host` lines in
+        // cleartext, so one Read returns a usable push credential for every
+        // remote the user has authenticated to. Denied nowhere before this —
+        // not here, not in `bash/policy.rs`, not in `file_safety.rs`.
+        "/.git-credentials",
         "/.netrc",
         "/.npmrc",
         "/.pypirc",
@@ -438,6 +447,14 @@ fn is_denied_system_path(path: &Path) -> bool {
             r"\wayland-core\credentials.enc",
             r"\wayland-core\credentials.key.json",
             r"\.wayland\cron\",
+            // Mirror of the POSIX `/.git-credentials` entry above. The first
+            // cut of this fix added only the forward-slash form, which gives
+            // ZERO protection on Windows — `%USERPROFILE%\.git-credentials`
+            // matched nothing and stayed readable. The tests that would have
+            // caught it were `#[cfg(unix)]`, so the guard was enforced on the
+            // one platform it worked on and the gap was invisible. They are
+            // no longer gated.
+            r"\.git-credentials",
             r"\.netrc",
             r"\.npmrc",
             r"\.pypirc",
