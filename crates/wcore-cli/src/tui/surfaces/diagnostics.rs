@@ -436,6 +436,22 @@ fn env_set_nonempty(name: &str) -> bool {
 /// failover chain, tool-approval posture) plus one cheap filesystem resolve
 /// for the memory directory. A valid-but-permissive state is surfaced as
 /// `Warn` (never a fake `Fail`); a benign "off" state is an honest `Ok`.
+/// Join `entries` for a one-line health detail, naming at most
+/// [`MAX_NAMED_FALLBACK_ENTRIES`] and counting the rest. A fallback chain is
+/// operator-authored and unbounded; a health row is one line.
+fn join_capped(entries: &[String]) -> String {
+    let shown = entries.len().min(MAX_NAMED_FALLBACK_ENTRIES);
+    let mut out = entries[..shown].join(", ");
+    let elided = entries.len() - shown;
+    if elided > 0 {
+        out.push_str(&format!(" (+{elided} more)"));
+    }
+    out
+}
+
+/// How many fallback entries a health row names before eliding the tail.
+const MAX_NAMED_FALLBACK_ENTRIES: usize = 3;
+
 fn scan_config_health(app: &App) -> Vec<HealthCheck> {
     let c = &app.config;
     let mut rows = Vec::new();
@@ -495,11 +511,27 @@ fn scan_config_health(app: &App) -> Vec<HealthCheck> {
             )
         } else {
             let n = c.fallback_models.len();
-            HealthCheck::new(
-                "provider failover",
-                HealthState::Ok,
-                format!("on · {n} fallback model{}", if n == 1 { "" } else { "s" }),
-            )
+            let plural = if n == 1 { "" } else { "s" };
+            // B02-R2: counting the CONFIGURED entries alone claims spare tyres
+            // the chain does not have — an entry whose provider has no
+            // credential is dropped at resolution and never tried.
+            let dead = c.fallback_unresolved.len();
+            if dead > 0 {
+                HealthCheck::new(
+                    "provider failover",
+                    HealthState::Warn,
+                    format!(
+                        "on · {n} fallback model{plural} · {dead} unusable                          (no credential): {}",
+                        join_capped(&c.fallback_unresolved)
+                    ),
+                )
+            } else {
+                HealthCheck::new(
+                    "provider failover",
+                    HealthState::Ok,
+                    format!("on · {n} fallback model{plural}"),
+                )
+            }
         }
     } else {
         HealthCheck::new(
@@ -508,6 +540,22 @@ fn scan_config_health(app: &App) -> Vec<HealthCheck> {
             "off — single provider",
         )
     });
+
+    // B02-R2: an entry whose MEANING changed. `<provider>:<model>` prefixes are
+    // now resolved against the real provider-alias set rather than the
+    // seven-name `/model`-picker catalog, so entries like `llama:3.3-70b` that
+    // used to be model ids on the primary are now cross-provider fallbacks
+    // needing their own credential. Only pushed when there is something to say.
+    if c.failover_enabled && !c.fallback_reinterpreted.is_empty() {
+        rows.push(HealthCheck::new(
+            "failover chain change",
+            HealthState::Warn,
+            format!(
+                "now read as another provider (needs its own credential): {}",
+                join_capped(&c.fallback_reinterpreted)
+            ),
+        ));
+    }
 
     // Spend cap (S5) — informational; "no cap" is a valid choice.
     rows.push(match c.budget_max_cost_usd {
@@ -3037,6 +3085,134 @@ mod tests {
         assert_eq!(warn("tool approval"), HealthState::Warn);
         assert_eq!(warn("credential store"), HealthState::Warn);
         assert_eq!(warn("provider failover"), HealthState::Warn);
+    }
+
+    // ── B02-R2: resolution changed what some configured entries MEAN ────
+    //
+    // D2 widened the `<provider>:<model>` predicate in
+    // `Config::fallback_specs` from the seven-name `/model`-picker catalog to
+    // the real provider-alias set. That silently re-reads pre-existing
+    // configuration: `llama:3.3-70b` and `flux-router:flux-standard` used to
+    // be model ids ON THE PRIMARY and are now cross-provider fallbacks that
+    // need their own credential. The only notice was a `tracing::warn!` and a
+    // comment inside a unit test. An operator on the Doctor screen must be
+    // told, by name.
+
+    /// Resolve `toml` under a throwaway `WAYLAND_HOME` with `env` applied, and
+    /// return the config-health rows the Doctor screen would show.
+    fn config_health_rows_for(
+        toml: &str,
+        env: &[(&'static str, Option<&str>)],
+    ) -> Vec<HealthCheck> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("config.toml"), toml).expect("write config");
+        let mut batch = EnvBatch::new();
+        batch.set("WAYLAND_HOME", &dir.path().to_string_lossy());
+        for (key, value) in env {
+            match value {
+                Some(value) => batch.set(key, value),
+                None => batch.unset(key),
+            }
+        }
+        let resolved =
+            wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
+                .expect("an unresolvable fallback must not block startup");
+        let mut app = App::new();
+        app.config = crate::tui::config_view_from(&resolved);
+        scan_config_health(&app)
+    }
+
+    #[test]
+    #[serial]
+    fn doctor_names_a_fallback_whose_meaning_changed() {
+        // `flux-router` is a built-in slug but NOT one of the seven picker
+        // names, so this entry flipped from "a model id on the primary" to "a
+        // cross-provider fallback". It has a credential here, so it RESOLVES —
+        // which is what separates this from the merely-unusable case below.
+        let rows = config_health_rows_for(
+            r#"
+[default]
+provider = "openai"
+model = "gpt-5"
+
+[providers.openai]
+api_key = "openai-canary-key-r2"
+
+[provider_chain]
+enabled = true
+fallback_models = ["flux-router:flux-standard", "gpt-4o-2024-11-20"]
+"#,
+            &[
+                ("FLUX_API_KEY", Some("flux-canary-key-r2")),
+                ("API_KEY", None),
+            ],
+        );
+
+        let named = rows
+            .iter()
+            .find(|row| row.detail.contains("flux-router:flux-standard"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no diagnostics row tells the operator that \
+                     `flux-router:flux-standard` now routes to another provider; rows: {:?}",
+                    rows.iter()
+                        .map(|r| (&r.label, &r.detail))
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            named.state,
+            HealthState::Warn,
+            "a change in what existing config MEANS is actionable, not an Ok: {}",
+            named.detail
+        );
+        // Negative control: an entry whose meaning did not change must not be
+        // dragged into the warning.
+        assert!(
+            !named.detail.contains("gpt-4o-2024-11-20"),
+            "an unchanged entry was reported as reinterpreted: {}",
+            named.detail
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn doctor_flags_a_configured_fallback_that_cannot_be_used() {
+        // `groq` resolves to a provider but has no credential, so the degrade
+        // drops it from the live chain. The configured list still shows two
+        // entries, so a row that just counts them tells the operator they have
+        // two spare tyres when one is flat.
+        let rows = config_health_rows_for(
+            r#"
+[default]
+provider = "openai"
+model = "gpt-5"
+
+[providers.openai]
+api_key = "openai-canary-key-r2"
+
+[provider_chain]
+enabled = true
+fallback_models = ["groq:llama-3.3-70b-versatile", "gpt-4o-2024-11-20"]
+"#,
+            &[("GROQ_API_KEY", None), ("API_KEY", None)],
+        );
+
+        let failover = rows
+            .iter()
+            .find(|row| row.label == "provider failover")
+            .expect("the provider failover row must exist");
+        assert_eq!(
+            failover.state,
+            HealthState::Warn,
+            "a chain with a dead entry is not Ok: {}",
+            failover.detail
+        );
+        assert!(
+            failover.detail.contains("1 unusable"),
+            "the failover row must count the entries that did not resolve, got: {}",
+            failover.detail
+        );
     }
 
     #[test]

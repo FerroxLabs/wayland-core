@@ -1372,8 +1372,17 @@ pub struct ConfigView {
     pub failover_enabled: bool,
     /// `[provider_chain] fallback_models` — ordered fallback model ids tried
     /// when the primary's circuit opens. The Advanced list editor (S7) edits
-    /// the chain.
+    /// the chain. This is the OPERATOR'S list, exactly as configured: the
+    /// Config tab writes it back to `config.toml`, so it must never be
+    /// narrowed to what resolved (B02-R1).
     pub fallback_models: Vec<String>,
+    /// B02-R2 — configured entries that could not be resolved, so they are not
+    /// in the live chain even though they are in the file. Read-only: the
+    /// Doctor screen reports them, the Config tab never writes them.
+    pub fallback_unresolved: Vec<String>,
+    /// B02-R2 — configured entries whose meaning changed (a model id on the
+    /// primary is now a cross-provider fallback). Read-only, as above.
+    pub fallback_reinterpreted: Vec<String>,
 }
 
 /// The four `ProviderCompat` cost-per-token overrides surfaced by the

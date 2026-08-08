@@ -1327,6 +1327,18 @@ pub struct Config {
     /// it with the surviving subset silently and permanently deleted the very
     /// fallbacks the credential degrade exists to tolerate.
     pub resolved_fallback_labels: Vec<String>,
+    /// B02-R2 — configured entries that resolution could NOT build (no
+    /// credential for the provider they name). They stay in the operator's
+    /// file; they are simply not in the live chain. Derived, never persisted.
+    pub unresolved_fallback_labels: Vec<String>,
+    /// B02-R2 — configured entries whose MEANING changed when D2 widened the
+    /// `<provider>:<model>` predicate from the seven-name `/model`-picker
+    /// catalog to the real provider-alias set. `llama:3.3-70b` and
+    /// `flux-router:flux-standard` used to be model ids on the primary and are
+    /// now cross-provider fallbacks needing their own credential. Surfaced on
+    /// the Doctor screen so the reinterpretation is not silent. Derived, never
+    /// persisted.
+    pub reinterpreted_fallback_labels: Vec<String>,
     /// W8a A.5/A.6: ExecutionBudget caps. Resolved-config copy of the
     /// merged `ConfigFile.budget`; bootstrap converts this into a
     /// `wcore_agent::budget::ExecutionBudgetView` via the `From` impl.
@@ -1530,6 +1542,8 @@ impl Default for Config {
             provider_policy: ProviderRoutingPolicyConfig::default(),
             resolved_fallbacks: Vec::new(),
             resolved_fallback_labels: Vec::new(),
+            unresolved_fallback_labels: Vec::new(),
+            reinterpreted_fallback_labels: Vec::new(),
             budget: wcore_budget::BudgetConfig::default(),
             storage: StorageConfig::default(),
             memory: MemoryConfig::default(),
@@ -2557,7 +2571,20 @@ impl Config {
                         let model = wcore_types::model_aliases::expand_short_form(entry)
                             .map(str::to_string)
                             .unwrap_or_else(|| role.to_string());
-                        return Some((entry.to_string(), Some(prefix.to_string()), model));
+                        // B02-R2 — an entry the OLD predicate would have left
+                        // on the primary has changed meaning under the
+                        // operator's feet. Record it so the Doctor screen can
+                        // say so by name; a `tracing::warn!` alone is not a
+                        // notice anyone reads.
+                        let reinterpreted = !wcore_types::model_aliases::known_providers()
+                            .contains(&prefix)
+                            && !merged.providers.contains_key(prefix);
+                        return Some((
+                            entry.to_string(),
+                            Some(prefix.to_string()),
+                            model,
+                            reinterpreted,
+                        ));
                     }
                     if entry.contains(':') {
                         // The defect's other half: this reinterpretation was
@@ -2571,7 +2598,7 @@ impl Config {
                              model id on the primary provider"
                         );
                     }
-                    Some((entry.to_string(), None, entry.to_string()))
+                    Some((entry.to_string(), None, entry.to_string(), false))
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -2645,6 +2672,8 @@ impl Config {
             provider_policy: merged.provider_policy,
             resolved_fallbacks: Vec::new(),
             resolved_fallback_labels: Vec::new(),
+            unresolved_fallback_labels: Vec::new(),
+            reinterpreted_fallback_labels: Vec::new(),
             budget: merged.budget,
             storage: merged.storage,
             // Absent `[memory]` resolves to the (memory-ON) default; see the
@@ -2712,7 +2741,12 @@ impl Config {
         }
 
         let mut kept_fallback_entries: Vec<String> = Vec::new();
-        for (entry, fallback_provider, fallback_model) in fallback_specs {
+        let mut unresolved_fallback_entries: Vec<String> = Vec::new();
+        let mut reinterpreted_fallback_entries: Vec<String> = Vec::new();
+        for (entry, fallback_provider, fallback_model, reinterpreted) in fallback_specs {
+            if reinterpreted {
+                reinterpreted_fallback_entries.push(entry.clone());
+            }
             if fallback_provider
                 .as_deref()
                 .is_none_or(|provider| provider == resolved.provider_label)
@@ -2754,6 +2788,7 @@ impl Config {
                         "provider_chain.fallback_models entry could not be resolved; \
                          dropping it from the chain"
                     );
+                    unresolved_fallback_entries.push(entry);
                 }
             }
         }
@@ -2770,6 +2805,8 @@ impl Config {
         // credential — permanently, from the user's own file, on an unrelated
         // edit.
         resolved.resolved_fallback_labels = kept_fallback_entries;
+        resolved.unresolved_fallback_labels = unresolved_fallback_entries;
+        resolved.reinterpreted_fallback_labels = reinterpreted_fallback_entries;
         Ok(resolved)
     }
 
@@ -10064,6 +10101,31 @@ fallback_models = ["groq:llama-3.3-70b-versatile", "llama:3.3-70b", "gpt-4o-2024
                 "gpt-4o-2024-11-20".to_string(),
             ],
             "resolution must not edit the operator's configured fallback list"
+        );
+
+        // B02-R2 — both facts an operator needs, recorded rather than logged.
+        // Neither `groq` nor `llama` is one of the seven picker names, so BOTH
+        // entries changed meaning: they used to be model ids on the primary and
+        // are now cross-provider fallbacks that need their own credential.
+        // `gpt-4o-2024-11-20` has no colon, so it cannot have been
+        // reinterpreted — the negative control.
+        assert_eq!(
+            resolved.reinterpreted_fallback_labels,
+            vec![
+                "groq:llama-3.3-70b-versatile".to_string(),
+                "llama:3.3-70b".to_string(),
+            ],
+            "a pre-existing entry whose meaning changed must be recorded, not \
+             just warned about once at startup"
+        );
+        assert_eq!(
+            resolved.unresolved_fallback_labels,
+            vec![
+                "groq:llama-3.3-70b-versatile".to_string(),
+                "llama:3.3-70b".to_string(),
+            ],
+            "an entry the chain cannot use must be nameable, so the Doctor \
+             screen can stop counting it as a live fallback"
         );
     }
 
