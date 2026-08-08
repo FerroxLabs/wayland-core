@@ -3,6 +3,79 @@ use super::*;
 use serde_json::json;
 use wcore_types::tool::ToolEffectKind;
 
+/// The breaker's health signal must key on the tool's own marker, never on
+/// "does this content look like a shell result".
+#[test]
+fn a_completed_child_is_not_a_tool_fault_but_every_real_fault_is() {
+    let input = json!({ "command": "pytest" });
+
+    // A child that ran and went red: the tool WORKED.
+    let red = child_completed_result(7, "", "1 failed");
+    assert!(red.is_error, "the model must still be told it went red");
+    assert!(
+        !BashTool.result_is_tool_fault(&input, &red),
+        "a non-zero shell exit is not a Bash malfunction"
+    );
+
+    // A child that ran and passed.
+    let green = child_completed_result(0, "ok", "");
+    assert!(!green.is_error);
+    assert!(!BashTool.result_is_tool_fault(&input, &green));
+
+    // Every genuine fault shape must still trip the breaker. The
+    // credential-denylist refusal is the load-bearing one: the breaker is the
+    // incidental rate limit on a prompt-injected model grinding at the
+    // Wave-SA exfiltration denylist.
+    let denylist_refusal = check_denylist("env").expect("`env` must be refused");
+    for content in [
+        "Failed to execute command: sandbox UNAVAILABLE".to_string(),
+        "Command timed out after 5ms".to_string(),
+        "Bash command cancelled by cancellation token".to_string(),
+        "Missing required parameter: command".to_string(),
+        denylist_refusal.to_string(),
+    ] {
+        let fault = ToolResult {
+            content: content.clone(),
+            is_error: true,
+        };
+        assert!(
+            BashTool.result_is_tool_fault(&input, &fault),
+            "must still count as a tool fault: {content}"
+        );
+    }
+}
+
+/// Without this the discriminator can rot silently on a future edit.
+#[test]
+fn the_child_status_marker_survives_the_only_post_processing_step() {
+    for code in [0, 1, 7, 130] {
+        assert!(
+            child_completed_result(code, "out", "err")
+                .content
+                .starts_with(CHILD_STATUS_PREFIX),
+            "child_completed_result must emit the marker head"
+        );
+    }
+    // `annotate_network_block` is append-only; it must never rewrite the head.
+    let annotated = super::policy::annotate_network_block(
+        "curl https://example.com",
+        wcore_sandbox::NetworkPolicy::Deny,
+        child_completed_result(1, "", ""),
+    );
+    assert!(
+        annotated.content.starts_with(CHILD_STATUS_PREFIX),
+        "network annotation destroyed the discriminator: {}",
+        annotated.content
+    );
+    assert!(
+        !BashTool.result_is_tool_fault(
+            &json!({ "command": "curl https://example.com" }),
+            &annotated
+        ),
+        "a network-blocked child still ran; it is not a Bash malfunction"
+    );
+}
+
 #[test]
 fn effect_contract_remains_opaque() {
     let contract = BashTool.effect_contract(&json!({ "command": "true" }));

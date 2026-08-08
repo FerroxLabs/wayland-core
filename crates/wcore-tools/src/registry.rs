@@ -510,8 +510,14 @@ impl ToolDispatcher for ToolRegistry {
             };
         }
 
-        let result = match self.get(tool) {
-            Some(t) => t.execute(input).await,
+        // Cloned so the outcome can be classified after `execute` consumes it.
+        let classify_input = input.clone();
+        let (result, fault) = match self.get(tool) {
+            Some(t) => {
+                let r = t.execute(input).await;
+                let fault = t.result_is_tool_fault(&classify_input, &r);
+                (r, fault)
+            }
             None => {
                 return ToolResult {
                     content: format!("tool '{tool}' not in registry"),
@@ -520,9 +526,11 @@ impl ToolDispatcher for ToolRegistry {
             }
         };
 
-        // Record outcome.
+        // Record outcome. A non-zero shell exit is the tool WORKING, so the
+        // tool classifies its own result rather than the breaker reading the
+        // overloaded model-facing `is_error` bit.
         if let Some(breaker) = self.breakers.read().get(tool) {
-            if result.is_error {
+            if fault {
                 breaker.record_failure();
             } else {
                 breaker.record_success();
@@ -553,8 +561,13 @@ impl ToolDispatcher for ToolRegistry {
             };
         }
 
-        let result = match self.get(tool) {
-            Some(t) => t.execute_with_ctx(input, ctx).await,
+        let classify_input = input.clone();
+        let (result, fault) = match self.get(tool) {
+            Some(t) => {
+                let r = t.execute_with_ctx(input, ctx).await;
+                let fault = t.result_is_tool_fault(&classify_input, &r);
+                (r, fault)
+            }
             None => {
                 return ToolResult {
                     content: format!("tool '{tool}' not in registry"),
@@ -563,9 +576,9 @@ impl ToolDispatcher for ToolRegistry {
             }
         };
 
-        // Record outcome.
+        // See `dispatch` above: the tool classifies its own result.
         if let Some(breaker) = self.breakers.read().get(tool) {
-            if result.is_error {
+            if fault {
                 breaker.record_failure();
             } else {
                 breaker.record_success();
