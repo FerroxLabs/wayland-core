@@ -22,13 +22,13 @@ use crate::diagnostics::{
     RuntimeProfileBinding, RuntimeRemediationCode, RuntimeWorkspaceKind, UnsupportedConfigOverride,
 };
 use crate::events::{
-    BudgetGrantRefusalReason, BudgetGrantResult, Capabilities, ErrorInfo,
-    OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
-    OperatorToolEffectResolution, OutputType, ProtocolEvent, RecoveryBudgetSnapshot,
-    RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason, RecoveryReplayItem,
-    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, SessionPersistence,
-    ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage, WorkflowChildTerminalState,
-    WorkflowNodeState, WorkflowTerminalState,
+    BudgetGrantRefusalReason, BudgetGrantResult, Capabilities, CapabilityActivation, CapabilityId,
+    CapabilityReasonCode, ErrorInfo, MonitorDirective, MonitorReason, OperatorResolutionEvidence,
+    OperatorResolutionEvidenceSource, OperatorToolEffectOutcome, OperatorToolEffectResolution,
+    OutputType, ProtocolEvent, RecoveryBudgetSnapshot, RecoveryCursor, RecoveryLifecycle,
+    RecoveryReconcileReason, RecoveryReplayItem, RecoveryReplayKind, RecoveryTurnSnapshot,
+    RecoveryUnavailableReason, SessionPersistence, ToolCategory, ToolInfo, ToolStatus, TurnCost,
+    Usage, WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use crate::goal::{
@@ -39,6 +39,10 @@ use wcore_types::execution_policy::{
     ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
 };
 use wcore_types::goal::{GoalStrategy, GoalTerminalState, LoopPolicy};
+use wcore_types::workspace_trust::{
+    AuthoritySource, DeveloperCapability, WorkspacePolicyReceipt, WorkspaceSandboxProfile,
+    WorkspaceTrustInput, resolve_workspace_trust,
+};
 
 use super::fixtures_support::capabilities;
 
@@ -353,6 +357,19 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "revision",
         "effective_execution_policy_revisions"
     ),
+    // Emitted once per session by `wcore-cli/src/main.rs`, immediately after
+    // `ready`. Output-only: it reports the trust and sandbox authority the
+    // session actually resolved, and a host cannot submit this shape to widen
+    // anything. Safety, because a host that renders "trusted workspace" from a
+    // frame it never validated is mis-stating the security posture.
+    wire!(
+        "workspace_policy",
+        "events/workspace_policy.json",
+        ["policy"],
+        Safety,
+        "workspace_fingerprint",
+        "available"
+    ),
     wire!(
         "session_recovery_snapshot",
         "events/session_recovery_snapshot.json",
@@ -421,6 +438,18 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         Safety,
         "session_turn_tool_and_cursor",
         "operator_tool_effect_resolution_v1"
+    ),
+    // Flattened `CapabilityActivation`. Startup claims arrive after `ready`;
+    // runtime claims arrive at the real success seam. `reason` is present only
+    // on `unavailable` (see `CapabilityActivation::is_well_formed`), so it is
+    // modelled but not required.
+    wire!(
+        "capability_activation",
+        "events/capability_activation.json",
+        ["capability", "stage"],
+        Observational,
+        "capability",
+        "available"
     ),
     wire!(
         "stream_start",
@@ -670,6 +699,48 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "failed_provider_and_selected_provider",
         "semantic_failover_receipts"
     ),
+    // One physical provider request attempt. `failure` is absent on a clean
+    // attempt, so nothing beyond the discriminator is required.
+    wire!(
+        "provider_attempt",
+        "events/provider_attempt.json",
+        [],
+        Observational,
+        "session",
+        "available"
+    ),
+    // A scheduled retry decision. Deliberately a separate variant from
+    // `provider_attempt` so a host counting physical attempts never
+    // double-counts a decision.
+    wire!(
+        "provider_retry",
+        "events/provider_retry.json",
+        [],
+        Observational,
+        "session",
+        "available"
+    ),
+    // A typed failure discovered after the physical send completed. Carries no
+    // retry authority; `failure` is the stable class.
+    wire!(
+        "provider_failure",
+        "events/provider_failure.json",
+        ["failure"],
+        Observational,
+        "session",
+        "available"
+    ),
+    // Structured monitor control flow. Safety: this is how a host tells a
+    // deliberate stop/replan apart from a generic engine error, and mis-reading
+    // it means telling the user the run crashed when Core chose to stop.
+    wire!(
+        "mid_flight_monitor_decision",
+        "events/mid_flight_monitor_decision.json",
+        ["directive", "reason"],
+        Safety,
+        "session",
+        "available"
+    ),
     wire!(
         "approval_required",
         "events/approval_required.json",
@@ -794,6 +865,17 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         Safety,
         "call_id",
         "host_delegated_delivery"
+    ),
+    // Non-destructive compaction notice, gated by the `ready` capability flag
+    // of the same name. `active_window_percent` is the same opaque 0..=100
+    // scale as `Usage.active_window_percent` and is omitted when unmeasurable.
+    wire!(
+        "compact_offload",
+        "events/compact_offload.json",
+        ["msg_id", "reason", "tokens_freed"],
+        Observational,
+        "msg_id",
+        "non_destructive_compact"
     ),
     wire!(
         "anvil_receipt",
@@ -1606,6 +1688,28 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 result: BudgetGrantResult::granted("budget-001".into(), 250_000, 2.5),
             },
         ),
+        // `unavailable` is the stage that carries `reason`, so this fixture is
+        // the one that publishes the reason vocabulary. The live stages are
+        // reason-less by construction (`CapabilityActivation::is_well_formed`)
+        // and validate against the same branch, since `reason` is optional.
+        (
+            "events/capability_activation.json".into(),
+            ProtocolEvent::CapabilityActivation {
+                activation: CapabilityActivation::unavailable(
+                    CapabilityId::MidFlightMonitor,
+                    CapabilityReasonCode::DisabledByConfig,
+                ),
+            },
+        ),
+        (
+            "events/compact_offload.json".into(),
+            ProtocolEvent::CompactOffload {
+                msg_id: "msg-001".into(),
+                reason: "window_pressure".into(),
+                tokens_freed: 4096,
+                active_window_percent: Some(48),
+            },
+        ),
         (
             "events/config_changed.json".into(),
             ProtocolEvent::ConfigChanged {
@@ -1886,7 +1990,36 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 message: "tools permission was not granted".into(),
             },
         ),
+        (
+            "events/mid_flight_monitor_decision.json".into(),
+            ProtocolEvent::MidFlightMonitorDecision {
+                directive: MonitorDirective::Stop,
+                reason: MonitorReason::RepeatedToolRoute,
+            },
+        ),
         ("events/pong.json".into(), ProtocolEvent::Pong),
+        // `failure` is optional on both attempt and retry: a clean attempt
+        // carries none. The fixtures populate it so the published schema
+        // describes the field a host has to read, and `required` stays at the
+        // discriminator alone so a clean attempt still validates.
+        (
+            "events/provider_attempt.json".into(),
+            ProtocolEvent::ProviderAttempt {
+                failure: Some("http_503".into()),
+            },
+        ),
+        (
+            "events/provider_failure.json".into(),
+            ProtocolEvent::ProviderFailure {
+                failure: "stream_truncated".into(),
+            },
+        ),
+        (
+            "events/provider_retry.json".into(),
+            ProtocolEvent::ProviderRetry {
+                failure: Some("timeout".into()),
+            },
+        ),
         (
             "events/provider_circuit_event.json".into(),
             ProtocolEvent::ProviderCircuitEvent {
@@ -2060,6 +2193,29 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             workflow[2].clone(),
         ),
         ("events/workflow_started.json".into(), workflow[0].clone()),
+        // Built through `resolve_workspace_trust`, not by hand: the receipt
+        // records what the real precedence resolver decided, so the published
+        // fixture cannot drift from the authority rule it claims to describe.
+        (
+            "events/workspace_policy.json".into(),
+            ProtocolEvent::WorkspacePolicy {
+                policy: WorkspacePolicyReceipt {
+                    trust: resolve_workspace_trust(
+                        "0".repeat(64),
+                        [WorkspaceTrustInput::grant(AuthoritySource::User)],
+                    ),
+                    profile: WorkspaceSandboxProfile::TrustedLocalSmart,
+                    backend: "bwrap".into(),
+                    writable_roots: vec!["/workspace".into()],
+                    readable_roots: vec!["/workspace".into(), "/usr/share".into()],
+                    capabilities: vec![DeveloperCapability {
+                        name: "cargo".into(),
+                        executable: "/usr/bin/cargo".into(),
+                        read_only_roots: vec!["/usr/lib/rustlib".into()],
+                    }],
+                },
+            },
+        ),
         (
             "events/anvil_receipt.json".into(),
             ProtocolEvent::AnvilReceipt {
