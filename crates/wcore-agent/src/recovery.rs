@@ -459,6 +459,21 @@ fn locked_session_refusal(
     session_id: &str,
     cause: &crate::recovery_confidential::RecoveryConfidentialError,
 ) -> String {
+    // C-3: the unlock remedy belongs only to causes an unlock can change. A
+    // plaintext credentials backend is decided by config alone —
+    // `reject_backend_without_confidential_storage` runs first and reads no
+    // environment — so appending the passphrase advice for that cause would
+    // tell the operator to do something that provably cannot lift this
+    // refusal. Its own text already names the config change that can.
+    let unlock = if matches!(
+        cause,
+        crate::recovery_confidential::RecoveryConfidentialError::PlaintextBackendRejected
+    ) {
+        ""
+    } else {
+        " To restore the key, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — \
+         preferred) or WAYLAND_VAULT_PASSPHRASE and resume again."
+    };
     format!(
         "session '{session_id}' cannot be resumed on this host: it was interrupted while a \
          provider request was in flight, and continuing it means re-opening the sealed copy of \
@@ -466,9 +481,7 @@ fn locked_session_refusal(
          mean either re-sending a request that may already have been answered, or claiming to \
          have resumed a session nothing was read from. Only THIS session is refused — starting \
          a new session on this host works normally, and its journal is left untouched, so \
-         restoring the key and resuming again recovers it. To restore the key, set \
-         WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
-         WAYLAND_VAULT_PASSPHRASE and resume again."
+         restoring the key and resuming again recovers it.{unlock}"
     )
 }
 
@@ -1967,6 +1980,34 @@ mod tests {
                 "the refusal must say {needle:?}; got: {refusal}"
             );
         }
+    }
+
+    /// C-3, downstream half: this refusal interpolates the cause and then adds
+    /// its own remedy, so it can re-advertise dead advice even after the cause's
+    /// text is fixed.
+    ///
+    /// `PlaintextBackendRejected` is settled by config before any store or
+    /// environment is consulted, so no passphrase can lift it. Every other cause
+    /// here is about a store that exists, where the unlock is exactly the point —
+    /// hence the second half, which keeps this measuring suppression rather than
+    /// absence.
+    #[test]
+    fn the_locked_session_refusal_drops_an_unlock_remedy_that_cannot_apply() {
+        use crate::recovery_confidential::RecoveryConfidentialError as Cause;
+
+        let plaintext = locked_session_refusal("session-a", &Cause::PlaintextBackendRejected);
+        assert!(
+            !plaintext.contains("WAYLAND_VAULT_PASSPHRASE"),
+            "a plaintext credentials backend is decided by config alone; no passphrase can \
+             lift this refusal: {plaintext}"
+        );
+
+        let unavailable = locked_session_refusal("session-a", &Cause::NoSecureBackendAvailable);
+        assert!(
+            unavailable.contains("WAYLAND_VAULT_PASSPHRASE_FD"),
+            "the unlock remedy must survive for the causes an unlock can change, or the \
+             assertion above is measuring nothing: {unavailable}"
+        );
     }
 
     /// The gate must not fire on a session that needs no key, whatever the key
