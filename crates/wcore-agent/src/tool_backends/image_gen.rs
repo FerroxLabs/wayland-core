@@ -1764,18 +1764,44 @@ mod tests {
 
     // -- SECRETS-28: Gemini key must not leak into the error path --
 
+    /// A `host:port` on loopback that is guaranteed to refuse a connection.
+    ///
+    /// These cases used TEST-NET-1 (`192.0.2.1:9`) with the comment "guaranteed
+    /// not to route — the POST fails fast". The first half is true, the second
+    /// is not: a reserved address is BLACKHOLED, not refused, so the connect
+    /// blocks until a timeout fires. MEASURED on hetzner-dsm, three consecutive
+    /// `cargo nextest run -p wcore-agent` runs, this test every time:
+    ///     PASS [  30.039s] / [  30.040s] / [  30.041s]
+    /// against a harness budget of 30s slow, 60s kill — i.e. it sat exactly on
+    /// the slow line, with its margin owned by the host's routing behaviour
+    /// rather than by anything the test asserts. A host that drops SYNs for
+    /// longer, or that is under load, turns that into a timeout kill.
+    ///
+    /// Binding port 0 and dropping the listener yields a port the kernel just
+    /// confirmed was free, so the connect fails immediately with
+    /// ECONNREFUSED — the same transport-error path, with no network and no
+    /// timing dependence. The assertions are unchanged.
+    fn closed_loopback_port() -> u16 {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    }
+
     /// A transport failure during a Gemini Imagen call must NOT echo the
     /// API key (or a `key=` query param) into the returned error, which
     /// surfaces to the user/model as a ToolResult `error`/`details`.
     #[tokio::test]
     async fn gemini_imagen_send_error_omits_api_key() {
         const SECRET_KEY: &str = "AIzaSyTEST_secrets28_leak_canary_value";
-        // TEST-NET-1 (192.0.2.0/24, RFC 5737): reserved, guaranteed not to
-        // route — POST fails fast with a transport error whose `Display`
-        // historically carried the `…?key=<KEY>` URL.
+        // See `closed_loopback_port`: the TEST-NET-1 address this used to POST
+        // to is blackholed, not refused, so the case cost a measured 30.04s of
+        // blocked connect on a 30s-slow / 60s-kill budget.
+        let port = closed_loopback_port();
         let backend = GeminiImagenBackend::with_endpoint_base(
             SECRET_KEY.to_string(),
-            "http://192.0.2.1:9/v1beta/models/imagen-3.0-generate-002:generateImages".to_string(),
+            format!("http://127.0.0.1:{port}/v1beta/models/imagen-3.0-generate-002:generateImages"),
         );
         let err = backend
             .generate(req("a robot", "square"))

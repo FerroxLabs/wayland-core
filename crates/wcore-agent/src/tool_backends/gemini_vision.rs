@@ -181,19 +181,42 @@ mod tests {
 
     const SECRET_KEY: &str = "AIzaSyTEST_secrets27_leak_canary_value";
 
+    /// A `host:port` on loopback that is guaranteed to refuse a connection.
+    ///
+    /// These cases used TEST-NET-1 (`192.0.2.1:9`) with the comment "guaranteed
+    /// not to route — the POST fails fast". The first half is true, the second
+    /// is not: a reserved address is BLACKHOLED, not refused, so the connect
+    /// blocks until a timeout fires. MEASURED on hetzner-dsm, three consecutive
+    /// `cargo nextest run -p wcore-agent` runs, this test every time:
+    ///     PASS [  30.039s] / [  30.040s] / [  30.041s]
+    /// against a harness budget of 30s slow, 60s kill — i.e. it sat exactly on
+    /// the slow line, with its margin owned by the host's routing behaviour
+    /// rather than by anything the test asserts. A host that drops SYNs for
+    /// longer, or that is under load, turns that into a timeout kill.
+    ///
+    /// Binding port 0 and dropping the listener yields a port the kernel just
+    /// confirmed was free, so the connect fails immediately with
+    /// ECONNREFUSED — the same transport-error path, with no network and no
+    /// timing dependence. The assertions are unchanged.
+    fn closed_loopback_port() -> u16 {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral loopback port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    }
+
     /// SECRETS-27 regression: a transport failure during a vision call must
     /// NOT echo the API key (or a `key=` query param) into the returned
     /// `VisionOutcome::Err` message, since that message becomes the tool
     /// result fed back into model context and persisted to the transcript.
     #[tokio::test]
     async fn vision_send_error_message_omits_api_key() {
-        // TEST-NET-1 (192.0.2.0/24, RFC 5737) is reserved for documentation
-        // and guaranteed not to route — the POST fails fast with a transport
-        // error whose `Display` historically carried the URL.
+        let port = closed_loopback_port();
         let backend = GeminiVisionBackend::with_endpoint_base(
             SECRET_KEY.to_string(),
             "gemini-2.5-flash".to_string(),
-            "http://192.0.2.1:9/v1beta/models".to_string(),
+            format!("http://127.0.0.1:{port}/v1beta/models"),
         );
         let outcome = backend
             .analyze("image/png", b"\x89PNG\r\n", "describe")
