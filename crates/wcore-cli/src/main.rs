@@ -1106,6 +1106,44 @@ const NON_TTY_NO_PROMPT_ADVICE: &str = "wayland-core: stdin is not a terminal an
      Use --json-stream for headless/piped use, or pass the prompt as an\n\
      argument: wayland-core \"your prompt here\".";
 
+/// The advice printed once, before any token is spent, when a run that will
+/// need approvals has nobody to ask.
+///
+/// This is the OPERATOR's half of the no-approver refusal. The model's half
+/// (`wcore_agent::orchestration::TOOL_BLOCKED_NO_APPROVER`) deliberately names
+/// no flag; this one does, because it is emitted by our own binary to our own
+/// stderr and never enters the model's context.
+///
+/// It names `--auto-approve` and nothing else. `--auto-approve` bypasses the
+/// approval prompt only; the OS sandbox stays on. The danger tiers are
+/// deliberately NOT named here — advising an operator to drop the sandbox in
+/// order to answer a permission prompt would be advice out of all proportion
+/// to the problem. `headless_no_approver_advice_names_only_flags_that_work`
+/// enforces that mechanically against the real clap definition.
+const HEADLESS_NO_APPROVER_ADVICE: &str = "wayland-core: this run has no interactive approver (stdin is not a terminal),\n\
+     so any tool that needs approval will be refused and the run may accomplish\n\
+     nothing. Pass --auto-approve to approve tool calls for this run, or add the\n\
+     tools you trust to [tools] allow_list in your global config.toml.";
+
+/// Whether to print [`HEADLESS_NO_APPROVER_ADVICE`].
+///
+/// Pure, so it can be tabled without a terminal. `policy` must be the
+/// EFFECTIVE posture (`LocalExecutionSelection::approvals()`), not
+/// `Config::smart_approval_policy()`: the danger tiers are folded in by
+/// `resolve_local_execution` and are never written back into the config, so
+/// reading the config would print "pass --auto-approve" at an operator who
+/// already bypassed the whole gate.
+fn headless_approval_advisory(
+    policy: ApprovalPolicy,
+    stdin_is_tty: bool,
+    prompt_is_empty: bool,
+) -> Option<&'static str> {
+    if prompt_is_empty || stdin_is_tty || policy == ApprovalPolicy::Bypass {
+        return None;
+    }
+    Some(HEADLESS_NO_APPROVER_ADVICE)
+}
+
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
     // Record protocol mode before ANY fallible startup work, so every refusal
@@ -2115,6 +2153,18 @@ async fn run() -> anyhow::Result<ExitCode> {
         // definition by `non_tty_advice_names_only_flags_that_do_what_it_says`.
         eprintln!("{NON_TTY_NO_PROMPT_ADVICE}");
         return Ok(ExitCode::FAILURE);
+    }
+
+    // Say it once, before a single token is spent, rather than letting the
+    // operator discover it from N refused tool calls and an empty answer.
+    // `execution.approvals()` is the posture the confirmer will actually be
+    // built with, danger tiers included.
+    if let Some(advice) = headless_approval_advisory(
+        execution.approvals(),
+        std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        prompt.is_empty(),
+    ) {
+        eprintln!("{advice}");
     }
 
     let provider_name = config.provider_label.clone();
@@ -6069,6 +6119,128 @@ mod tests {
                  positional: wayland-core \"your prompt\"."
             );
         }
+    }
+
+    /// The operator-facing no-approver advice must name a flag that does what
+    /// the sentence says it does. Same machine check as
+    /// `non_tty_advice_names_only_flags_that_do_what_it_says`, against the
+    /// real clap definition rather than a copy of the message (UAT-W1: the
+    /// advice once said `-p`, which is `--provider`).
+    #[test]
+    fn headless_no_approver_advice_names_only_flags_that_work() {
+        use clap::CommandFactory;
+
+        fn resolve(cmd: &clap::Command, token: &str) -> Option<String> {
+            let name = token.trim_start_matches('-');
+            cmd.get_arguments()
+                .find(|a| {
+                    if token.starts_with("--") {
+                        a.get_long() == Some(name)
+                            || a.get_all_aliases().is_some_and(|v| v.contains(&name))
+                    } else {
+                        name.chars().count() == 1 && a.get_short() == name.chars().next()
+                    }
+                })
+                .map(|a| a.get_id().to_string())
+        }
+
+        let cmd = Cli::command();
+        // Controls, both directions, so a dead resolver cannot pass this.
+        assert_eq!(
+            resolve(&cmd, "--json-stream").as_deref(),
+            Some("json_stream"),
+            "resolver is dead"
+        );
+        assert_eq!(resolve(&cmd, "--definitely-not-a-real-flag"), None);
+
+        let tokens: Vec<&str> = HEADLESS_NO_APPROVER_ADVICE
+            .split(|c: char| c.is_whitespace() || c == '"' || c == ',')
+            .map(|t| t.trim_end_matches('.'))
+            .filter(|t| t.starts_with('-') && t.len() > 1)
+            .collect();
+        assert!(
+            !tokens.is_empty(),
+            "no flag tokens extracted — the extractor is dead, or the advice \
+             stopped naming a remedy at all"
+        );
+        for token in tokens {
+            let id = resolve(&cmd, token)
+                .unwrap_or_else(|| panic!("the advice names `{token}`, not an argument at all"));
+            assert_eq!(
+                id, "auto_approve",
+                "the advice names `{token}` (clap id `{id}`). Only \
+                 --auto-approve belongs here: it bypasses the approval prompt \
+                 and leaves the OS sandbox on. Never advise a danger tier to \
+                 answer a permission prompt."
+            );
+        }
+        assert!(HEADLESS_NO_APPROVER_ADVICE.contains("--auto-approve"));
+    }
+
+    #[test]
+    fn headless_approval_advisory_fires_only_when_there_is_no_approver() {
+        use ApprovalPolicy::{AutoEdit, Bypass, Prompt};
+        // (policy, stdin_is_tty, prompt_is_empty) -> fires?
+        let table = [
+            ((Prompt, false, false), true),
+            ((AutoEdit, false, false), true),
+            // There IS an approver: the operator will get the y/n prompt.
+            ((Prompt, true, false), false),
+            // Nothing will ever be asked: approvals are bypassed.
+            ((Bypass, false, false), false),
+            // No prompt means the REPL/`--json-stream` guard above owns it.
+            ((Prompt, false, true), false),
+        ];
+        for ((policy, tty, empty), expected) in table {
+            assert_eq!(
+                headless_approval_advisory(policy, tty, empty).is_some(),
+                expected,
+                "policy={policy:?} tty={tty} prompt_empty={empty}"
+            );
+        }
+    }
+
+    /// The call site must read the EFFECTIVE posture, not the config's. A bare
+    /// `--dangerously-skip-permissions` never writes Bypass back into `Config`
+    /// (`resolve_local_execution` folds it into the returned selection), so a
+    /// call site reading `config.smart_approval_policy()` would advise an
+    /// operator who already bypassed the entire gate to pass --auto-approve.
+    #[test]
+    fn danger_tier_runs_are_never_advised_to_pass_auto_approve() {
+        use wcore_cli::packaged_runtime::resolve_local_execution;
+
+        let cli = Cli::parse_from([
+            "wayland-core",
+            "--dangerously-skip-permissions",
+            "do a thing",
+        ]);
+        let (approval_bypass, dangerous_launch) = danger_tiers(&cli);
+        assert!(approval_bypass, "tier 1 must set the approval bypass");
+        assert!(
+            !cli.auto_approve,
+            "the danger tier is not an --auto-approve alias"
+        );
+
+        let config = wcore_config::config::Config::default();
+        // Control: the config alone still says Prompt — this is exactly the
+        // value a naive call site would read.
+        assert_eq!(config.smart_approval_policy(), ApprovalPolicy::Prompt);
+
+        let execution = resolve_local_execution(
+            &config,
+            approval_bypass,
+            dangerous_launch,
+            DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+            false,
+        )
+        .expect("tier-1 execution policy resolves");
+        assert_eq!(execution.approvals(), ApprovalPolicy::Bypass);
+        assert_eq!(
+            headless_approval_advisory(execution.approvals(), false, false),
+            None,
+            "a run that already bypasses approvals must not be told to pass \
+             --auto-approve"
+        );
     }
 
     #[test]

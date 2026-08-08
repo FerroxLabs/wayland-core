@@ -7,12 +7,27 @@ use wcore_types::execution_policy::ApprovalPolicy;
 pub struct ToolConfirmer {
     approval_policy: ApprovalPolicy,
     allow_list: HashSet<String>,
+    /// Whether there is an interactive approver this session can reach.
+    ///
+    /// Resolved once, at construction, from `io::stdin().is_terminal()`. A
+    /// process's stdin cannot become a terminal mid-run, so caching it costs
+    /// nothing and buys two things: the CLI and the confirmer stop probing
+    /// the terminal independently (they can no longer disagree), and tests
+    /// can pin the condition with `set_interactive_approver` instead of
+    /// depending on whatever stdin the test runner happened to inherit.
+    interactive_approver: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmResult {
     Approved,
+    /// A human was asked and refused.
     Denied,
+    /// The call was refused because no human could be asked: the run has no
+    /// interactive approver, or the one it had disappeared before answering.
+    /// A separate variant because the two are not the same fact and the
+    /// message the operator and the model see must not claim they are.
+    DeniedNoApprover,
     Quit,
 }
 
@@ -31,7 +46,20 @@ impl ToolConfirmer {
         Self {
             approval_policy: policy,
             allow_list: allow_list.into_iter().collect(),
+            interactive_approver: io::stdin().is_terminal(),
         }
+    }
+
+    /// Whether this session can reach an interactive approver.
+    pub fn has_interactive_approver(&self) -> bool {
+        self.interactive_approver
+    }
+
+    /// Override approver presence. Exists so tests can pin the condition
+    /// without a terminal, and so a host that knows better than
+    /// `is_terminal()` (Windows ConPTY, MSYS) can say so.
+    pub fn set_interactive_approver(&mut self, present: bool) {
+        self.interactive_approver = present;
     }
 
     /// Returns whether auto-approve is enabled
@@ -122,13 +150,13 @@ impl ToolConfirmer {
         // closed: a tool that needs confirmation but cannot get it is denied.
         // Auto-approve and allow-listed tools are already handled above, so
         // this only gates tools that would otherwise prompt.
-        if !io::stdin().is_terminal() {
+        if !self.interactive_approver {
             tracing::debug!(
                 target: "wcore_agent::confirm",
                 tool = %tool_name,
                 "tool needs confirmation but stdin is not a terminal; denying (no interactive approver)"
             );
-            return ConfirmResult::Denied;
+            return ConfirmResult::DeniedNoApprover;
         }
 
         self.prompt_and_decide(
@@ -173,9 +201,9 @@ impl ToolConfirmer {
             // between "the operator pressed Enter" and "the operator's
             // terminal went away", and only the byte count can tell them
             // apart.
-            Ok(0) => return ConfirmResult::Denied,
+            Ok(0) => return ConfirmResult::DeniedNoApprover,
             Ok(_) => {}
-            Err(_) => return ConfirmResult::Denied,
+            Err(_) => return ConfirmResult::DeniedNoApprover,
         }
 
         match input.trim().to_lowercase().as_str() {
@@ -377,7 +405,7 @@ mod tests {
             ConfirmResult::Approved,
             "end-of-input with no answer must not approve the tool call"
         );
-        assert_eq!(result, ConfirmResult::Denied);
+        assert_eq!(result, ConfirmResult::DeniedNoApprover);
     }
 
     #[test]
@@ -385,7 +413,7 @@ mod tests {
         // A real empty line (the operator pressed Enter) still means yes.
         assert_eq!(ask(&mut gate(), "\n").0, ConfirmResult::Approved);
         // The stream simply ending must NOT be read as the same thing.
-        assert_eq!(ask(&mut gate(), "").0, ConfirmResult::Denied);
+        assert_eq!(ask(&mut gate(), "").0, ConfirmResult::DeniedNoApprover);
     }
 
     #[test]
@@ -418,7 +446,7 @@ mod tests {
         let mut prompt = Vec::new();
         assert_eq!(
             gate().prompt_and_decide("Bash", "x", &mut answers, &mut prompt),
-            ConfirmResult::Denied
+            ConfirmResult::DeniedNoApprover
         );
     }
 

@@ -1140,13 +1140,14 @@ fn collect_streams(child: &mut std::process::Child) -> Streams {
 /// approval channel a user at a terminal actually has.
 ///
 /// This transport exists because of a product fact the piped variant hid for
-/// two plans. `wcore_agent::confirm::ToolConfirmer::check_for` returns `Denied`
-/// unconditionally when `io::stdin()` is not a terminal — a deliberate
+/// two plans. `wcore_agent::confirm::ToolConfirmer::check_for` returns
+/// `DeniedNoApprover` unconditionally when `io::stdin()` is not a terminal — a deliberate
 /// fail-closed rule, since a blocking `read_line` on a pipe that never reaches
 /// EOF would wedge the turn. The consequence is that on the piped headless
 /// transport the parent's `Delegate` call is refused before any child exists:
-/// every captured run shows `X Tool execution denied by user` and zero child
-/// provider turns. Every REFUSED verdict recorded from such a run was an
+/// every captured run shows the confirmer's refusal (`Tool execution denied by
+/// user` at the time of capture; `BLOCKED: this run has no interactive
+/// approver ...` since) and zero child provider turns. Every REFUSED verdict recorded from such a run was an
 /// absence of effect from an actor that never acted.
 ///
 /// Answering `y` here is the faithful move, not a bypass: it is exactly what a
@@ -1765,7 +1766,8 @@ fn live_probe(entry: &CorpusEntry, transport: LiveTransport) -> ProbeResult {
     // on `delegation_attempted` — a served request carrying a `tool_result`.
     // That proves the DELEGATING CALL RETURNED. It does not prove the child
     // acted, and the two came apart on every piped-headless run: the confirmer
-    // denied the `Delegate` call (`X Tool execution denied by user`), the
+    // denied the `Delegate` call (then `X Tool execution denied by user`; now
+    // `X BLOCKED: this run has no interactive approver ...`), the
     // denial came back as a `tool_result`, the gate passed, and twelve decisive
     // REFUSED verdicts were recorded across two platforms from runs with zero
     // child provider turns. The precondition is now keyed on evidence the CHILD

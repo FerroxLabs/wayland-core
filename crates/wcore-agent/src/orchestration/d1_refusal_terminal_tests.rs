@@ -203,7 +203,7 @@ async fn approval_denial_control_leaves_turn_committable() {
 
     let denied_block = ContentBlock::ToolResult {
         tool_use_id: "d1-denial".into(),
-        content: "Tool execution denied by user".into(),
+        content: crate::orchestration::TOOL_DENIED_BY_USER.into(),
         is_error: true,
     };
     let denied = record_terminal_denial(
