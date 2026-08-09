@@ -1488,8 +1488,62 @@ pub(super) fn execute_blocking(
     let cleanup = identity
         .mark_process_exited()
         .and_then(|()| identity.cleanup());
-    match (execution, cleanup) {
-        (_, Err(cleanup_error)) => Err(cleanup_error),
-        (result, Ok(())) => result,
+    join_execution_and_cleanup(execution, cleanup)
+}
+
+/// Marker every post-execution cleanup fault carries into the caller's stderr.
+///
+/// It exists so the *reader* of a tool result — a human or an agent — can tell
+/// "your command did not run" apart from "your command ran, its effects have
+/// already happened, and only the sandbox's own teardown failed". The
+/// distinction is the whole point: an agent told a non-idempotent command
+/// failed will re-issue it, and the second run is real damage.
+pub(super) const CLEANUP_FAULT_PREFIX: &str = "wcore-sandbox: the command RAN TO COMPLETION and \
+     its effects have already happened; only post-execution sandbox cleanup failed, so do NOT \
+     retry the command. Cleanup fault: ";
+
+/// Combine the execution outcome with the post-execution ACL/profile teardown
+/// outcome.
+///
+/// A teardown fault is NOT an execution failure. Before this existed the join
+/// was `(_, Err(cleanup_error)) => Err(cleanup_error)`, which threw away a
+/// successful `SandboxOutput` — exit code, stdout and stderr — and reported the
+/// teardown fault as though the command had never run. Under machine-wide ACL
+/// mutation-lock contention that is exactly what happened: the child had
+/// already written its files and the caller was told "Failed to execute
+/// command".
+///
+/// The rules:
+/// * teardown clean — pass the execution result through untouched;
+/// * teardown faulted, command succeeded — return the REAL exit code and
+///   output, with the fault appended to stderr behind [`CLEANUP_FAULT_PREFIX`];
+/// * teardown faulted, command also failed — return the EXECUTION error, whose
+///   typed variant (`Timeout`, `OutputLimitExceeded`, …) callers match on. The
+///   teardown fault is logged rather than substituted, because the execution
+///   failure is the cause and the teardown fault is a consequence of it.
+///
+/// Either way the fault is logged at `error` level, so a stranded lease is
+/// never silent just because the command it belonged to succeeded.
+pub(super) fn join_execution_and_cleanup(
+    execution: Result<SandboxOutput>,
+    cleanup: Result<()>,
+) -> Result<SandboxOutput> {
+    let Err(cleanup_error) = cleanup else {
+        return execution;
+    };
+    tracing::error!(
+        target: "wcore_sandbox",
+        error = %cleanup_error,
+        command_succeeded = execution.is_ok(),
+        "AppContainer post-execution cleanup failed; the command's own outcome is unaffected"
+    );
+    match execution {
+        Ok(mut output) => {
+            output
+                .stderr
+                .extend_from_slice(format!("\n{CLEANUP_FAULT_PREFIX}{cleanup_error}\n").as_bytes());
+            Ok(output)
+        }
+        Err(execution_error) => Err(execution_error),
     }
 }

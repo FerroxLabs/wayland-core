@@ -181,6 +181,118 @@ fn killed_owner_is_recovered_before_next_execution() {
     next.cleanup().unwrap();
 }
 
+/// W-A(a): measure what one execution actually costs inside the machine-wide
+/// mutation lock, rather than reasoning about it.
+///
+/// This is the instrument the contention question needs. It prints, per
+/// manifest shape, the number of DACL-mutating intents and the wall clock of
+/// each locked phase. The DACL write count is derivable exactly:
+/// `apply_intents` performs one `SetNamedSecurityInfoW` per existing intent,
+/// and `revoke_intents` performs one per intent plus one more per DENY intent
+/// (`restore_unprotected_dacl`) — so `writes = intents + intents + denies`.
+///
+/// It asserts only what must not regress silently (the intent set matches the
+/// manifest, and the lock is not held across profile-service RPC), and PRINTS
+/// the timings, because a hard wall-clock threshold on someone else's hardware
+/// is a permanently-red or permanently-green gate rather than a measurement.
+#[test]
+#[ignore = "requires explicit native Windows AppContainer acceptance"]
+fn measure_locked_phase_cost_per_execution() {
+    use std::time::Instant;
+    require_live_acceptance();
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let git_objects = workspace.join(".git").join("objects");
+    fs::create_dir_all(&git_objects).unwrap();
+    let secret = workspace.join(".env");
+    fs::write(&secret, b"TOKEN=x").unwrap();
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&scratch).unwrap();
+
+    // A grant on a DIRECTORY is written with `SUB_CONTAINERS_AND_OBJECTS_INHERIT`,
+    // so `SetNamedSecurityInfoW` propagates the ACE across the whole subtree.
+    // That, not the number of intents, is the only mechanism by which one
+    // execution could hold the machine-wide lock for seconds — so the third
+    // shape carries a tree big enough for the propagation cost to show.
+    const WIDE_FILES: usize = 2000;
+    let wide = temp.path().join("wide");
+    for bucket in 0..20 {
+        let dir = wide.join(format!("d{bucket}"));
+        fs::create_dir_all(&dir).unwrap();
+        for file in 0..(WIDE_FILES / 20) {
+            fs::write(dir.join(format!("f{file}.txt")), b"x").unwrap();
+        }
+    }
+
+    // Shape 1: the floor — no filesystem intents at all.
+    // Shape 2: the production `WorkspacePolicy::contained()` shape — workspace
+    // read+write, scratch write, and the two secret-deny targets a real repo
+    // carries (`.env` and `.git/objects`).
+    // Shape 3: the same shape over a 2000-file tree.
+    let shapes: [(&str, SandboxManifest); 3] = [
+        ("empty", SandboxManifest::default()),
+        (
+            "repo-rooted-small",
+            SandboxManifest {
+                fs_read_allow: vec![workspace.clone()],
+                fs_write_allow: vec![workspace.clone(), scratch.clone()],
+                fs_read_deny: vec![secret.clone(), git_objects.clone()],
+                ..Default::default()
+            },
+        ),
+        (
+            "repo-rooted-2000-files",
+            SandboxManifest {
+                fs_read_allow: vec![wide.clone()],
+                fs_write_allow: vec![wide.clone(), scratch.clone()],
+                fs_read_deny: vec![secret.clone(), git_objects.clone()],
+                ..Default::default()
+            },
+        ),
+    ];
+
+    for (label, manifest) in shapes {
+        let intents = canonical_intents(&manifest).unwrap();
+        let denies = intents
+            .iter()
+            .filter(|i| i.kind == IntentKind::Deny)
+            .count();
+        let projected_writes = intents.len() * 2 + denies;
+
+        let setup = Instant::now();
+        let mut identity = ExecutionIdentity::start(&manifest).unwrap();
+        let setup_us = setup.elapsed().as_micros();
+
+        let exited = Instant::now();
+        identity.mark_process_exited().unwrap();
+        let exited_us = exited.elapsed().as_micros();
+
+        let teardown = Instant::now();
+        identity.cleanup().unwrap();
+        let teardown_us = teardown.elapsed().as_micros();
+
+        println!(
+            "MEASURE shape={label} intents={} denies={denies} \
+             projected_dacl_writes={projected_writes} setup_us={setup_us} \
+             mark_exited_us={exited_us} teardown_us={teardown_us}",
+            intents.len()
+        );
+
+        assert_eq!(
+            intents.len(),
+            manifest
+                .fs_read_allow
+                .iter()
+                .chain(manifest.fs_write_allow.iter())
+                .chain(manifest.fs_read_deny.iter())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            "{label}: the intent set must be exactly the manifest's distinct existing paths"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // F-28-02-002 — the stale-lease wedge.
 //
