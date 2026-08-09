@@ -28,6 +28,10 @@ const EGRESS_CLAIM: &str = "that is why it failed";
 /// Clauses that forbid the model from reporting a cause. None may ever ship.
 const FORBIDDING_CLAUSES: &[&str] = &["do NOT claim", "do not invent any other", "Do NOT report"];
 
+/// The marker the true-cause branch writes immediately before the line it
+/// selected out of the command's output.
+const QUOTED_CAUSE_MARKER: &str = "reports a different failure:\n";
+
 /// The command must actually have reached a shell. A pre-exec refusal (the
 /// exec-time capability gate) also produces `is_error` with no egress claim in
 /// it, which would pass every assertion below while proving nothing.
@@ -119,6 +123,89 @@ async fn filesystem_failure_on_the_streaming_path_is_not_blamed_on_egress() {
         result.content
     );
     assert_no_forbidding_clause(&result.content);
+}
+
+/// The other half of the fix, driven end to end: when the OS sandbox really
+/// does deny something, the annotation must QUOTE BACK the line the OS wrote.
+///
+/// Nothing here feeds the expected text in as input. The command asks for a
+/// write the sandbox refuses; the kernel and `touch` author the denial line;
+/// the assertion then requires that same line to appear inside the annotation,
+/// and to have come from the command's own output rather than from the
+/// annotation's static prose. Deleting the true-cause branch removes the
+/// marker and this test panics.
+///
+/// LINUX-ONLY: the string a refused write produces is bwrap's ("Read-only file
+/// system"); macOS seatbelt and Windows AppContainer word it differently and
+/// are covered by the unit legs on their measured strings.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn real_sandbox_write_denial_is_quoted_back_by_the_annotation() {
+    if !wcore_tools::bash::platform_enforces_read_deny() {
+        eprintln!(
+            "SKIP real_sandbox_write_denial_is_quoted_back_by_the_annotation: \
+             no enforcing OS sandbox on this host, the denial cannot be provoked"
+        );
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let policy = Arc::new(WorkspacePolicy::contained(dir.path()));
+    let ctx = ToolContext::test_default().with_workspace(policy);
+
+    // `git clone` makes the command match the network heuristic; the local
+    // source means no socket is opened; the `touch` provokes a real refusal
+    // from the sandbox, which writes its own error text.
+    let result = BashTool
+        .execute_with_ctx(
+            json!({"command":
+                "git clone /nonexistent-outside-root/repo.git out; touch /usr/wl-false-cause-probe"}),
+            &ctx,
+        )
+        .await;
+
+    eprintln!("--- quoted-cause content ---\n{}\n---", result.content);
+    assert_the_shell_actually_ran(&result.content);
+    assert!(
+        result.is_error,
+        "the leg needs a FAILING command; got:\n{}",
+        result.content
+    );
+    assert!(
+        !result.content.contains(EGRESS_CLAIM),
+        "no socket was opened, so egress cannot be asserted as the cause:\n{}",
+        result.content
+    );
+    assert_no_forbidding_clause(&result.content);
+
+    // The annotation must name the true cause, and that text must be the OS's,
+    // not the annotation's own prose.
+    let (before, after) = result
+        .content
+        .split_once(QUOTED_CAUSE_MARKER)
+        .unwrap_or_else(|| {
+            panic!(
+                "the annotation must quote the cause the sandbox reported; got:\n{}",
+                result.content
+            )
+        });
+    let quoted = after.lines().next().unwrap_or_default().trim();
+    assert!(
+        quoted.contains("/usr/wl-false-cause-probe"),
+        "the refused path must be in the quoted cause; quoted {quoted:?} in:\n{}",
+        result.content
+    );
+    assert!(
+        quoted.contains("Read-only file system") || quoted.contains("Permission denied"),
+        "the quoted cause must be the sandbox's own denial text; quoted {quoted:?} in:\n{}",
+        result.content
+    );
+    assert!(
+        before.contains(quoted),
+        "the quoted line must have been EXTRACTED from the command's output, \
+         not composed by the annotation; quoted {quoted:?} in:\n{}",
+        result.content
+    );
 }
 
 /// POSITIVE CONTROL — a genuine egress denial under the same real sandbox must
