@@ -345,3 +345,98 @@ fn user32_linkage_splits_the_spawnable_from_the_dead() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// W-D acceptance. Under the DEFAULT (`contained`) posture, `node` and `python`
+/// must run. They are the two toolchains whose install directories carry no
+/// `ALL APPLICATION PACKAGES` ACE, so before the grant-set change cmd cannot
+/// even stat them and reports "is not recognized as an internal or external
+/// command" — that is the RED this test reproduces.
+///
+/// Graded from WORLD STATE, not stdout: each interpreter is asked to create a
+/// file, and the assertion is that the file is on disk afterwards.
+#[test]
+#[ignore = "explicit native Windows toolchain acceptance"]
+fn node_and_python_run_under_the_default_posture() {
+    require_live();
+    assert_quiet();
+    let root = workspace("wd");
+    let (policy, ctx) = contained_ctx(&root);
+    for r in policy.readable_roots() {
+        println!("WD READ-GRANT {}", r.display());
+    }
+    control(&ctx, &root, "start");
+
+    let cases: [(&str, &str, &str); 2] = [
+        (
+            "node",
+            "node-ok.txt",
+            "node -e \"require('fs').writeFileSync('node-ok.txt','1')\"",
+        ),
+        (
+            "python",
+            "python-ok.txt",
+            "python -c \"open('python-ok.txt','w').write('1')\"",
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, marker, command) in cases {
+        let started = std::time::Instant::now();
+        let p = run(&ctx, command);
+        let landed = root.join(marker);
+        println!(
+            "WD name={name} exit={} elapsed_ms={} landed={} stderr={:?}",
+            p.exit_code,
+            started.elapsed().as_millis(),
+            landed.is_file(),
+            p.stderr.trim()
+        );
+        if p.exit_code != 0 || !landed.is_file() {
+            failures.push(format!(
+                "{name}: exit={} landed={} raw={}",
+                p.exit_code,
+                landed.is_file(),
+                p.raw
+            ));
+        }
+        control(&ctx, &root, name);
+    }
+    control(&ctx, &root, "end");
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(
+        failures.is_empty(),
+        "the default posture cannot run these toolchains: {failures:#?}"
+    );
+}
+
+/// Cost of the grant-set change, measured rather than assumed.
+///
+/// Every extra directory in the read grant set is an inherited-ACE rewrite over
+/// its whole subtree, applied on grant and again on revoke, inside the
+/// machine-wide mutation lock (stage 1 measured ~100 µs per file per
+/// direction). `C:\Program Files\nodejs` and a Python install are large trees,
+/// so adding them could make EVERY Bash call slower. This prints the wall clock
+/// of the same trivial `echo` under the default posture so the before/after
+/// numbers are comparable.
+#[test]
+#[ignore = "explicit native Windows toolchain measurement"]
+fn measure_trivial_command_wall_clock() {
+    require_live();
+    assert_quiet();
+    let root = workspace("cost");
+    let (policy, ctx) = contained_ctx(&root);
+    println!("COST grants={}", policy.readable_roots().len());
+    for r in policy.readable_roots() {
+        println!("COST READ-GRANT {}", r.display());
+    }
+    for i in 0..5 {
+        let started = std::time::Instant::now();
+        let p = run(&ctx, &format!("echo cost{i}> cost{i}.txt"));
+        println!(
+            "COST iter={i} exit={} elapsed_ms={}",
+            p.exit_code,
+            started.elapsed().as_millis()
+        );
+        assert_eq!(p.exit_code, 0, "cost iteration {i} failed: {}", p.raw);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
