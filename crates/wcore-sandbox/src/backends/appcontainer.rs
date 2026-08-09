@@ -514,15 +514,17 @@ mod appcontainer_acl_lease;
 #[cfg(windows)]
 mod windows_impl {
     //! Windows AppContainer + Job Objects backend, split across `command`,
-    //! `handles`, `process` and `tests` so every source file stays under the
-    //! 1000-line limit (F20-03 Task 1A). Cross-module items are `pub(super)`;
-    //! the public surface (`AppContainerBackend`) is unchanged.
+    //! `handles`, `process`, `window_station` and `tests` so every source file
+    //! stays under the 1000-line limit (F20-03 Task 1A). Cross-module items
+    //! are `pub(super)`; the public surface (`AppContainerBackend`) is
+    //! unchanged.
     mod command;
     mod handles;
     mod process;
     mod shared_verdict;
     #[cfg(test)]
     mod tests;
+    mod window_station;
 
     pub use process::AppContainerBackend;
 }
