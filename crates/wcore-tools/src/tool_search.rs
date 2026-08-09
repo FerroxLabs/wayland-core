@@ -113,6 +113,76 @@ fn echoable(query: &str) -> String {
     )
 }
 
+/// How many characters of deferred-tool NAMES a miss message may list.
+///
+/// A miss cannot be terminal without saying what IS in the session — but a
+/// catalogue is exactly what must never be poured back into the context
+/// (see [`MAX_ECHOED_QUERY_CHARS`]). 400 characters is roughly a dozen
+/// MCP-length names: enough to show the SHAPE of what is here, bounded so a
+/// 300-tool server cannot turn a miss into a blob of ToolSearch's own making.
+const MAX_MISS_CATALOG_CHARS: usize = 400;
+
+/// The miss response.
+///
+/// The whole response used to be the first line. That is a dead end carrying
+/// zero information: it cannot distinguish "you phrased the query badly" from
+/// "no such capability exists in this session", so the rational next move is
+/// to re-phrase — and that is exactly what happened. Measured live by the
+/// Wayland Desktop lane (GPT-5.6 Sol, new binary, 2026-08-08): ten consecutive
+/// ToolSearch calls, every one `status=Success` with no matcher miss to blame,
+/// against ONE connected MCP server carrying two tools, hunting a web-search
+/// tool and a `research-advisor` skill that were never in the session. Query 7
+/// was `research-advisor`; the next three were re-phrasings of the same absent
+/// capability. The loop is the message design, not the model.
+///
+/// So the miss states the three things a caller needs in order to STOP: that
+/// nothing matched, what the deferred set actually holds, and that the query
+/// was already compared against all of it — the last is what makes "search
+/// again" provably useless rather than merely discouraged. Truncating the name
+/// list does not weaken that claim, because the match pass above scans every
+/// deferred tool regardless of how many are listed here; the omitted count is
+/// stated out loud so a truncated inventory cannot read as a complete one.
+fn miss_message(echoed_query: &str, deferred: &[&str]) -> String {
+    let head = format!("No deferred tools matching \"{echoed_query}\" found.");
+    let total = deferred.len();
+    if total == 0 {
+        return format!(
+            "{head} This session has NO deferred tools at all, so ToolSearch \
+             cannot return one however it is phrased. Proceed without the \
+             tool, or tell the user the capability is unavailable."
+        );
+    }
+
+    let mut listed = String::new();
+    let mut included = 0usize;
+    for name in deferred {
+        let sep = if included == 0 { "" } else { ", " };
+        if listed.len() + sep.len() + name.len() > MAX_MISS_CATALOG_CHARS {
+            break;
+        }
+        listed.push_str(sep);
+        listed.push_str(name);
+        included += 1;
+    }
+    let inventory = match total - included {
+        0 => listed,
+        // Even the first name blew the budget — say the count rather than
+        // emit an empty inventory that reads as "there is nothing here".
+        _ if included == 0 => format!("{total} tools, none short enough to list here"),
+        omitted => format!("{listed} (+{omitted} more of {total} not listed)"),
+    };
+
+    format!(
+        "{head} All {total} deferred tools in this session were compared \
+         against that query and none matched. The deferred set is: \
+         {inventory}. ToolSearch can only ever return tools from that set, so \
+         if the capability you want is not in it, this session does not have \
+         it and re-running ToolSearch with different wording cannot make it \
+         appear. Proceed without it, or tell the user the capability is \
+         unavailable."
+    )
+}
+
 /// Upper bound on returned matches. Each match carries the tool's FULL input
 /// schema, so an unbounded relaxed match could pour an entire MCP catalogue
 /// into one tool result. Matches are RANKED before the cut, so this is a
@@ -425,8 +495,14 @@ impl Tool for ToolSearchTool {
         drop(hydrated);
 
         if matches.is_empty() {
+            let deferred: Vec<&str> = self
+                .tool_defs
+                .iter()
+                .filter(|d| d.deferred)
+                .map(|d| d.name.as_str())
+                .collect();
             return ToolResult {
-                content: format!("No deferred tools matching \"{}\" found.", echoable(query)),
+                content: miss_message(&echoable(query), &deferred),
                 is_error: false,
             };
         }
@@ -909,11 +985,152 @@ mod tests {
         );
 
         // An ordinary query is still quoted in full — the bound is for blobs,
-        // and a miss the caller cannot read is a worse miss.
+        // and a miss the caller cannot read is a worse miss. Asserted as
+        // "quoted verbatim, no truncation marker" rather than as the whole
+        // response: the response now also carries the deferred inventory and
+        // the terminality claim (see
+        // `a_miss_says_what_is_available_and_that_re_searching_cannot_help`),
+        // which this bound has no opinion about.
         let ordinary = tool.execute(json!({"query": "zzzznotpresent"})).await;
-        assert_eq!(
-            ordinary.content, "No deferred tools matching \"zzzznotpresent\" found.",
-            "the bound must not touch a query anyone would actually type"
+        assert!(
+            ordinary
+                .content
+                .starts_with("No deferred tools matching \"zzzznotpresent\" found."),
+            "the bound must not touch a query anyone would actually type; got: {}",
+            ordinary.content
+        );
+        assert!(
+            !ordinary.content.contains("truncated"),
+            "an untruncated query must not be marked truncated; got: {}",
+            ordinary.content
+        );
+    }
+
+    /// C-6. MEASURED live by the Wayland Desktop lane (GPT-5.6 Sol, new
+    /// binary, 2026-08-08): ten consecutive ToolSearch calls, EVERY one of them
+    /// `status=Success` with no matcher miss to blame. One MCP server was
+    /// connected (`wayland-team-guide`, two tools) and the model was hunting a
+    /// web-search tool and a `research-advisor` skill that did not exist in the
+    /// session at all. Query 7 was literally `research-advisor`; queries 8-10
+    /// were "web search operation schema", "internet search" and "search the
+    /// web for sources" — three re-phrasings of the same absent capability.
+    ///
+    /// The miss response was, verbatim and in its entirety, `No deferred tools
+    /// matching "research-advisor" found.` That is a dead end carrying zero
+    /// information: it cannot distinguish "you phrased the query badly" from
+    /// "no such capability exists here", so re-phrasing is the RATIONAL next
+    /// move. The loop is the message design, not the model.
+    ///
+    /// A miss is terminal only if it says what IS here and that the query was
+    /// already compared against all of it.
+    ///
+    /// MUTANT: return the bare one-line miss and this fails.
+    #[tokio::test]
+    async fn a_miss_says_what_is_available_and_that_re_searching_cannot_help() {
+        let tool = ToolSearchTool::new(build_measured_defs());
+        let result = tool.execute(json!({"query": "research-advisor"})).await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.starts_with("No deferred tools matching"),
+            "precondition: this query must miss; got: {}",
+            result.content
+        );
+
+        // What IS available. Without it the caller cannot tell an absent
+        // capability from a badly phrased query, and rephrasing is rational.
+        for name in [
+            "wld_probe_secret",
+            "aion_list_models",
+            "tv_chart_set_symbol",
+        ] {
+            assert!(
+                result.content.contains(name),
+                "a miss must state what IS available — {name} is missing from: {}",
+                result.content
+            );
+        }
+
+        let lower = result.content.to_lowercase();
+        // That the whole deferred set was already checked. This is what makes
+        // "search again" provably useless rather than merely discouraged.
+        assert!(
+            lower.contains("none matched"),
+            "a miss must say the whole deferred set was already compared \
+             against the query; got: {}",
+            result.content
+        );
+        // And the terminality claim itself, said plainly.
+        assert!(
+            lower.contains("cannot make it appear"),
+            "a miss must say plainly that re-searching cannot surface an \
+             absent capability; got: {}",
+            result.content
+        );
+    }
+
+    /// The bound on the fix above. Telling the caller what IS available must
+    /// not become the second way ToolSearch answers with a catalogue — the
+    /// echo bound already refuses the first
+    /// ([`a_miss_on_a_blob_does_not_echo_the_blob_back`]). A short, ordinary
+    /// query against a 301-tool MCP catalogue is the case the echo bound
+    /// cannot cover, because there is no blob to be four times larger than.
+    ///
+    /// MUTANT: list every deferred name instead of bounding at
+    /// [`MAX_MISS_CATALOG_CHARS`] and this fails (301 names, ~9KB).
+    #[tokio::test]
+    async fn a_miss_against_a_large_catalogue_stays_bounded() {
+        let tool = ToolSearchTool::new(build_verbose_mcp_defs());
+        let result = tool.execute(json!({"query": "zzzznotpresent"})).await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.starts_with("No deferred tools matching"),
+            "precondition: this query must miss; got: {}",
+            result.content
+        );
+        assert!(
+            result.content.len() < 1200,
+            "a miss must stay bounded against a large catalogue; got {} chars: {}",
+            result.content.len(),
+            result.content
+        );
+        // Bounded by TRUNCATION, not by silence: the count it did not list has
+        // to be stated, or the inventory reads as complete when it is not.
+        assert!(
+            result.content.contains("more of 301"),
+            "the omitted count must be stated out loud; got: {}",
+            result.content
+        );
+    }
+
+    /// NEGATIVE CONTROL for the two tests above. The inventory and the
+    /// "searching again cannot help" advice belong to a MISS. Leaking either
+    /// into a HIT tells the model to stop searching in the one case where the
+    /// search worked, and breaks the JSON array `record_hydrated_tools` parses.
+    ///
+    /// MUTANT: append the miss guidance unconditionally and this fails.
+    #[tokio::test]
+    async fn a_hit_carries_none_of_the_miss_guidance() {
+        let tool = ToolSearchTool::new(build_measured_defs());
+        let result = tool.execute(json!({"query": "wld_probe_secret"})).await;
+        assert!(!result.is_error);
+        assert_eq!(match_names(&result.content), vec!["wld_probe_secret"]);
+
+        let lower = result.content.to_lowercase();
+        for leak in [
+            "no deferred tools matching",
+            "none matched",
+            "cannot make it appear",
+        ] {
+            assert!(
+                !lower.contains(leak),
+                "miss guidance {leak:?} must not appear on a hit; got: {}",
+                result.content
+            );
+        }
+        assert!(
+            !result.content.contains("tv_chart_set_symbol"),
+            "a hit must not list the rest of the catalogue; got: {}",
+            result.content
         );
     }
 
