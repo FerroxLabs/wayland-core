@@ -656,7 +656,11 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 
 /// Free-function body of `is_secret_path` (uses no `self` fields). Extracted
 /// so `compute_secret_deny` can call it without a `WorkspacePolicy` instance.
-fn is_secret_path_static(path: &Path) -> bool {
+/// The one credential-file name predicate in the crate. `Read`/`SecretDenyFs`
+/// reach it via [`WorkspacePolicy::is_secret_path`]; `grep_policy` (SR-05) uses
+/// it directly, because Grep has no policy instance and must not grow a second,
+/// divergent copy of this list.
+pub(crate) fn is_secret_path_static(path: &Path) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
 
     if let Some(ext) = path.extension().and_then(|e| e.to_str())

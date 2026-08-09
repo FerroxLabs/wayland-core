@@ -69,6 +69,9 @@ pub mod glob;
 // the prior Wayland Python engine.
 pub mod google_meet_tool;
 pub mod grep;
+// SR-04/SR-05: Grep's product-owned ignore + secret policy, applied to every
+// search backend so `rg`, `grep` and `findstr` cannot answer differently.
+mod grep_policy;
 // T3-3.1.5: per-thread interrupt signaling (port of the prior Wayland Python engine).
 pub mod interrupt;
 // T11 (Plan v2 Tier 2B): JSON Lines streaming tool — large-file-friendly

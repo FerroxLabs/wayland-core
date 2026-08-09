@@ -66,9 +66,50 @@ Execute a shell command and return the result.
 
 Search file contents with regular expressions.
 
-- Uses `rg` (ripgrep) when available, falls back to `grep -rn`
+- Uses `rg` (ripgrep) when available, falls back to `grep -rn` (`findstr` on Windows)
 - Supports glob filtering and case-insensitive search
 - Results limited to 250 lines
+
+### Ignore and secret policy
+
+The search backend is an implementation detail; the policy is not. Grep applies
+the SAME ignore and secret rules to `rg`, `grep` and `findstr` output, so what
+comes back does not depend on which binary the host happens to have installed.
+(It used to: with ripgrep present a `.env` was skipped, and without it the file's
+contents were returned and forwarded to the model.)
+
+**Ignore policy.** For a directory search the reportable file set is enumerated
+with ripgrep's own `ignore` crate under its standard filters — `.gitignore`,
+`.ignore`, `.git/`, and hidden dotfiles are excluded. Two deliberate points:
+
+- A path named **explicitly** is searched even if hidden. The ignore policy
+  governs traversal, not an explicit request. (This is ripgrep's rule too.)
+- `.gitignore` is honoured **even outside a git repository**, which ripgrep does
+  not do. The file states an intent that should not have to wait on `git init`.
+
+**Secret policy.** Files matching the credential-file list that `Read` and the
+OS sandbox already use — `.env` and `.env.*`, `*.pem`, `*.key`, `id_rsa`,
+`.npmrc`, `.netrc`, `~/.aws/credentials`, `service-account*.json`, and the rest
+— are never reported, and naming one directly is refused with an error rather
+than served. Grep returns matched line *content*, which makes it the shortest
+exfiltration path of any read tool.
+
+Match content that survives is scrubbed with the same `PIIScrubber` the engine
+applies to all tool output, so `API_KEY=…` in an ordinary file comes back as
+`[REDACTED:SECRET_ASSIGNMENT]`. Grep has to do this itself: its `path:lineno:`
+prefix pushes the assignment off the start of the line, and the scrubber's
+credential-assignment rules are line-anchored.
+
+**Withholding is never silent.** Anything the policy removes is counted in a
+trailing line, e.g.
+
+```
+src/app.rs:12:let key = load();
+[Grep policy: 1 secret-shaped file(s) withheld (.env); 3 match(es) in ignored paths]
+```
+
+A search whose every hit was withheld reports that line, not "No matches found" —
+"could not show you" and "there was nothing" are different answers.
 
 ## Glob
 

@@ -9,7 +9,13 @@ use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolEffectKind, ToolResu
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::grep_policy::{self, GrepScope};
 use crate::path_validation::validate_search_root;
+use crate::workspace_policy::is_secret_path_static;
+
+/// The one string that means "the backend looked and found nothing". Shared so
+/// `run_grep` can tell it apart from a match list without a magic literal.
+const NO_MATCHES: &str = "No matches found";
 
 pub struct GrepTool;
 
@@ -185,10 +191,62 @@ async fn run_grep(input: &Value, search_root: Option<&Path>) -> ToolResult {
         }
     }
 
+    // SR-05. Grep returns matched line CONTENT, so naming a secret-shaped file
+    // outright is the shortest exfil path there is. Refuse it here, before any
+    // backend runs, rather than filtering its lines out afterwards — the
+    // operator deserves to be told, and no backend gets the chance to read it.
+    if is_secret_path_static(&resolved) && !resolved.is_dir() {
+        return ToolResult {
+            content: format!(
+                "Refused to search {path}: it is a credential-bearing file \
+                 (Grep returns matched line content)"
+            ),
+            is_error: true,
+        };
+    }
+
+    // SR-04/SR-05. Decide what this search may report BEFORE choosing a
+    // backend, so `rg`, `grep` and `findstr` are all held to the same answer.
+    // See `grep_policy` for the rules and the reasoning.
+    let scope = grep_policy::scope_for(&resolved);
+    let base = match search_root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| resolved.clone()),
+    };
+
     // Try ripgrep first, fallback to grep.
-    match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {
+    let raw = match try_ripgrep(pattern, path, glob_pattern, case_insensitive, search_root).await {
         Ok(output) => output,
         Err(_) => try_grep(pattern, path, case_insensitive, search_root).await,
+    };
+    apply_policy(raw, &scope, &base)
+}
+
+/// The single place any backend's output is turned into a tool result. The
+/// backends themselves neither filter nor truncate, which is what makes the
+/// three of them incapable of diverging.
+fn apply_policy(raw: ToolResult, scope: &GrepScope, base: &Path) -> ToolResult {
+    if raw.is_error || raw.content == NO_MATCHES {
+        return raw;
+    }
+
+    let filtered = scope.apply(&raw.content, base);
+    // Truncate AFTER filtering: withheld lines must not consume the budget and
+    // crowd out reportable matches.
+    let mut lines: Vec<String> = filtered.lines.iter().take(250).cloned().collect();
+
+    if let Some(footer) = filtered.footer() {
+        lines.push(footer);
+    } else if lines.is_empty() {
+        return ToolResult {
+            content: NO_MATCHES.to_string(),
+            is_error: false,
+        };
+    }
+
+    ToolResult {
+        content: lines.join("\n"),
+        is_error: false,
     }
 }
 
@@ -231,7 +289,7 @@ async fn try_ripgrep(
 
     if output.status.code() == Some(1) && stdout.is_empty() {
         return Ok(ToolResult {
-            content: "No matches found".to_string(),
+            content: NO_MATCHES.to_string(),
             is_error: false,
         });
     }
@@ -243,10 +301,10 @@ async fn try_ripgrep(
         });
     }
 
-    // Truncate to 250 lines (global limit, not per-file)
-    let lines: Vec<&str> = stdout.lines().take(250).collect();
+    // Raw and untruncated: `run_grep` owns the ignore/secret policy and the
+    // 250-line cap, so every backend is held to one answer.
     Ok(ToolResult {
-        content: lines.join("\n"),
+        content: stdout.into_owned(),
         is_error: false,
     })
 }
@@ -364,13 +422,13 @@ async fn try_grep(
                 }
             } else if stdout.is_empty() {
                 ToolResult {
-                    content: "No matches found".to_string(),
+                    content: NO_MATCHES.to_string(),
                     is_error: false,
                 }
             } else {
-                let lines: Vec<&str> = stdout.lines().take(250).collect();
+                // Raw and untruncated — see the note in `try_ripgrep`.
                 ToolResult {
-                    content: lines.join("\n"),
+                    content: stdout.into_owned(),
                     is_error: false,
                 }
             }

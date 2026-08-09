@@ -267,11 +267,9 @@ async fn grep_redacts_a_secret_assignment_found_in_an_ordinary_file() {
 // SR-04 — the ignore policy
 // ---------------------------------------------------------------------------
 
-/// Ripgrep skips `.gitignore`d paths; `grep -rn` and `findstr` do not. The
-/// product must decide, not the backend.
-#[tokio::test]
-#[serial]
-async fn grep_fallback_honours_gitignore_like_ripgrep_does() {
+/// A tree with a vendored, `.gitignore`d copy of the needle and a real one.
+/// `repo` plants a `.git` directory, which is what turns `.gitignore` on.
+fn seed_ignore_tree(repo: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join("node_modules")).expect("mkdir node_modules");
     std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
@@ -286,25 +284,66 @@ async fn grep_fallback_honours_gitignore_like_ripgrep_does() {
     )
     .expect("write src");
     std::fs::write(dir.path().join(".gitignore"), "node_modules/\n").expect("write .gitignore");
+    if repo {
+        std::fs::create_dir_all(dir.path().join(".git")).expect("mkdir .git");
+    }
+    dir
+}
 
-    let _path = PathGuard::set(&path_without_ripgrep());
-
+async fn grep_for_needle(dir: &tempfile::TempDir) -> String {
     let ctx = ToolContext::test_default();
-    let result = GrepTool
+    GrepTool
         .execute_with_ctx(
-            json!({ "pattern": "ZORVAXNEEDLE", "path": work(&dir).to_string_lossy() }),
+            json!({ "pattern": "ZORVAXNEEDLE", "path": work(dir).to_string_lossy() }),
             &ctx,
         )
-        .await;
+        .await
+        .content
+}
+
+/// Ripgrep skips `.gitignore`d paths; `grep -rn` and `findstr` do not. Inside a
+/// repository the product must give ripgrep's answer on every backend.
+#[tokio::test]
+#[serial]
+async fn grep_fallback_honours_gitignore_inside_a_repo_like_ripgrep_does() {
+    let dir = seed_ignore_tree(true);
+    let _path = PathGuard::set(&path_without_ripgrep());
+    let content = grep_for_needle(&dir).await;
 
     assert!(
-        result.content.contains("app.js"),
-        "positive control missing: the non-ignored hit must be returned, got: {}",
-        result.content
+        content.contains("app.js"),
+        "positive control missing: the non-ignored hit must be returned, got: {content}"
     );
     assert!(
-        !result.content.contains("node_modules"),
-        "a .gitignore'd path must be absent from the results, got: {}",
-        result.content
+        !content.contains("node_modules/x.js"),
+        "a .gitignore'd path must be absent from the results, got: {content}"
+    );
+}
+
+/// The ONE deliberate divergence from ripgrep, pinned so it cannot drift back
+/// by accident. MEASURED on ripgrep 14 (`/opt/homebrew/bin/rg`): outside a git
+/// repository `rg` does not read `.gitignore` at all and returns
+/// `node_modules/x.js`. The product honours the file anyway — it is an explicit
+/// statement of intent that should not wait on `git init` — and says so in the
+/// footer rather than dropping the matches silently.
+#[tokio::test]
+#[serial]
+async fn grep_honours_a_gitignore_outside_a_repo_and_says_that_it_did() {
+    let dir = seed_ignore_tree(false);
+    let _path = PathGuard::set(&path_without_ripgrep());
+    let content = grep_for_needle(&dir).await;
+
+    assert!(
+        content.contains("app.js"),
+        "positive control missing: the ordinary hit must be returned, got: {content}"
+    );
+    assert!(
+        !content.contains("node_modules/x.js"),
+        "an explicit .gitignore must be honoured even outside a repo, got: {content}"
+    );
+    assert!(
+        content.contains("[Grep policy:") && content.contains("ignored paths"),
+        "withholding must be reported, never silent — a caller told \
+         'no matches' would act on it. got: {content}"
     );
 }

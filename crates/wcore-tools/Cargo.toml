@@ -13,6 +13,11 @@ wcore-protocol.workspace      = true
 wcore-config.workspace        = true
 wcore-repomap.workspace       = true
 wcore-observability.workspace = true
+# SR-05: `grep_policy` scrubs Grep match CONTENT with the SAME `PIIScrubber`
+# the engine already applies to tool output. Grep's `path:lineno:` prefix
+# defeats the scrubber's line-anchored rules, so the content field must be
+# handed over on its own — reusing the scrubber, never reimplementing it.
+wcore-safety.workspace        = true
 # T3-3.1.7: SessionSearchTool queries past-session episodes via MemoryApi.
 wcore-memory.workspace        = true
 # S9: BashTool routes all 4 execute paths through the sandbox backend.
