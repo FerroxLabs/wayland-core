@@ -537,6 +537,98 @@ fn windows_dll_not_found_status_reaches_the_model_only_via_extraction() {
     );
 }
 
+/// NO annotation branch may advertise the deleted `WAYLAND_BASH_ALLOW_NETWORK`
+/// env lever as a way to approve egress.
+///
+/// **Why this exists (integration/sandbox-repair).** This is a COMBINED-TREE
+/// defect: neither contributing branch was wrong on its own. `fix/egress-rework`
+/// (SEC-11) deleted the env lever so the environment can no longer open the
+/// sandboxed shell — see `workspace_policy.rs` and `docs/architecture.md`.
+/// `fix/banner-lint` was authored against the pre-SEC-11 tree and its NEW
+/// evidence-dispatch strings still told the operator to
+/// `set WAYLAND_BASH_ALLOW_NETWORK=1`. egress-rework could not have updated
+/// strings that did not yet exist, so ONLY the merge advertises a dead lever —
+/// and a remediation that silently does nothing is worse than none, because the
+/// operator concludes the product is broken rather than that they used the wrong
+/// control.
+///
+/// Graded on the ANNOTATION, over ALL THREE evidence branches, and it asserts
+/// the POSITIVE direction too: naming the real control is what makes the absence
+/// of the dead one meaningful. A branch that emitted no remediation at all would
+/// pass a bare `!contains` check.
+#[test]
+fn no_annotation_branch_advertises_the_deleted_env_lever() {
+    // One body per FailureEvidence arm, so no branch escapes the check.
+    // The flag is false for NotEgress ON PURPOSE: that branch has just
+    // established that egress is NOT the cause, so naming an egress control
+    // there would be the same misdirection this test exists to prevent.
+    let cases = [
+        (
+            "Egress",
+            "Exit code: 6\nSTDOUT:\n\nSTDERR:\n\
+             curl: (6) Could not resolve host: registry.npmjs.org\n",
+            true,
+        ),
+        (
+            "NotEgress",
+            "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+             fatal: could not lock config file /home/u/.gitconfig: Permission denied\n",
+            false,
+        ),
+        ("Silent", "Exit code: 1\nSTDOUT:\n\nSTDERR:\n", true),
+    ];
+
+    for (arm, body, offers_egress_remedy) in cases {
+        let r = annotate_network_block(
+            "curl https://example.com",
+            NetworkPolicy::Deny,
+            failed(body),
+        );
+        let annotation = annotation_only(&r.content, body);
+
+        // The invariant under test, on every arm.
+        assert!(
+            !annotation.contains("WAYLAND_BASH_ALLOW_NETWORK"),
+            "{arm}: the annotation advertises the env lever SEC-11 deleted, so the \
+             operator is told to do something that cannot work:\n{annotation}"
+        );
+        // Every arm must say SOMETHING, or the assertion above is satisfied by
+        // an empty string and this test degenerates into a tautology.
+        assert!(
+            annotation.len() > 80,
+            "{arm}: produced no substantive annotation, so the negative assertion \
+             above proves nothing:\n{annotation}"
+        );
+
+        if offers_egress_remedy {
+            // POSITIVE CONTROL for the arms that DO offer an egress remedy:
+            // deleting the remedy outright would otherwise read as a pass.
+            assert!(
+                annotation.contains("egress_allow"),
+                "{arm}: must still name the control that DOES approve egress, or \
+                 this test only proves the text got shorter:\n{annotation}"
+            );
+            assert!(
+                annotation.contains("environment variable cannot approve it"),
+                "{arm}: must say outright that an environment variable cannot \
+                 approve egress:\n{annotation}"
+            );
+        } else {
+            // The complementary guarantee: the branch that ruled egress OUT must
+            // not offer an egress remedy, and must quote the cause it did find.
+            assert!(
+                !annotation.contains("egress_allow"),
+                "{arm}: egress was ruled out, so offering an egress control \
+                 misdirects the operator:\n{annotation}"
+            );
+            assert!(
+                annotation.contains("/home/u/.gitconfig"),
+                "{arm}: must quote the cause the platform actually named:\n{annotation}"
+            );
+        }
+    }
+}
+
 /// Ordering: egress evidence wins even when a filesystem-shaped line came
 /// FIRST. Nothing else exercises the early return across lines.
 #[test]
