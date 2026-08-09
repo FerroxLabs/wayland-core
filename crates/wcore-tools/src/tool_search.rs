@@ -119,6 +119,20 @@ fn echoable(query: &str) -> String {
 /// relevance cut, not an arbitrary one.
 const MAX_MATCHES: usize = 10;
 
+/// Told on every match, because the success body is the artifact that gets
+/// pasted back. Measured (Wayland Desktop / GPT-5.6 Sol, 2026-08-08): a
+/// 12712-char ToolSearch result went straight back in as the next `query`
+/// and was answered with a 12748-char echo of itself. [`echoable`] bounds
+/// the damage on the MISS path, but only after the paste has happened —
+/// this says it a turn earlier, on the body being pasted.
+///
+/// It rides `status` rather than a prose line wrapped around the JSON
+/// because `AgentEngine::record_hydrated_tools` parses the WHOLE content as
+/// a `serde_json::Value::Array` and records nothing otherwise — a preamble
+/// would leave every "successfully" searched tool uncallable.
+const DO_NOT_PASTE_BACK: &str = "Do not pass this result back to ToolSearch \
+     as a query — a query is a tool name or a few keywords.";
+
 /// Status line on a tool the engine has not admitted yet.
 const STATUS_FIRST_LOAD: &str = "LOADED — this tool is now callable by name. \
      Call it directly on your next step; searching for it again returns this \
@@ -395,11 +409,16 @@ impl Tool for ToolSearchTool {
             .map(|&(_, _, idx)| {
                 let def = &self.tool_defs[idx];
                 let already = hydrated.contains(&def.name);
+                let loaded = if already {
+                    STATUS_ALREADY_LOADED
+                } else {
+                    STATUS_FIRST_LOAD
+                };
                 json!({
                     "name": def.name,
                     "description": def.description,
                     "parameters": def.input_schema,
-                    "status": if already { STATUS_ALREADY_LOADED } else { STATUS_FIRST_LOAD },
+                    "status": format!("{loaded} {DO_NOT_PASTE_BACK}"),
                 })
             })
             .collect();
@@ -1045,6 +1064,84 @@ mod tests {
             Some("SpawnTool"),
             "the array shape `record_hydrated_tools` parses must be preserved"
         );
+    }
+
+    /// The SUCCESS body is the artifact the model pasted back.
+    ///
+    /// Measured, Wayland Desktop / GPT-5.6 Sol, 2026-08-08: a 12712-char
+    /// ToolSearch result went straight back in as the next `query`, and was
+    /// answered with a 12748-char echo of itself. The miss path already warns
+    /// about this ([`echoable`]) — but only AFTER the paste has happened,
+    /// which is one whole turn too late. The success body has to say it
+    /// first, and the only channel in that body that reaches the model
+    /// without changing the array shape is `status`.
+    ///
+    /// MUTANT: drop the no-paste-back clause from the STATUS constants and
+    /// this fails.
+    #[tokio::test]
+    async fn a_match_tells_the_caller_not_to_paste_the_result_back() {
+        let hydrated = HydratedTools::default();
+        let tool = ToolSearchTool::with_hydration(build_measured_defs(), hydrated.clone());
+
+        // BOTH status lines: the paste-back in the live run followed a
+        // successful search, and a repeat search is exactly the state the
+        // model is in when it reaches for the previous result.
+        let first = tool.execute(json!({"query": "wld_probe_secret"})).await;
+        hydrated.write().insert("wld_probe_secret".to_string());
+        let second = tool.execute(json!({"query": "wld_probe_secret"})).await;
+
+        for (label, body) in [("first load", &first), ("already loaded", &second)] {
+            assert!(!body.is_error);
+            let parsed: serde_json::Value = serde_json::from_str(&body.content)
+                .unwrap_or_else(|_| panic!("{label}: body must be a JSON array"));
+            for m in parsed.as_array().expect("array") {
+                let status = m["status"].as_str().expect("a match carries a status");
+                let lower = status.to_lowercase();
+                assert!(
+                    lower.contains("do not") && lower.contains("query"),
+                    "{label}: the status must tell the caller not to pass this \
+                     result back as a query; got: {status}"
+                );
+            }
+        }
+    }
+
+    /// NEGATIVE CONTROL for the test above, and the reason the warning went
+    /// into `status` rather than into a prose line wrapped around the JSON.
+    ///
+    /// `AgentEngine::record_hydrated_tools` parses the body with
+    /// `serde_json::from_str::<Value>` and returns early unless the WHOLE
+    /// content is a `Value::Array`, reading `.name` off each element. One
+    /// prose line before the array and it records nothing — the tool never
+    /// gets force-admitted into `tools[]`, so a "successful" search leaves it
+    /// uncallable, which is a worse loop than the one being closed.
+    ///
+    /// MUTANT: prepend any preamble to the returned content — e.g.
+    /// `format!("Note: …\n{json}")` — and this fails.
+    #[tokio::test]
+    async fn the_success_body_stays_a_bare_json_array_of_named_matches() {
+        let tool = ToolSearchTool::new(build_measured_defs());
+        let result = tool.execute(json!({"query": "wld_probe_secret"})).await;
+        assert!(!result.is_error);
+
+        let parsed =
+            serde_json::from_str::<serde_json::Value>(&result.content).unwrap_or_else(|e| {
+                panic!("the whole body must parse as JSON, or the engine records nothing: {e}")
+            });
+        let arr = parsed
+            .as_array()
+            .expect("the top level must be an ARRAY — `record_hydrated_tools` bails otherwise");
+        assert!(!arr.is_empty());
+        for m in arr {
+            assert!(
+                m.get("name").and_then(|n| n.as_str()).is_some(),
+                "every element must carry a string `name`; got: {m}"
+            );
+            assert!(
+                m.get("parameters").is_some(),
+                "every element must still carry its schema; got: {m}"
+            );
+        }
     }
 
     /// TEST B from the Wayland Desktop handoff, 2026-08-04. Their defect,

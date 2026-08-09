@@ -17045,6 +17045,44 @@ mod set_config_tests {
         );
     }
 
+    /// The no-paste-back warning and the hydration recorder read the SAME
+    /// bytes, so they are proven together or not at all.
+    ///
+    /// Measured, Wayland Desktop / GPT-5.6 Sol, 2026-08-08: a 12712-char
+    /// ToolSearch result was pasted straight back in as the next `query`. The
+    /// success body now says not to — and the obvious place to put that
+    /// sentence, a prose line wrapped around the JSON, would silently break
+    /// [`Self::record_hydrated_tools`], which bails unless the WHOLE content
+    /// parses as a `Value::Array`. A search that no longer hydrates leaves
+    /// the tool uncallable: a worse loop than the one being closed.
+    ///
+    /// MUTANT: move the warning out of `status` and into a preamble line and
+    /// the recorder assertion fails; delete the warning and the first
+    /// assertion fails.
+    #[tokio::test]
+    async fn the_warned_tool_search_body_still_hydrates_through_the_recorder() {
+        let mut engine = engine_with_live_tool_search(&["mcp__srv__alpha"]);
+        let body = registered_tool_search(&engine, "mcp__srv__alpha").await;
+
+        let lower = body.to_lowercase();
+        assert!(
+            lower.contains("do not") && lower.contains("query"),
+            "the success body must warn against passing itself back as a \
+             query; got: {body}"
+        );
+
+        engine.record_hydrated_tools(&body);
+        assert!(
+            engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "mcp__srv__alpha"),
+            "the warned body must still parse as the bare JSON array the \
+             recorder needs; hydrated: {:?}",
+            engine.hydrated_tool_names
+        );
+    }
+
     /// Layer D1 follow-up (hydrated-tool admission): an MCP tool the provider
     /// cap trimmed on turn N, then hydrated via a REAL ToolSearch built on the
     /// registry snapshot, must be present in turn N+1's outbound tools[] with
