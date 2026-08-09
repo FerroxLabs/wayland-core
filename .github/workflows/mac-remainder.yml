@@ -1,0 +1,83 @@
+name: mac remainder (unpublished)
+
+# macOS evidence for the `fix/macos-remainder` lane.
+#
+# Two things this lane cannot get anywhere else:
+#   1. RUNNING the `wcore-sandbox` unit tests on a real macOS kernel. The
+#      `backends::sandbox_exec` module is `#[cfg(target_os = "macos")]`, so its
+#      tests do not exist on Linux at all — `cargo test` on hetzner reports them
+#      as neither passed nor failed, it reports nothing. `clippy --target
+#      aarch64-apple-darwin` type-checks them there; only a Mac executes them.
+#   2. A native arm64 binary. The hetzner zig cross-link SIGSEGVs on the real
+#      binary (579 object files plus wasmtime/aws-lc-sys/ring/sqlite-vec/blake3
+#      and ~15 Apple frameworks).
+#
+# Artifact only. No tag, no release, no npm publish.
+
+on:
+  push:
+    branches:
+      - fix/macos-remainder
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox-tests:
+    name: wcore-sandbox tests on macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          uname -mrs
+          getconf DARWIN_USER_TEMP_DIR
+
+      # The seatbelt tests spawn `sandbox-exec` for real. If the runner image
+      # cannot, they return early and prove nothing, so say so out loud.
+      - name: sandbox-exec is usable on this runner
+        run: |
+          sandbox-exec -p '(version 1)(allow default)' /usr/bin/true
+          echo "sandbox-exec probe exit=$?"
+
+      - name: cargo test -p wcore-sandbox --lib
+        run: cargo test -p wcore-sandbox --lib -- --nocapture
+
+  artifact:
+    name: build aarch64-apple-darwin
+    # Only when the commit asks for it: a release build of wcore-cli is ~1 h of
+    # macOS runner time and the red half of a red/green cycle does not need one.
+    if: contains(github.event.head_commit.message, '[artifact]')
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustc --version
+          uname -m
+
+      - name: Build wcore-cli (release)
+        run: cargo build --release -p wcore-cli --target aarch64-apple-darwin
+
+      - name: Prove it is a real Mach-O arm64 binary
+        run: |
+          BIN=target/aarch64-apple-darwin/release/wayland-core
+          test -x "$BIN" || { echo "no binary produced"; exit 1; }
+          file "$BIN"
+          file "$BIN" | grep -q 'Mach-O 64-bit executable arm64' || {
+            echo "not a Mach-O arm64 executable"; exit 1; }
+          "$BIN" --version
+          shasum -a 256 "$BIN"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wayland-core-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/wayland-core
+          if-no-files-found: error
+          retention-days: 7
