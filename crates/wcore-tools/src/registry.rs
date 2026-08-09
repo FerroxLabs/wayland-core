@@ -64,6 +64,14 @@ pub struct ToolRegistry {
     /// orchestration `execute_*` call, so a new dispatch path cannot forget
     /// to plumb a parameter and silently lose the gate.
     read_only: bool,
+
+    /// The session's hydrated-tool set, published by the engine and read by
+    /// the registered `ToolSearch`. Owned HERE, not by the search tool, so
+    /// [`Self::refresh_tool_search_catalog`] can rebuild the tool without
+    /// forgetting what the engine has already admitted — a rebuild happens on
+    /// bootstrap, on every config-MCP registration, on `/mcp add`, and from
+    /// the TUI engine bridge.
+    hydrated_tools: crate::tool_search::HydratedTools,
 }
 
 impl Default for ToolRegistry {
@@ -82,7 +90,29 @@ impl ToolRegistry {
                 wcore_sandbox::FailClosedBackend::new(),
             ))),
             read_only: false,
+            hydrated_tools: crate::tool_search::HydratedTools::default(),
         }
+    }
+
+    /// Handle onto the session's hydrated-tool set.
+    ///
+    /// The engine owns the decision (`AgentEngine::hydrated_tool_names`) and
+    /// publishes it here with [`Self::publish_hydrated_tools`]; the registered
+    /// `ToolSearch` reads it to decide whether a match is a first load or one
+    /// the engine has already admitted. Exposed so a host that keeps the
+    /// registry behind an `Arc` can still publish without `&mut`.
+    pub fn hydrated_tools(&self) -> crate::tool_search::HydratedTools {
+        self.hydrated_tools.clone()
+    }
+
+    /// Replace the session's hydrated-tool set. Takes `&self`: the engine
+    /// holds the registry behind an `Arc` and publishes on every hydration.
+    pub fn publish_hydrated_tools<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.hydrated_tools.write() = names.into_iter().map(Into::into).collect();
     }
 
     /// Install the session's `[default] read_only` posture. Set once at
@@ -203,6 +233,13 @@ impl ToolRegistry {
     /// it can be discovered. Reapply the configured cold split so a newly
     /// added non-deferred proxy is still searchable when global cold deferral
     /// is enabled.
+    ///
+    /// The rebuilt tool is handed the registry's [`Self::hydrated_tools`]
+    /// handle, NOT a fresh one. A refresh runs on bootstrap, on every
+    /// config-MCP registration, on `/mcp add`, and from the TUI engine
+    /// bridge; without the shared handle each of those would forget what the
+    /// engine had already admitted and hand the model back the stale
+    /// pre-hydration answer, which is what it reads as "still not loaded".
     pub fn refresh_tool_search_catalog(
         &mut self,
         defer_cold: &wcore_config::tools::DeferColdConfig,
@@ -212,7 +249,12 @@ impl ToolRegistry {
         if defer_cold.enabled {
             apply_cold_deferral(&mut snapshot, &defer_cold.hot_allowlist);
         }
-        self.replace_by_name(Box::new(crate::tool_search::ToolSearchTool::new(snapshot)));
+        self.replace_by_name(Box::new(
+            crate::tool_search::ToolSearchTool::with_hydration(
+                snapshot,
+                self.hydrated_tools.clone(),
+            ),
+        ));
     }
 
     /// Find a tool by name

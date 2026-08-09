@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
@@ -21,44 +22,129 @@ const CANCEL_CHECK_INTERVAL: usize = 100;
 /// the tool; prose is a hint about it.
 const NAME_WEIGHT: usize = 2;
 
+/// Upper bound on how many tokens are SUBSTRING-scanned against the catalogue.
+///
+/// A query is meant to be intentional prose. The longest genuine one in any
+/// captured session is four words ("wld_probe_secret tool schema parameters");
+/// naming a tool and saying what you want from it does not reach two dozen.
+/// 64 leaves an order of magnitude of headroom over that while bounding the
+/// worst case at 64 × catalogue substring compares, instead of letting a
+/// pasted-in JSON document scan the catalogue a thousand times over.
+///
+/// It does NOT bound the exact-name pass below, which is a hash lookup per
+/// tool and stays complete: a tool NAMED past the cap is still found.
+const MAX_QUERY_TOKENS: usize = 64;
+
+/// The metalanguage of a serialized tool catalogue: JSON literals, JSON-Schema
+/// keywords, and the four keys this very tool emits (`name`, `description`,
+/// `parameters`, `status`).
+///
+/// These are the words a JSON blob is MADE of, and real MCP prose is full of
+/// them too ("returns a JSON object whose properties describe the required
+/// parameters"), so scoring them makes every tool in a catalogue look
+/// equally relevant to a document that mentions no tool at all. Measured on a
+/// live GPT-5.6 Sol run: a blob query scored 48 points of pure scaffolding per
+/// decoy against 32 for the tool it actually named, so the named tool was cut
+/// off by [`MAX_MATCHES`] entirely — 25 searches, no match, run killed.
+///
+/// Dropped only when the query has something else to go on, mirroring the
+/// one-character rule below: a caller whose whole query is "schema" still gets
+/// a substring search for "schema".
+const STRUCTURAL_NOISE: &[&str] = &[
+    "additionalproperties",
+    "allof",
+    "anyof",
+    "array",
+    "boolean",
+    "const",
+    "default",
+    "description",
+    "enum",
+    "false",
+    "format",
+    "integer",
+    "items",
+    "json",
+    "name",
+    "null",
+    "number",
+    "object",
+    "oneof",
+    "parameters",
+    "properties",
+    "required",
+    "schema",
+    "status",
+    "string",
+    "title",
+    "tool",
+    "tools",
+    "true",
+    "type",
+];
+
+fn is_structural_noise(token: &str) -> bool {
+    STRUCTURAL_NOISE.contains(&token)
+}
+
 /// Upper bound on returned matches. Each match carries the tool's FULL input
 /// schema, so an unbounded relaxed match could pour an entire MCP catalogue
 /// into one tool result. Matches are RANKED before the cut, so this is a
 /// relevance cut, not an arbitrary one.
 const MAX_MATCHES: usize = 10;
 
-/// Status line on a tool this instance has not returned before.
+/// Status line on a tool the engine has not admitted yet.
 const STATUS_FIRST_LOAD: &str = "LOADED — this tool is now callable by name. \
      Call it directly on your next step; searching for it again returns this \
      same result and makes no progress.";
 
-/// Status line on a tool this instance has already returned. See the
+/// Status line on a tool the engine has already admitted. See the
 /// repeat-search note in [`ToolSearchTool::execute_with_ctx`].
 const STATUS_ALREADY_LOADED: &str = "ALREADY LOADED — an earlier ToolSearch \
      in this session already returned this tool, and it has been callable by \
      name ever since. Searching again cannot change that. Call it directly, \
      now.";
 
+/// The session's hydrated-tool set, shared by handle.
+///
+/// The authority is the engine (`AgentEngine::hydrated_tool_names`) — it is
+/// what decides whether a deferred tool is force-admitted into the outbound
+/// `tools[]`. `wcore-tools` sits BELOW `wcore-agent` and must never depend on
+/// it, so the engine publishes into this handle rather than the search tool
+/// reaching upward. The handle is owned by [`crate::registry::ToolRegistry`],
+/// which outlives every `ToolSearch` instance it builds.
+pub type HydratedTools = Arc<RwLock<HashSet<String>>>;
+
 /// Built-in tool that searches for deferred tools and loads their full schema.
 /// Core tool (never deferred itself) — always available to the LLM.
 pub struct ToolSearchTool {
     /// Snapshot of all tool definitions (taken at construction time).
     tool_defs: Vec<ToolDef>,
-    /// Names this instance has already returned as loaded.
-    ///
-    /// The snapshot above cannot tell a hydrated tool from a still-deferred
-    /// one — that state lives on the engine — so remembering what we handed
-    /// out is the only thing this tool can do to stop the second answer being
-    /// the same bytes as the first. See the repeat-search note in
-    /// [`Self::execute_with_ctx`] for the measured loop that motivates it.
-    already_returned: Mutex<HashSet<String>>,
+    /// Handle onto the session's hydrated set. Read-only from here: this
+    /// tool REPORTS hydration, it does not decide it. See the repeat-search
+    /// note in [`Self::execute_with_ctx`] for the measured loop that
+    /// motivates reporting it at all.
+    hydrated: HydratedTools,
 }
 
 impl ToolSearchTool {
+    /// Standalone instance with a private, permanently empty hydrated set.
+    /// Registry-built instances use [`Self::with_hydration`] so the set
+    /// survives a catalog rebuild.
     pub fn new(tool_defs: Vec<ToolDef>) -> Self {
+        Self::with_hydration(tool_defs, HydratedTools::default())
+    }
+
+    /// Instance that reports hydration from a SHARED set.
+    ///
+    /// `refresh_tool_search_catalog` rebuilds this tool on bootstrap, on every
+    /// config-MCP registration, on `/mcp add`, and from the TUI engine bridge.
+    /// Passing the registry's handle through is what stops a rebuild from
+    /// forgetting what the engine has already admitted.
+    pub fn with_hydration(tool_defs: Vec<ToolDef>, hydrated: HydratedTools) -> Self {
         Self {
             tool_defs,
-            already_returned: Mutex::new(HashSet::new()),
+            hydrated,
         }
     }
 }
@@ -162,6 +248,22 @@ impl Tool for ToolSearchTool {
             };
         }
 
+        // An EXACT token match on a tool's full name is unambiguous intent and
+        // cannot happen by accident, so it outranks any amount of scoring below
+        // — see the tier in the sort. Built from the full deduped token set,
+        // BEFORE the noise filter and the cap: this is one hash lookup per
+        // tool, not a scan, so there is no reason to bound it, and bounding it
+        // is what would make a name buried at token 300 of a pasted-in document
+        // unreachable.
+        let exact_names: HashSet<&str> = tokens.iter().copied().collect();
+
+        // Drop the JSON/JSON-Schema scaffolding — see [`STRUCTURAL_NOISE`].
+        if tokens.iter().any(|t| !is_structural_noise(t)) {
+            tokens.retain(|t| !is_structural_noise(t));
+        }
+        // Bound the substring work — see [`MAX_QUERY_TOKENS`].
+        tokens.truncate(MAX_QUERY_TOKENS);
+
         // RANK, do not gate. Requiring EVERY token to match (the previous
         // rule) made a longer, more descriptive query strictly LESS likely to
         // succeed than a terser one, which is backwards: "wld_probe_secret
@@ -183,7 +285,13 @@ impl Tool for ToolSearchTool {
         // matched-token COUNT ranks the decoy first and the fix would have
         // traded "no match" for "buried" — which reads the same to a model.
         // One long, specific token outweighs a handful of short generic ones.
-        let mut scored: Vec<(usize, usize)> = Vec::new(); // (score, def index)
+        //
+        // Scoring is a TIER below exact-name, though, because summed scores do
+        // not survive a pathological query: a pasted-in JSON document gives
+        // every tool in a verbose catalogue dozens of incidental points, and no
+        // weighting of a single 16-character name beats that in aggregate.
+        // (score is only comparable within a tier.)
+        let mut scored: Vec<(bool, usize, usize)> = Vec::new(); // (exact name, score, def index)
 
         for (idx, def) in self.tool_defs.iter().enumerate() {
             if idx % CANCEL_CHECK_INTERVAL == 0 && ctx.cancel.is_cancelled() {
@@ -209,16 +317,19 @@ impl Tool for ToolSearchTool {
                     }
                 })
                 .sum();
+            let exact = exact_names.contains(name_l.as_str());
             // The floor. Zero matched tokens is still NO MATCH — without it,
             // "rank instead of require-all" degrades into "match everything",
             // and every positive case above would still look fixed.
-            if score > 0 {
-                scored.push((score, idx));
+            if exact || score > 0 {
+                scored.push((exact, score, idx));
             }
         }
 
-        // Stable sort: tools with equal scores keep registry order.
-        scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+        // Exact-name tier first, then score. Stable sort: ties keep registry
+        // order.
+        scored
+            .sort_by_key(|&(exact, score, _)| (std::cmp::Reverse(exact), std::cmp::Reverse(score)));
         scored.truncate(MAX_MATCHES);
 
         // Final cancel check before producing output; lets a cancel that
@@ -242,28 +353,31 @@ impl Tool for ToolSearchTool {
         // the engine's own repeated-tool-call guard. Every MCP tool was
         // unreachable this way, not merely a large server's.
         //
-        // The snapshot still cannot express hydration — the hydrated set lives
-        // on the engine (`AgentEngine::hydrated_tool_names`), not here. What
-        // this tool CAN do is remember what it already handed out, so a repeat
-        // search is not the same bytes and says so in words. A rebuild via
-        // `refresh_tool_search_catalog` resets that memory, which is correct:
-        // a rebuilt catalog is a new snapshot and a re-search of it is a
-        // genuine first load.
-        let mut already_returned = self.already_returned.lock();
+        // The snapshot itself still cannot express hydration, and the
+        // authority for it is the engine (`AgentEngine::hydrated_tool_names`),
+        // which is what force-admits a hydrated tool into the outbound
+        // `tools[]`. The engine publishes that set into [`Self::hydrated`], so
+        // the status line reports the ENGINE'S state rather than a count of
+        // how many times this instance has been asked. Two consequences the
+        // tests pin: a tool the engine never admitted looks identical on every
+        // search (nothing changed, so nothing should read as if it had), and a
+        // catalog rebuild cannot resurrect the pre-hydration answer, because
+        // the rebuilt instance shares the same set.
+        let hydrated = self.hydrated.read();
         let matches: Vec<Value> = scored
             .iter()
-            .map(|&(_, idx)| {
+            .map(|&(_, _, idx)| {
                 let def = &self.tool_defs[idx];
-                let first_load = already_returned.insert(def.name.clone());
+                let already = hydrated.contains(&def.name);
                 json!({
                     "name": def.name,
                     "description": def.description,
                     "parameters": def.input_schema,
-                    "status": if first_load { STATUS_FIRST_LOAD } else { STATUS_ALREADY_LOADED },
+                    "status": if already { STATUS_ALREADY_LOADED } else { STATUS_FIRST_LOAD },
                 })
             })
             .collect();
-        drop(already_returned);
+        drop(hydrated);
 
         if matches.is_empty() {
             return ToolResult {
@@ -357,6 +471,88 @@ mod tests {
             ),
             deferred_def("tv_chart_set_symbol", "Change the chart symbol"),
         ]
+    }
+
+    /// A catalogue shaped like a real MCP server's: long `snake_case` names and
+    /// VERBOSE descriptions written in exactly the vocabulary a serialized tool
+    /// catalogue is made of — "object", "properties", "required",
+    /// "parameters", "type", "string", "name". Read any of the MCP servers this
+    /// repo actually talks to and this is what their prose looks like.
+    ///
+    /// That overlap is the whole point: it is what lets a JSON blob in the
+    /// query out-score the one tool the blob actually names.
+    fn build_verbose_mcp_defs() -> Vec<ToolDef> {
+        let mut defs: Vec<ToolDef> = (0..300)
+            .map(|i| {
+                deferred_def(
+                    &format!("mcp__acme_suite__operation_{i}"),
+                    &format!(
+                        "Operation {i}: returns a JSON object whose properties \
+                         describe the required parameters, the type of each \
+                         string field and the name of the resource."
+                    ),
+                )
+            })
+            .collect();
+        defs.push(deferred_def("wld_probe_secret", "Probe a stored secret"));
+        defs
+    }
+
+    /// The pathological query from a live Wayland Desktop screenshot (GPT-5.6
+    /// Sol, 2026-08-08): the model put a giant JSON blob in `query` — the UI
+    /// rendered it as `"[ { [... 197 similar lines] } ]"` — and did it 25 times
+    /// in a row until the engine's repeated-tool-call guard killed the run
+    /// ("stopped early before finishing").
+    ///
+    /// The SHAPE is what matters: a serialized tool catalogue. Every word in it
+    /// is either JSON / JSON-Schema scaffolding (`name`, `description`,
+    /// `parameters`, `type`, `object`, `properties`, `required`, `string`,
+    /// `integer`, `status`) or vocabulary invented for this fixture and absent
+    /// from [`build_verbose_mcp_defs`]. So the ONLY thing in the blob that can
+    /// legitimately match a real tool is `names_a_real_tool`, when supplied —
+    /// which is what makes the positive and negative cases below a controlled
+    /// pair differing in exactly one token.
+    fn pathological_catalogue_blob(names_a_real_tool: Option<&str>) -> String {
+        let alien = [
+            "zephyr",
+            "ledger",
+            "reconcile",
+            "quiescing",
+            "glyph",
+            "tessellations",
+        ];
+        let mut entries: Vec<Value> = (0..30)
+            .map(|i| {
+                json!({
+                    "name": format!("mcp__zephyr_ledger__{}_{i}", alien[i % alien.len()]),
+                    "description": "Reconcile zephyr ledger shards upstream, \
+                                    quiescing glyph tessellations.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "shard_id": {"type": "string"},
+                            "ledger_ref": {"type": "integer"},
+                        },
+                        "required": ["shard_id"],
+                    },
+                    "status": "LOADED",
+                })
+            })
+            .collect();
+        if let Some(real) = names_a_real_tool {
+            // Mid-blob, not at the front: a model pasting a result back does
+            // not helpfully lead with the one name that matters.
+            entries.insert(
+                entries.len() / 2,
+                json!({
+                    "name": real,
+                    "description": "Reconcile zephyr ledger shards upstream.",
+                    "parameters": {"type": "object", "properties": {}},
+                    "status": "LOADED",
+                }),
+            );
+        }
+        serde_json::to_string_pretty(&Value::Array(entries)).unwrap()
     }
 
     fn match_names(content: &str) -> Vec<String> {
@@ -559,6 +755,99 @@ mod tests {
         }
     }
 
+    /// C-5b. The pathological query, from a LIVE Wayland Desktop screenshot
+    /// (GPT-5.6 Sol, 2026-08-08): 25 consecutive ToolSearch calls whose `query`
+    /// was a giant JSON blob — the UI rendered it `"[ { [... 197 similar lines]
+    /// } ]"` — and the run ended "stopped early before finishing", killed by
+    /// the engine's repeated-tool-call guard.
+    ///
+    /// Ranking alone does not rescue this. The blob is made of the same words
+    /// an MCP catalogue's prose is made of, so on a 300-tool catalogue each
+    /// decoy collects `object` + `properties` + `required` + `parameters` +
+    /// `type` + `string` + `name` = 48 points of scaffolding, while the tool
+    /// the blob NAMES scores 32 for its own name. 300 decoys outrank it and
+    /// MAX_MATCHES cuts it off entirely: a guaranteed miss, 25 times over.
+    ///
+    /// MUTANT: drop the structural-noise filter and this fails (the named tool
+    /// is nowhere in the ten returned matches); drop the exact-name tier and it
+    /// fails whenever a decoy's prose still carries non-structural overlap.
+    #[tokio::test]
+    async fn a_pathological_json_blob_still_finds_the_tool_it_names() {
+        let tool = ToolSearchTool::new(build_verbose_mcp_defs());
+        let query = pathological_catalogue_blob(Some("wld_probe_secret"));
+        assert!(
+            query.split_whitespace().count() > 300,
+            "the fixture must stay pathological — hundreds of tokens, not a \
+             tidy phrase; got {} tokens",
+            query.split_whitespace().count()
+        );
+
+        let result = tool.execute(json!({ "query": query })).await;
+        assert!(!result.is_error);
+        assert!(
+            !result.content.starts_with("No deferred tools matching"),
+            "a blob that names a real tool must not be a guaranteed miss"
+        );
+        let names = match_names(&result.content);
+        assert_eq!(
+            names.first().map(|s| s.as_str()),
+            Some("wld_probe_secret"),
+            "the tool the blob NAMES must rank first, ahead of 300 tools that \
+             only matched JSON scaffolding; got: {names:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the test above, and the reason the fix is a noise
+    /// filter rather than "be more tolerant". Same blob, same 300-tool
+    /// catalogue, one difference: no real tool name anywhere in it.
+    ///
+    /// Every non-structural word in the blob is invented for the fixture and
+    /// absent from the catalogue, so the only thing left that could match is
+    /// the JSON scaffolding. If scaffolding alone matches, ToolSearch answers a
+    /// blob with ten arbitrary tools and their full schemas — which is worse
+    /// than a miss, because it looks like an answer.
+    ///
+    /// MUTANT: drop the structural-noise filter and this fails with ten
+    /// `mcp__acme_suite__operation_*` matches.
+    #[tokio::test]
+    async fn a_pathological_json_blob_naming_nothing_still_reports_no_match() {
+        let tool = ToolSearchTool::new(build_verbose_mcp_defs());
+        let result = tool
+            .execute(json!({ "query": pathological_catalogue_blob(None) }))
+            .await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.starts_with("No deferred tools matching"),
+            "JSON scaffolding is not a search term; got: {}",
+            match_names(&result.content).join(", ")
+        );
+    }
+
+    /// The cap on substring-scanned tokens ([`MAX_QUERY_TOKENS`]) is a work
+    /// bound, and a work bound that can hide the tool the caller NAMED is just
+    /// the old guaranteed-miss wearing a different hat. A pasted-in document
+    /// does not put the name it mentions in the first 64 words.
+    ///
+    /// MUTANT: build `exact_names` from the CAPPED token list instead of the
+    /// full one and this fails.
+    #[tokio::test]
+    async fn the_token_cap_cannot_hide_an_exactly_named_tool() {
+        let tool = ToolSearchTool::new(build_verbose_mcp_defs());
+        let mut query: Vec<String> = (0..MAX_QUERY_TOKENS * 3)
+            .map(|i| format!("zzfiller{i}"))
+            .collect();
+        query.push("wld_probe_secret".to_string());
+
+        let result = tool.execute(json!({ "query": query.join(" ") })).await;
+        assert!(!result.is_error);
+        assert_eq!(
+            match_names(&result.content),
+            vec!["wld_probe_secret"],
+            "a name past the cap must still be found — the cap bounds substring \
+             scanning, not exact-name lookup"
+        );
+    }
+
     /// C-5, defect 2 (the one the comment in `execute_with_ctx` documents): the
     /// snapshot is taken at construction and still marks a hydrated tool
     /// deferred, so searching for the same tool twice returned a BYTE-IDENTICAL
@@ -567,17 +856,24 @@ mod tests {
     /// searches with no call ever attempted, the run killed by the engine's
     /// repeated-tool-call guard.
     ///
-    /// The snapshot cannot be made hydration-aware from inside this tool (the
-    /// hydrated set lives on the engine). What it CAN do is remember what it
-    /// already handed out, so the second answer is not the same bytes and says
-    /// out loud that the tool has been callable since the first search.
+    /// The hydrated set lives on the engine, so this tool cannot decide the
+    /// answer — it reports the set the engine published into its shared
+    /// handle. Once the engine has admitted the tool, the second answer is not
+    /// the same bytes and says out loud that the tool has been callable since
+    /// the first search.
     ///
     /// MUTANT: return the same `status` string on every search and this fails.
+    /// MUTANT: ignore the shared set and count this instance's own returns
+    /// instead, and `an_unhydrated_repeat_search_is_byte_identical` fails.
     #[tokio::test]
     async fn a_repeat_search_does_not_return_the_identical_body() {
-        let tool = ToolSearchTool::new(build_measured_defs());
+        let hydrated = HydratedTools::default();
+        let tool = ToolSearchTool::with_hydration(build_measured_defs(), hydrated.clone());
 
         let first = tool.execute(json!({"query": "wld_probe_secret"})).await;
+        // What the engine's `record_hydrated_tools` publishes after parsing
+        // the body above: the tool is now force-admitted into `tools[]`.
+        hydrated.write().insert("wld_probe_secret".to_string());
         let second = tool.execute(json!({"query": "wld_probe_secret"})).await;
         assert!(!first.is_error && !second.is_error);
         assert_ne!(
@@ -599,6 +895,27 @@ mod tests {
             status.to_lowercase().contains("already"),
             "the repeat answer must say the tool was ALREADY loaded, not repeat \
              the first-load wording; got: {status}"
+        );
+    }
+
+    /// NEGATIVE CONTROL for the test above. The changed body has to MEAN
+    /// "the engine admitted this tool", not "you asked twice" — otherwise the
+    /// signal the model is being taught to read is noise.
+    ///
+    /// MUTANT: go back to an instance-local `already_returned` set and this
+    /// fails while `a_repeat_search_does_not_return_the_identical_body` stays
+    /// green — which is exactly the first-pass fix this replaces.
+    #[tokio::test]
+    async fn an_unhydrated_repeat_search_is_byte_identical() {
+        let tool = ToolSearchTool::new(build_measured_defs());
+
+        let first = tool.execute(json!({"query": "wld_probe_secret"})).await;
+        let second = tool.execute(json!({"query": "wld_probe_secret"})).await;
+        assert!(!first.is_error && !second.is_error);
+        assert_eq!(
+            first.content, second.content,
+            "with nothing hydrated, the answer has not changed and must not \
+             pretend it has"
         );
     }
 

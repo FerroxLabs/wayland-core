@@ -3903,6 +3903,7 @@ impl AgentEngine {
         self.mcp_curation_cache = None;
         self.mcp_cap_cache = None;
         self.hydrated_tool_names.clear();
+        self.publish_hydrated_tools();
         self.recent_turn_traces.clear();
         self.drafted_skill_signatures.clear();
         self.mode_override = None;
@@ -6298,7 +6299,9 @@ impl AgentEngine {
                         "tool_result({tool_use_id}{}): {content}",
                         if *is_error { " error" } else { "" }
                     )),
-                    ContentBlock::Thinking { thinking } => Some(format!("thinking: {thinking}")),
+                    ContentBlock::Thinking { thinking, .. } => {
+                        Some(format!("thinking: {thinking}"))
+                    }
                     ContentBlock::Image { mime, .. } => Some(format!("[image: {mime}]")),
                 };
                 if let Some(line) = line {
@@ -11648,6 +11651,7 @@ impl AgentEngine {
             if !thinking_text.is_empty() {
                 assistant_content.push(ContentBlock::Thinking {
                     thinking: thinking_text,
+                    extra: None,
                 });
             }
             if !assistant_text.is_empty() {
@@ -15300,6 +15304,7 @@ impl AgentEngine {
         }
         if !demoted.is_empty() {
             self.hydrated_tool_names.retain(|n| !demoted.contains(n));
+            self.publish_hydrated_tools();
         }
         if !evicted.is_empty() {
             tracing::info!(
@@ -15382,6 +15387,26 @@ impl AgentEngine {
             );
         }
         self.hydrated_tool_names.push(name.to_string());
+        self.publish_hydrated_tools();
+    }
+
+    /// Mirror [`Self::hydrated_tool_names`] into the registry so the
+    /// registered `ToolSearch` reports the ENGINE'S admission state.
+    ///
+    /// The engine is the authority — it is what force-admits a hydrated tool
+    /// into the outbound `tools[]` — but `wcore-tools` sits below
+    /// `wcore-agent` and cannot read up. Without this mirror the search tool
+    /// answers from its construction-time snapshot, so a repeat search returns
+    /// the byte-identical "still deferred" body, the model reads that as "the
+    /// schema has not loaded", and searches again: measured against a real
+    /// MCP server as ten identical searches with no call ever attempted,
+    /// killed by the engine's own repeated-tool-call guard.
+    ///
+    /// Called after EVERY mutation of the set, including the evictions and
+    /// prunes, so the two can never disagree.
+    fn publish_hydrated_tools(&self) {
+        self.tools
+            .publish_hydrated_tools(self.hydrated_tool_names.iter().cloned());
     }
 
     /// Layer D3 follow-up (catalog fold): a DIRECT call to a deferred tool
@@ -15443,6 +15468,7 @@ impl AgentEngine {
             stale
         );
         self.hydrated_tool_names.retain(|n| !stale.contains(n));
+        self.publish_hydrated_tools();
     }
 
     /// Layer D1/D3 (token-opt): cold-deferral + hydration exemption +
@@ -16787,6 +16813,98 @@ mod set_config_tests {
             "hydration must return the full schema"
         );
         engine.record_hydrated_tools(&result.content);
+    }
+
+    /// Engine whose LIVE registry holds the named MCP fixture tools AND the
+    /// real `ToolSearch` built over them — i.e. the instance the model
+    /// actually calls, not a throwaway one the test constructs.
+    fn engine_with_live_tool_search(names: &[&str]) -> super::AgentEngine {
+        let mut engine = make_engine("m");
+        let defer_cold = engine.defer_cold_config();
+        let mut reg = hydration_registry(names);
+        reg.refresh_tool_search_catalog(&defer_cold);
+        engine.tools = Arc::new(reg);
+        engine
+    }
+
+    /// Run the REGISTERED `ToolSearch` (registry instance) and return its body.
+    async fn registered_tool_search(engine: &super::AgentEngine, query: &str) -> String {
+        let registry = engine.tools();
+        let search = registry.get("ToolSearch").expect("ToolSearch registered");
+        let result = search.execute(serde_json::json!({ "query": query })).await;
+        assert!(!result.is_error, "ToolSearch must succeed: {result:?}");
+        assert!(
+            result.content.contains(query),
+            "ToolSearch must match {query}: {}",
+            result.content
+        );
+        result.content
+    }
+
+    /// C-5 (hydration-aware catalog). `ToolSearch` answers from a
+    /// construction-time snapshot that marks a deferred tool deferred
+    /// forever, while the authoritative hydrated set lives on the engine.
+    /// After the engine has ADMITTED a tool, a repeat search must not return
+    /// the byte-identical body — that identity is what the model reads as
+    /// "still not loaded" and is the measured ten-search no-progress loop.
+    ///
+    /// The refresh in the middle is the second half of the defect:
+    /// `refresh_tool_search_catalog` rebuilds the tool and runs on bootstrap,
+    /// on every config-MCP registration, on `/mcp add`, and from the TUI
+    /// engine bridge. A rebuild must not resurrect the pre-hydration answer.
+    #[tokio::test]
+    async fn repeat_tool_search_reflects_engine_hydration_across_refresh() {
+        let mut engine = engine_with_live_tool_search(&["mcp__srv__alpha", "mcp__srv__bravo"]);
+        let defer_cold = engine.defer_cold_config();
+
+        let before = registered_tool_search(&engine, "mcp__srv__alpha").await;
+        engine.record_hydrated_tools(&before);
+        assert!(
+            engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "mcp__srv__alpha"),
+            "the engine must have recorded the hydration"
+        );
+
+        // Bootstrap / config-MCP / `/mcp add` / TUI bridge all land here.
+        engine
+            .registry_mut()
+            .expect("registry uncontended in this test")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        let after = registered_tool_search(&engine, "mcp__srv__alpha").await;
+        assert_ne!(
+            before, after,
+            "a repeat search AFTER the engine admitted the tool must not return \
+             the byte-identical pre-hydration body — a catalog refresh must not \
+             resurrect the stale answer"
+        );
+        assert!(
+            after.contains("ALREADY LOADED"),
+            "the post-hydration body must say the tool is already declared: {after}"
+        );
+    }
+
+    /// Negative control for the test above: the differentiation must come
+    /// from the ENGINE'S hydration set, not from the search tool guessing.
+    /// A tool the engine never admitted looks exactly the same on the second
+    /// search — otherwise the "changed body" signal means nothing.
+    #[tokio::test]
+    async fn unhydrated_repeat_tool_search_stays_byte_identical() {
+        let engine = engine_with_live_tool_search(&["mcp__srv__alpha", "mcp__srv__bravo"]);
+
+        let first = registered_tool_search(&engine, "mcp__srv__bravo").await;
+        let second = registered_tool_search(&engine, "mcp__srv__bravo").await;
+        assert_eq!(
+            first, second,
+            "an UNHYDRATED tool's repeat search must be byte-identical — the \
+             changed body is a hydration signal, not a repeat-search counter"
+        );
+        assert!(
+            engine.hydrated_tool_names.is_empty(),
+            "nothing was hydrated in this test"
+        );
     }
 
     /// Layer D1 follow-up (hydrated-tool admission): an MCP tool the provider
@@ -18818,6 +18936,7 @@ mod compact_tests {
                 Role::Assistant,
                 vec![ContentBlock::Thinking {
                     thinking: "reasoning ".repeat(10_000),
+                    extra: None,
                 }],
             ),
             Message::new(
