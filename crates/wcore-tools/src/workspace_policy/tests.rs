@@ -834,3 +834,61 @@ fn scratch_dir_is_a_real_directory_we_own() {
         "scratch {scratch:?} is not under the {SCRATCH_ROOT} tree"
     );
 }
+
+/// Measured under the macOS seatbelt sandbox: with only the executable's own
+/// directory granted, `npm --version` dies with
+/// `Error: Cannot find module '../lib/cli.js'` — the entry shim lives in
+/// `<pkg>/bin` while the code it requires lives in `<pkg>/lib`.
+#[test]
+fn capability_roots_grants_the_node_package_root_not_just_its_bin_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let package = tmp.path().join("lib").join("node_modules").join("npm");
+    std::fs::create_dir_all(package.join("bin")).expect("bin");
+    std::fs::create_dir_all(package.join("lib")).expect("lib");
+    let executable = package.join("bin").join("npm-cli.js");
+    std::fs::write(&executable, b"#!/usr/bin/env node\n").expect("write shim");
+    let executable = std::fs::canonicalize(&executable).expect("canonicalize");
+
+    let roots = capability_roots(&executable);
+    let want = std::fs::canonicalize(&package).expect("canonicalize package");
+    assert!(
+        roots.contains(&want),
+        "package root {want:?} must be granted so the shim can require ../lib; got {roots:?}"
+    );
+
+    // Narrowness: the shared node_modules tree must NOT become readable.
+    let node_modules =
+        std::fs::canonicalize(tmp.path().join("lib").join("node_modules")).expect("canonicalize");
+    assert!(
+        !roots.contains(&node_modules),
+        "grant widened to the whole node_modules tree {node_modules:?}: {roots:?}"
+    );
+}
+
+#[test]
+fn capability_roots_keeps_the_scope_segment_for_a_scoped_node_package() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let package = tmp
+        .path()
+        .join("lib")
+        .join("node_modules")
+        .join("@acme")
+        .join("cli");
+    std::fs::create_dir_all(package.join("bin")).expect("bin");
+    let executable = package.join("bin").join("cli.js");
+    std::fs::write(&executable, b"#!/usr/bin/env node\n").expect("write shim");
+    let executable = std::fs::canonicalize(&executable).expect("canonicalize");
+
+    let roots = capability_roots(&executable);
+    let want = std::fs::canonicalize(&package).expect("canonicalize package");
+    assert!(
+        roots.contains(&want),
+        "scoped package root {want:?} must be granted; got {roots:?}"
+    );
+    let scope =
+        std::fs::canonicalize(package.parent().expect("scope dir")).expect("canonicalize scope");
+    assert!(
+        !roots.contains(&scope),
+        "grant widened to the whole @acme scope {scope:?}: {roots:?}"
+    );
+}

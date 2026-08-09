@@ -108,6 +108,33 @@ pub(super) fn capability_roots(executable: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    // A globally installed Node CLI resolves to
+    // `<prefix>/lib/node_modules/<pkg>/bin/<entry>.js`, so the executable's own
+    // directory — the only root granted above — holds the entry shim while the
+    // package code that shim `require`s on its first line lives one level up.
+    // Measured under the macOS sandbox: `npm --version` dies with
+    // `Cannot find module '../lib/cli.js'`. Grant the PACKAGE root only, never
+    // the whole `node_modules` tree; a scoped package spends two segments.
+    // An attacker gains read of that one package's own program files, which are
+    // world-readable on disk and already executable by this shell.
+    const NODE_MODULES: &str = "/lib/node_modules/";
+    if let Some(index) = text.find(NODE_MODULES) {
+        let base = index + NODE_MODULES.len();
+        let mut segments = text[base..].split('/');
+        let mut package = segments.next().unwrap_or_default().to_string();
+        if package.starts_with('@')
+            && let Some(scoped) = segments.next()
+        {
+            package.push('/');
+            package.push_str(scoped);
+        }
+        if !package.is_empty() {
+            let root = PathBuf::from(format!("{}{package}", &text[..base]));
+            if root.is_dir() {
+                roots.push(canon(root));
+            }
+        }
+    }
     if let Some(index) = text.find(".app/Contents/Developer/") {
         let developer = PathBuf::from(&text[..index + ".app/Contents/Developer".len()]);
         if developer.exists() {
