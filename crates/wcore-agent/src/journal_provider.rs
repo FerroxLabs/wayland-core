@@ -588,6 +588,9 @@ fn provider_stream_event(event: &LlmEvent) -> Result<ProviderStreamEvent, Provid
         LlmEvent::ThinkingSubject(subject) => ProviderStreamEvent::ThinkingSubject {
             subject: subject.clone(),
         },
+        LlmEvent::ThinkingSignature(signature) => ProviderStreamEvent::ThinkingSignature {
+            signature: signature.clone(),
+        },
         LlmEvent::Done {
             stop_reason,
             finish_reason,

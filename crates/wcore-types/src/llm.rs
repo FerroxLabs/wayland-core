@@ -139,6 +139,17 @@ pub enum LlmEvent {
     /// actually produce reasoning. The host renders it as the heading for
     /// the in-flight thinking block. Opaque — never switch on the value.
     ThinkingSubject(String),
+    /// C-4b — an opaque provider signature covering the reasoning of THIS
+    /// turn, carried on the thought part itself (Gemini `thoughtSignature`).
+    /// Gemini is stateless about reasoning: a signed thought must be sent
+    /// back verbatim, signature included, or the server rejects the replayed
+    /// turn. The signature on a `functionCall` part is a DIFFERENT value and
+    /// already rides on [`LlmEvent::ToolUse::extra`]; this variant carries the
+    /// one that arrives on a thought part, which had nowhere to go before.
+    /// The engine folds it into `ContentBlock::Thinking.extra` for replay.
+    /// Emitted at most once per turn (first signature wins); providers that
+    /// don't sign reasoning never emit it.
+    ThinkingSignature(String),
     /// Response complete
     Done {
         stop_reason: StopReason,

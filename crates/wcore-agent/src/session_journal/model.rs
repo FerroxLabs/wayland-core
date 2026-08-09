@@ -520,6 +520,12 @@ pub enum ProviderStreamEvent {
     ThinkingSubject {
         subject: String,
     },
+    /// C-4b — opaque provider signature over the turn's reasoning (Gemini
+    /// `thoughtSignature` on a thought part). Journaled so a recovered turn
+    /// replays the signed thought verbatim instead of stripping the signature.
+    ThinkingSignature {
+        signature: String,
+    },
     Done {
         stop_reason: serde_json::Value,
         finish_reason: serde_json::Value,

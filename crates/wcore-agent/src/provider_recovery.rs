@@ -146,6 +146,10 @@ pub struct RecoveredProviderRound {
     pub response_digest: String,
     pub assistant_text: String,
     pub thinking_text: String,
+    /// C-4b — opaque provider signature over the recovered turn's reasoning.
+    /// `None` for providers that don't sign reasoning, and for journals
+    /// written before the signature was captured.
+    pub thinking_signature: Option<String>,
     pub tool_calls: Vec<ContentBlock>,
     pub stop_reason: StopReason,
     pub finish_reason: FinishReason,
@@ -449,6 +453,7 @@ pub fn recover_provider_round(
 
     let mut assistant_text = String::new();
     let mut thinking_text = String::new();
+    let mut thinking_signature: Option<String> = None;
     let mut tool_calls = Vec::new();
     let mut tool_call_ids = BTreeSet::new();
     let mut citations = Vec::new();
@@ -482,6 +487,10 @@ pub fn recover_provider_round(
             }
             ProviderStreamEvent::ThinkingDelta { text } => thinking_text.push_str(&text),
             ProviderStreamEvent::ThinkingSubject { .. } => {}
+            ProviderStreamEvent::ThinkingSignature { signature } => {
+                // C-4b — first signature wins, matching the live stream path.
+                thinking_signature.get_or_insert(signature);
+            }
             ProviderStreamEvent::Done {
                 stop_reason,
                 finish_reason,
@@ -549,6 +558,7 @@ pub fn recover_provider_round(
         response_digest,
         assistant_text,
         thinking_text,
+        thinking_signature,
         tool_calls,
         stop_reason,
         finish_reason,

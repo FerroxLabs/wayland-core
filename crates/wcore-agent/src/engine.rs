@@ -10177,6 +10177,11 @@ impl AgentEngine {
             const MAX_STREAM_RETRIES: u32 = 2;
             let mut assistant_text = String::new();
             let mut thinking_text = String::new();
+            // C-4b — an opaque provider signature covering this turn's
+            // reasoning (Gemini `thoughtSignature` on a thought part). Kept
+            // beside `thinking_text` so the assistant message can carry it
+            // back verbatim on the next request.
+            let mut thinking_signature: Option<String> = None;
             let mut tool_calls: Vec<ContentBlock> = Vec::new();
             // Declared without an initial value: the `'stream` loop only
             // leaves via `break 'stream` (after these are assigned in
@@ -10201,6 +10206,7 @@ impl AgentEngine {
                 // double-commits text/tool-calls from a failed attempt.
                 assistant_text.clear();
                 thinking_text.clear();
+                let _ = thinking_signature.take();
                 tool_calls.clear();
                 // `stop_reason` / `finish_reason` / `turn_usage` are
                 // assigned only on the successful (`Done`) path below;
@@ -10310,6 +10316,10 @@ impl AgentEngine {
                     }
                     assistant_text = round.assistant_text;
                     thinking_text = round.thinking_text;
+                    // C-4b — a recovered turn must replay its reasoning
+                    // signature too, or the resumed conversation sends the
+                    // signed thought back bare.
+                    thinking_signature = round.thinking_signature;
                     tool_calls = round.tool_calls;
                     if !round.citations.is_empty() || !round.search_results.is_empty() {
                         let block =
@@ -10996,6 +11006,16 @@ impl AgentEngine {
                             self.output.emit_thinking(&text, &self.current_msg_id);
                             thinking_text.push_str(&text);
                         }
+                        LlmEvent::ThinkingSignature(signature) => {
+                            // C-4b — opaque signature over this turn's
+                            // reasoning. NOT display content: it never
+                            // reaches `thinking_text` or the host; it is
+                            // stashed so the assistant message can hand it
+                            // back verbatim on the next request. The
+                            // provider emits at most one per turn; keep the
+                            // first so a late one can't shadow it.
+                            thinking_signature.get_or_insert(signature);
+                        }
                         LlmEvent::ThinkingSubject(subject) => {
                             // #318 — per-turn thinking SUBJECT. Display-only:
                             // emit on the same msg_id as the reasoning text
@@ -11651,7 +11671,13 @@ impl AgentEngine {
             if !thinking_text.is_empty() {
                 assistant_content.push(ContentBlock::Thinking {
                     thinking: thinking_text,
-                    extra: None,
+                    // C-4b — carry the provider's reasoning signature on the
+                    // block itself so the next request replays the thought
+                    // exactly as it was received. Gemini rejects a replayed
+                    // signed thought that comes back bare.
+                    extra: thinking_signature
+                        .take()
+                        .map(|sig| serde_json::json!({ "thoughtSignature": sig })),
                 });
             }
             if !assistant_text.is_empty() {

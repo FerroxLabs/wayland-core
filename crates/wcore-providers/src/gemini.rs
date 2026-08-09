@@ -804,6 +804,12 @@ pub(crate) struct GeminiStreamState {
     /// True if at least one functionCall part was emitted. Drives the
     /// StopReason mapping when finishReason is "STOP" but tool calls exist.
     saw_tool_call: bool,
+    /// C-4b — true once a `thoughtSignature` on a THOUGHT part has been
+    /// surfaced as `LlmEvent::ThinkingSignature`. The engine concatenates a
+    /// turn's reasoning into one `ContentBlock::Thinking` with one `extra`
+    /// slot, so only the first signature can be replayed; emitting later ones
+    /// would silently overwrite it with a signature covering different text.
+    saw_thought_signature: bool,
 }
 
 /// Parse the SSE stream from `streamGenerateContent?alt=sse`.
@@ -995,10 +1001,7 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
         .and_then(Value::as_array)
     {
         for part in parts {
-            // Thought parts (`thought: true`) carry reasoning text. The
-            // accompanying `thoughtSignature` is captured on the tool-call
-            // part (or, when there is no tool call, simply observed; the
-            // public API at present only exposes signatures on calls).
+            // Thought parts (`thought: true`) carry reasoning text.
             let is_thought = part
                 .get("thought")
                 .and_then(Value::as_bool)
@@ -1012,6 +1015,23 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
                 } else {
                     events.push(LlmEvent::TextDelta(text.to_string()));
                 }
+            }
+
+            // C-4b: Gemini puts `thoughtSignature` on the part it belongs to,
+            // which is often the THOUGHT part rather than the `functionCall`.
+            // Only the call-part signature was ever captured, so a signature
+            // on a thought part was parsed and dropped — and the thought went
+            // back to a stateless server unsigned. Capture it here; the
+            // functionCall branch below keeps its own, distinct signature.
+            // First one wins: the engine folds a turn's reasoning into a
+            // single `ContentBlock::Thinking`, so it has exactly one slot.
+            if is_thought
+                && !state.saw_thought_signature
+                && let Some(sig) = part.get("thoughtSignature").and_then(Value::as_str)
+                && !sig.is_empty()
+            {
+                state.saw_thought_signature = true;
+                events.push(LlmEvent::ThinkingSignature(sig.to_string()));
             }
 
             if let Some(call) = part.get("functionCall") {
@@ -1903,6 +1923,75 @@ mod tests {
                 assert_eq!(extra["thoughtSignature"], "sig-xyz");
             }
             other => panic!("expected ToolUse with extra, got {other:?}"),
+        }
+    }
+
+    /// C-4b (capture half). Gemini attaches `thoughtSignature` to the part it
+    /// belongs to — which is often a THOUGHT part, not the `functionCall`.
+    /// The parser only ever read the signature off a `functionCall` part, so a
+    /// signature that arrived on a thought part was parsed and thrown away,
+    /// and the replayed history went back unsigned. Nothing downstream can
+    /// re-sign it: if the parser drops it here, it is gone for the session.
+    #[test]
+    fn parse_sse_chunk_captures_thought_signature_on_a_thought_part() {
+        let mut state = GeminiStreamState::default();
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":"weighing it","thought":true,"thoughtSignature":"sig-thought"}]}}]}"#;
+        let events = parse_sse_chunk(data, &mut state);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::ThinkingDelta(t) if t == "weighing it")),
+            "the reasoning text must still surface: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::ThinkingSignature(s) if s == "sig-thought")),
+            "a signature on a thought part must be captured, not dropped: {events:?}"
+        );
+    }
+
+    /// A MULTI-part turn: the signed thought is the SECOND part, and a
+    /// `functionCall` with its OWN signature follows. The two signatures are
+    /// distinct values on distinct parts and must not be confused — the
+    /// call's rides on `ToolUse.extra`, the thought's on its own event.
+    /// A later signed thought must NOT displace the first: the engine folds a
+    /// turn's reasoning into one block with one signature slot.
+    #[test]
+    fn parse_sse_chunk_keeps_thought_and_call_signatures_apart() {
+        let mut state = GeminiStreamState::default();
+        let data = r#"{"candidates":[{"content":{"parts":[
+            {"text":"first","thought":true},
+            {"text":"second","thought":true,"thoughtSignature":"sig-thought"},
+            {"text":"third","thought":true,"thoughtSignature":"sig-later"},
+            {"functionCall":{"name":"Read","args":{}},"thoughtSignature":"sig-call"}
+        ]}}]}"#;
+        let events = parse_sse_chunk(data, &mut state);
+
+        let signatures: Vec<&String> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ThinkingSignature(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            signatures,
+            vec!["sig-thought"],
+            "exactly the FIRST thought signature is carried, from the part \
+             that actually holds it: {events:?}"
+        );
+
+        match events
+            .iter()
+            .find(|e| matches!(e, LlmEvent::ToolUse { .. }))
+        {
+            Some(LlmEvent::ToolUse { extra, .. }) => assert_eq!(
+                extra.as_ref().expect("call signature")["thoughtSignature"],
+                "sig-call",
+                "the call keeps its OWN signature"
+            ),
+            other => panic!("expected a ToolUse event, got {other:?}"),
         }
     }
 
