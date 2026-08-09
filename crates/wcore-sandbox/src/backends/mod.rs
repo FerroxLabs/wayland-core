@@ -20,7 +20,14 @@ pub mod bwrap_seccomp;
 pub mod docker;
 pub mod no_sandbox;
 pub mod process_tree;
-#[cfg(target_os = "macos")]
+// Compiled on every platform, like `appcontainer` and `bwrap`, so the SBPL
+// PROFILE GENERATOR — pure string generation — is unit-testable off macOS.
+// It was previously `#[cfg(target_os = "macos")]`, which made the macOS
+// grant set the only sandbox policy in the workspace that no Linux or
+// Windows CI job could ever exercise. Backend SELECTION is unchanged:
+// `default_for_platform` still only reaches for this backend on macOS, and
+// `is_available()` probes a real `sandbox-exec` spawn, so it reports false
+// everywhere else.
 pub mod sandbox_exec;
 
 /// Channel buffer for the streaming receiver. The default buffered impl
