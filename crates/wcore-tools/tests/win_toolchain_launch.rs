@@ -276,3 +276,72 @@ fn discriminate_direct_spawn_versus_shell_child() {
     control(&ctx, &root, "end");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The user32 hypothesis, stated so it can be falsified.
+///
+/// A byte scan of the import directory says `cmd.exe`, `hostname.exe`,
+/// `attrib.exe` and `find.exe` do NOT link `USER32.dll`, while `where.exe`,
+/// `git.exe`, `cargo.exe` and `node.exe` do. If user32's `DllMain` is what
+/// fails under this sandbox, the first group runs and the second returns
+/// 0xC0000142 — and no other property (System32 vs Program Files, granted vs
+/// AAP-inherited, Microsoft-signed vs not) separates the two groups the same
+/// way. Each row is spawned DIRECTLY, so `cmd.exe` is not in the picture.
+#[test]
+#[ignore = "explicit native Windows toolchain measurement"]
+fn user32_linkage_splits_the_spawnable_from_the_dead() {
+    require_live();
+    assert_quiet();
+    let root = workspace("user32");
+    let backend = AppContainerBackend::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    let system32 =
+        std::path::Path::new(&std::env::var("SYSTEMROOT").expect("SYSTEMROOT")).join("System32");
+
+    println!(
+        "UI-LIMITS-OVERRIDE {:?}",
+        std::env::var("WAYLAND_SANDBOX_DIAG_UI_LIMITS").ok()
+    );
+
+    for (name, links_user32, argv) in [
+        (
+            "cmd",
+            false,
+            vec!["cmd.exe".to_owned(), "/c".to_owned(), "echo ok".to_owned()],
+        ),
+        ("hostname", false, vec!["hostname.exe".to_owned()]),
+        ("attrib", false, vec!["attrib.exe".to_owned()]),
+        ("find", false, vec!["find.exe".to_owned(), "/?".to_owned()]),
+        (
+            "where",
+            true,
+            vec!["where.exe".to_owned(), "cmd".to_owned()],
+        ),
+    ] {
+        let mut argv = argv;
+        argv[0] = system32.join(&argv[0]).to_string_lossy().into_owned();
+        let manifest = wcore_sandbox::SandboxManifest {
+            timeout: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        };
+        let outcome = rt.block_on(backend.execute(
+            &manifest,
+            wcore_sandbox::SandboxCommand {
+                argv,
+                cwd: Some(root.clone()),
+            },
+        ));
+        match outcome {
+            Ok(o) => println!(
+                "U32 name={name} links_user32={links_user32} exit={} stdout={:?} stderr={:?}",
+                o.exit_code,
+                String::from_utf8_lossy(&o.stdout).trim(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => println!("U32 name={name} links_user32={links_user32} ERR={e}"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

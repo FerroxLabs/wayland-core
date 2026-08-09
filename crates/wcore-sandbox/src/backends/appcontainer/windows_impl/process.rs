@@ -900,15 +900,24 @@ pub(super) fn execute_blocking(
             // jobs, system parameter changes, display changes, global atoms,
             // desktop switches, and shutdown calls. AppContainer SIDs gate
             // KERNEL objects but not USER32 surfaces; these flags close that.
+            // DIAGNOSTIC ONLY — to be removed before this lane is proposed.
+            // `WAYLAND_SANDBOX_DIAG_UI_LIMITS=<hex>` replaces the mask so the
+            // 0xC0000142 image-init failure can be A/B'd against each flag in a
+            // single Windows run instead of one rebuild per variant.
             let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
-                UIRestrictionsClass: JOB_OBJECT_UILIMIT_HANDLES
-                    | JOB_OBJECT_UILIMIT_READCLIPBOARD
-                    | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
-                    | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
-                    | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
-                    | JOB_OBJECT_UILIMIT_GLOBALATOMS
-                    | JOB_OBJECT_UILIMIT_DESKTOP
-                    | JOB_OBJECT_UILIMIT_EXITWINDOWS,
+                UIRestrictionsClass: std::env::var("WAYLAND_SANDBOX_DIAG_UI_LIMITS")
+                    .ok()
+                    .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                    .unwrap_or(
+                        JOB_OBJECT_UILIMIT_HANDLES
+                            | JOB_OBJECT_UILIMIT_READCLIPBOARD
+                            | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+                            | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+                            | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+                            | JOB_OBJECT_UILIMIT_GLOBALATOMS
+                            | JOB_OBJECT_UILIMIT_DESKTOP
+                            | JOB_OBJECT_UILIMIT_EXITWINDOWS,
+                    ),
             };
             if SetInformationJobObject(
                 job.as_raw(),
