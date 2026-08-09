@@ -61,10 +61,12 @@ pub struct SandboxManifest {
     /// Syscall policy (Linux only, ignored elsewhere).
     #[serde(default)]
     pub syscall_policy: SyscallPolicy,
-    /// Wall-clock timeout for the child process. Optional; backends pick a
-    /// sane default if None. TOML encoding uses serde's default struct form
-    /// (`{ secs = N, nanos = M }`); programmatic callers pass a `Duration`
-    /// directly.
+    /// Wall-clock timeout for the child process. `None` means the CALLER owns
+    /// the bound: the host backends (bwrap, sandbox-exec) impose no cap of
+    /// their own, so a caller that passes `None` must apply its own timeout.
+    /// The container/AppContainer backends still fall back to 60 s. TOML
+    /// encoding uses serde's default struct form (`{ secs = N, nanos = M }`);
+    /// programmatic callers pass a `Duration` directly.
     #[serde(default)]
     pub timeout: Option<Duration>,
     /// Max RSS bytes for the child. Enforced where the backend can;

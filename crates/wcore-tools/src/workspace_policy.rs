@@ -184,7 +184,9 @@ impl WorkspacePolicy {
     /// honors the network opt-in. Does NOT jail the in-process file tools.
     pub fn trusted_local(workspace: impl Into<PathBuf>) -> Self {
         let root = canon(workspace.into());
-        let mut writable_extra = scratch_dirs(WorkspaceTrust::Trusted);
+        let scratch = scratch_dirs(WorkspaceTrust::Trusted);
+        let cache_env = temp_env(&scratch);
+        let mut writable_extra = scratch;
         if let Some(home) = dirs::home_dir() {
             for sub in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache"] {
                 let path = home.join(sub);
@@ -219,7 +221,7 @@ impl WorkspacePolicy {
             // sender and stays on this Deny default: it must not get a networked
             // shell by default (Overwatch ruling on #657, Sean-confirmed).
             network: crate::bash::default_bash_network_policy(),
-            cache_env: Vec::new(),
+            cache_env,
             authority_read_deny: Vec::new(),
             authority_write_deny: Vec::new(),
             deny_git_authority_env: false,
@@ -239,7 +241,7 @@ impl WorkspacePolicy {
     pub fn contained(root: impl Into<PathBuf>) -> Self {
         let root = canon(root.into());
         let cache_root = root.join(".wcache");
-        let cache_env = CACHE_ENV_DIRS
+        let mut cache_env: Vec<(String, String)> = CACHE_ENV_DIRS
             .iter()
             .map(|(var, sub)| {
                 (
@@ -251,6 +253,7 @@ impl WorkspacePolicy {
         let readable_extra = minimal_toolchain_read_dirs();
         let network_scoped_readable = Vec::new();
         let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
+        cache_env.extend(temp_env(&writable_extra));
 
         Self {
             root,
@@ -954,6 +957,38 @@ fn scratch_dirs(trust: WorkspaceTrust) -> Vec<PathBuf> {
         Some(dir) => vec![dir],
         None => Vec::new(),
     }
+}
+
+/// `TMPDIR`/`TMP`/`TEMP` pointed INTO the session's own writable scratch grant.
+///
+/// SEC-06 / SEC-10 made the bwrap backend remount every ungranted filesystem
+/// read-only, and the host `/tmp` is ungranted. Left pointing at the host temp
+/// directory, these vars turn every temp-using tool into a failure — and the
+/// dangerous ones do not fail loudly. Measured on hetzner-dsm under
+/// `trusted_local` and `contained` before this redirect existed:
+/// `mktemp` → "Read-only file system" (exit 1, honest), but
+/// `seq 1 200000 | sort -R | wc -l` → prints `0`, **exit 0**, `is_error=false`.
+/// A silently wrong answer reported as success is exactly the defect the
+/// read-only remount was added to remove, recreated at a different path.
+///
+/// [`WorkspacePolicy::delegated_mutation`] already does this with its private
+/// scratch root; this is the same mechanism for the two profiles a real user
+/// actually gets. It grants NO new authority — `scratch_dirs` already put this
+/// directory in `writable_extra`, so it is a writable root either way, and it
+/// is per-uid, per-trust and ownership-verified (see [`scratch_dir`]). Because
+/// every write grant is its own bind mount and `--remount-ro` does not touch
+/// submounts, it stays writable underneath a read-only `/tmp`.
+///
+/// Empty when the scratch grant could not be established: with no writable
+/// scratch to point at, redirecting would only relocate the failure.
+fn temp_env(scratch: &[PathBuf]) -> Vec<(String, String)> {
+    let Some(dir) = scratch.first() else {
+        return Vec::new();
+    };
+    ["TMPDIR", "TMP", "TEMP"]
+        .into_iter()
+        .map(|var| (var.to_owned(), dir.to_string_lossy().into_owned()))
+        .collect()
 }
 
 /// SAFETY: `getuid` is a POSIX call that cannot fail, takes no arguments and

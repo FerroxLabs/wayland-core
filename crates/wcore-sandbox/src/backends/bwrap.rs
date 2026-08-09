@@ -536,6 +536,37 @@ impl BubblewrapBackend {
             });
         }
 
+        // SEC-06 / SEC-10 — every filesystem the manifest did NOT grant is
+        // remounted read-only, LAST, after every positive bind above.
+        //
+        // bubblewrap builds its new root as a fresh tmpfs and `--tmpfs /tmp`
+        // adds a second one, and both are WRITABLE. So a write to any path the
+        // manifest never granted — `/tmp/out.txt`, or `/opt/x` after the child
+        // creates `/opt` — succeeded, exited 0, read back correctly inside the
+        // namespace, and then vanished when the namespace was torn down. The
+        // host path never existed. macOS/sandbox-exec denies the same write
+        // with EPERM, so on macOS the agent is told the truth and on Linux it
+        // was told it had saved a file it had not. Data loss reported as
+        // success is worse than a refusal: an agent builds on the belief.
+        //
+        // `--remount-ro DEST` remounts only the mount point at DEST — SUBMOUNTS
+        // are untouched. Every `fs_write_allow` entry is its own bind mount, so
+        // a granted root keeps full write access even when it lives under
+        // `/tmp` (which is where `std::env::temp_dir()`-derived workspaces and
+        // the `wayland-scratch-u<uid>` scratch grants actually are). Verified
+        // on hetzner-dsm with bubblewrap 0.9.0: a rw bind under a read-only
+        // `/tmp` still writes, and both `/tmp/<ungranted>` and `/<ungranted>`
+        // fail with EROFS.
+        //
+        // The cost is that an ungranted `/tmp` write now FAILS instead of
+        // silently evaporating. Measured against git / node / python3 / gcc
+        // under this exact posture: all four still work, falling back to
+        // `TMPDIR` or the cwd.
+        bwrap_argv.push("--remount-ro".into());
+        bwrap_argv.push("/tmp".into());
+        bwrap_argv.push("--remount-ro".into());
+        bwrap_argv.push("/".into());
+
         // Separator + user command.
         bwrap_argv.push("--".into());
         bwrap_argv.push(program);
@@ -594,27 +625,39 @@ impl BubblewrapBackend {
         drop(seccomp_file);
 
         // 6. Timeout + wait.
-        let timeout = manifest
-            .timeout
-            .unwrap_or_else(|| std::time::Duration::from_secs(30));
-
+        //
+        // The wall-clock bound is the CALLER's, and only the caller's. This
+        // used to be `manifest.timeout.unwrap_or(30s)`, an invented Linux-only
+        // cap: `BashTool` advertises "default 120000, max 600000" ms to the
+        // model and passes no `manifest.timeout`, so every Bash command on
+        // Linux — and only on Linux — was killed at 30 s with all of its
+        // output discarded and nothing in the result saying why. macOS's
+        // `SandboxExecBackend` imposes no cap of its own; this now matches it,
+        // so the number the tool advertises is the number that is enforced.
+        // Every in-tree caller that leaves `timeout` at None wraps the call in
+        // its own `tokio::time::timeout`, and cancelling that future drops the
+        // child, which arms the guards below exactly as the explicit-timeout
+        // arm does.
         let wait_fut = super::wait_with_bounded_output_on_exit(&mut child, || {
             #[cfg(target_os = "linux")]
             sandbox_tree.disarm();
             process_tree.disarm();
         });
-        let output = match tokio::time::timeout(timeout, wait_fut).await {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
-                return Err(e);
-            }
-            Err(_elapsed) => {
-                // Dropping this future arms `ProcessTreeGuard` before the
-                // direct bwrap handle is dropped. Linux descendant discovery
-                // kills the PID-namespace init and its complete tree; the
-                // dedicated outer process group is the final backstop.
-                return Err(SandboxError::Timeout);
-            }
+        let output = match manifest.timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, wait_fut).await {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => {
+                    return Err(e);
+                }
+                Err(_elapsed) => {
+                    // Dropping this future arms `ProcessTreeGuard` before the
+                    // direct bwrap handle is dropped. Linux descendant discovery
+                    // kills the PID-namespace init and its complete tree; the
+                    // dedicated outer process group is the final backstop.
+                    return Err(SandboxError::Timeout);
+                }
+            },
+            None => wait_fut.await?,
         };
 
         // 7. Return.

@@ -60,7 +60,33 @@ fn trusted_local_sets_cwd_and_does_not_redirect_caches() {
             .as_path()
     );
     // Trusted reuses the user's global caches — no redirect.
-    assert!(p.cache_env().is_empty());
+    for (var, _) in CACHE_ENV_DIRS {
+        assert!(
+            p.cache_env().iter().all(|(k, _)| k != var),
+            "Trusted must not redirect {var}"
+        );
+    }
+    // ...but TMPDIR/TMP/TEMP MUST be redirected into the writable scratch
+    // grant, because the sandbox backends remount the ungranted host `/tmp`
+    // read-only. Leaving them alone is what made `sort` print nothing and
+    // still report success (see `temp_env`).
+    let scratch = p
+        .writable_roots()
+        .into_iter()
+        .find(|w| w != p.root())
+        .expect("Trusted has a writable scratch grant");
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        let value = p
+            .cache_env()
+            .iter()
+            .find(|(k, _)| k == var)
+            .unwrap_or_else(|| panic!("Trusted must redirect {var}"));
+        assert_eq!(
+            Path::new(&value.1),
+            scratch,
+            "{var} must point at the writable scratch grant"
+        );
+    }
 }
 
 #[test]
@@ -183,6 +209,26 @@ fn contained_redirects_caches_into_workspace() {
     assert!(Path::new(&cargo.1).starts_with(p.root()));
     assert!(p.cache_env().iter().any(|(k, _)| k == "npm_config_cache"));
     assert!(p.cache_env().iter().any(|(k, _)| k == "PIP_CACHE_DIR"));
+
+    // TMPDIR/TMP/TEMP go to the Contained scratch grant, NOT into the
+    // workspace and NOT left on the read-only host `/tmp` (see `temp_env`).
+    let scratch = p
+        .writable_roots()
+        .into_iter()
+        .find(|w| w != p.root())
+        .expect("Contained has a writable scratch grant");
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        let value = p
+            .cache_env()
+            .iter()
+            .find(|(k, _)| k == var)
+            .unwrap_or_else(|| panic!("Contained must redirect {var}"));
+        assert_eq!(
+            Path::new(&value.1),
+            scratch,
+            "{var} must point at the writable scratch grant"
+        );
+    }
 }
 
 #[test]
