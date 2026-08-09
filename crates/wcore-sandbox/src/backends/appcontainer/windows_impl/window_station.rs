@@ -264,12 +264,12 @@ fn create_sandbox_station() -> Option<SandboxStation> {
     let station_name = format!("WaylandCoreSbx-{}", std::process::id());
     let desktop_name = "Sandbox";
 
-    let mut station_sa = SECURITY_ATTRIBUTES {
+    let station_sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: station_sd.0,
         bInheritHandle: 0,
     };
-    let mut desktop_sa = SECURITY_ATTRIBUTES {
+    let desktop_sa = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: desktop_sd.0,
         bInheritHandle: 0,
@@ -280,7 +280,7 @@ fn create_sandbox_station() -> Option<SandboxStation> {
     // security descriptors outlive the calls that read them.
     unsafe {
         let name_w = widen(&station_name);
-        let hsta = CreateWindowStationW(name_w.as_ptr(), 0, WINSTA_ALL, &mut station_sa);
+        let hsta = CreateWindowStationW(name_w.as_ptr(), 0, WINSTA_ALL, &station_sa);
         if hsta.is_null() {
             tracing::warn!(
                 target: "wcore_sandbox",
@@ -311,7 +311,7 @@ fn create_sandbox_station() -> Option<SandboxStation> {
             std::ptr::null(),
             0,
             DESKTOP_ALL,
-            &mut desktop_sa,
+            &desktop_sa,
         );
         let create_err = GetLastError();
 
