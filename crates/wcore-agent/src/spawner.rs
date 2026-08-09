@@ -5851,6 +5851,7 @@ mod fail_loud_tests {
             turns: 3,
             active_window_percent: None,
             agent_run_id: None,
+            ended_on_unrecovered_tool_failure: false,
         }
     }
 

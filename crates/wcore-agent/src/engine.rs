@@ -6127,6 +6127,9 @@ impl AgentEngine {
             turns: turn,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
+            // B3: a turn-cap stop is reported as a LIMIT outcome, which
+            // outranks the trailing tool state (see `wcore_cli::exit_code`).
+            ended_on_unrecovered_tool_failure: false,
         };
         if let Some(turn_id) = self.active_journal_turn_id.clone() {
             self.commit_terminal_recovery_checkpoint(
@@ -6852,6 +6855,11 @@ impl AgentEngine {
                     })?,
                     active_window_percent: terminal.active_window_percent,
                     agent_run_id: terminal.agent_run_id.clone(),
+                    // B3: recomputed from the restored conversation, so a
+                    // resumed run reports the same outcome the original did.
+                    ended_on_unrecovered_tool_failure: ended_on_unrecovered_tool_failure(
+                        &self.messages,
+                    ),
                 };
                 self.total_usage = result.usage.clone();
                 self.run_usage = result.usage_delta.clone();
@@ -7272,6 +7280,8 @@ impl AgentEngine {
             turns,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
+            // B3: a checkpoint replay carries no live tool batch of its own.
+            ended_on_unrecovered_tool_failure: false,
         };
         let loop_guard = LoopGuard::restore(&checkpoint.loop_guard)?;
         let failure_guard = FailureGuard::restore(&checkpoint.failure_guard)?;
@@ -11880,6 +11890,12 @@ impl AgentEngine {
                     active_window_percent: self
                         .active_window_percent_now(&effective_model, input_token_estimate as u64),
                     agent_run_id: self.current_agent_run_id.clone(),
+                    // B3: this is the natural end of the tool loop — the model
+                    // answered instead of calling another tool — so the last
+                    // committed tool batch is the one it answered off.
+                    ended_on_unrecovered_tool_failure: ended_on_unrecovered_tool_failure(
+                        &self.messages,
+                    ),
                 };
                 if let Some(turn_id) = journal_turn_id {
                     self.commit_terminal_recovery_checkpoint(
@@ -13251,6 +13267,8 @@ impl AgentEngine {
             turns: 1,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
+            // B3: a synthetic pre-loop result ran no tool batch of its own.
+            ended_on_unrecovered_tool_failure: false,
         }
     }
 
@@ -13327,6 +13345,8 @@ impl AgentEngine {
             turns: turn + 1,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
+            // B3: a synthetic pre-loop result ran no tool batch of its own.
+            ended_on_unrecovered_tool_failure: false,
         }
     }
 
@@ -21414,6 +21434,41 @@ pub struct AgentResult {
     pub active_window_percent: Option<u32>,
     /// #279(c): the run's stable correlation id (clone of current_agent_run_id).
     pub agent_run_id: Option<String>,
+    /// B3: the run's LAST tool-result batch carried an error and the model
+    /// then answered instead of calling another tool.
+    ///
+    /// This is the one thing about task outcome the process can honestly
+    /// decide for itself — a tool said it failed, and nothing tried again. It
+    /// is deliberately NOT "any tool failed during the run": an agent that
+    /// probes for a missing file and recovers has not failed. The CLI maps it
+    /// to a distinct exit code so a caller checking `$?` can tell a completed
+    /// run from one that gave up on a broken tool call.
+    pub ended_on_unrecovered_tool_failure: bool,
+}
+
+/// Decide [`AgentResult::ended_on_unrecovered_tool_failure`] from the
+/// conversation itself.
+///
+/// Walks back to the most recent message carrying `ToolResult` blocks — the
+/// batch the model answered off — and reports whether any of them was an
+/// error. Reading the committed history rather than threading engine state
+/// keeps the answer identical on the fresh-run, resumed and recovered paths,
+/// which all rebuild `messages` and none of which share a counter.
+fn ended_on_unrecovered_tool_failure(messages: &[Message]) -> bool {
+    for message in messages.iter().rev() {
+        let mut saw_result = false;
+        let mut saw_error = false;
+        for block in &message.content {
+            if let ContentBlock::ToolResult { is_error, .. } = block {
+                saw_result = true;
+                saw_error |= *is_error;
+            }
+        }
+        if saw_result {
+            return saw_error;
+        }
+    }
+    false
 }
 
 /// Run the shared `drive_council` over OWNED inputs behind a `Pin<Box<dyn Future>>`.
@@ -27453,6 +27508,7 @@ mod audit_2026_05_22_tests {
             turns: 1,
             active_window_percent: None,
             agent_run_id: None,
+            ended_on_unrecovered_tool_failure: false,
         };
         engine
             .commit_terminal_recovery_checkpoint(

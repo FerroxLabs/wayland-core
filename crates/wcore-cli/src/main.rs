@@ -12,6 +12,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
 use wcore_cli::budget_grants::BudgetGrantLedger;
 use wcore_cli::doctor;
+// B3: the exit-code contract. `ShutdownSignal` names which signal ended the
+// process so the code can be 128+N instead of a blanket SUCCESS.
+use wcore_cli::exit_code::ShutdownSignal;
 use wcore_cli::log_rotate;
 use wcore_cli::packaged_runtime::{
     LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
@@ -929,7 +932,13 @@ impl Drop for BundledSkillTmpCleanup {
     }
 }
 
-async fn shutdown_signal() {
+/// Await a shutdown signal and report WHICH one arrived.
+///
+/// B3: the caller needs the identity, not just the fact — an interrupted run
+/// must exit 130 and a terminated one 143, the codes a shell already
+/// understands. Returning `()` is what forced the old `Ok(ExitCode::SUCCESS)`
+/// below: with no signal to name, the only honest code was the wrong one.
+async fn shutdown_signal() -> ShutdownSignal {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -938,9 +947,9 @@ async fn shutdown_signal() {
         let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler install");
         let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler install");
         tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv()  => {}
-            _ = hup.recv()  => {}
+            _ = term.recv() => ShutdownSignal::Terminate,
+            _ = int.recv()  => ShutdownSignal::Interrupt,
+            _ = hup.recv()  => ShutdownSignal::Hangup,
         }
     }
     #[cfg(not(unix))]
@@ -948,24 +957,30 @@ async fn shutdown_signal() {
         tokio::signal::ctrl_c()
             .await
             .expect("Ctrl+C handler install");
+        ShutdownSignal::Interrupt
     }
 }
 
 async fn run_until_shutdown<R, S>(run_future: R, signal_future: S) -> anyhow::Result<ExitCode>
 where
     R: std::future::Future<Output = anyhow::Result<ExitCode>>,
-    S: std::future::Future<Output = ()>,
+    S: std::future::Future<Output = ShutdownSignal>,
 {
     let mut run_future = Box::pin(run_future);
     tokio::select! {
         result = &mut run_future => result,
-        _ = signal_future => {
+        signal = signal_future => {
             // Explicitly drop all bootstrap/session state before the outer
             // cleanup guard runs. This also releases every Windows capability
             // handle clone so the no-delete process root can be removed.
             drop(run_future);
             wcore_cli::profile_router::reap_all_children_blocking();
-            Ok(ExitCode::SUCCESS)
+            // B3: an interrupted run did NOT succeed. This used to return
+            // `ExitCode::SUCCESS`, so `kill -INT` mid-tool produced empty
+            // output and exit 0 — a caller checking `$?` could not tell a
+            // cancelled run from a completed one. 128+signal is the shell
+            // convention every other Unix program already follows.
+            Ok(ExitCode::from(signal.exit_code()))
         }
     }
 }
@@ -2263,13 +2278,20 @@ async fn run() -> anyhow::Result<ExitCode> {
                     run_result.usage.cache_read_tokens,
                     run_result.finish_reason,
                 );
-                ExitCode::SUCCESS
+                // B3: the one-shot path used to return SUCCESS for every
+                // completed `engine.run`, so a run stopped by the turn cap and
+                // one that gave up on a failing tool both reported 0. The
+                // contract lives in `wcore_cli::exit_code`.
+                ExitCode::from(wcore_cli::exit_code::for_run_outcome(
+                    run_result.stop_reason,
+                    run_result.ended_on_unrecovered_tool_failure,
+                ))
             }
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
                 // `\nCaused by: …` lines which the formatter recognises).
                 output.emit_error(&format!("{e:#}"), false);
-                ExitCode::FAILURE
+                ExitCode::from(wcore_cli::exit_code::FAILURE)
             }
         }
     };
@@ -7056,12 +7078,13 @@ mod tests {
         let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
+        let raised = kind.clone();
         let trigger = tokio::spawn(async move {
             ready_rx
                 .await
                 .expect("reference extraction reaches signal point");
             tokio::task::yield_now().await;
-            raise_native_shutdown_signal(&kind);
+            raise_native_shutdown_signal(&raised);
         });
 
         let cleanup = BundledSkillTmpCleanup;
@@ -7069,7 +7092,16 @@ mod tests {
             .await
             .expect("native signal shutdown must complete cleanly");
         trigger.await.expect("native signal trigger task");
-        assert_eq!(status, ExitCode::SUCCESS);
+        // B3: a signalled shutdown reports 128+signal, not SUCCESS. This
+        // assertion previously demanded `ExitCode::SUCCESS`, which is what let
+        // `kill -INT` mid-run look identical to a completed one.
+        let expected = match kind.as_str() {
+            "sigint" | "ctrl-c" => ShutdownSignal::Interrupt,
+            "sigterm" => ShutdownSignal::Terminate,
+            "sighup" => ShutdownSignal::Hangup,
+            other => panic!("unsupported native test signal: {other}"),
+        };
+        assert_eq!(status, ExitCode::from(expected.exit_code()));
         let process_root = extracted_root
             .lock()
             .expect("read extraction root")

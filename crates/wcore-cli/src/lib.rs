@@ -52,6 +52,11 @@ pub mod agent_cmd;
 // the binary crate.
 pub mod crash_sentinel;
 
+// B3: the process exit-code contract. Lives in the lib so both the binary and
+// the end-to-end `tests/exit_code_contract.rs` name the SAME constants — a
+// contract only one side can see is not a contract.
+pub mod exit_code;
+
 // v0.7.0 Task 1.B.2: `wayland-core init` scaffolds `.wayland/config.toml`
 // + a `WAYLAND.md` template in the current project. Non-interactive;
 // idempotent unless `--force` is set.
