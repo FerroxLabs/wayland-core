@@ -2966,16 +2966,18 @@ impl AgentBootstrap {
             let workspace = std::path::PathBuf::from(&self.workspace);
             let policy = if strict_workspace {
                 // SEC-13 — the sandboxed shell's egress is decided by the
-                // OPERATOR's trusted `[security] egress_allow`, never by an
-                // inherited env var (SEC-11, see `default_bash_network_policy`).
-                // A channel-attached session is a remote sender and keeps the
-                // absolute #657 lockdown: the operator's allowlist widens the
-                // operator's own shell, not a remote sender's.
+                // OPERATOR's trusted `[security] allow_sandboxed_shell_network`,
+                // never by an inherited env var (SEC-11, see
+                // `default_bash_network_policy`) and never as a side effect of
+                // the per-host `egress_allow` permit. A channel-attached session
+                // is a remote sender and keeps the absolute #657 lockdown: the
+                // operator's switch widens the operator's own shell, not a
+                // remote sender's.
                 let network = if is_channel_remote {
                     wcore_sandbox::NetworkPolicy::Deny
                 } else {
                     wcore_tools::workspace_policy::operator_bash_network(
-                        &self.config.security.egress_allow,
+                        self.config.security.allow_sandboxed_shell_network,
                     )
                 };
                 wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)

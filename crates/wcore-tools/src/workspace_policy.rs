@@ -988,48 +988,46 @@ pub fn local_bash_network(has_channel_posture: bool) -> NetworkPolicy {
 }
 
 /// SEC-13 — the Bash network posture for a SANDBOXED (`contained`) session,
-/// decided by the operator's TRUSTED `[security] egress_allow`.
+/// decided by the operator's TRUSTED `[security] allow_sandboxed_shell_network`.
 ///
 /// The W2/W3 conformance gate measured the polarity backwards on Linux: a bare
 /// `WAYLAND_BASH_ALLOW_NETWORK=1` in the environment re-opened the sandboxed
-/// shell (`accept_count=1` on a driver-owned listener) while
-/// `egress_allow = ["127.0.0.1"]` recorded `accept_count=0`. Untrusted
-/// provenance raised the boundary; trusted provenance did nothing, which made
-/// every allowlist any operator has ever written decorative for the shell.
+/// shell (`accept_count=1` on a driver-owned listener) while the operator's own
+/// trusted config recorded `accept_count=0`. Untrusted provenance raised the
+/// boundary; trusted provenance had no lever at all.
 ///
 /// The env lever is gone (see [`crate::bash::default_bash_network_policy`]) and
 /// this is its replacement, matching the posture `SecurityConfig::enabled`
-/// already documents: **config-file only, read from the trusted layer**.
-/// `merge_configs` builds `egress_allow` from the global layer plus a project
-/// layer that `restrict_untrusted_project_config` has already emptied unless
-/// the operator granted that workspace fingerprint, so a cloned repository
-/// cannot mint the grant.
+/// already documents: **config-file only, read from the trusted layer**. The
+/// `[security]` arm of `merge_config_files_with_trust` takes this field from the
+/// GLOBAL layer alone, so a project file — which travels with a cloned
+/// repository — cannot mint the grant.
 ///
-/// GRANULARITY, stated plainly because it is coarser than what the operator
-/// wrote: no sandbox backend in this repo has a host/DNS gate for an arbitrary
-/// shell — bwrap, sandbox-exec, AppContainer and Docker all reject
-/// [`NetworkPolicy::AllowHosts`] — so the enforceable grant is all-or-nothing.
-/// A non-empty allowlist therefore yields [`NetworkPolicy::Inherit`]: the host
-/// network, not only the listed hosts. That widening is logged at `warn` every
-/// time it bites rather than happening quietly. The in-process HTTP egress gate
-/// (`wcore_agent::egress`) still enforces the allowlist host-by-host for the
-/// agent's own requests; only the shell is coarse.
-pub fn operator_bash_network(egress_allow: &[String]) -> NetworkPolicy {
-    let hosts: Vec<&str> = egress_allow
-        .iter()
-        .map(|entry| entry.trim())
-        .filter(|entry| !entry.is_empty())
-        .collect();
-    if hosts.is_empty() {
+/// It is deliberately **not** derived from `[security] egress_allow`. The first
+/// draft of this fix was, and that was a worse trade than the defect it closed:
+/// `egress_allow` is a per-host permit for the in-process HTTP gate, the strict
+/// branch is selected by `!workspace_trust.is_trusted()` — the DEFAULT for any
+/// repo the operator has not fingerprint-trusted — and no sandbox backend in
+/// this repo has a host/DNS gate for an arbitrary shell (bwrap, sandbox-exec,
+/// AppContainer and Docker all reject [`NetworkPolicy::AllowHosts`]), so the
+/// enforceable shell grant is all-or-nothing. Measured on the first draft:
+/// `egress_allow = ["docs.rs"]` opened a connection to `127.0.0.1:44755`, a host
+/// the operator never listed. Permitting one host for one subsystem must not
+/// hand an untrusted repository's shell arbitrary outbound TCP.
+///
+/// GRANULARITY, stated plainly: `true` yields [`NetworkPolicy::Inherit`] — the
+/// whole host network — and that is logged at `warn` every time it bites rather
+/// than happening quietly. There is no narrower enforceable option today.
+pub fn operator_bash_network(allow_sandboxed_shell_network: bool) -> NetworkPolicy {
+    if !allow_sandboxed_shell_network {
         return NetworkPolicy::Deny;
     }
     tracing::warn!(
         target: "wcore_tools::workspace_policy",
-        egress_allow = ?hosts,
-        "[security] egress_allow is non-empty, so the sandboxed shell is granted \
-         network access. No sandbox backend can filter an arbitrary shell's egress \
-         by host, so this grant is the whole host network, not only the listed \
-         entries. Remove every egress_allow entry to keep the shell offline."
+        "[security] allow_sandboxed_shell_network = true, so the sandboxed shell is \
+         granted network access. No sandbox backend can filter an arbitrary shell's \
+         egress by host, so this grant is the WHOLE host network. Set it back to \
+         false to keep the shell offline."
     );
     NetworkPolicy::Inherit
 }
