@@ -909,6 +909,67 @@ mod tests {
         );
     }
 
+    /// End to end, through the production `execute`: `mktemp` must produce a
+    /// file this test can see from OUTSIDE the sandbox.
+    ///
+    /// This is the row the live macOS matrix reported red on the merged tree —
+    /// `mktemp: mkstemp failed on /var/folders/…/T/tmp.XXXXXXXXXX: Operation
+    /// not permitted` — under BOTH the contained and the trusted_local profile.
+    /// `WorkspacePolicy` redirects `TMPDIR`/`TMP`/`TEMP` into the session's
+    /// granted scratch, which is why clang, python3 and node recovered, but
+    /// Darwin's `mktemp(1)` reads `confstr(_CS_DARWIN_USER_TEMP_DIR)` first and
+    /// never consults the environment, so it still targets a directory the
+    /// profile does not grant.
+    ///
+    /// The manifest carries only the workspace, exactly like the `contained`
+    /// profile, so a pass cannot come from some broader grant this test
+    /// invented. `TMPDIR` is set to the workspace on purpose: it must not be
+    /// what makes the test pass.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn sandboxed_mktemp_creates_a_file_the_host_can_see() {
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+        let work = tempfile::tempdir().expect("workspace");
+        let canon_work = std::fs::canonicalize(work.path()).expect("canonicalize workspace");
+        let m = SandboxManifest {
+            fs_write_allow: vec![canon_work.clone()],
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("TMPDIR".into(), canon_work.to_string_lossy().into_owned()),
+            ],
+            ..Default::default()
+        };
+
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec!["/usr/bin/mktemp".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("execute returns Ok");
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let printed = stdout.trim().to_owned();
+        assert_eq!(
+            out.exit_code,
+            0,
+            "mktemp must succeed inside the sandbox; stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path = std::path::Path::new(&printed);
+        assert!(
+            path.is_absolute() && path.exists(),
+            "the host must see the file the sandboxed mktemp created, got {printed:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn profile_emits_fs_allowlist() {
         let m = SandboxManifest {
