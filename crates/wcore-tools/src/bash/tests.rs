@@ -1025,3 +1025,44 @@ fn sandbox_denial_is_inert_without_a_scoped_manifest() {
         result.content
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn sandbox_denial_does_not_call_a_granted_path_ungranted_through_a_symlink() {
+    // macOS spells the granted scratch root `/private/tmp/...` in the manifest
+    // while the shell reports `/tmp/...`. A raw prefix match would report a
+    // GRANTED path as "outside every granted root" — the annotation would state
+    // a falsehood. Modelled here with a real symlink so the test runs on any unix.
+    let real = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(real.path()).unwrap();
+    let link_parent = tempfile::tempdir().unwrap();
+    let link = link_parent.path().join("alias");
+    std::os::unix::fs::symlink(&granted, &link).unwrap();
+    std::fs::write(granted.join("scratch.txt"), b"x").unwrap();
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        fs_read_deny: vec![granted.join("secret.pem")],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+
+    let via_link = link.join("scratch.txt");
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: format!(
+                "Exit code: 1\nSTDOUT:\n\nSTDERR:\ncp: {}: I/O error\n",
+                via_link.display()
+            ),
+            is_error: true,
+        },
+    );
+    assert!(
+        !result.content.to_lowercase().contains("outside every root"),
+        "a granted path reached through a symlink must not be reported as \
+         ungranted; got:\n{}",
+        result.content
+    );
+}

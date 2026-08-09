@@ -131,7 +131,7 @@ fn candidate_paths(body: &str) -> Vec<&str> {
 /// never given a fabricated cause.
 fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause)> {
     let raw = Path::new(token);
-    let resolved = if raw.is_absolute() {
+    let joined = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
         scope
@@ -139,6 +139,14 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
             .as_ref()?
             .join(raw.strip_prefix("./").unwrap_or(raw))
     };
+    // Manifest roots are canonicalized by `WorkspacePolicy`, but a child names
+    // whatever spelling it was given. On macOS the granted scratch root is
+    // `/private/tmp/...` while the shell reports `/tmp/...`, so a prefix match on
+    // the raw token would call a GRANTED path "outside every granted root" —
+    // this annotation would then state a falsehood. Resolve first; a path that
+    // does not exist keeps its literal spelling, which is the right answer for
+    // the "no such file" case.
+    let resolved = std::fs::canonicalize(&joined).unwrap_or(joined);
     if scope.deny.iter().any(|d| resolved.starts_with(d)) {
         return Some((resolved, DeniedBecause::PolicyDeny));
     }
