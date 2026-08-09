@@ -254,15 +254,23 @@ async fn bwrap_still_runs_the_host_toolchains() {
             }
         }
         if let Ok(home) = std::env::var("HOME") {
-            for sub in [".cargo", ".rustup"] {
-                let p = Path::new(&home).join(sub);
-                if p.exists() {
-                    manifest.fs_read_allow.push(p);
-                }
-            }
+            // HOME itself stays the workspace — the host home is NOT granted,
+            // so `~/.gitconfig` and friends remain unreadable. The rustup shim
+            // is pointed at its real stores explicitly, mirroring the
+            // toolchain-path grants production makes.
             manifest
                 .env
                 .push(("HOME".into(), root.to_string_lossy().into_owned()));
+            for (var, sub) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+                let p = Path::new(&home).join(sub);
+                if p.exists() {
+                    manifest.env.push((
+                        var.into(),
+                        std::env::var(var).unwrap_or_else(|_| p.to_string_lossy().into_owned()),
+                    ));
+                    manifest.fs_read_allow.push(p);
+                }
+            }
         }
         let out = backend
             .execute(
