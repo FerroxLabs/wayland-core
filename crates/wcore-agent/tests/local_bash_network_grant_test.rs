@@ -43,11 +43,14 @@
 //!
 //! ENV HERMETICITY
 //!
-//! `default_bash_network_policy()` returns `Inherit` when
-//! `WAYLAND_BASH_ALLOW_NETWORK=1`, which would make the Deny expectations (and
-//! therefore the positive/negative discrimination) collapse on a host that sets
-//! it. Every test here scrubs that variable through an `EnvGuard` and is
-//! `#[serial]` because the variable is process-global.
+//! `default_bash_network_policy()` USED to return `Inherit` when
+//! `WAYLAND_BASH_ALLOW_NETWORK=1`, which collapsed the Deny expectations (and
+//! therefore the positive/negative discrimination) on a host that set it. That
+//! env lever was deleted by SEC-11 — the default is now an unconditional Deny —
+//! so the scrub below is belt-and-braces rather than load-bearing. It stays,
+//! along with `#[serial]`, so a reintroduced env read is caught here too rather
+//! than silently changing what these tests measure. The variable's own
+//! behaviour is pinned in `bash_egress_provenance_test.rs`.
 
 use std::sync::Arc;
 

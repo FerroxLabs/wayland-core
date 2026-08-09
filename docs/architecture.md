@@ -264,9 +264,41 @@ policy object, set once at engine bootstrap.
 | **`Trusted`** | Local CLI / desktop sessions on the user's own machine | `RealFs` (no jail) | Rooted at workspace; toolchain dirs + global caches readable | Reused from `~/.cargo`, `~/.npm`, etc. — no redirect |
 | **`Contained`** | Remote `Workspace` posture | `SandboxedFs ∘ SecretDenyFs` (write-scoped + secret deny) | Rooted at workspace; tight write scope; toolchain read-only | Redirected into `<root>/.wcache/{cargo,npm,pip}` |
 
-Both modes seed network policy from `default_bash_network_policy()`, which
-honors the `WAYLAND_BASH_ALLOW_NETWORK` env var. Network access is never
-hardcoded inside `WorkspacePolicy`.
+Both modes seed network policy from `default_bash_network_policy()`, an
+unconditional `Deny`. Network access is never hardcoded inside
+`WorkspacePolicy`; it is widened only by an explicit `with_network` at the
+bootstrap seam:
+
+* a genuinely-local session (no channel posture) gets `Inherit` via
+  `local_bash_network`;
+* a sandboxed (`Contained`) session gets network **only** when the operator's
+  config file sets `[security] allow_sandboxed_shell_network = true`, via
+  `operator_bash_network`. It defaults to `false` and, like `[security]
+  enabled`, is read from the trusted global layer alone — a project file that
+  travels with a cloned repository cannot mint it. Because no sandbox backend
+  can filter an arbitrary shell's egress by host, that grant is the whole host
+  network, and it is logged at `warn` whenever it applies. A channel-attached
+  (remote-sender) session never receives it.
+
+  It is deliberately **not** derived from `[security] egress_allow`.
+  `egress_allow` is a per-host permit for the in-process HTTP gate; the
+  `Contained` branch is the default for any repo the operator has not
+  fingerprint-trusted; and the shell grant is all-or-nothing. Tying them
+  together meant that permitting one host for the HTTP gate handed an untrusted
+  cloned repository's shell arbitrary outbound TCP (measured:
+  `egress_allow = ["docs.rs"]` opened `127.0.0.1:44755`).
+
+  Under bwrap the grant also binds the host's resolver file into the namespace
+  (see `wcore-sandbox::backends::bwrap`), because `/etc/resolv.conf` is a
+  symlink into `/run` on systemd distributions and a `Contained` namespace does
+  not carry `/run` — without that bind `Inherit` yielded a network with no name
+  resolution and `curl` exited 6.
+
+There is deliberately **no environment variable** that opens the sandboxed
+shell. `WAYLAND_BASH_ALLOW_NETWORK` used to, and was removed (SEC-11): the
+environment is inherited from whatever launched the process, so honoring it let
+untrusted provenance raise a security boundary — the same supply-chain hazard
+`[security] enabled` is documented against.
 
 ### Two enforcement adapters
 

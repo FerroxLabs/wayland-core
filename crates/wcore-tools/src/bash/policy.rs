@@ -254,8 +254,9 @@ pub(super) fn annotate_network_block(
              not reach the network — that is why it failed. This is NOT a missing tool: do \
              NOT claim that a package manager, node/npm, git, curl, or the Command Line \
              Tools are absent or need installing, and do not invent any other cause. To \
-             enable installs, the user can run this on a trusted workspace or set \
-             WAYLAND_BASH_ALLOW_NETWORK=1 to approve egress. To read a URL now, use the \
+             enable installs, the user can run this on a trusted workspace or add an \
+             entry to `[security] egress_allow` in their config file to approve egress \
+             (an environment variable cannot approve it). To read a URL now, use the \
              WebFetch tool; to search the web, use the `web` tool with operation \"search\".",
         );
         result.is_error = true;

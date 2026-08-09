@@ -12,8 +12,10 @@
 //!     `SandboxedFs ∘ SecretDenyFs`. (Bash is NOT in this posture yet — see
 //!     the deferred OS-sandbox secret-read-deny work.)
 //!
-//! Network is ALWAYS seeded from `default_bash_network_policy()` so the
-//! `WAYLAND_BASH_ALLOW_NETWORK` opt-in survives; it is never hardcoded.
+//! Network is ALWAYS seeded from `default_bash_network_policy()` — a fail-safe
+//! Deny — and widened only by an explicit `with_network` at the trusted
+//! bootstrap seam (`local_bash_network` for a genuinely-local session,
+//! `operator_bash_network` for a sandboxed one). It is never hardcoded here.
 
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
@@ -213,7 +215,7 @@ impl WorkspacePolicy {
             readable_extra,
             network_scoped_readable,
             // #657: the bare constructor is fail-safe — network is seeded from
-            // `default_bash_network_policy()` (Deny unless `WAYLAND_BASH_ALLOW_NETWORK`).
+            // `default_bash_network_policy()`, an unconditional Deny.
             // Network egress is granted only for a GENUINELY-LOCAL session, and
             // that grant is applied at bootstrap via `with_network(Inherit)` gated
             // on `channel_tool_posture.is_none()` (see `local_bash_network`). A
@@ -263,9 +265,11 @@ impl WorkspacePolicy {
             network_scoped_readable,
             // #657: a Contained (untrusted / remote `Workspace`) posture runs
             // potentially attacker-influenced content, so egress stays DENIED to
-            // keep the exfil boundary tight. `WAYLAND_BASH_ALLOW_NETWORK=1`
-            // remains the explicit operator escape hatch (via
-            // `default_bash_network_policy`).
+            // keep the exfil boundary tight. The operator's config-file
+            // `[security] egress_allow` is the explicit escape hatch, applied at
+            // bootstrap via `with_network(operator_bash_network(..))` — SEC-11
+            // deleted the `WAYLAND_BASH_ALLOW_NETWORK` env lever that used to
+            // fill that role from untrusted provenance.
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             authority_read_deny: Vec::new(),
@@ -1041,17 +1045,61 @@ fn scratch_dir(trust: WorkspaceTrust) -> Option<PathBuf> {
 /// channel posture attached (local CLI / TUI / json-stream / ACP / desktop).
 ///
 /// A channel-attached session — INCLUDING `Full` posture — is a remote sender.
-/// It stays on the pre-#657 lockdown: `default_bash_network_policy()` (Deny
-/// unless the operator sets `WAYLAND_BASH_ALLOW_NETWORK`). A remote-triggered
-/// context does not get a networked shell by default; if a real
-/// remote-networked-shell use case appears, it becomes a deliberate per-channel
-/// opt-in, not the default.
+/// It stays on the pre-#657 lockdown: `default_bash_network_policy()`, which is
+/// an unconditional Deny. A remote-triggered context does not get a networked
+/// shell; if a real remote-networked-shell use case appears, it becomes a
+/// deliberate per-channel opt-in, not the default.
 pub fn local_bash_network(has_channel_posture: bool) -> NetworkPolicy {
     if has_channel_posture {
         crate::bash::default_bash_network_policy()
     } else {
         NetworkPolicy::Inherit
     }
+}
+
+/// SEC-13 — the Bash network posture for a SANDBOXED (`contained`) session,
+/// decided by the operator's TRUSTED `[security] allow_sandboxed_shell_network`.
+///
+/// The W2/W3 conformance gate measured the polarity backwards on Linux: a bare
+/// `WAYLAND_BASH_ALLOW_NETWORK=1` in the environment re-opened the sandboxed
+/// shell (`accept_count=1` on a driver-owned listener) while the operator's own
+/// trusted config recorded `accept_count=0`. Untrusted provenance raised the
+/// boundary; trusted provenance had no lever at all.
+///
+/// The env lever is gone (see [`crate::bash::default_bash_network_policy`]) and
+/// this is its replacement, matching the posture `SecurityConfig::enabled`
+/// already documents: **config-file only, read from the trusted layer**. The
+/// `[security]` arm of `merge_config_files_with_trust` takes this field from the
+/// GLOBAL layer alone, so a project file — which travels with a cloned
+/// repository — cannot mint the grant.
+///
+/// It is deliberately **not** derived from `[security] egress_allow`. The first
+/// draft of this fix was, and that was a worse trade than the defect it closed:
+/// `egress_allow` is a per-host permit for the in-process HTTP gate, the strict
+/// branch is selected by `!workspace_trust.is_trusted()` — the DEFAULT for any
+/// repo the operator has not fingerprint-trusted — and no sandbox backend in
+/// this repo has a host/DNS gate for an arbitrary shell (bwrap, sandbox-exec,
+/// AppContainer and Docker all reject [`NetworkPolicy::AllowHosts`]), so the
+/// enforceable shell grant is all-or-nothing. Measured on the first draft:
+/// `egress_allow = ["docs.rs"]` opened a connection to `127.0.0.1:44755`, a host
+/// the operator never listed. Permitting one host for one subsystem must not
+/// hand an untrusted repository's shell arbitrary outbound TCP.
+///
+/// GRANULARITY, stated plainly: `true` yields [`NetworkPolicy::Inherit`] — the
+/// whole host network — and that is logged at `warn` every time it bites rather
+/// than happening quietly. There is no narrower enforceable option today.
+pub fn operator_bash_network(allow_sandboxed_shell_network: bool) -> NetworkPolicy {
+    if !allow_sandboxed_shell_network {
+        return NetworkPolicy::Deny;
+    }
+    tracing::warn!(
+        target: "wcore_tools::workspace_policy",
+        "[security] allow_sandboxed_shell_network = true, so the sandboxed shell is \
+         granted network access. No sandbox backend can filter an arbitrary shell's \
+         egress by host, so this grant is the WHOLE host network. Set it back to \
+         false to keep the shell offline."
+    );
+    NetworkPolicy::Inherit
 }
 
 mod discovery;

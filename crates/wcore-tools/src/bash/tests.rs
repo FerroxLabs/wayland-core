@@ -277,14 +277,10 @@ fn legit_downloads_and_literal_posts_are_allowed() {
 
 #[test]
 fn default_bash_network_policy_is_deny() {
-    // Without the opt-in env var, agent-initiated Bash must default to
-    // NetworkPolicy::Deny so a confined command cannot exfiltrate over
-    // the network. (Env-var-free assertion: the test process does not
-    // set WAYLAND_BASH_ALLOW_NETWORK.)
-    assert!(
-        std::env::var("WAYLAND_BASH_ALLOW_NETWORK").is_err(),
-        "test env must not pre-set the opt-in var"
-    );
+    // Agent-initiated Bash must default to NetworkPolicy::Deny so a confined
+    // command cannot exfiltrate over the network. SEC-11: the default is now
+    // UNCONDITIONAL — no environment variable can raise it — so this asserts
+    // Deny even with `WAYLAND_BASH_ALLOW_NETWORK=1` present in the process env.
     let (manifest, _cmd) = build_sandbox_pieces("echo hi", None);
     assert_eq!(
         manifest.network,
@@ -598,7 +594,7 @@ async fn live_local_egress_on_channel_egress_blocked() {
     );
 
     // Channel-attached session (incl Full): local_bash_network(true) =>
-    // fail-safe default (Deny in this env — no WAYLAND_BASH_ALLOW_NETWORK).
+    // the fail-safe default, which is an unconditional Deny.
     let channel = WorkspacePolicy::trusted_local(dir.path()).with_network(local_bash_network(true));
     assert_eq!(channel.network(), default_bash_network_policy());
     let (m2, cmd2) = build_sandbox_pieces(curl, Some(&channel));

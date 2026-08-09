@@ -235,7 +235,7 @@ fn contained_redirects_caches_into_workspace() {
 fn network_is_gated_on_trust_posture() {
     // #657 (Overwatch ruling, Sean-confirmed): the bare `trusted_local`
     // constructor is fail-safe — it seeds network from the shared helper
-    // (Deny unless `WAYLAND_BASH_ALLOW_NETWORK`), NOT unconditional Inherit.
+    // (an unconditional Deny), NOT unconditional Inherit.
     // Egress is granted only at bootstrap for a genuinely-local session; see
     // `local_bash_network` + `with_network`. Contained stays denied too.
     let dir = tempfile::tempdir().unwrap();

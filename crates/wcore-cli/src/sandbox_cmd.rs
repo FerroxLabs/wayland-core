@@ -288,13 +288,15 @@ mod tests {
             "the workspace must be writable by the child: {:?}",
             policy.writable_roots()
         );
-        // The fail-safe network posture: a sandboxed child gets no egress
-        // unless the operator opted in. This is what makes a DNS reachability
-        // difference a usable containment signal.
+        // The fail-safe network posture: a sandboxed child gets no egress.
+        // This is what makes a DNS reachability difference a usable
+        // containment signal. SEC-11 — the assertion used to carry an
+        // `|| env::var("WAYLAND_BASH_ALLOW_NETWORK").is_ok()` escape clause;
+        // that env lever is gone, so the posture here is unconditional.
         assert!(
-            matches!(policy.network(), wcore_sandbox::NetworkPolicy::Deny)
-                || std::env::var("WAYLAND_BASH_ALLOW_NETWORK").is_ok(),
-            "contained profile must default to network Deny"
+            matches!(policy.network(), wcore_sandbox::NetworkPolicy::Deny),
+            "contained profile must default to network Deny, got {:?}",
+            policy.network()
         );
         assert_eq!(ctx.sandbox.backend_name(), expected_backend);
         assert_ne!(

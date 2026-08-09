@@ -299,8 +299,39 @@ pub struct SecurityConfig {
     /// their subdomains, e.g. `"example.com"`) or exact hosts (for shared-
     /// platform hosts that can't be apex-allowed, e.g. `"myapp.workers.dev"`).
     /// Added on top of the auto-derived provider + first-party defaults.
+    ///
+    /// This list governs the in-process HTTP egress gate
+    /// (`wcore_agent::egress`) — host by host, exactly as written — and
+    /// NOTHING ELSE. In particular it does **not** decide whether the
+    /// sandboxed shell has network; see `allow_sandboxed_shell_network`, which
+    /// is a separate switch precisely because this one is a per-host permit
+    /// and that one is all-or-nothing.
+    ///
+    /// It is trust-gated: `restrict_untrusted_project_config` drops a project
+    /// file's entries until the operator has granted that workspace
+    /// fingerprint, so a cloned repository cannot widen the gate.
     #[serde(default)]
     pub egress_allow: Vec<String>,
+    /// Master switch for the SANDBOXED SHELL's network. Off by default.
+    ///
+    /// Like `enabled`, this is **config-file only and read from the TRUSTED
+    /// (global) layer alone** — never a bare env var (supply-chain hazard, C8)
+    /// and never a project file, which travels with a cloned repository. See
+    /// the `security` block of `merge_config_files_with_trust`.
+    ///
+    /// A `Contained` session (untrusted workspace, or the Managed execution
+    /// floor) runs Bash with `NetworkPolicy::Deny` until the operator sets this
+    /// to `true`. No sandbox backend in this repo can filter an arbitrary
+    /// shell's egress by host — bwrap, sandbox-exec, AppContainer and Docker
+    /// all reject `NetworkPolicy::AllowHosts` — so the grant is
+    /// **all-or-nothing: the whole host network**. That is why it is its own
+    /// boolean rather than a side effect of `egress_allow`: an operator who
+    /// permits one host for the HTTP gate must not thereby hand an untrusted
+    /// repository's shell arbitrary outbound TCP. It is logged at `warn` every
+    /// time it applies. A channel-attached (remote sender) session never
+    /// receives the grant.
+    #[serde(default)]
+    pub allow_sandboxed_shell_network: bool,
 }
 
 impl Default for SecurityConfig {
@@ -308,6 +339,7 @@ impl Default for SecurityConfig {
         Self {
             enabled: true,
             egress_allow: Vec::new(),
+            allow_sandboxed_shell_network: false,
         }
     }
 }
@@ -5087,9 +5119,19 @@ fn merge_config_files_with_trust(
     // entries entirely until the operator has granted the workspace
     // fingerprint, exactly like project `[providers]`, `[mcp.servers]` and
     // `tools.skills.allow`.
+    //
+    // `allow_sandboxed_shell_network` takes the SAME shape as `enabled`, and for
+    // the same reason: it is read from the trusted layer alone. It is a
+    // whole-host-network grant for the sandboxed shell, so the untrusted layer
+    // gets no say at all — not `||` (a project could mint it), not `&&` (a
+    // project could revoke a grant the operator deliberately made, and a project
+    // silent on `[security]` deserializes to the `false` default, which is
+    // absorbing for `&&`). The default-FALSE polarity means the field is
+    // fail-safe: absence anywhere is "no network".
     let security = SecurityConfig {
         enabled: global.security.enabled,
         egress_allow: [global.security.egress_allow, project.security.egress_allow].concat(),
+        allow_sandboxed_shell_network: global.security.allow_sandboxed_shell_network,
     };
 
     // M5.bootstrap-wiring — session_cap is an opt-in `Option<BudgetConfig>`:

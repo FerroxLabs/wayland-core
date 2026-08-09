@@ -321,10 +321,62 @@ impl BubblewrapBackend {
                 bwrap_argv.push(etc.into());
             }
         }
+
+        // A granted network needs a RESOLVER, or it is only a route. This is
+        // the SECOND half of that grant, and it is deliberately kept alongside
+        // the `NETWORK_RO_ETC` bind above rather than replaced by it.
+        //
+        // History, because the two halves were authored against different
+        // trees and the reason they now coexist is not obvious. When `/etc` was
+        // bound WHOLESALE from the host, the host's own `/etc/resolv.conf`
+        // symlink came with it, pointing into `/run`
+        // (`../run/systemd/resolve/stub-resolv.conf` on Ubuntu 24.04). `/run`
+        // is not in the namespace, so the symlink dangled: glibc found no
+        // nameserver and every hostname lookup failed with EAI_NONAME while
+        // raw-IP connections still worked. Measured then: `cat
+        // /etc/resolv.conf` inside → "No such file or directory", `curl
+        // https://example.com` → exit 6 "Could not resolve host", the same curl
+        // on the host → HTTP 200. Binding at `/etc/resolv.conf` could not fix
+        // it either — bwrap followed the dangling symlink when creating the
+        // destination and aborted the whole spawn with "Can't create file at
+        // /etc/resolv.conf" — so the fix bound the CANONICAL target at its own
+        // path and let the inherited symlink land on it.
+        //
+        // The blanket `/etc` bind is gone (SEC-05/07/10, see SYSTEM_RO_ETC), so
+        // that dangling symlink is gone with it: the namespace's `/etc` is
+        // synthesized, `NETWORK_RO_ETC` creates `/etc/resolv.conf` as a fresh
+        // file mount point, and bwrap resolves the SOURCE in the host namespace
+        // where the symlink is intact. The `/etc/resolv.conf` bind alone is
+        // therefore expected to be sufficient on a systemd host today.
+        //
+        // This canonical-target bind is retained anyway because it is free and
+        // not equivalent: it covers a resolver whose canonical path is reached
+        // through a chain `NETWORK_RO_ETC` does not reproduce, and it costs
+        // nothing when `/etc/resolv.conf` is a plain file (`canonicalize`
+        // returns it unchanged and the bind is a harmless self-bind). It
+        // exposes no bytes the `/etc/resolv.conf` bind has not already exposed
+        // — the same file, reachable under two names.
+        //
+        // Only when the manifest actually granted network. A `Deny` namespace
+        // has no use for a resolver, so this adds nothing to the default
+        // posture — and `fs_read_deny` is rendered after this point, so a
+        // policy that denies the path still shadows it.
+        if matches!(manifest.network, NetworkPolicy::Inherit)
+            && let Ok(resolved) = std::fs::canonicalize("/etc/resolv.conf")
+        {
+            let s = resolved.to_string_lossy().into_owned();
+            bwrap_argv.push("--ro-bind-try".into());
+            bwrap_argv.push(s.clone());
+            bwrap_argv.push(s);
+        }
+
         // Synthesized replacements for the identity/name-resolution files the
         // blanket `/etc` bind used to supply from the host. Held alive until
         // this function returns so the sources still exist when bwrap builds
-        // its namespace.
+        // its namespace. None of SYNTHETIC_ETC_FILES is `resolv.conf`, so this
+        // block cannot shadow either resolver bind above under later-arg-wins;
+        // the synthetic `nsswitch.conf` carries `hosts: files dns` so DNS is
+        // still consulted.
         #[cfg(target_os = "linux")]
         let _synthetic_etc = {
             let scaffold = synthetic_etc_scaffold()?;
