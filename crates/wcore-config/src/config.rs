@@ -299,6 +299,24 @@ pub struct SecurityConfig {
     /// their subdomains, e.g. `"example.com"`) or exact hosts (for shared-
     /// platform hosts that can't be apex-allowed, e.g. `"myapp.workers.dev"`).
     /// Added on top of the auto-derived provider + first-party defaults.
+    ///
+    /// This list governs TWO boundaries, at different granularities:
+    ///
+    /// 1. the in-process HTTP egress gate (`wcore_agent::egress`), host by
+    ///    host, exactly as written; and
+    /// 2. the SANDBOXED SHELL. A non-empty list is the operator's opt-in to
+    ///    give a `Contained` Bash session network at all
+    ///    (`wcore_tools::workspace_policy::operator_bash_network`). No sandbox
+    ///    backend can filter an arbitrary shell's egress by host, so that grant
+    ///    is **all-or-nothing: the whole host network, not only the entries
+    ///    below**, and it is logged at `warn` when it applies. Leave this empty
+    ///    to keep the sandboxed shell offline. A channel-attached (remote
+    ///    sender) session never receives the grant.
+    ///
+    /// Like `enabled`, this is operator-owned: `restrict_untrusted_project_config`
+    /// drops a project file's entries until the operator has granted that
+    /// workspace fingerprint, so a cloned repository cannot widen either
+    /// boundary.
     #[serde(default)]
     pub egress_allow: Vec<String>,
 }

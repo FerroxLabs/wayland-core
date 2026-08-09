@@ -264,9 +264,24 @@ policy object, set once at engine bootstrap.
 | **`Trusted`** | Local CLI / desktop sessions on the user's own machine | `RealFs` (no jail) | Rooted at workspace; toolchain dirs + global caches readable | Reused from `~/.cargo`, `~/.npm`, etc. — no redirect |
 | **`Contained`** | Remote `Workspace` posture | `SandboxedFs ∘ SecretDenyFs` (write-scoped + secret deny) | Rooted at workspace; tight write scope; toolchain read-only | Redirected into `<root>/.wcache/{cargo,npm,pip}` |
 
-Both modes seed network policy from `default_bash_network_policy()`, which
-honors the `WAYLAND_BASH_ALLOW_NETWORK` env var. Network access is never
-hardcoded inside `WorkspacePolicy`.
+Both modes seed network policy from `default_bash_network_policy()`, an
+unconditional `Deny`. Network access is never hardcoded inside
+`WorkspacePolicy`; it is widened only by an explicit `with_network` at the
+bootstrap seam:
+
+* a genuinely-local session (no channel posture) gets `Inherit` via
+  `local_bash_network`;
+* a sandboxed (`Contained`) session gets network **only** when the operator's
+  config file carries a non-empty `[security] egress_allow`, via
+  `operator_bash_network`. Because no sandbox backend can filter an arbitrary
+  shell's egress by host, that grant is the whole host network rather than only
+  the listed entries, and it is logged at `warn` whenever it applies.
+
+There is deliberately **no environment variable** that opens the sandboxed
+shell. `WAYLAND_BASH_ALLOW_NETWORK` used to, and was removed (SEC-11): the
+environment is inherited from whatever launched the process, so honoring it let
+untrusted provenance raise a security boundary — the same supply-chain hazard
+`[security] enabled` is documented against.
 
 ### Two enforcement adapters
 

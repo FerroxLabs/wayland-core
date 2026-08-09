@@ -39,8 +39,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use serial_test::serial;
 use tokio_util::sync::CancellationToken;
 use wcore_agent::bootstrap::AgentBootstrap;
+use wcore_agent::channel_tools::ChannelToolScope;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
+use wcore_channels::ChannelToolPosture;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
 use wcore_sandbox::{NetworkPolicy, SandboxRegistry};
@@ -188,12 +190,26 @@ async fn curl_through_bootstrapped_bash(
     port: u16,
     network_override: Option<NetworkPolicy>,
 ) -> (String, NetworkPolicy) {
+    curl_through_bootstrapped_bash_inner(config, workdir, port, network_override, false).await
+}
+
+async fn curl_through_bootstrapped_bash_inner(
+    config: Config,
+    workdir: &std::path::Path,
+    port: u16,
+    network_override: Option<NetworkPolicy>,
+    channel_attached: bool,
+) -> (String, NetworkPolicy) {
     let workspace = workdir.to_str().expect("utf8 workdir").to_string();
-    let result = AgentBootstrap::new(config, workspace, null_output())
-        .without_channels(true)
-        .build()
-        .await
-        .expect("bootstrap should succeed");
+    let mut bootstrap =
+        AgentBootstrap::new(config, workspace, null_output()).without_channels(true);
+    if channel_attached {
+        bootstrap = bootstrap.channel_tool_posture(ChannelToolScope {
+            posture: ChannelToolPosture::Full,
+            workspace_root: workdir.to_path_buf(),
+        });
+    }
+    let result = bootstrap.build().await.expect("bootstrap should succeed");
 
     let installed = result
         .engine
@@ -348,5 +364,36 @@ async fn an_empty_egress_allow_still_denies_the_sandboxed_shell() {
         0,
         "an empty [security] egress_allow must leave the sandboxed shell with \
          no egress. policy={network:?} tool_result={content:?}"
+    );
+}
+
+/// The grant must stay narrow. A channel-attached session is a REMOTE sender
+/// even at `Full` posture (#657, Overwatch ruling): the operator's allowlist
+/// widens the operator's own shell, never a remote sender's, or a
+/// prompt-injected `curl --data-binary @secret` gets its egress back through
+/// the new lever. Reddens if `operator_bash_network` is applied unconditionally
+/// in the `strict_workspace` branch.
+#[tokio::test]
+#[serial]
+async fn a_channel_remote_session_never_receives_the_operator_grant() {
+    let (_plugins, _env) = hermetic_env(None);
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let obs = Observer::start();
+
+    let (content, network) = curl_through_bootstrapped_bash_inner(
+        contained_config(&["127.0.0.1"]),
+        workdir.path(),
+        obs.port,
+        None,
+        true,
+    )
+    .await;
+
+    assert_eq!(
+        obs.accept_count(),
+        0,
+        "a channel-attached (remote-sender) session must stay on the absolute \
+         lockdown even when the operator's egress_allow is non-empty. \
+         policy={network:?} tool_result={content:?}"
     );
 }
