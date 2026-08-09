@@ -900,6 +900,14 @@ pub(super) fn execute_blocking(
             // jobs, system parameter changes, display changes, global atoms,
             // desktop switches, and shutdown calls. AppContainer SIDs gate
             // KERNEL objects but not USER32 surfaces; these flags close that.
+            // These flags are NOT what makes a user32-linked child fail image
+            // initialization with 0xC0000142. Measured on SeanDesktop
+            // 2026-08-10 by A/B'ing the mask over one run: 0xff (this set),
+            // 0x00 (no UI restrictions at all), 0xfe (no HANDLES), 0xbf (no
+            // DESKTOP), 0xdf (no GLOBALATOMS), 0xbe and 0x9e all produced the
+            // SAME verdict — `where.exe` dead, `cmd`/`hostname`/`attrib`/`find`
+            // alive. The cause is the parent's window station; see
+            // `crates/wcore-tools/tests/win_toolchain_launch.rs`.
             let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
                 UIRestrictionsClass: JOB_OBJECT_UILIMIT_HANDLES
                     | JOB_OBJECT_UILIMIT_READCLIPBOARD
