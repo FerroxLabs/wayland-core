@@ -188,3 +188,91 @@ fn measure_default_posture_toolchain_launch() {
     control(&ctx, &root, "end");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Discriminator. `where.exe` lives in System32 and is granted read+execute to
+/// ALL APPLICATION PACKAGES, so its 0xC0000142 in the measurement above cannot
+/// be a grant-set or DLL-location problem. These cases vary ONE thing at a time
+/// to locate the boundary the failure sits on:
+///
+/// * `direct` spawns the external image as the sandbox's OWN program — no
+///   `cmd.exe` in the middle.
+/// * `via-cmd` spawns the same image as a child of the sandboxed `cmd.exe`.
+/// * `nested-cmd` spawns `cmd.exe` itself as a child of `cmd.exe`, so the child
+///   image is the one program already proven to start under this sandbox.
+///
+/// If `direct` succeeds and `via-cmd` fails, the defect is in what a child of
+/// the sandboxed shell inherits, not in the token or the ACLs.
+#[test]
+#[ignore = "explicit native Windows toolchain measurement"]
+fn discriminate_direct_spawn_versus_shell_child() {
+    require_live();
+    assert_quiet();
+    let root = workspace("discriminate");
+    let (_policy, ctx) = contained_ctx(&root);
+    control(&ctx, &root, "start");
+
+    let backend = AppContainerBackend::new();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    let system32 = std::path::Path::new(&std::env::var("SYSTEMROOT").expect("SYSTEMROOT"))
+        .join("System32")
+        .to_string_lossy()
+        .into_owned();
+
+    for (name, argv) in [
+        (
+            "direct-where",
+            vec![format!("{system32}\\where.exe"), "cmd".to_owned()],
+        ),
+        (
+            "via-cmd-where",
+            vec![
+                "cmd".to_owned(),
+                "/c".to_owned(),
+                format!("\"{system32}\\where.exe\" cmd"),
+            ],
+        ),
+        (
+            "nested-cmd",
+            vec![
+                "cmd".to_owned(),
+                "/c".to_owned(),
+                format!("\"{system32}\\cmd.exe\" /c echo nested"),
+            ],
+        ),
+        (
+            "direct-cmd",
+            vec![
+                format!("{system32}\\cmd.exe"),
+                "/c".to_owned(),
+                "echo plain".to_owned(),
+            ],
+        ),
+    ] {
+        let manifest = wcore_sandbox::SandboxManifest {
+            timeout: Some(std::time::Duration::from_secs(30)),
+            ..Default::default()
+        };
+        let outcome = rt.block_on(backend.execute(
+            &manifest,
+            wcore_sandbox::SandboxCommand {
+                argv,
+                cwd: Some(root.clone()),
+            },
+        ));
+        match outcome {
+            Ok(o) => println!(
+                "DISC name={name} exit={} stdout={:?} stderr={:?}",
+                o.exit_code,
+                String::from_utf8_lossy(&o.stdout).trim(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => println!("DISC name={name} ERR={e}"),
+        }
+    }
+
+    control(&ctx, &root, "end");
+    let _ = std::fs::remove_dir_all(&root);
+}
