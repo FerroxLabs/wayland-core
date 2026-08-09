@@ -226,40 +226,188 @@ pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResu
              here — retrying will not help, and git is not broken or missing.",
         );
     }
+    // No clause here may forbid the model from reporting a cause: the W2/W3
+    // sandbox gate measured such a clause suppressing the TRUE cause of a
+    // failure while a false one was asserted elsewhere in the same message.
     result.content.push_str(
-        "\nDo NOT report git, a compiler, node/npm, or the Command Line Tools as absent or \
-         needing installation, and do not invent any other cause. Remedy: run once with \
-         `--trust-workspace` in this directory to switch to the trusted-local profile, or \
-         `--dangerously-skip-permissions-and-sandbox` to turn the OS sandbox off entirely.",
+        "\nRemedy: run once with `--trust-workspace` in this directory to switch to the \
+         trusted-local profile, or `--dangerously-skip-permissions-and-sandbox` to turn the \
+         OS sandbox off entirely.",
     );
     result.is_error = true;
     result
 }
 
-/// When a network-dependent command FAILS and the sandbox blocks network,
-/// append a clear explanation + the right tools to use, and force `is_error`.
-/// This turns the silent "empty output" failure (the 2026-05-31 curl-thrash
-/// bug) into an actionable signal so the agent pivots to WebFetch / the `web`
-/// search tool instead of retrying curl (and re-prompting for approval) in a loop.
+/// Output substrings that mean the command really did reach for the network and
+/// could not get there. Only these license the "egress is why it failed" claim.
+const EGRESS_FAILURE_NEEDLES: &[&str] = &[
+    "could not resolve host",
+    "couldn't resolve host",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "nodename nor servname provided",
+    "getaddrinfo",
+    "enotfound",
+    "eai_again",
+    "network is unreachable",
+    "enetunreach",
+    "network is down",
+    "no route to host",
+    "ehostunreach",
+    "connection refused",
+    "econnrefused",
+    "connection reset",
+    "econnreset",
+    "connection timed out",
+    "etimedout",
+    "failed to connect to",
+    "couldn't connect to server",
+    "could not connect to server",
+    "failed to establish a new connection",
+    "unable to access",
+    "ssl connect error",
+    "network-outbound",
+];
+
+/// Output substrings that name a cause which is NOT the network: a filesystem
+/// denial (macOS seatbelt names the path, and bwrap / AppContainer surface one
+/// of these too) or a refused process launch (Windows gives the NTSTATUS).
+///
+/// Checked only AFTER [`EGRESS_FAILURE_NEEDLES`], so a seatbelt socket denial
+/// reported as `Failed to connect to …: Operation not permitted` still counts
+/// as egress.
+const NON_EGRESS_FAILURE_NEEDLES: &[&str] = &[
+    // Filesystem denials.
+    "operation not permitted",
+    "permission denied",
+    "access is denied",
+    "eacces",
+    "eperm",
+    "read-only file system",
+    "erofs",
+    "deny file-read",
+    "deny file-write",
+    "outside sandbox root",
+    "no such file or directory",
+    "enoent",
+    // Refused process launches. Windows AppContainer refuses every external
+    // image with one of these; a POSIX shell reports the rest.
+    "0xc0000142",
+    "0xc0000135",
+    "status_dll_init_failed",
+    "status_dll_not_found",
+    "is not recognized as an internal or external command",
+    "exec format error",
+    "cannot execute binary file",
+];
+
+/// What the failed command's own output says about WHY it failed.
+#[derive(Debug, PartialEq, Eq)]
+enum FailureEvidence {
+    /// The output names a network failure.
+    Egress,
+    /// The output names a cause that is not the network. Carries the offending
+    /// line verbatim, so the path macOS names and the NTSTATUS Windows gives
+    /// both reach the model.
+    NotEgress(String),
+    /// The output names no cause at all (`curl -s`, a swallowed stderr).
+    Silent,
+}
+
+/// Read the cause out of the command's own output.
+///
+/// Network evidence wins outright: a seatbelt socket denial reads
+/// `curl: (7) Failed to connect to …: Operation not permitted`, which carries
+/// both a network needle and a filesystem-shaped one, and it really is egress.
+fn failure_evidence(body: &str) -> FailureEvidence {
+    let mut not_egress: Option<String> = None;
+    for line in body.lines() {
+        let lower = line.to_lowercase();
+        if EGRESS_FAILURE_NEEDLES.iter().any(|n| lower.contains(n)) {
+            return FailureEvidence::Egress;
+        }
+        if not_egress.is_none() && NON_EGRESS_FAILURE_NEEDLES.iter().any(|n| lower.contains(n)) {
+            not_egress = Some(line.trim().to_string());
+        }
+    }
+    match not_egress {
+        Some(line) => FailureEvidence::NotEgress(line),
+        None => FailureEvidence::Silent,
+    }
+}
+
+/// When a network-dependent command FAILS under a no-network sandbox, say what
+/// actually stopped it.
+///
+/// This keeps the signal the annotation was written for: the silent
+/// "empty output" failure (the 2026-05-31 curl-thrash bug) still gets an
+/// actionable message, so the agent pivots to WebFetch / the `web` search tool
+/// instead of retrying curl — and re-prompting for approval — in a loop.
+///
+/// What changed is where the cause comes from. It is read from the command's
+/// OUTPUT and never guessed from the command string.
+/// [`looks_network_dependent`] only decides whether this annotation has
+/// anything to say at all; it cannot decide *why* the command failed, and the
+/// revision that let it do so asserted egress on every failure of a
+/// network-shaped command. Measured on macOS and Windows in the W2/W3 sandbox
+/// gate: every failure observed there was a filesystem denial or a refused
+/// process launch — several with the network untouched, including an
+/// `npm install` of a `file:` dependency — and every one was told the network
+/// was to blame. So:
+///
+/// * output names a network failure  → egress is stated as the cause;
+/// * output names a different cause  → that cause is quoted and egress is
+///   ruled out;
+/// * output names nothing at all     → egress is offered as *one* possibility
+///   beside the others, not asserted.
+///
+/// No branch may instruct the model not to report a cause. The removed clause
+/// ("…do NOT claim… and do not invent any other cause") forbade reporting the
+/// true cause while the false one was being asserted, which left an agent no
+/// way to self-correct.
 pub(super) fn annotate_network_block(
     command: &str,
     policy: NetworkPolicy,
     mut result: ToolResult,
 ) -> ToolResult {
-    if result.is_error && matches!(policy, NetworkPolicy::Deny) && looks_network_dependent(command)
+    if !result.is_error
+        || !matches!(policy, NetworkPolicy::Deny)
+        || !looks_network_dependent(command)
     {
-        result.content.push_str(
-            "\n\n⚠ Bash network egress is OFF for this workspace (an untrusted / contained \
-             workspace denies network to prevent data exfiltration), so this command could \
-             not reach the network — that is why it failed. This is NOT a missing tool: do \
-             NOT claim that a package manager, node/npm, git, curl, or the Command Line \
-             Tools are absent or need installing, and do not invent any other cause. To \
-             enable installs, the user can run this on a trusted workspace or set \
-             WAYLAND_BASH_ALLOW_NETWORK=1 to approve egress. To read a URL now, use the \
-             WebFetch tool; to search the web, use the `web` tool with operation \"search\".",
-        );
-        result.is_error = true;
+        return result;
     }
+    match failure_evidence(&result.content) {
+        FailureEvidence::Egress => result.content.push_str(
+            "\n\n⚠ Bash network egress is OFF for this workspace (an untrusted / contained \
+             workspace denies network to prevent data exfiltration), and this command's own \
+             output reports a network failure — that is why it failed. To enable installs, \
+             the user can run this on a trusted workspace or set WAYLAND_BASH_ALLOW_NETWORK=1 \
+             to approve egress. To read a URL now, use the WebFetch tool; to search the web, \
+             use the `web` tool with operation \"search\".",
+        ),
+        FailureEvidence::NotEgress(line) => result.content.push_str(&format!(
+            "\n\n⚠ Cause: Bash network egress is OFF for this workspace, but egress is NOT \
+             what stopped this command — its own output reports a different failure:\n  \
+             {line}\nThat is the cause to report. A named path means the OS sandbox put that \
+             path out of reach; a process-launch status (for example the Windows NTSTATUS \
+             0xC0000142) means the program could not start under the sandbox at all. Neither \
+             is fixed by retrying, and neither means the tool is missing from the machine."
+        )),
+        FailureEvidence::Silent => result.content.push_str(
+            "\n\n⚠ Cause: this annotation could not determine why the command failed — its \
+             output names neither a network failure nor a filesystem or process-launch \
+             denial. Bash network egress is OFF for this workspace (an untrusted / contained \
+             workspace denies network to prevent data exfiltration), which is one possible \
+             cause; a filesystem denial or a refused process launch under the same sandbox \
+             are others, and any note below this one about a specific denied path is better \
+             evidence than this paragraph. Read the command's own error output above; if it \
+             is empty, re-run with the tool's errors enabled (drop `-s` / `--quiet`, add \
+             `-v`). If it is egress: the user can run this on a trusted workspace or set \
+             WAYLAND_BASH_ALLOW_NETWORK=1 to approve it; to read a URL now, use the WebFetch \
+             tool; to search the web, use the `web` tool with operation \"search\".",
+        ),
+    }
+    result.is_error = true;
     result
 }
 

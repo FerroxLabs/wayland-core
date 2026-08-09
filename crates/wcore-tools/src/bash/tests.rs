@@ -375,10 +375,12 @@ fn network_block_hint_appended_only_when_denied_failed_and_network_cmd() {
         "hint must explain the block and point to WebFetch + the `web` search tool:\n{}",
         r.content
     );
-    // #657: the hint must forbid fabricating a missing-tool cause.
+    // The hint must never forbid the model from reporting a cause. #657 added
+    // such a clause; the W2/W3 sandbox gate measured it suppressing the TRUE
+    // cause while the false one (egress) was being asserted.
     assert!(
-        r.content.contains("NOT a missing tool") && r.content.contains("do NOT claim"),
-        "hint must tell the model not to invent a missing-tool remedy:\n{}",
+        !r.content.contains("do NOT claim") && !r.content.contains("do not invent any other"),
+        "the annotation must never forbid reporting a cause:\n{}",
         r.content
     );
 
@@ -405,6 +407,183 @@ fn network_block_hint_appended_only_when_denied_failed_and_network_cmd() {
     assert!(
         !r.content.contains("network egress is OFF"),
         "no hint on success"
+    );
+}
+
+// ── Foundation W2/W3 gate: the annotation must not assert a false cause ─────
+//
+// Measured on macOS and Windows against wayland-core d6f76c67: every sandbox
+// failure the gate observed was a FILESYSTEM denial or a refused PROCESS
+// LAUNCH, and every one of them was annotated "Bash network egress is OFF …
+// that is why it failed", plus a clause forbidding the model from reporting
+// any other cause. The node probe used a `file:` dependency and never touched
+// the network at all. An agent cannot self-correct from that: it is told the
+// wrong reason and told not to look further.
+//
+// The strings below are the ones the gate recorded, verbatim.
+
+/// The claim that is only true when the output says the network failed.
+const EGRESS_CLAIM: &str = "that is why it failed";
+
+fn failed(body: &str) -> ToolResult {
+    ToolResult {
+        content: body.to_string(),
+        is_error: true,
+    }
+}
+
+#[test]
+fn macos_filesystem_denial_is_not_blamed_on_network_egress() {
+    // macOS seatbelt: the binary LAUNCHES and then hits a named path denial.
+    // `npm install` matches the network heuristic; a `file:` dependency means
+    // the network was never involved.
+    let r = annotate_network_block(
+        "npm install file:../local-pkg",
+        NetworkPolicy::Deny,
+        failed(
+            "Exit code: 243\nSTDOUT:\n\nSTDERR:\n\
+             npm ERR! code EACCES\n\
+             npm ERR! syscall open\n\
+             npm ERR! path /Users/me/.npmrc\n\
+             npm ERR! errno -1\n\
+             npm ERR! Error: EACCES: permission denied, open '/Users/me/.npmrc'\n",
+        ),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a filesystem denial must not be asserted as an egress failure:\n{}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("do NOT claim") && !r.content.contains("do not invent any other"),
+        "the annotation must never forbid reporting a cause:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.contains("/Users/me/.npmrc"),
+        "where the platform names the denied path, surface it:\n{}",
+        r.content
+    );
+}
+
+#[test]
+fn macos_git_path_denial_is_not_blamed_on_network_egress() {
+    // The gate's git leg: the binary launches, then EPERM on ~/.gitconfig.
+    // `git clone <local path>` never opens a socket.
+    let r = annotate_network_block(
+        "git clone /srv/mirror/repo.git work",
+        NetworkPolicy::Deny,
+        failed(
+            "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+             fatal: could not lock config file /Users/me/.gitconfig: Operation not permitted\n",
+        ),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a seatbelt path denial must not be asserted as an egress failure:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.contains("/Users/me/.gitconfig"),
+        "the denied path the platform named must reach the model:\n{}",
+        r.content
+    );
+}
+
+#[test]
+fn windows_process_launch_failure_is_not_blamed_on_network_egress() {
+    // Windows AppContainer: the binary does not launch at all. The platform
+    // gives an NTSTATUS, so surface it.
+    let r = annotate_network_block(
+        "git fetch origin",
+        NetworkPolicy::Deny,
+        failed(
+            "Exit code: -1073741502\nSTDOUT:\n\nSTDERR:\n\
+             git.exe - Application Error: The application was unable to start correctly \
+             (0xc0000142). Click OK to close the application.\n",
+        ),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a refused process launch must not be asserted as an egress failure:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.to_lowercase().contains("0xc0000142"),
+        "the NTSTATUS the platform gave must reach the model:\n{}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("do NOT claim") && !r.content.contains("do not invent any other"),
+        "the annotation must never forbid reporting a cause:\n{}",
+        r.content
+    );
+}
+
+/// POSITIVE CONTROL. Deleting the banner is not the fix — a real egress denial
+/// must still be named, or this lane has only removed a useful message.
+#[test]
+fn genuine_egress_denial_is_still_named_as_the_cause() {
+    for body in [
+        "Exit code: 6\nSTDOUT:\n\nSTDERR:\ncurl: (6) Could not resolve host: example.com\n",
+        "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+         fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n",
+        "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+         npm ERR! network request to https://registry.npmjs.org/left-pad failed, reason: \
+         getaddrinfo EAI_AGAIN registry.npmjs.org\n",
+    ] {
+        let r = annotate_network_block(
+            "curl -sS https://example.com",
+            NetworkPolicy::Deny,
+            failed(body),
+        );
+        assert!(
+            r.content.contains("network egress is OFF") && r.content.contains(EGRESS_CLAIM),
+            "a real egress denial must still be named as the cause; body was:\n{body}\ngot:\n{}",
+            r.content
+        );
+        assert!(r.is_error);
+    }
+}
+
+/// A macOS socket denial reads as BOTH a network failure and "Operation not
+/// permitted". It is egress, and must be classified as such.
+#[test]
+fn socket_denial_reported_as_operation_not_permitted_is_still_egress() {
+    let r = annotate_network_block(
+        "curl -sS https://example.com",
+        NetworkPolicy::Deny,
+        failed(
+            "Exit code: 7\nSTDOUT:\n\nSTDERR:\n\
+             curl: (7) Failed to connect to example.com port 443: Operation not permitted\n",
+        ),
+    );
+    assert!(
+        r.content.contains(EGRESS_CLAIM),
+        "a denied socket is an egress failure even when the errno is EPERM:\n{}",
+        r.content
+    );
+}
+
+/// The silent-failure case the annotation was originally written for
+/// (`curl -s`, exit 6, no output). Nothing is known, so nothing may be
+/// asserted — but the anti-thrash pointer to WebFetch must survive.
+#[test]
+fn silent_failure_offers_egress_as_a_possibility_not_a_verdict() {
+    let r = annotate_network_block(
+        "curl -sL https://x.y",
+        NetworkPolicy::Deny,
+        failed("Exit code: 6\nSTDOUT:\n\nSTDERR:\n"),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "with no evidence, no cause may be asserted:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.contains("network egress is OFF") && r.content.contains("WebFetch"),
+        "the anti-thrash pointer must survive:\n{}",
+        r.content
     );
 }
 
@@ -911,6 +1090,13 @@ fn sandbox_denial_names_the_policy_denied_path_and_a_remedy() {
     assert!(
         result.is_error,
         "a denied command stays an error; got:\n{}",
+        result.content
+    );
+    // No annotation may forbid the model from reporting a cause (W2/W3 gate).
+    assert!(
+        !result.content.contains("do not invent any other")
+            && !result.content.contains("Do NOT report"),
+        "the sandbox-denial annotation must never forbid reporting a cause; got:\n{}",
         result.content
     );
 }
