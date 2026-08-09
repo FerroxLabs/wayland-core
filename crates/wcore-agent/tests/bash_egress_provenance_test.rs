@@ -336,9 +336,13 @@ async fn a_bare_env_var_cannot_open_the_sandboxed_shell_network() {
     let workdir = tempfile::TempDir::new().expect("workdir");
     let obs = Observer::start();
 
-    let (content, network) =
-        curl_through_bootstrapped_bash(contained_config(&[], false), workdir.path(), obs.port, None)
-            .await;
+    let (content, network) = curl_through_bootstrapped_bash(
+        contained_config(&[], false),
+        workdir.path(),
+        obs.port,
+        None,
+    )
+    .await;
 
     assert_eq!(
         obs.accept_count(),
@@ -464,9 +468,13 @@ async fn the_default_configuration_denies_the_sandboxed_shell() {
     let workdir = tempfile::TempDir::new().expect("workdir");
     let obs = Observer::start();
 
-    let (content, network) =
-        curl_through_bootstrapped_bash(contained_config(&[], false), workdir.path(), obs.port, None)
-            .await;
+    let (content, network) = curl_through_bootstrapped_bash(
+        contained_config(&[], false),
+        workdir.path(),
+        obs.port,
+        None,
+    )
+    .await;
 
     assert_eq!(
         obs.accept_count(),
