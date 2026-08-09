@@ -61,12 +61,53 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents)?;
     tmp.as_file().sync_all()?;
+    // B6 — carry the destination's own mode onto the temp file BEFORE the
+    // rename, so the name is never published with the tempfile's 0600.
+    carry_destination_mode(&tmp, dest);
 
     // `persist()` does the atomic rename. `PersistError` wraps both
     // the underlying io::Error and the un-renamed temp file; we only
     // care about the io::Error for callers using `?`.
     tmp.persist(dest).map(|_| ()).map_err(|e| e.error)
 }
+
+/// Copy an EXISTING destination's permission bits onto the temp file that is
+/// about to replace it (B6).
+///
+/// `NamedTempFile` creates its file 0600 by design, and the rename carries
+/// that mode onto the destination name. Every rewrite of an existing file
+/// therefore redefined its permissions: a 0755 script edited by the agent came
+/// back 0600 and the agent's own next turn got `Exit code: 126 … Permission
+/// denied`; a 0644 file silently lost group/other read.
+///
+/// Only an existing destination is matched. A file this helper CREATES keeps
+/// the private 0600 — credentials, the session mirror and the memory store are
+/// all written through here, and widening a new file would be a security
+/// change nobody asked for.
+///
+/// Best-effort: a failure to read or apply the mode must not fail the write,
+/// which would turn a cosmetic permission problem into data loss.
+#[cfg(unix)]
+fn carry_destination_mode(tmp: &tempfile::NamedTempFile, dest: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Ok(existing) = std::fs::metadata(dest) {
+        // Mask to the permission/setuid/sticky bits; `mode()` also carries the
+        // file-type bits, which are not the kernel's to take from a chmod.
+        let bits = existing.permissions().mode() & 0o7777;
+        let _ = tmp
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(bits));
+    }
+}
+
+/// Windows has no POSIX mode. The nearest analogue, the read-only ATTRIBUTE,
+/// must NOT be copied onto the temp file: `MoveFileExW(REPLACE_EXISTING)`
+/// refuses a read-only participant, so carrying it would turn today's silent
+/// permission change into a failed write. Left as a no-op deliberately rather
+/// than by omission.
+#[cfg(not(unix))]
+fn carry_destination_mode(_tmp: &tempfile::NamedTempFile, _dest: &Path) {}
 
 /// Length past which a destination is rewritten to extended-length form on
 /// Windows. Well below `MAX_PATH` (260) so there is headroom for the sibling
@@ -261,6 +302,77 @@ mod tests {
         let path = dir.path().join("new.txt");
         atomic_write(&path, b"hello").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    /// B6 — the rename-over-tempfile publish must not redefine the
+    /// destination's permissions.
+    ///
+    /// `NamedTempFile` creates its file 0600 by design, and `persist()`
+    /// carries that mode onto the destination name, so every rewrite of an
+    /// existing file silently replaced its mode with 0600. Measured through
+    /// the product: a 0755 script edited by the agent came back 0600 and the
+    /// agent's own next turn got `Exit code: 126 … Permission denied`.
+    ///
+    /// Two files are seeded identically and only one is written. The
+    /// untouched sibling is the CONTROL: if its mode moves too, the
+    /// environment (umask, filesystem, test runner) is responsible and the
+    /// subject measurement says nothing.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_the_destination_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let subject = dir.path().join("edited.sh");
+        let control = dir.path().join("untouched.sh");
+        for p in [&subject, &control] {
+            std::fs::write(p, b"#!/bin/sh\necho HELLO\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mode =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        // The fixture itself must be real before anything is measured off it.
+        assert_eq!(mode(&subject), 0o755, "fixture did not take 0755");
+
+        atomic_write(&subject, b"#!/bin/sh\necho GOODBYE\n").unwrap();
+
+        assert_eq!(
+            mode(&control),
+            0o755,
+            "CONTROL: the untouched sibling lost its mode, so the environment \
+             is stripping modes and the subject leg is uninterpretable"
+        );
+        assert_eq!(
+            mode(&subject),
+            0o755,
+            "atomic_write redefined the destination's mode: 0o755 -> 0o{:o} \
+             (an edited shell script stops being executable)",
+            mode(&subject)
+        );
+        assert_eq!(
+            std::fs::read(&subject).unwrap(),
+            b"#!/bin/sh\necho GOODBYE\n"
+        );
+    }
+
+    /// The other half of B6: a file the caller creates through this helper
+    /// keeps the private-by-default 0600 it has always had. Credentials,
+    /// session mirrors and the memory store are all written this way and
+    /// several of them rely on it, so preservation must apply to an EXISTING
+    /// destination only — never widen a new file.
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_still_creates_new_files_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.json");
+        atomic_write(&path, b"{}").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o600,
+            "a newly created file must stay owner-only"
+        );
     }
 
     #[test]

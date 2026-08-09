@@ -28,7 +28,7 @@ use crate::budget_authority::{
 };
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
-use crate::compact::{auto, emergency, estimate, micro};
+use crate::compact::{auto, emergency, estimate, micro, prompt as compact_prompt};
 use crate::confirm::ToolConfirmer;
 use crate::journal_provider::JournaledLlmProvider;
 use crate::orchestration::ExecutionControl;
@@ -3094,6 +3094,20 @@ const PRE_PROMPT_TOKEN_BUDGET: usize = 500;
 /// large prompt to the 1h cache tier. 30 minutes is a conservative lower
 /// bound for a multi-turn agent session.
 const AGENT_TURN_CACHE_REUSE_WINDOW_SECS: u64 = 1800;
+
+/// B7 — label the compaction fold puts in front of the user's original
+/// instruction, so the model can tell a preserved request from summary prose,
+/// and so a later compaction can recognise its own pin instead of nesting one.
+const PINNED_INSTRUCTION_HEADER: &str = "[Original user instruction — preserved verbatim]";
+
+/// Upper bound on the pinned instruction. An unbounded pin would grow the very
+/// buffer compaction exists to shrink; past this the pin is truncated with an
+/// explicit notice rather than silently.
+const PINNED_INSTRUCTION_MAX_CHARS: usize = 4000;
+
+/// First words of the post-compact summary message — aliased here only so the
+/// pin capture can refuse to pin a summary the product itself wrote.
+const COMPACT_SUMMARY_LEAD_IN: &str = compact_prompt::SUMMARY_LEAD_IN;
 
 /// Output-side token optimization (Part A): fluff closers that, once the model
 /// starts emitting one at a *paragraph boundary*, signal the answer is over and
@@ -13621,6 +13635,59 @@ impl AgentEngine {
         self.cache_ledger.record_compaction(&session_id, event);
     }
 
+    /// B7 — capture the user's ORIGINAL instruction once, so compaction can
+    /// re-fold it verbatim instead of trusting the summarizer to restate it.
+    ///
+    /// `live_turn` is the trailing user message `run_compaction` has already
+    /// popped; it is consulted last so a single-turn session still has a
+    /// source. Text produced by a previous compaction is skipped — pinning a
+    /// fold would nest one summary inside the next.
+    ///
+    /// Captured once and never overwritten: the instruction the session opened
+    /// with is the one worth carrying, and a stable string keeps the re-fold
+    /// idempotent across repeated compactions.
+    fn remember_original_instruction(&mut self, live_turn: Option<&Message>) {
+        if self.compact_state.pinned_instruction.is_some() {
+            return;
+        }
+        let found = self
+            .messages
+            .iter()
+            .chain(live_turn)
+            .filter(|m| matches!(m.role, Role::User))
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                // A pin written by an earlier compaction (a resumed session
+                // loads one) is the original instruction — take it back out
+                // rather than pinning the fold that contains it.
+                ContentBlock::Text { text } if text.starts_with(PINNED_INSTRUCTION_HEADER) => Some(
+                    text[PINNED_INSTRUCTION_HEADER.len()..]
+                        .trim_start()
+                        .to_string(),
+                ),
+                ContentBlock::Text { text }
+                    if !text.trim().is_empty()
+                        && !text.starts_with(auto::BOUNDARY_PREFIX)
+                        && !text.starts_with(COMPACT_SUMMARY_LEAD_IN) =>
+                {
+                    Some(text.clone())
+                }
+                _ => None,
+            });
+        self.compact_state.pinned_instruction = found.map(|text| {
+            // Bounded: an unbounded pin would grow the very buffer compaction
+            // exists to shrink. Truncation is announced, never silent.
+            match text.char_indices().nth(PINNED_INSTRUCTION_MAX_CHARS) {
+                Some((cut, _)) => format!(
+                    "{}… [instruction truncated at {} characters]",
+                    &text[..cut],
+                    PINNED_INSTRUCTION_MAX_CHARS
+                ),
+                None => text,
+            }
+        });
+    }
+
     /// Run the multi-level compaction pipeline before each API call.
     ///
     /// Execution order: tool-call-args hygiene → microcompact → autocompact →
@@ -13723,6 +13790,12 @@ impl AgentEngine {
                 Some(m) if matches!(m.role, Role::User) => self.messages.pop(),
                 _ => None,
             };
+            // B7 — the A4 carve-out above only protects the TRAILING user
+            // message, and in a tool-driven run that is a `tool_result`.
+            // Capture the user's ORIGINAL instruction here, while the
+            // pre-compaction buffer still holds it, so the fold below can
+            // re-attach it verbatim.
+            self.remember_original_instruction(live_user_turn.as_ref());
             let result = auto::autocompact(
                 provider.as_ref(),
                 &self.messages,
@@ -13785,6 +13858,25 @@ impl AgentEngine {
                             } else {
                                 folded.push(Self::neutralize_orphaned_tool_result(block));
                             }
+                        }
+                    }
+                    // B7 — re-attach the user's original instruction verbatim,
+                    // AFTER the live turn is folded in so the duplicate check
+                    // sees the whole message. Skipped when the text is already
+                    // present (single-turn sessions, where the live turn IS the
+                    // instruction, and repeat compactions whose previous fold
+                    // was carved out as the live turn).
+                    if let Some(pin) = self.compact_state.pinned_instruction.clone() {
+                        let already_present = folded.iter().any(
+                            |b| matches!(b, ContentBlock::Text { text } if text.contains(&pin)),
+                        );
+                        if !already_present {
+                            folded.insert(
+                                0,
+                                ContentBlock::Text {
+                                    text: format!("{PINNED_INSTRUCTION_HEADER}\n{pin}"),
+                                },
+                            );
                         }
                     }
                     // Token-opt compaction-floor: every message currently in
@@ -19319,6 +19411,171 @@ mod compact_tests {
                 engine.messages
             );
         }
+    }
+
+    #[tokio::test]
+    async fn autocompact_preserves_the_original_instruction_in_a_tool_driven_run() {
+        // B7 / CTX-02. The A4 carve-out above only protects the TRAILING
+        // user message. In a tool-driven run the trailing message is a
+        // `tool_result`, not the instruction — so the user's actual request
+        // is handed wholesale to the summarizer and is gone whenever the
+        // summary does not happen to restate it.
+        //
+        // Measured against the shipped binary (probe
+        // `durability/p07_compaction.py`): the canary `PROMPT-CANARY-COMPACT`
+        // is on the wire for provider requests 1-10 and absent from 11-14,
+        // and the resumable session mirror (49 015 B) does not contain it.
+        // With `[compact] enabled = false` — the negative control leg — the
+        // same canary is present in every request and in the session file.
+        //
+        // `SummaryProvider` returns a canned summary that does NOT mention
+        // the instruction, which is exactly the case the product must not
+        // depend on.
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+
+        const INSTRUCTION: &str =
+            "PROMPT-CANARY-COMPACT: migrate the staging schema, never touch prod.db";
+
+        let messages = vec![
+            // The ORIGINAL instruction — the only place the constraint
+            // "never touch prod.db" is ever stated.
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: INSTRUCTION.into(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Read".into(),
+                    input: json!({"path": "schema.sql"}),
+                    extra: None,
+                }],
+            ),
+            // The LIVE turn is a tool_result, as it is on every turn of a
+            // headless tool-driven run. The A4 carve-out saves THIS, which
+            // carries none of the user's intent.
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "CREATE TABLE users (...)".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+        engine.run_compaction().await.expect("autocompact succeeds");
+
+        // Control: the mechanism that already works must still work, so a
+        // red on the subject leg is about the instruction and not about the
+        // fold collapsing everything.
+        let summary_kept = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("prior conversation summary")));
+        assert!(
+            summary_kept,
+            "CONTROL: the summary itself did not survive the fold, so this \
+             test is measuring the wrong thing: {:?}",
+            engine.messages
+        );
+
+        let preserved = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains(INSTRUCTION)));
+        assert!(
+            preserved,
+            "the user's ORIGINAL instruction must survive compaction \
+             verbatim — it is the only statement of the task and of the \
+             'never touch prod.db' constraint; post-compact messages: {:?}",
+            engine.messages
+        );
+
+        // A7 — the fold must stay one alternating sequence.
+        for pair in engine.messages.windows(2) {
+            assert_ne!(
+                pair[0].role, pair[1].role,
+                "post-compact history must alternate roles (A7): {:?}",
+                engine.messages
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn autocompact_pins_the_original_instruction_once_across_two_compactions() {
+        // The pin must be idempotent: a second compaction re-folds the SAME
+        // instruction rather than re-pinning the previous fold (which would
+        // nest, and grow the buffer every pass — the opposite of compaction).
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+
+        const INSTRUCTION: &str = "PROMPT-CANARY-COMPACT: the one and only task";
+
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: INSTRUCTION.into(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "working".into(),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t9".into(),
+                    content: "done".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+        engine.run_compaction().await.expect("first autocompact");
+        // Re-arm the trigger and drive a second pass over the folded buffer.
+        engine.compact_state.last_input_tokens = 180_000;
+        engine.compact_state.last_real_input_tokens = 180_000;
+        engine.run_compaction().await.expect("second autocompact");
+
+        let occurrences: usize = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.matches(INSTRUCTION).count(),
+                _ => 0,
+            })
+            .sum();
+        assert_eq!(
+            occurrences, 1,
+            "after two compactions the instruction must be present exactly \
+             once, not dropped and not duplicated: {:?}",
+            engine.messages
+        );
     }
 
     #[tokio::test]

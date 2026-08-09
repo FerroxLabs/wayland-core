@@ -475,6 +475,53 @@ mod tests {
         assert_eq!(content, "goodbye world");
     }
 
+    /// B6 at the surface the user actually touches. Probe
+    /// `fs_mode_preservation` measured this end to end against the shipped
+    /// binary: `edited.sh` went 0o755 -> 0o600 and the agent's very next
+    /// `./edited.sh` turn returned `Exit code: 126 … Permission denied`,
+    /// while an untouched sibling in the same directory stayed 0o755.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_preserves_the_files_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let edited = dir.path().join("edited.sh");
+        let untouched = dir.path().join("untouched.sh");
+        for p in [&edited, &untouched] {
+            std::fs::write(p, "#!/bin/sh\necho HELLO\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&edited), 0o755, "fixture did not take 0755");
+
+        let tool = EditTool::new(None);
+        let result = tool
+            .execute(json!({
+                "file_path": edited.to_str().unwrap(),
+                "old_string": "HELLO",
+                "new_string": "GOODBYE"
+            }))
+            .await;
+        assert!(!result.is_error, "unexpected error: {}", result.content);
+
+        // CONTROL first: if the sibling nobody edited also lost its mode, the
+        // environment is the cause and the subject leg means nothing.
+        assert_eq!(
+            mode(&untouched),
+            0o755,
+            "CONTROL: an unedited sibling lost its mode"
+        );
+        assert_eq!(
+            mode(&edited),
+            0o755,
+            "Edit dropped the executable bit: 0o755 -> 0o{:o}; the tool \
+             reported {:?}",
+            mode(&edited),
+            result.content
+        );
+    }
+
     #[tokio::test]
     async fn test_edit_old_string_not_found() {
         let dir = tempdir().unwrap();
