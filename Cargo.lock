@@ -10290,6 +10290,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "wcore-sandbox",
  "wcore-types",
  "which 6.0.3",
  "windows-sys 0.59.0",
