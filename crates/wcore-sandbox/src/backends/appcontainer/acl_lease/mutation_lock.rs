@@ -20,6 +20,44 @@ const MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
 const LOCAL_SYSTEM_RID: u32 = 18;
 
+/// Why this mutex is keyed per USER and not per workspace or per profile.
+///
+/// Narrowing the key is the obvious response to two agents blocking each other,
+/// and it is unsound here for two independent reasons, both of which have to
+/// stop being true before the key can shrink:
+///
+/// 1. **The lease directory is one shared per-user directory.** Every
+///    `ExecutionIdentity::start` runs `recover_dead_leases_locked` over the
+///    whole of `lease_directory()`, and reclaiming a dead owner's lease mutates
+///    THAT owner's DACLs and deletes ITS profile. Two sweeps keyed on different
+///    workspaces would run concurrently over the same files and the same
+///    foreign DACLs, and could each try to reclaim the same abandoned lease.
+///
+/// 2. **Grant sets are never workspace-disjoint.** Every Contained execution
+///    grants `minimal_toolchain_read_dirs()` (`~/.rustup`, `~/.cargo/bin`) and
+///    the shared `%TEMP%\wayland-scratch` tree no matter which workspace it
+///    runs in — see `wcore_tools::workspace_policy`. `apply_explicit_access` is
+///    a read-modify-write of one object's DACL
+///    (`GetNamedSecurityInfoW` → `SetEntriesInAclW` → `SetNamedSecurityInfoW`),
+///    so two concurrent grants on `~/.cargo/bin` are a lost update: whichever
+///    writes second writes back a DACL built from a snapshot taken before the
+///    first, and the first execution's package-SID ALLOW silently disappears
+///    while its child is still running. The symptom would be an intermittent
+///    "cannot execute cargo" inside a sandbox that was granted cargo.
+///
+/// Per-user is also not over-broad: two users have disjoint lease directories
+/// and disjoint `~`/`%TEMP%` trees, which is exactly the boundary the key draws.
+///
+/// The cost this serialises is NOT the number of DACL intents. Measured on
+/// SEANDESKTOP (`measure_locked_phase_cost_per_execution`), an execution with 0
+/// intents and one with 10 projected DACL writes both cost ~40 ms of setup and
+/// ~41-46 ms of teardown; the same 4 intents over a 2000-file tree cost 239 ms
+/// and 240 ms. The driver is `SUB_CONTAINERS_AND_OBJECTS_INHERIT` propagation,
+/// ~100 µs per file under every granted directory, paid once on grant and again
+/// on revoke — so hold time is O(files in the workspace), and a large checkout
+/// is what pushes one execution past the 15 s timeout below and makes a second
+/// agent fail. Shortening the hold means not re-granting a whole tree per
+/// execution, not trimming the intent list.
 pub(super) struct MutationLock(OwnedHandle);
 
 impl MutationLock {
@@ -316,14 +354,38 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// Helper-process entry: acquire the machine-wide mutation mutex and hold
+    /// it, so a sibling process can be observed contending for it.
+    ///
+    /// Two optional rendezvous files let a caller place the hold at a precise
+    /// point in ITS OWN lifecycle rather than at helper start-up, which is what
+    /// the W-B cleanup-timeout proof needs: the mutex must be free while the
+    /// sandbox is being set up and taken by the time teardown runs.
+    /// `WCORE_MUTEX_HELPER_GO` — wait for this path to exist before acquiring.
+    /// `WCORE_MUTEX_HELPER_RELEASE` — release as soon as this path exists.
     #[test]
     fn mutation_lock_helper_entry() {
         let Some(marker) = std::env::var_os("WCORE_MUTEX_HELPER_MARKER") else {
             return;
         };
+        let deadline = Instant::now() + Duration::from_secs(120);
+        if let Some(go) = std::env::var_os("WCORE_MUTEX_HELPER_GO") {
+            let go = std::path::PathBuf::from(go);
+            while !go.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
         let _lock = MutationLock::acquire().unwrap();
         fs::write(marker, b"locked").unwrap();
-        std::thread::sleep(Duration::from_secs(2));
+        match std::env::var_os("WCORE_MUTEX_HELPER_RELEASE") {
+            None => std::thread::sleep(Duration::from_secs(2)),
+            Some(release) => {
+                let release = std::path::PathBuf::from(release);
+                while !release.exists() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
     }
 
     #[test]
