@@ -472,7 +472,7 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// already changes (a hydration admission).
 ///
 /// `catalog_max_chars` bounds the names portion of the line; overflow is
-/// replaced by a `+N more — search to discover` suffix, keeping the line a
+/// replaced by a `+N more not listed` suffix, keeping the line a
 /// bounded directory so an MCP swarm cannot balloon the prompt while every
 /// omitted tool stays discoverable through ToolSearch queries.
 ///
@@ -512,6 +512,12 @@ pub fn fold_deferred_into_catalog(
 /// cap). The fixed prefix and the constant-size `+N more` overflow suffix
 /// sit outside the budget; omitted names remain discoverable via ToolSearch
 /// queries.
+///
+/// The suffix STATES the omitted tools' reachability instead of advising a
+/// search for them. Measured (Wayland Desktop / GPT-5.6 Sol, 2026-08-08):
+/// with `search to discover` on the line, a model hunting two tools that did
+/// not exist ran ten consecutive searches, every one `status=Success`. The
+/// prompt's own inventory told it iterating was the way to find out.
 fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars: usize) -> String {
     const PREFIX: &str =
         "Deferred tools (name-only; load the full schema via this tool before calling): ";
@@ -532,7 +538,10 @@ fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars
         if included > 0 {
             list.push_str(", ");
         }
-        list.push_str(&format!("+{omitted} more — search to discover"));
+        list.push_str(&format!(
+            "+{omitted} more not listed — this tool searches every deferred \
+             tool, listed or not"
+        ));
     }
     format!("{PREFIX}{list}.")
 }
@@ -1141,8 +1150,11 @@ mod tests {
         // Budget fits only a handful of ~18-char names.
         let folded = fold_deferred_into_catalog(defs, 60);
         let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
+        // Truncation accounting only — the marker's WORDING is pinned by
+        // `the_overflow_marker_*` below, so this test does not have to move
+        // when that sentence is retuned.
         assert!(
-            ts.description.contains("more — search to discover"),
+            ts.description.contains(" more"),
             "overflow must be summarized: {}",
             ts.description
         );
@@ -1159,6 +1171,90 @@ mod tests {
             .expect("+N marker present");
         let included = ts.description.matches("mcp__srv__tool_").count();
         assert_eq!(included + omitted, 50);
+    }
+
+    /// The overflow marker as the model reads it — everything from `+N`
+    /// onward. Shared by the two tests below so they cannot drift apart.
+    fn overflow_marker(description: &str) -> String {
+        let at = description
+            .find('+')
+            .unwrap_or_else(|| panic!("no `+N` overflow marker in: {description}"));
+        description[at..].to_string()
+    }
+
+    /// A catalogue with far more deferred tools than the budget can name.
+    fn overflowing_catalog(max_chars: usize) -> String {
+        let mut defs = vec![catalog_def("ToolSearch", false)];
+        for i in 0..50 {
+            defs.push(catalog_def(&format!("mcp__srv__tool_{i:03}"), true));
+        }
+        fold_deferred_into_catalog(defs, max_chars)
+            .iter()
+            .find(|d| d.name == "ToolSearch")
+            .expect("ToolSearch carries the catalog")
+            .description
+            .clone()
+    }
+
+    /// The catalogue must not TELL the model to go searching.
+    ///
+    /// Measured, Wayland Desktop / GPT-5.6 Sol, 2026-08-08: ten consecutive
+    /// ToolSearch calls, every one `status=Success`, no matcher miss. The
+    /// model was hunting a web-search tool and a `research-advisor` skill
+    /// that DO NOT EXIST — one dead end, then four rephrasings. The overflow
+    /// marker read `+N more — search to discover`, i.e. the prompt's own
+    /// inventory line advised discovery-by-iteration, and until 0b94370f the
+    /// miss said nothing to stop it.
+    ///
+    /// The marker's job is to be an accurate DIRECTORY footnote: N tools are
+    /// not named here and are still reachable. It is not a suggested action.
+    ///
+    /// MUTANT: restore `search to discover` and this fails.
+    #[test]
+    fn the_overflow_marker_does_not_advise_discovery_by_searching() {
+        let marker = overflow_marker(&overflowing_catalog(60));
+        for invitation in [
+            "search to discover",
+            "to discover",
+            "search again",
+            "keep searching",
+        ] {
+            assert!(
+                !marker.to_lowercase().contains(invitation),
+                "the overflow marker must not read as an instruction to go \
+                 searching ({invitation:?}); got: {marker}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL for the test above. "Do not invite a search loop" is
+    /// trivially satisfiable by saying nothing, or by implying the omitted
+    /// tools are gone — both of which are WORSE than the invitation, because
+    /// a model that believes a tool is unavailable stops looking for a tool
+    /// that is right there.
+    ///
+    /// MUTANT: collapse the marker to a bare `+{omitted} more` and this fails
+    /// while `the_overflow_marker_does_not_advise_discovery_by_searching`
+    /// stays green.
+    #[test]
+    fn the_overflow_marker_still_says_the_omitted_tools_are_reachable() {
+        let marker = overflow_marker(&overflowing_catalog(60));
+        let lower = marker.to_lowercase();
+
+        assert!(
+            ["searches", "reachable", "loadable", "findable"]
+                .iter()
+                .any(|w| lower.contains(w)),
+            "the marker must state that the unlisted tools are still \
+             reachable through this tool; got: {marker}"
+        );
+        for absent in ["unavailable", "not available", "cannot be", "hidden"] {
+            assert!(
+                !lower.contains(absent),
+                "the marker must not imply the unlisted tools are gone \
+                 ({absent:?}); got: {marker}"
+            );
+        }
     }
 
     /// Codex verify finding: `catalog_max_chars` must be a HARD bound. The
@@ -1182,7 +1278,7 @@ mod tests {
             ts.description
         );
         assert!(
-            ts.description.contains("+2 more — search to discover"),
+            ts.description.contains("+2 more"),
             "all names collapse into the omitted marker: {}",
             ts.description
         );
