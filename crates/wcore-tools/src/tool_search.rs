@@ -87,6 +87,32 @@ fn is_structural_noise(token: &str) -> bool {
     STRUCTURAL_NOISE.contains(&token)
 }
 
+/// How much of the query the miss message may quote back.
+///
+/// The miss message exists so the caller can see WHICH query missed, and 200
+/// characters is more than any intentional query needs. Echoing an unbounded
+/// query is what turns a pasted-in JSON catalogue into a tool RESULT of the
+/// same size: the blob then occupies the context twice, and the newest thing
+/// the model sees is its own blob rather than anything it can act on. In the
+/// live GPT-5.6 Sol run that motivated this, that pair repeated 25 times.
+const MAX_ECHOED_QUERY_CHARS: usize = 200;
+
+/// The query as the miss message may quote it — bounded by
+/// [`MAX_ECHOED_QUERY_CHARS`], on a char boundary, with an explicit marker so a
+/// truncated echo can never be mistaken for the query itself.
+fn echoable(query: &str) -> String {
+    if query.chars().count() <= MAX_ECHOED_QUERY_CHARS {
+        return query.to_string();
+    }
+    let head: String = query.chars().take(MAX_ECHOED_QUERY_CHARS).collect();
+    format!(
+        "{head}… (query truncated; it was {} characters. A query is a tool name \
+         or a few keywords — do not paste a tool catalogue or a previous \
+         ToolSearch result into it.)",
+        query.chars().count()
+    )
+}
+
 /// Upper bound on returned matches. Each match carries the tool's FULL input
 /// schema, so an unbounded relaxed match could pour an entire MCP catalogue
 /// into one tool result. Matches are RANKED before the cut, so this is a
@@ -381,7 +407,7 @@ impl Tool for ToolSearchTool {
 
         if matches.is_empty() {
             return ToolResult {
-                content: format!("No deferred tools matching \"{}\" found.", query),
+                content: format!("No deferred tools matching \"{}\" found.", echoable(query)),
                 is_error: false,
             };
         }
@@ -768,9 +794,14 @@ mod tests {
     /// the blob NAMES scores 32 for its own name. 300 decoys outrank it and
     /// MAX_MATCHES cuts it off entirely: a guaranteed miss, 25 times over.
     ///
-    /// MUTANT: drop the structural-noise filter and this fails (the named tool
-    /// is nowhere in the ten returned matches); drop the exact-name tier and it
-    /// fails whenever a decoy's prose still carries non-structural overlap.
+    /// MUTANT (measured, not asserted from the armchair): revert BOTH the
+    /// noise filter and the exact-name tier — i.e. exactly the first-pass C-5
+    /// code — and this fails with
+    /// `left: Some("mcp__acme_suite__operation_0")`, the named tool nowhere in
+    /// the ten returned matches. Reverting the noise filter ALONE leaves this
+    /// test green, because the exact-name tier still carries it; that half is
+    /// pinned by the negative control below, which is the test that actually
+    /// fails when only the filter goes.
     #[tokio::test]
     async fn a_pathological_json_blob_still_finds_the_tool_it_names() {
         let tool = ToolSearchTool::new(build_verbose_mcp_defs());
@@ -820,6 +851,50 @@ mod tests {
             result.content.starts_with("No deferred tools matching"),
             "JSON scaffolding is not a search term; got: {}",
             match_names(&result.content).join(", ")
+        );
+    }
+
+    /// The other half of "a pathological query is handled sanely": a MISS on a
+    /// blob must not answer with the blob.
+    ///
+    /// The miss message quotes the query back, so before this bound a 200-line
+    /// pasted-in catalogue produced a tool RESULT of the same size — the blob
+    /// now sits in the context twice, and the newest thing the model sees is
+    /// its own blob rather than anything it can act on. That is the shape of
+    /// the live loop: 25 blob searches, 25 blob echoes, run killed.
+    ///
+    /// MUTANT: echo `query` unbounded and this fails.
+    #[tokio::test]
+    async fn a_miss_on_a_blob_does_not_echo_the_blob_back() {
+        let tool = ToolSearchTool::new(build_verbose_mcp_defs());
+        let query = pathological_catalogue_blob(None);
+
+        let result = tool.execute(json!({ "query": query.clone() })).await;
+        assert!(!result.is_error);
+        assert!(
+            result.content.starts_with("No deferred tools matching"),
+            "precondition: this query must miss; got: {}",
+            result.content
+        );
+        assert!(
+            result.content.len() < query.len() / 4,
+            "a miss must not answer a {}-char blob with a {}-char echo of it",
+            query.len(),
+            result.content.len()
+        );
+        assert!(
+            result.content.contains("truncated"),
+            "a truncated echo must say so, or it reads as the query itself; \
+             got: {}",
+            result.content
+        );
+
+        // An ordinary query is still quoted in full — the bound is for blobs,
+        // and a miss the caller cannot read is a worse miss.
+        let ordinary = tool.execute(json!({"query": "zzzznotpresent"})).await;
+        assert_eq!(
+            ordinary.content, "No deferred tools matching \"zzzznotpresent\" found.",
+            "the bound must not touch a query anyone would actually type"
         );
     }
 
