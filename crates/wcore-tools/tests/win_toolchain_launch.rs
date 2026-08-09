@@ -286,6 +286,28 @@ fn discriminate_direct_spawn_versus_shell_child() {
 /// 0xC0000142 — and no other property (System32 vs Program Files, granted vs
 /// AAP-inherited, Microsoft-signed vs not) separates the two groups the same
 /// way. Each row is spawned DIRECTLY, so `cmd.exe` is not in the picture.
+///
+/// # Why this asserts, and did not
+///
+/// This test printed a table and asserted NOTHING, so it could not fail.
+/// Measured on SeanDesktop 2026-08-10 with `SYSTEMROOT` pointed at an empty
+/// directory: all five rows returned `ERR=… does not exist`, nothing was
+/// spawned, no property was tested, and the binary still reported
+/// `test result: ok. 1 passed`. A hypothesis test that is falsifiable only by a
+/// human reading stdout is not a gate. Three checks now stand between the table
+/// and a green:
+///
+/// 1. **Decidedness.** A row whose backend call errored measured nothing, so an
+///    undecided row is a failure, not a data point. This is the check the
+///    `SYSTEMROOT` sabotage trips.
+/// 2. **Positive control.** The `cmd` row must exit 0 AND return its own
+///    `ok` on stdout. A sandbox that starts nothing, or whose capture is dead,
+///    cannot satisfy the split below honestly.
+/// 3. **The hypothesis itself.** Every `links_user32` row must die at image
+///    initialization with `STATUS_DLL_INIT_FAILED`, and no row that does not
+///    link user32 may die that way. It is deliberately NOT "the other rows exit
+///    0": `find /?` legitimately exits 1 under this sandbox, and an exit code
+///    from a program that ran is exactly the evidence that it was spawnable.
 #[test]
 #[ignore = "explicit native Windows toolchain measurement"]
 fn user32_linkage_splits_the_spawnable_from_the_dead() {
@@ -305,6 +327,13 @@ fn user32_linkage_splits_the_spawnable_from_the_dead() {
         std::env::var("WAYLAND_SANDBOX_DIAG_UI_LIMITS").ok()
     );
 
+    // The backend refused to produce an outcome: this row measured nothing.
+    // Same sentinel convention as `parse()` above.
+    const UNDECIDED: i32 = i32::MIN;
+    // The image never finished initializing — the "dead" side of the split.
+    const STATUS_DLL_INIT_FAILED: i32 = 0xC000_0142_u32 as i32;
+
+    let mut rows: Vec<(&str, bool, i32, String)> = Vec::new();
     for (name, links_user32, argv) in [
         (
             "cmd",
@@ -333,17 +362,68 @@ fn user32_linkage_splits_the_spawnable_from_the_dead() {
                 cwd: Some(root.clone()),
             },
         ));
-        match outcome {
-            Ok(o) => println!(
-                "U32 name={name} links_user32={links_user32} exit={} stdout={:?} stderr={:?}",
-                o.exit_code,
-                String::from_utf8_lossy(&o.stdout).trim(),
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            Err(e) => println!("U32 name={name} links_user32={links_user32} ERR={e}"),
-        }
+        let row = match outcome {
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_owned();
+                println!(
+                    "U32 name={name} links_user32={links_user32} exit={} stdout={stdout:?} stderr={:?}",
+                    o.exit_code,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                (name, links_user32, o.exit_code, stdout)
+            }
+            Err(e) => {
+                println!("U32 name={name} links_user32={links_user32} ERR={e}");
+                (name, links_user32, UNDECIDED, format!("ERR={e}"))
+            }
+        };
+        rows.push(row);
     }
     let _ = std::fs::remove_dir_all(&root);
+
+    let undecided: Vec<&str> = rows
+        .iter()
+        .filter(|(_, _, exit, _)| *exit == UNDECIDED)
+        .map(|(name, ..)| *name)
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "the sandbox returned no outcome for {undecided:?}, so the user32 split was never \
+         measured and this run certifies nothing. rows: {rows:?}"
+    );
+
+    let (_, _, cmd_exit, cmd_stdout) = rows
+        .iter()
+        .find(|(name, ..)| *name == "cmd")
+        .expect("the cmd row is the positive control and must be in the table");
+    assert_eq!(
+        *cmd_exit, 0,
+        "POSITIVE CONTROL FAILED: the sandbox cannot run `cmd /c echo ok`, so every other row \
+         is void. rows: {rows:?}"
+    );
+    assert!(
+        cmd_stdout.contains("ok"),
+        "POSITIVE CONTROL FAILED: `cmd /c echo ok` exited 0 but its output never arrived, so \
+         stdout capture is dead and no row below can be read. rows: {rows:?}"
+    );
+
+    for (name, links_user32, exit, detail) in &rows {
+        if *links_user32 {
+            assert_eq!(
+                *exit, STATUS_DLL_INIT_FAILED,
+                "{name} links USER32.dll, so the hypothesis predicts it dies at image \
+                 initialization with {STATUS_DLL_INIT_FAILED}; it returned {exit} \
+                 ({detail:?}). The split is REFUTED. rows: {rows:?}"
+            );
+        } else {
+            assert_ne!(
+                *exit, STATUS_DLL_INIT_FAILED,
+                "{name} does not link USER32.dll, so the hypothesis predicts it is spawnable; \
+                 it died at image initialization instead ({detail:?}). The split is REFUTED \
+                 and something other than user32 linkage is killing these images. rows: {rows:?}"
+            );
+        }
+    }
 }
 
 /// W-D acceptance. Under the DEFAULT (`contained`) posture, `node` and `python`
