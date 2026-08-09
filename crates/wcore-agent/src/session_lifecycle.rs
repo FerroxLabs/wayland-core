@@ -313,8 +313,15 @@ fn outstanding_items(state: &ReducedSessionState) -> Vec<ReconcileItem> {
                 other => format!("{other:?}"),
             },
             // Only an Unknown tool takes `ToolExecutionResolved`; the reducer's
-            // `require_tool_unknown` refuses it from Prepared or Running.
-            operator_resolvable: matches!(tool.effect, ToolEffectState::Unknown { .. }),
+            // `require_tool_unknown` refuses it from Prepared or Running. A
+            // RUNNING tool is still resolvable here because [`reconcile_resolve`]
+            // first records the interruption that the crash left implicit — see
+            // the comment there for why that is an operator-writable fact and
+            // not an engine-only receipt.
+            operator_resolvable: matches!(
+                tool.effect,
+                ToolEffectState::Running | ToolEffectState::Unknown { .. }
+            ),
         });
     }
 
@@ -833,6 +840,34 @@ pub fn reconcile_resolve(
         }
     })?;
 
+    // A crash leaves the interruption implicit: the journal's last word on the
+    // tool is `Running`, and only `Unknown` accepts an operator receipt. The
+    // engine records exactly this transition on its own restart
+    // (`ToolUnknownReason::Interrupted`), but that path needs a live engine,
+    // so a headless operator could never reach it. Recording it here asserts
+    // nothing about the effect's outcome — it is an admission of ignorance,
+    // and the exclusive writer lease this function holds is the proof that no
+    // engine still owns the execution.
+    if matches!(
+        state.tools.get(tool_execution_id).map(|tool| &tool.effect),
+        Some(ToolEffectState::Running)
+    ) {
+        journal
+            .append(SessionEvent::ToolExecutionUnknown {
+                tool_execution_id: tool_execution_id.to_owned(),
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                evidence: serde_json::json!({
+                    "recovery": "wayland-core session reconcile",
+                    "prior_state": "running",
+                    "operator_id": operator_id,
+                }),
+            })
+            .map_err(|source| SessionLifecycleError::Journal {
+                path: path.clone(),
+                source,
+            })?;
+    }
+
     let event = match item.kind {
         ReconcileKind::ToolExecution => {
             let resolution = match resolution {
@@ -956,7 +991,18 @@ pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
     // across five classes. Refuse here first, with the blocking items named, so
     // the operator gets exit code 5 and an actionable list rather than an
     // opaque "invalid journal state transition" from deep inside the reducer.
-    let outstanding = outstanding_items(&state);
+    //
+    // Hook phases are excluded from the refusal: they are the engine's own
+    // bookkeeping about whether a hook's outcome was applied, not an external
+    // effect an operator can have an opinion about, and no verb has ever been
+    // able to dispose of one. Counting them made a crash mid-tool-round
+    // permanently uncancellable, because a `Finished` pre-tool phase is
+    // consumed only by a recovery checkpoint that a crashed run never records.
+    // They are abandoned below instead.
+    let outstanding = outstanding_items(&state)
+        .into_iter()
+        .filter(|item| item.kind != ReconcileKind::HookPhase)
+        .collect::<Vec<_>>();
     if !outstanding.is_empty() {
         return Err(SessionLifecycleError::OutstandingReconcile {
             id: id.to_owned(),
@@ -973,6 +1019,38 @@ pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
             source,
         }
     })?;
+    // Abandon the interrupted turns' nonterminal hook phases first. Each takes
+    // the one terminal transition its state admits; `AbandonedUnknown` remains
+    // nonterminal for continuation, so this closes the turn without ever
+    // claiming a lost hook outcome was applied.
+    for (hook_phase_id, phase) in &state.hook_phases {
+        if !pending.contains(&phase.turn_id) {
+            continue;
+        }
+        let event = match phase.state {
+            HookPhaseState::Prepared => Some(SessionEvent::HookPhaseNotStarted {
+                hook_phase_id: hook_phase_id.clone(),
+                reason: crate::session_journal::HookPhaseNotStartedReason::CancelledBeforeStart,
+            }),
+            HookPhaseState::Started { .. } | HookPhaseState::Finished { .. } => {
+                Some(SessionEvent::HookPhaseAbandonedUnknown {
+                    hook_phase_id: hook_phase_id.clone(),
+                })
+            }
+            HookPhaseState::NotStarted { .. }
+            | HookPhaseState::NotApplicable
+            | HookPhaseState::AbandonedUnknown
+            | HookPhaseState::Consumed { .. } => None,
+        };
+        if let Some(event) = event {
+            journal
+                .append(event)
+                .map_err(|source| SessionLifecycleError::Journal {
+                    path: path.clone(),
+                    source,
+                })?;
+        }
+    }
     for turn_id in &pending {
         journal
             .append(SessionEvent::TurnCancelled {

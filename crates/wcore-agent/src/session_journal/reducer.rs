@@ -3522,7 +3522,21 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
         }
         SessionEvent::HookPhaseAbandonedUnknown { hook_phase_id } => {
             let phase = required_mut(&mut state.hook_phases, "hook phase", hook_phase_id)?;
-            if !matches!(phase.state, HookPhaseState::Started { .. }) {
+            // `Finished` is abandonable too. A finished phase leaves `Finished`
+            // only by being consumed by a recovery checkpoint, so a crash
+            // between the hook finishing and the next checkpoint used to leave
+            // a phase with NO reachable terminal state at all — and because
+            // `require_turn_descendants_terminal` counts `Finished` as
+            // nonterminal, its turn could then never be committed, failed or
+            // cancelled. Abandoning it is the honest disposition: the outcome
+            // existed and was never applied to the conversation.
+            // `AbandonedUnknown` stays nonterminal for CONTINUATION (see
+            // `recovery::plan`), so this only ever unblocks abandoning a turn,
+            // never resuming one across a lost hook outcome.
+            if !matches!(
+                phase.state,
+                HookPhaseState::Started { .. } | HookPhaseState::Finished { .. }
+            ) {
                 return Err(JournalError::InvalidTransition(format!(
                     "hook phase {hook_phase_id} is not started and unknown"
                 )));
