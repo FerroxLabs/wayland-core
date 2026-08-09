@@ -371,10 +371,12 @@ fn network_block_hint_appended_only_when_denied_failed_and_network_cmd() {
         "hint must explain the block and point to WebFetch + the `web` search tool:\n{}",
         r.content
     );
-    // #657: the hint must forbid fabricating a missing-tool cause.
+    // The hint must never forbid the model from reporting a cause. #657 added
+    // such a clause; the W2/W3 sandbox gate measured it suppressing the TRUE
+    // cause while the false one (egress) was being asserted.
     assert!(
-        r.content.contains("NOT a missing tool") && r.content.contains("do NOT claim"),
-        "hint must tell the model not to invent a missing-tool remedy:\n{}",
+        !r.content.contains("do NOT claim") && !r.content.contains("do not invent any other"),
+        "the annotation must never forbid reporting a cause:\n{}",
         r.content
     );
 
@@ -401,6 +403,326 @@ fn network_block_hint_appended_only_when_denied_failed_and_network_cmd() {
     assert!(
         !r.content.contains("network egress is OFF"),
         "no hint on success"
+    );
+}
+
+// ── Foundation W2/W3 gate: the annotation must not assert a false cause ─────
+//
+// Measured on macOS and Windows against wayland-core d6f76c67: every sandbox
+// failure the gate observed was a FILESYSTEM denial or a refused PROCESS
+// LAUNCH, and every one of them was annotated "Bash network egress is OFF …
+// that is why it failed", plus a clause forbidding the model from reporting
+// any other cause. The node probe used a `file:` dependency and never touched
+// the network at all. An agent cannot self-correct from that: it is told the
+// wrong reason and told not to look further.
+//
+// The strings below are the ones the gate recorded, verbatim.
+
+/// The claim that is only true when the output says the network failed.
+const EGRESS_CLAIM: &str = "that is why it failed";
+
+/// The marker the true-cause branch writes immediately before it quotes the
+/// line it selected. It appears in no command's output, so an assertion
+/// anchored to it cannot be satisfied by a test's own input body.
+const QUOTED_CAUSE_MARKER: &str = "reports a different failure:\n";
+
+fn failed(body: &str) -> ToolResult {
+    ToolResult {
+        content: body.to_string(),
+        is_error: true,
+    }
+}
+
+/// The text the ANNOTATION added, with the body the tool already had removed.
+///
+/// Every claim of the form "X reaches the model" must be graded against this,
+/// never against `result.content`. `annotate_network_block` APPENDS, so
+/// `content.contains(<anything in the body>)` is true before the function is
+/// even called. Three assertions on this feature were exactly that tautology
+/// and stayed green while the whole true-cause branch was deleted.
+fn annotation_only<'a>(content: &'a str, body: &str) -> &'a str {
+    content
+        .strip_prefix(body)
+        .expect("annotate_network_block must append to the body, never rewrite it")
+}
+
+/// The cause line the production code SELECTED and quoted, exactly as it
+/// rendered it — its own two-space indent included. `None` when no quoted-cause
+/// block was emitted at all.
+fn quoted_cause_line(content: &str) -> Option<&str> {
+    content.split_once(QUOTED_CAUSE_MARKER)?.1.lines().next()
+}
+
+/// The load-bearing claim of this fix: the true cause is EXTRACTED from the
+/// output, SELECTED from among several candidate lines, TRIMMED, and quoted
+/// inside the annotation.
+///
+/// Every assertion here is graded against a string that does not appear in the
+/// input body:
+///   * `annotation_only(...)` strips the body before looking for the path;
+///   * the expected quoted line carries production's own `"  "` indent and has
+///     the input's leading tab / trailing spaces removed, so the exact string
+///     asserted exists nowhere in the input;
+///   * a LATER line also matching the needle list must not be the one chosen.
+#[test]
+fn true_cause_line_is_selected_trimmed_and_quoted_inside_the_annotation() {
+    // The needle-bearing line is deliberately ragged (leading tab + spaces,
+    // trailing spaces) and is preceded and followed by decoys.
+    let body = "Exit code: 243\nSTDOUT:\n\nSTDERR:\n\
+                npm WARN using --force, --no-audit\n\
+                \t  npm ERR! Error: EACCES: open '/Users/me/.npmrc'   \n\
+                npm ERR! errno -13\n\
+                npm ERR! log written to /Users/me/.npm/_logs/x.log, access is denied\n";
+    let r = annotate_network_block(
+        "npm install file:../local-pkg",
+        NetworkPolicy::Deny,
+        failed(body),
+    );
+    let annotation = annotation_only(&r.content, body);
+
+    // 1. The denied path must reach the model through the ANNOTATION. This is
+    //    the assertion the vacuous version got wrong: it read `r.content`,
+    //    which contains the body.
+    assert!(
+        annotation.contains("/Users/me/.npmrc"),
+        "the path the platform named must be carried by the annotation itself:\n{annotation}"
+    );
+
+    // 2. Exactly which line was selected, and how it was rendered. The string
+    //    below is not in the body: the body's copy is tab-indented and has
+    //    trailing spaces; this one has production's two-space indent and is
+    //    trimmed.
+    assert_eq!(
+        quoted_cause_line(&r.content),
+        Some("  npm ERR! Error: EACCES: open '/Users/me/.npmrc'"),
+        "the annotation must quote the FIRST needle-bearing line, trimmed:\n{}",
+        r.content
+    );
+
+    // 3. The later decoy ("access is denied") also matches the needle list and
+    //    must NOT have been chosen.
+    assert!(
+        !quoted_cause_line(&r.content).unwrap().contains("_logs"),
+        "a later needle-bearing line must not displace the first:\n{}",
+        r.content
+    );
+
+    assert!(!r.content.contains(EGRESS_CLAIM), "not an egress failure");
+}
+
+/// Needle coverage, graded honestly. The static prose of the true-cause branch
+/// already contains `0xC0000142` as an example, so asserting on that NTSTATUS
+/// passes even when the selected line is dropped. This leg uses
+/// `0xC0000135` (STATUS_DLL_NOT_FOUND), which the prose does NOT mention, so
+/// the only way it can reach the annotation is via the extracted line.
+#[test]
+fn windows_dll_not_found_status_reaches_the_model_only_via_extraction() {
+    let body = "Exit code: -1073741515\nSTDOUT:\n\nSTDERR:\n  \
+                git.exe - System Error: the code execution cannot proceed because a \
+                required DLL was not found (0xC0000135).  \n";
+    let r = annotate_network_block("git fetch origin", NetworkPolicy::Deny, failed(body));
+    let annotation = annotation_only(&r.content, body);
+    assert!(
+        annotation.to_lowercase().contains("0xc0000135"),
+        "the NTSTATUS Windows gave must be carried by the annotation:\n{annotation}"
+    );
+    assert_eq!(
+        quoted_cause_line(&r.content),
+        Some(
+            "  git.exe - System Error: the code execution cannot proceed because a \
+             required DLL was not found (0xC0000135)."
+        ),
+        "the launch status line must be quoted, trimmed:\n{}",
+        r.content
+    );
+}
+
+/// Ordering: egress evidence wins even when a filesystem-shaped line came
+/// FIRST. Nothing else exercises the early return across lines.
+#[test]
+fn egress_evidence_on_a_later_line_beats_an_earlier_filesystem_line() {
+    let body = "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                warning: could not lock config file /home/u/.gitconfig: Permission denied\n\
+                curl: (6) Could not resolve host: registry.npmjs.org\n";
+    let r = annotate_network_block("npm install left-pad", NetworkPolicy::Deny, failed(body));
+    assert!(
+        r.content.contains(EGRESS_CLAIM),
+        "a named network failure anywhere in the output is still egress:\n{}",
+        r.content
+    );
+    assert_eq!(
+        quoted_cause_line(&r.content),
+        None,
+        "egress must not also emit a quoted non-egress cause:\n{}",
+        r.content
+    );
+}
+
+#[test]
+fn macos_filesystem_denial_is_not_blamed_on_network_egress() {
+    // macOS seatbelt: the binary LAUNCHES and then hits a named path denial.
+    // `npm install` matches the network heuristic; a `file:` dependency means
+    // the network was never involved.
+    let body = "Exit code: 243\nSTDOUT:\n\nSTDERR:\n\
+                npm ERR! code EACCES\n\
+                npm ERR! syscall open\n\
+                npm ERR! path /Users/me/.npmrc\n\
+                npm ERR! errno -1\n\
+                npm ERR! Error: EACCES: permission denied, open '/Users/me/.npmrc'\n";
+    let r = annotate_network_block(
+        "npm install file:../local-pkg",
+        NetworkPolicy::Deny,
+        failed(body),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a filesystem denial must not be asserted as an egress failure:\n{}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("do NOT claim") && !r.content.contains("do not invent any other"),
+        "the annotation must never forbid reporting a cause:\n{}",
+        r.content
+    );
+    // Graded against the ANNOTATION, not `r.content` — the body already holds
+    // this text, so `r.content.contains(...)` could never fail.
+    assert_eq!(
+        quoted_cause_line(&r.content),
+        Some("  npm ERR! code EACCES"),
+        "the first line naming a non-network cause must be quoted back:\n{}",
+        r.content
+    );
+}
+
+#[test]
+fn macos_git_path_denial_is_not_blamed_on_network_egress() {
+    // The gate's git leg: the binary launches, then EPERM on ~/.gitconfig.
+    // `git clone <local path>` never opens a socket.
+    let body = "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                fatal: could not lock config file /Users/me/.gitconfig: Operation not permitted\n";
+    let r = annotate_network_block(
+        "git clone /srv/mirror/repo.git work",
+        NetworkPolicy::Deny,
+        failed(body),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a seatbelt path denial must not be asserted as an egress failure:\n{}",
+        r.content
+    );
+    // The body holds this path already, so grade the ANNOTATION alone.
+    assert!(
+        annotation_only(&r.content, body).contains("/Users/me/.gitconfig"),
+        "the denied path the platform named must be carried by the annotation:\n{}",
+        r.content
+    );
+    assert_eq!(
+        quoted_cause_line(&r.content),
+        Some(
+            "  fatal: could not lock config file /Users/me/.gitconfig: \
+             Operation not permitted"
+        ),
+        "the seatbelt line must be quoted back verbatim:\n{}",
+        r.content
+    );
+}
+
+#[test]
+fn windows_process_launch_failure_is_not_blamed_on_network_egress() {
+    // Windows AppContainer: the binary does not launch at all. The platform
+    // gives an NTSTATUS, so surface it.
+    let body = "Exit code: -1073741502\nSTDOUT:\n\nSTDERR:\n\
+                git.exe - Application Error: The application was unable to start correctly \
+                (0xc0000142). Click OK to close the application.\n";
+    let r = annotate_network_block("git fetch origin", NetworkPolicy::Deny, failed(body));
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a refused process launch must not be asserted as an egress failure:\n{}",
+        r.content
+    );
+    // `r.content.to_lowercase().contains("0xc0000142")` was a double tautology:
+    // the body carries it AND the branch's static prose names 0xC0000142 as an
+    // example. Grade the SELECTED line instead.
+    assert_eq!(
+        quoted_cause_line(&r.content),
+        Some(
+            "  git.exe - Application Error: The application was unable to start \
+             correctly (0xc0000142). Click OK to close the application."
+        ),
+        "the launch-failure line the platform gave must be quoted back:\n{}",
+        r.content
+    );
+    assert!(
+        !r.content.contains("do NOT claim") && !r.content.contains("do not invent any other"),
+        "the annotation must never forbid reporting a cause:\n{}",
+        r.content
+    );
+}
+
+/// POSITIVE CONTROL. Deleting the banner is not the fix — a real egress denial
+/// must still be named, or this lane has only removed a useful message.
+#[test]
+fn genuine_egress_denial_is_still_named_as_the_cause() {
+    for body in [
+        "Exit code: 6\nSTDOUT:\n\nSTDERR:\ncurl: (6) Could not resolve host: example.com\n",
+        "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+         fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n",
+        "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+         npm ERR! network request to https://registry.npmjs.org/left-pad failed, reason: \
+         getaddrinfo EAI_AGAIN registry.npmjs.org\n",
+    ] {
+        let r = annotate_network_block(
+            "curl -sS https://example.com",
+            NetworkPolicy::Deny,
+            failed(body),
+        );
+        assert!(
+            r.content.contains("network egress is OFF") && r.content.contains(EGRESS_CLAIM),
+            "a real egress denial must still be named as the cause; body was:\n{body}\ngot:\n{}",
+            r.content
+        );
+        assert!(r.is_error);
+    }
+}
+
+/// A macOS socket denial reads as BOTH a network failure and "Operation not
+/// permitted". It is egress, and must be classified as such.
+#[test]
+fn socket_denial_reported_as_operation_not_permitted_is_still_egress() {
+    let r = annotate_network_block(
+        "curl -sS https://example.com",
+        NetworkPolicy::Deny,
+        failed(
+            "Exit code: 7\nSTDOUT:\n\nSTDERR:\n\
+             curl: (7) Failed to connect to example.com port 443: Operation not permitted\n",
+        ),
+    );
+    assert!(
+        r.content.contains(EGRESS_CLAIM),
+        "a denied socket is an egress failure even when the errno is EPERM:\n{}",
+        r.content
+    );
+}
+
+/// The silent-failure case the annotation was originally written for
+/// (`curl -s`, exit 6, no output). Nothing is known, so nothing may be
+/// asserted — but the anti-thrash pointer to WebFetch must survive.
+#[test]
+fn silent_failure_offers_egress_as_a_possibility_not_a_verdict() {
+    let r = annotate_network_block(
+        "curl -sL https://x.y",
+        NetworkPolicy::Deny,
+        failed("Exit code: 6\nSTDOUT:\n\nSTDERR:\n"),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "with no evidence, no cause may be asserted:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.contains("network egress is OFF") && r.content.contains("WebFetch"),
+        "the anti-thrash pointer must survive:\n{}",
+        r.content
     );
 }
 
@@ -914,6 +1236,13 @@ fn sandbox_denial_names_the_policy_denied_path_and_a_remedy() {
     assert!(
         result.is_error,
         "a denied command stays an error; got:\n{}",
+        result.content
+    );
+    // No annotation may forbid the model from reporting a cause (W2/W3 gate).
+    assert!(
+        !result.content.contains("do not invent any other")
+            && !result.content.contains("Do NOT report"),
+        "the sandbox-denial annotation must never forbid reporting a cause; got:\n{}",
         result.content
     );
 }
