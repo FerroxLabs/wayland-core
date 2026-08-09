@@ -13,10 +13,21 @@
 //!   hazard, C8)"*. Raising a boundary from the environment is the same class
 //!   of mistake as lowering one from it.
 //!
-//! * **SEC-13** — meanwhile the operator's TRUSTED `[security] egress_allow`
-//!   had no effect on Bash at all: `egress_allow = ["127.0.0.1"]` still
-//!   recorded `accept_count=0`. Every allowlist any operator has ever written
-//!   was decorative for the shell.
+//! * **SEC-13** — meanwhile the operator had no trusted lever at all: nothing
+//!   in the config file could give a `Contained` Bash session network.
+//!
+//!   The first repair welded that lever onto `[security] egress_allow`, and
+//!   that was a worse trade than the defect. `egress_allow` is a PER-HOST
+//!   permit for the in-process HTTP gate; the `Contained` branch is the DEFAULT
+//!   for any repo the operator has not fingerprint-trusted; and no sandbox
+//!   backend can filter an arbitrary shell's egress by host, so the shell grant
+//!   is all-or-nothing. Measured on that draft: `egress_allow = ["docs.rs"]`
+//!   opened `127.0.0.1:44755`, a host the operator never listed. So permitting
+//!   one host for one subsystem handed an untrusted cloned repository's shell
+//!   arbitrary outbound TCP. The lever is now its own operator-owned switch,
+//!   `[security] allow_sandboxed_shell_network`, default false, read from the
+//!   trusted (global) config layer alone — the same shape as
+//!   `[security] enabled`.
 //!
 //! These tests are graded from a listener the TEST owns — a real
 //! `TcpListener` whose completed-`accept()` count no product log line can
@@ -162,7 +173,7 @@ fn hermetic_env(bash_allow_network: Option<&str>) -> (tempfile::TempDir, EnvGuar
 /// `workspace_trust` is left at the UNTRUSTED default, which is what selects
 /// the strict (`contained`) bootstrap branch — the branch the conformance gate
 /// measured and the branch every remote/channel session also lands on.
-fn contained_config(egress_allow: &[&str]) -> Config {
+fn contained_config(egress_allow: &[&str], allow_sandboxed_shell_network: bool) -> Config {
     let mut config = Config {
         provider_label: "openai".into(),
         provider: ProviderType::OpenAI,
@@ -175,6 +186,7 @@ fn contained_config(egress_allow: &[&str]) -> Config {
         ..Default::default()
     };
     config.security.egress_allow = egress_allow.iter().map(|s| (*s).to_string()).collect();
+    config.security.allow_sandboxed_shell_network = allow_sandboxed_shell_network;
     config
 }
 
@@ -279,7 +291,7 @@ async fn control_the_observer_is_reachable_when_the_policy_allows_it() {
     let obs = Observer::start();
 
     let (content, network) = curl_through_bootstrapped_bash(
-        contained_config(&[]),
+        contained_config(&[], false),
         workdir.path(),
         obs.port,
         Some(NetworkPolicy::Inherit),
@@ -313,7 +325,8 @@ async fn a_bare_env_var_cannot_open_the_sandboxed_shell_network() {
     let obs = Observer::start();
 
     let (content, network) =
-        curl_through_bootstrapped_bash(contained_config(&[]), workdir.path(), obs.port, None).await;
+        curl_through_bootstrapped_bash(contained_config(&[], false), workdir.path(), obs.port, None)
+            .await;
 
     assert_eq!(
         obs.accept_count(),
@@ -360,20 +373,61 @@ async fn a_bare_env_var_cannot_open_a_directly_constructed_contained_policy() {
 
 // ── SEC-13 ───────────────────────────────────────────────────────────────────
 
-/// SEC-13, the direction that was inert. The operator's TRUSTED
-/// `[security] egress_allow` must actually govern the sandboxed shell.
+/// SEC-13, the OVER-GRANT direction — the reason this half was reworked.
 ///
-/// Before the fix `WorkspacePolicy::contained()` never saw the config at all,
-/// so this records `accept_count=0` — the allowlist was decorative.
+/// `egress_allow` is a per-host permit for the in-process HTTP gate. Listing a
+/// host there must not give the sandboxed shell network, because the grant the
+/// backends can actually enforce is the WHOLE host network: the observer below
+/// is `127.0.0.1`, a host the operator never listed.
+///
+/// The `Contained` branch is the default for any repo the operator has not
+/// fingerprint-trusted, so on the first draft of this fix every operator with
+/// any `egress_allow` entry — the ordinary configuration for anyone using the
+/// HTTP gate at all — gave a cloned repository's shell arbitrary outbound TCP.
+/// Measured on that draft: `accept_count=1`, `policy=Inherit`.
 #[tokio::test]
 #[serial]
-async fn operator_egress_allow_governs_the_sandboxed_shell() {
+async fn an_egress_allow_permit_does_not_open_the_sandboxed_shell() {
     let (_plugins, _env) = hermetic_env(None);
     let workdir = tempfile::TempDir::new().expect("workdir");
     let obs = Observer::start();
 
     let (content, network) = curl_through_bootstrapped_bash(
-        contained_config(&["127.0.0.1"]),
+        contained_config(&["docs.rs"], false),
+        workdir.path(),
+        obs.port,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        obs.accept_count(),
+        0,
+        "SEC-13 OVER-GRANT: `egress_allow = [\"docs.rs\"]` — one host, for the \
+         HTTP gate — opened the sandboxed shell's network to 127.0.0.1:{}, a \
+         host the operator never listed. A per-host permit for one subsystem \
+         must not be a whole-host-network switch for another. \
+         policy={network:?} tool_result={content:?}",
+        obs.port
+    );
+}
+
+/// SEC-13, the positive direction. The operator's own switch,
+/// `[security] allow_sandboxed_shell_network = true`, must actually reach the
+/// sandboxed shell — otherwise the documented escape hatch is decorative and
+/// the operator has no trusted lever at all, which was the original defect.
+///
+/// Same `egress_allow = ["docs.rs"]` as the test above: the ONE variable
+/// between the two is the new boolean.
+#[tokio::test]
+#[serial]
+async fn the_operator_switch_opens_the_sandboxed_shell() {
+    let (_plugins, _env) = hermetic_env(None);
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let obs = Observer::start();
+
+    let (content, network) = curl_through_bootstrapped_bash(
+        contained_config(&["docs.rs"], true),
         workdir.path(),
         obs.port,
         None,
@@ -382,35 +436,36 @@ async fn operator_egress_allow_governs_the_sandboxed_shell() {
 
     assert!(
         obs.accept_count() >= 1,
-        "SEC-13: the operator's [security] egress_allow did not reach the \
-         sandboxed shell — the allowlist is decorative. \
+        "SEC-13: [security] allow_sandboxed_shell_network = true did not reach \
+         the sandboxed shell — the operator's opt-in is decorative. \
          policy={network:?} tool_result={content:?}"
     );
 }
 
-/// SEC-13, the closed direction. An EMPTY allowlist must still deny. Pairs
+/// SEC-13, the closed default. Nothing set anywhere must still deny. Pairs
 /// with the test above so the fix cannot be "always grant"; pairs with the
 /// fired control above so `accept_count == 0` is a real observation.
 #[tokio::test]
 #[serial]
-async fn an_empty_egress_allow_still_denies_the_sandboxed_shell() {
+async fn the_default_configuration_denies_the_sandboxed_shell() {
     let (_plugins, _env) = hermetic_env(None);
     let workdir = tempfile::TempDir::new().expect("workdir");
     let obs = Observer::start();
 
     let (content, network) =
-        curl_through_bootstrapped_bash(contained_config(&[]), workdir.path(), obs.port, None).await;
+        curl_through_bootstrapped_bash(contained_config(&[], false), workdir.path(), obs.port, None)
+            .await;
 
     assert_eq!(
         obs.accept_count(),
         0,
-        "an empty [security] egress_allow must leave the sandboxed shell with \
+        "the default [security] block must leave the sandboxed shell with \
          no egress. policy={network:?} tool_result={content:?}"
     );
 }
 
 /// The grant must stay narrow. A channel-attached session is a REMOTE sender
-/// even at `Full` posture (#657, Overwatch ruling): the operator's allowlist
+/// even at `Full` posture (#657, Overwatch ruling): the operator's switch
 /// widens the operator's own shell, never a remote sender's, or a
 /// prompt-injected `curl --data-binary @secret` gets its egress back through
 /// the new lever. Reddens if `operator_bash_network` is applied unconditionally
@@ -423,7 +478,7 @@ async fn a_channel_remote_session_never_receives_the_operator_grant() {
     let obs = Observer::start();
 
     let (content, network) = curl_through_bootstrapped_bash_inner(
-        contained_config(&["127.0.0.1"]),
+        contained_config(&[], true),
         workdir.path(),
         obs.port,
         None,
@@ -435,7 +490,7 @@ async fn a_channel_remote_session_never_receives_the_operator_grant() {
         obs.accept_count(),
         0,
         "a channel-attached (remote-sender) session must stay on the absolute \
-         lockdown even when the operator's egress_allow is non-empty. \
+         lockdown even when the operator set allow_sandboxed_shell_network. \
          policy={network:?} tool_result={content:?}"
     );
 }
