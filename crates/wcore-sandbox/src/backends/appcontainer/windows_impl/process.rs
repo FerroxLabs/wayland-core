@@ -1022,9 +1022,26 @@ pub(super) fn execute_blocking(
             }
 
             // ---- 7. STARTUPINFOEXW ----
+            //
+            // `lpDesktop` names the engine's OWN window station and desktop.
+            // Leaving it NULL makes the child inherit the engine's, and a
+            // non-interactive station (`Service-0x1-…$` under OpenSSH, a
+            // service, or a scheduled task) carries no ALL APPLICATION
+            // PACKAGES ACE — so USER32's process-attach cannot open it and
+            // every USER32-linked image dies at load with 0xC0000142
+            // STATUS_DLL_INIT_FAILED. See `window_station` for the measured
+            // descriptors and for why a private station is TIGHTER than
+            // inheriting the interactive `WinSta0`. Declared before `sinfo`
+            // so the buffer outlives the `CreateProcessAsUserW` that reads it.
+            let mut desktop_w: Option<Vec<u16>> =
+                super::window_station::sandbox_desktop().map(<[u16]>::to_vec);
             let mut sinfo: STARTUPINFOEXW = mem::zeroed();
             sinfo.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
             sinfo.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            sinfo.StartupInfo.lpDesktop = desktop_w
+                .as_mut()
+                .map(|d| d.as_mut_ptr())
+                .unwrap_or(ptr::null_mut());
             sinfo.StartupInfo.hStdInput = std::ptr::null_mut();
             sinfo.StartupInfo.hStdOutput = stdout_w.as_raw();
             sinfo.StartupInfo.hStdError = stderr_w.as_raw();

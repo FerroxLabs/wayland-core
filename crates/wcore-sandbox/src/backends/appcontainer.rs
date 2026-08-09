@@ -2,24 +2,34 @@
 //!
 //! Tier 0 default on Windows per cross-platform strategy. Builds a per-engine
 //! AppContainer profile, derives a restricted token from the current process
-//! (with `BUILTIN\Administrators` / `BUILTIN\Users` / `Authenticated Users`
-//! SIDs explicitly disabled so an elevated parent doesn't grant the child
-//! group-membership-based access), pins the child's integrity level to Low
-//! via an explicit `SetTokenInformation` call, places the child in a Job
-//! Object with memory/CPU/active-process/breakaway/priority caps AND a UI
-//! restrictions set (no clipboard, no desktop, no inheriting USER handles,
-//! no shutdown). Image load goes through `CreateProcessAsUserW` with
-//! `STARTUPINFOEXW` carrying `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`
-//! and a `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` scoped to exactly the two
-//! stdout/stderr write ends — every other inheritable handle in the parent
-//! process is excluded.
+//! (`DISABLE_MAX_PRIVILEGE` only — **`SidsToDisable` is `0`/null**, see the
+//! 2026-07-23 hardware matrix recorded at the `CreateRestrictedToken` call
+//! site; containment comes from the AppContainer/lowbox check and Low IL, not
+//! from deny-only group SIDs), pins the child's integrity level to Low via an
+//! explicit `SetTokenInformation` call, places the child in a Job Object with
+//! memory/CPU/active-process/breakaway/priority caps AND a UI restrictions set
+//! (no clipboard, no desktop, no inheriting USER handles, no shutdown), and
+//! puts it on the engine's OWN window station and desktop rather than the
+//! inherited one (see `windows_impl::window_station`). Image load goes through
+//! `CreateProcessAsUserW` with `STARTUPINFOEXW` carrying
+//! `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` and a
+//! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` scoped to exactly the two stdout/stderr
+//! write ends — every other inheritable handle in the parent process is
+//! excluded.
+//!
+//! > **This paragraph used to claim `BUILTIN\Administrators` / `BUILTIN\Users`
+//! > / `Authenticated Users` were passed as `SidsToDisable`. That was false and
+//! > had been false since 2026-07-23.** PR FerroxLabs/wayland-core#254 was
+//! > written against it and proposed re-enabling SIDs that are not disabled, so
+//! > its entire diff is a no-op on this tree. Read the call site, not this
+//! > header.
 //!
 //! Pipeline:
 //!   1. Recover any durable leases whose recorded owner process is dead, then
 //!      create a unique AppContainer profile for this execution. A name
 //!      collision is never reused; another unique identity is allocated.
 //!   2. OpenProcessToken + CreateRestrictedToken(DISABLE_MAX_PRIVILEGE,
-//!      SidsToDisable=[Administrators, Users, Authenticated Users]).
+//!      SidsToDisable=null).
 //!   3. SetTokenInformation(TokenIntegrityLevel, S-1-16-4096 Low).
 //!   4. CreateJobObjectW + SetInformationJobObject:
 //!        - Extended limits: KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=512,
@@ -514,15 +524,17 @@ mod appcontainer_acl_lease;
 #[cfg(windows)]
 mod windows_impl {
     //! Windows AppContainer + Job Objects backend, split across `command`,
-    //! `handles`, `process` and `tests` so every source file stays under the
-    //! 1000-line limit (F20-03 Task 1A). Cross-module items are `pub(super)`;
-    //! the public surface (`AppContainerBackend`) is unchanged.
+    //! `handles`, `process`, `window_station` and `tests` so every source file
+    //! stays under the 1000-line limit (F20-03 Task 1A). Cross-module items
+    //! are `pub(super)`; the public surface (`AppContainerBackend`) is
+    //! unchanged.
     mod command;
     mod handles;
     mod process;
     mod shared_verdict;
     #[cfg(test)]
     mod tests;
+    mod window_station;
 
     pub use process::AppContainerBackend;
 }
