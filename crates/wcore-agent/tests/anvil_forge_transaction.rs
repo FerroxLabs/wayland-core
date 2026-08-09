@@ -306,7 +306,7 @@ mod real_checkouts {
         child: &str,
         dropped: &Arc<AtomicUsize>,
     ) -> (BuiltCandidate, PathBuf) {
-        let capacity = manager.workspace_capacity(1).await.expect("capacity");
+        let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
         let workspace = manager
             .create_isolated_checkout(child, &format!("anvil-cand/{child}"), pinned_head, capacity)
             .await
@@ -437,7 +437,7 @@ mod real_checkouts {
         let manager =
             WorktreeManager::new_with_workspace_root(repo.path(), &checkouts).expect("manager");
         let pinned_head = manager.pinned_head().await.expect("pinned head");
-        let capacity = manager.workspace_capacity(1).await.expect("capacity");
+        let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
         let workspace = manager
             .create_isolated_checkout("solo", "anvil-cand/solo", &pinned_head, capacity)
             .await

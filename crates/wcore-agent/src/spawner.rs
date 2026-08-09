@@ -1844,14 +1844,22 @@ impl AgentSpawner {
                 }
                 // Prove usable storage for this transaction plus the already
                 // retained allocations before creating the standalone checkout.
+                //
+                // `retained + 1` sizes the per-transaction ceiling by fair share
+                // across the whole roster, but this call admits exactly ONE new
+                // transaction — the admission mutex above serializes children —
+                // so only one ceiling is charged against free space. The already
+                // retained allocations are charged separately and by measurement
+                // inside `workspace_capacity` via `reserved_workspace_bytes()`;
+                // charging them a second time here is what made a near-full
+                // roster demand 64.5 GiB free to create one small checkout.
                 let active_workers = retained.saturating_add(1);
-                let capacity =
-                    manager
-                        .workspace_capacity(active_workers)
-                        .await
-                        .map_err(|error| {
-                            DurableSpawnerError::WorkspacePreparation(error.to_string())
-                        })?;
+                let capacity = manager
+                    .workspace_capacity(active_workers, 1)
+                    .await
+                    .map_err(|error| {
+                        DurableSpawnerError::WorkspacePreparation(error.to_string())
+                    })?;
                 let worker_id = child_id.as_str();
                 let branch = format!("wayland-child/{worker_id}");
                 // Write-ahead the preparation lease naming the exact working
@@ -4490,7 +4498,25 @@ mod production_durable_spawn_tests {
             spawner.prepare_durable_launch(child("near-cap-right"), overrides),
         );
 
-        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        // Name both arms in the failure. Before this, a sum of 0 printed only
+        // `left: 0, right: 1` and read as a contention flake — it was actually
+        // the capacity gate refusing BOTH arms for a reason the assertion never
+        // showed. A failure here must say which arm failed and why.
+        let arms = format!(
+            "left={}, right={}",
+            left.as_ref()
+                .err()
+                .map_or_else(|| "admitted".to_owned(), |error| error.to_string()),
+            right
+                .as_ref()
+                .err()
+                .map_or_else(|| "admitted".to_owned(), |error| error.to_string()),
+        );
+        assert_eq!(
+            usize::from(left.is_ok()) + usize::from(right.is_ok()),
+            1,
+            "exactly one concurrent near-cap launch must be admitted; {arms}"
+        );
         let quota_error = left.err().or_else(|| right.err()).unwrap().to_string();
         assert!(
             quota_error.contains("evidence quota is full"),
