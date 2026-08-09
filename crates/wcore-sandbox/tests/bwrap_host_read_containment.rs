@@ -42,8 +42,7 @@ fn host_file_marker(path: &str) -> Option<String> {
     let line = text
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .next_back()?
+        .rfind(|l| !l.is_empty() && !l.starts_with('#'))?
         .to_owned();
     (line.len() >= 8).then_some(line)
 }
