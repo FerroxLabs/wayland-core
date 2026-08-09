@@ -212,12 +212,35 @@ async fn real_sandbox_write_denial_is_quoted_back_by_the_annotation() {
 /// still be named as the cause. Without this leg, deleting the banner outright
 /// would "pass" the negative legs above.
 ///
-/// `#[ignore]`: needs a host where the sandbox can actually deny a live socket
-/// (Hetzner bwrap). Run with `--ignored`.
+/// It runs by default on Linux rather than sitting behind `#[ignore]`: a
+/// control that never executes is not a control. `contained()` is
+/// `NetworkPolicy::Deny`, so an enforcing bwrap gets `--unshare-net` and the
+/// denial is guaranteed on any host where the sandbox spawns at all. The two
+/// preconditions it cannot manufacture — an enforcing sandbox, and a `curl` to
+/// run — are checked up front and reported loudly.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[serial]
-#[ignore = "real sandbox + real egress attempt — run with --ignored on a bwrap host"]
 async fn genuine_egress_denial_under_the_real_sandbox_is_still_named() {
+    if !wcore_tools::bash::platform_enforces_read_deny() {
+        eprintln!(
+            "SKIP genuine_egress_denial_under_the_real_sandbox_is_still_named: \
+             no enforcing OS sandbox on this host, egress cannot be denied"
+        );
+        return;
+    }
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .map(|o| !o.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!(
+            "SKIP genuine_egress_denial_under_the_real_sandbox_is_still_named: \
+             no curl on this host, the control cannot provoke a named network failure"
+        );
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let policy = Arc::new(WorkspacePolicy::contained(dir.path()));
     let ctx = ToolContext::test_default().with_workspace(policy);
