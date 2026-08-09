@@ -49,6 +49,7 @@ use wcore_sandbox::{NetworkPolicy, SandboxRegistry};
 use wcore_tools::Tool;
 use wcore_tools::bash::BashTool;
 use wcore_tools::context::ToolContext;
+use wcore_tools::workspace_policy::WorkspacePolicy;
 
 // ── the driver-owned observer ────────────────────────────────────────────────
 
@@ -223,8 +224,16 @@ async fn curl_through_bootstrapped_bash_inner(
         Some(net) => Arc::new((*installed).clone().with_network(net)),
         None => installed,
     };
-    let network = policy.network();
+    curl_under_policy(policy, workdir, port).await
+}
 
+/// Run one `curl` at the observer through the real BashTool under `policy`.
+async fn curl_under_policy(
+    policy: Arc<WorkspacePolicy>,
+    workdir: &std::path::Path,
+    port: u16,
+) -> (String, NetworkPolicy) {
+    let network = policy.network();
     let registry =
         Arc::new(SandboxRegistry::required_for_session(None).expect("select a sandbox backend"));
     let ctx = ToolContext::new(
@@ -312,6 +321,39 @@ async fn a_bare_env_var_cannot_open_the_sandboxed_shell_network() {
         "SEC-11: a bare WAYLAND_BASH_ALLOW_NETWORK=1 in the ENVIRONMENT opened \
          the sandboxed shell's egress. Privilege may only be raised by \
          operator-owned config, never by an inherited env var. \
+         policy={network:?} tool_result={content:?}"
+    );
+}
+
+/// SEC-11 at the CONSTRUCTOR seam, and the test that actually pins the deleted
+/// env read.
+///
+/// The bootstrap seam is now belt-and-braces: it applies an explicit
+/// `with_network(..)` that overrides whatever the constructor seeded, so the
+/// test above stays green even if `default_bash_network_policy` starts reading
+/// the environment again. Three production sites build
+/// `WorkspacePolicy::contained()` and apply NO override — `sandbox_context` in
+/// `wcore_cli::sandbox_cmd` (`wayland-core sandbox exec`),
+/// `wcore_agent::channel_tools::apply_posture`, and `AgentSpawner` — and at
+/// those seams `default_bash_network_policy()` is the ONLY decider. This test
+/// takes that shape, and it is the one that reddens if the env read returns.
+#[tokio::test]
+#[serial]
+async fn a_bare_env_var_cannot_open_a_directly_constructed_contained_policy() {
+    let (_plugins, _env) = hermetic_env(Some("1"));
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let obs = Observer::start();
+
+    let policy = Arc::new(WorkspacePolicy::contained(workdir.path()));
+    let (content, network) = curl_under_policy(policy, workdir.path(), obs.port).await;
+
+    assert_eq!(
+        obs.accept_count(),
+        0,
+        "SEC-11: `WorkspacePolicy::contained()` seeded its network policy from \
+         the environment, so `wayland-core sandbox exec`, the channel posture \
+         installer and AgentSpawner all hand out a networked shell to anyone \
+         who can set WAYLAND_BASH_ALLOW_NETWORK. \
          policy={network:?} tool_result={content:?}"
     );
 }
