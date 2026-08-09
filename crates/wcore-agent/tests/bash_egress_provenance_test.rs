@@ -213,6 +213,22 @@ async fn curl_through_bootstrapped_bash_inner(
     network_override: Option<NetworkPolicy>,
     channel_attached: bool,
 ) -> (String, NetworkPolicy) {
+    let installed = bootstrapped_policy(config, workdir, channel_attached).await;
+    // The override exists ONLY for the fired positive control below, which has
+    // to prove this observer is reachable at all from inside the sandbox.
+    let policy = match network_override {
+        Some(net) => Arc::new((*installed).clone().with_network(net)),
+        None => installed,
+    };
+    curl_under_policy(policy, workdir, port).await
+}
+
+/// The workspace policy the REAL bootstrap installs for `config`.
+async fn bootstrapped_policy(
+    config: Config,
+    workdir: &std::path::Path,
+    channel_attached: bool,
+) -> Arc<WorkspacePolicy> {
     let workspace = workdir.to_str().expect("utf8 workdir").to_string();
     let mut bootstrap =
         AgentBootstrap::new(config, workspace, null_output()).without_channels(true);
@@ -223,20 +239,11 @@ async fn curl_through_bootstrapped_bash_inner(
         });
     }
     let result = bootstrap.build().await.expect("bootstrap should succeed");
-
-    let installed = result
+    result
         .engine
         .tools()
         .workspace_policy()
-        .expect("bootstrap installs one workspace policy per session");
-
-    // The override exists ONLY for the fired positive control below, which has
-    // to prove this observer is reachable at all from inside the sandbox.
-    let policy = match network_override {
-        Some(net) => Arc::new((*installed).clone().with_network(net)),
-        None => installed,
-    };
-    curl_under_policy(policy, workdir, port).await
+        .expect("bootstrap installs one workspace policy per session")
 }
 
 /// Run one `curl` at the observer through the real BashTool under `policy`.
@@ -246,6 +253,17 @@ async fn curl_under_policy(
     port: u16,
 ) -> (String, NetworkPolicy) {
     let network = policy.network();
+    let command = format!(
+        "cd {} && curl -sS --max-time 5 http://127.0.0.1:{}/probe; echo",
+        shell_quote(workdir),
+        port
+    );
+    (bash_under_policy(policy, &command).await, network)
+}
+
+/// Run one shell command through the real BashTool under `policy`, inside the
+/// real sandbox backend. Returns the tool result content.
+async fn bash_under_policy(policy: Arc<WorkspacePolicy>, command: &str) -> String {
     let registry =
         Arc::new(SandboxRegistry::required_for_session(None).expect("select a sandbox backend"));
     let ctx = ToolContext::new(
@@ -258,19 +276,13 @@ async fn curl_under_policy(
     .with_workspace(policy)
     .with_sandbox(registry);
 
-    let out = BashTool
+    BashTool
         .execute_with_ctx(
-            serde_json::json!({
-                "command": format!(
-                    "cd {} && curl -sS --max-time 5 http://127.0.0.1:{}/probe; echo",
-                    shell_quote(workdir), port
-                ),
-                "timeout": 20000,
-            }),
+            serde_json::json!({ "command": command, "timeout": 20000 }),
             &ctx,
         )
-        .await;
-    (out.content, network)
+        .await
+        .content
 }
 
 fn shell_quote(p: &std::path::Path) -> String {
@@ -493,4 +505,103 @@ async fn a_channel_remote_session_never_receives_the_operator_grant() {
          lockdown even when the operator set allow_sandboxed_shell_network. \
          policy={network:?} tool_result={content:?}"
     );
+}
+
+// ── the grant has to be USABLE ───────────────────────────────────────────────
+
+/// A network with no name resolution is not a network. The operator's opt-in
+/// must give the sandboxed shell a working resolver, not just a route.
+///
+/// Found while re-checking the SEC-11/SEC-13 residuals: under the `Contained`
+/// profile with `NetworkPolicy::Inherit`, `curl https://example.com` exited 6
+/// ("Could not resolve host") inside the sandbox while the identical `curl` on
+/// the host returned HTTP 200 — so the documented escape hatch worked for raw
+/// IP literals only.
+///
+/// Root cause is in the bwrap backend, not in the policy: on systemd
+/// distributions `/etc/resolv.conf` is a symlink into `/run`
+/// (`../run/systemd/resolve/stub-resolv.conf` on Ubuntu 24.04), the sandbox
+/// namespace binds `/etc` but not `/run`, so the symlink dangles and every
+/// lookup fails with EAI_NONAME. Reproduced at the bwrap layer directly:
+/// `cat /etc/resolv.conf` inside → "No such file or directory".
+///
+/// The assertion grades the resolver file the C library actually reads, from
+/// inside the sandbox, against the host's — bytes on disk, not curl's opinion.
+#[tokio::test]
+#[serial]
+async fn the_operator_grant_gives_the_sandboxed_shell_a_resolver() {
+    let (_plugins, _env) = hermetic_env(None);
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let nameserver = host_nameserver();
+
+    let policy = bootstrapped_policy(contained_config(&[], true), workdir.path(), false).await;
+    assert_eq!(
+        policy.network(),
+        NetworkPolicy::Inherit,
+        "precondition: the operator switch must have granted network"
+    );
+
+    let inside = bash_under_policy(policy, "cat /etc/resolv.conf; echo CHILD_RAN").await;
+    assert!(
+        inside.contains(&nameserver),
+        "the sandboxed shell was granted network but has no resolver: the \
+         host's {nameserver:?} is not visible inside the namespace, so \
+         every hostname lookup fails while raw-IP connections work. \
+         tool_result={inside:?}"
+    );
+}
+
+/// The resolver bind is GATED on the grant, and this is the test that keeps
+/// the gate honest. A `Deny` namespace has no network, so it must not acquire
+/// a readable host file it never had: the default posture stays exactly the
+/// posture it was before this fix.
+///
+/// `echo CHILD_RAN` is the liveness control. Without it this negative
+/// assertion passes just as happily when bwrap fails to build the namespace at
+/// all and every child exits 1 with empty stdout — the exact shape that let a
+/// completely broken sandbox report three green containment tests.
+#[tokio::test]
+#[serial]
+async fn the_default_deny_posture_gains_no_resolver() {
+    let (_plugins, _env) = hermetic_env(None);
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let nameserver = host_nameserver();
+
+    let policy = bootstrapped_policy(contained_config(&[], false), workdir.path(), false).await;
+    assert_eq!(
+        policy.network(),
+        NetworkPolicy::Deny,
+        "precondition: the default posture must be Deny"
+    );
+
+    let inside = bash_under_policy(policy, "cat /etc/resolv.conf; echo CHILD_RAN").await;
+    assert!(
+        inside.contains("CHILD_RAN"),
+        "INSTRUMENT BLIND: the child did not run at all, so the negative \
+         assertion below would pass on a completely broken sandbox. \
+         tool_result={inside:?}"
+    );
+    assert!(
+        !inside.contains(&nameserver),
+        "the network-Deny posture must not carry the host resolver — the bind \
+         is supposed to be gated on NetworkPolicy::Inherit. \
+         tool_result={inside:?}"
+    );
+}
+
+/// The host's first `nameserver` line. Panics loudly rather than returning an
+/// empty needle: on a host with no resolver, "the sandbox cannot resolve
+/// names" is not a statement about the sandbox, and `contains("")` is true for
+/// every string — so both tests above would be vacuous.
+fn host_nameserver() -> String {
+    let host = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    host.lines()
+        .find(|line| line.trim_start().starts_with("nameserver "))
+        .map(|line| line.trim().to_string())
+        .unwrap_or_else(|| {
+            panic!(
+                "INSTRUMENT BLIND: this host's /etc/resolv.conf declares no \
+                 nameserver. host_resolv_conf={host:?}"
+            )
+        })
 }

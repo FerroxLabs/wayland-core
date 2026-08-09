@@ -250,6 +250,37 @@ impl BubblewrapBackend {
             }
         }
 
+        // A granted network needs a RESOLVER, or it is only a route. `--ro-bind
+        // /etc` above is not enough on systemd distributions: `/etc/resolv.conf`
+        // is a symlink into `/run` (`../run/systemd/resolve/stub-resolv.conf` on
+        // Ubuntu 24.04) and `/run` is not in the namespace, so the symlink
+        // dangles, glibc finds no nameserver and every hostname lookup fails
+        // with EAI_NONAME while raw-IP connections work. Measured before this
+        // bind: `cat /etc/resolv.conf` inside → "No such file or directory",
+        // `curl https://example.com` → exit 6 "Could not resolve host", the same
+        // curl on the host → HTTP 200. That made the operator's documented
+        // network opt-in usable for IP literals only.
+        //
+        // Bind the RESOLVED file at its own canonical path rather than at
+        // `/etc/resolv.conf`: bwrap follows the dangling symlink when creating
+        // the destination and aborts the whole spawn with "Can't create file at
+        // /etc/resolv.conf". Binding the target makes the existing symlink land
+        // on it. When `/etc/resolv.conf` is a plain file, `canonicalize` returns
+        // it unchanged and the bind is a harmless self-bind.
+        //
+        // Only when the manifest actually granted network. A `Deny` namespace
+        // has no use for a resolver, so this adds nothing to the default
+        // posture — and `fs_read_deny` is rendered after this point, so a
+        // policy that denies the path still shadows it.
+        if matches!(manifest.network, NetworkPolicy::Inherit)
+            && let Ok(resolved) = std::fs::canonicalize("/etc/resolv.conf")
+        {
+            let s = resolved.to_string_lossy().into_owned();
+            bwrap_argv.push("--ro-bind-try".into());
+            bwrap_argv.push(s.clone());
+            bwrap_argv.push(s);
+        }
+
         // Manifest-declared mounts. Use the `--*-bind-try` variants so a
         // declared source that does not exist on THIS host is silently
         // skipped instead of aborting the whole spawn (bwrap treats a plain
