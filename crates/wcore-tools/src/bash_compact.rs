@@ -17,9 +17,15 @@ mod git;
 mod grep;
 mod testrun;
 
-/// Output below either bound is returned verbatim — never pay compaction cost
-/// or risk info loss on already-small output.
-const SIZE_GATE_LINES: usize = 40;
+/// Output at or below this many bytes is returned verbatim — never pay
+/// compaction cost, or risk info loss, on output that costs almost nothing to
+/// carry.
+///
+/// The gate is deliberately on BYTES ALONE. It used to additionally require
+/// `lines <= 40`, which put a cliff at 39 lines of output: a 200-line,
+/// 1.4 KiB result (an ordinary `git status`, test run or build log) lost ~82%
+/// of its lines to save a few hundred bytes. Compaction exists to save
+/// TOKENS, and tokens track bytes, not line count.
 const SIZE_GATE_BYTES: usize = 8 * 1024;
 
 /// Lines of raw tail always appended after a non-trivial compaction — exit
@@ -46,18 +52,62 @@ impl Compacted {
     }
 }
 
+/// The `\nSTDERR:\n` marker `BashTool` writes between the two streams. Kept in
+/// sync with the producer in `bash.rs` (`"Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}"`)
+/// and with the TUI parser in `wcore-cli/src/tui/tool_formatters/bash.rs`.
+const STDERR_MARKER: &str = "\nSTDERR:\n";
+const STDOUT_MARKER: &str = "\nSTDOUT:\n";
+
+/// The structural parts of a rendered `BashTool` result. `header` is the
+/// `Exit code: N` line; `stdout` / `stderr` are the two stream BODIES with no
+/// framing of their own.
+struct Envelope<'a> {
+    header: &'a str,
+    stdout: &'a str,
+    stderr: &'a str,
+}
+
+/// Split a rendered `BashTool` result into its envelope. `None` for anything
+/// that is not the envelope shape (the other `SandboxOutput` renderers, error
+/// strings, a future format) — the caller then falls back to whole-blob
+/// compaction, so this stays fail-open.
+///
+/// Splits on the LAST `\nSTDERR:\n`, matching the TUI parser: the marker is
+/// structural and appears once, but a command may legitimately print the
+/// literal text itself on stdout.
+fn split_envelope(raw: &str) -> Option<Envelope<'_>> {
+    let head_end = raw.find(STDOUT_MARKER)?;
+    let header = &raw[..head_end];
+    if !header.starts_with("Exit code: ") {
+        return None;
+    }
+    let body = &raw[head_end + STDOUT_MARKER.len()..];
+    let split = body.rfind(STDERR_MARKER)?;
+    Some(Envelope {
+        header,
+        stdout: &body[..split],
+        stderr: &body[split + STDERR_MARKER.len()..],
+    })
+}
+
 /// Compact the output of `command` (the full Bash command string) given its
 /// `raw` combined output and `exit_code`. Fail-open: returns `raw` unchanged
 /// when small, unrecognised, or on any parser miss.
 pub fn compact_bash(command: &str, raw: &str, exit_code: i32) -> Compacted {
     // Size gate: leave small output alone.
-    if raw.len() <= SIZE_GATE_BYTES && raw.lines().count() <= SIZE_GATE_LINES {
+    if raw.len() <= SIZE_GATE_BYTES {
         return Compacted::unchanged(raw);
     }
 
-    let compacted_body = dispatch(command, raw, exit_code)
-        .or_else(|| classifier::compact(raw))
-        .map(|body| with_guaranteed_tail(&body, raw));
+    // Compact the two stream BODIES independently and re-frame, so the
+    // `Exit code:` / `STDOUT:` / `STDERR:` lines can never be elided as if
+    // they were content. Compacting the rendered blob as one flat text used
+    // to delete the `STDERR:` delimiter outright, presenting stderr
+    // diagnostics to the model under the `STDOUT:` heading.
+    let compacted_body = match split_envelope(raw) {
+        Some(env) => compact_envelope(command, &env, exit_code),
+        None => compact_stream(command, raw, exit_code),
+    };
 
     match compacted_body {
         // Only accept the compaction if it actually shrank the output.
@@ -68,6 +118,30 @@ pub fn compact_bash(command: &str, raw: &str, exit_code: i32) -> Compacted {
         },
         _ => Compacted::unchanged(raw),
     }
+}
+
+/// Compact each stream body in place and re-emit the envelope verbatim.
+/// `None` when neither stream compacted (nothing was gained).
+fn compact_envelope(command: &str, env: &Envelope<'_>, exit_code: i32) -> Option<String> {
+    let out = compact_stream(command, env.stdout, exit_code);
+    let err = compact_stream(command, env.stderr, exit_code);
+    if out.is_none() && err.is_none() {
+        return None;
+    }
+    Some(format!(
+        "{}{STDOUT_MARKER}{}{STDERR_MARKER}{}",
+        env.header,
+        out.as_deref().unwrap_or(env.stdout),
+        err.as_deref().unwrap_or(env.stderr),
+    ))
+}
+
+/// Compact one stream body: per-command parser, else the generic shape
+/// classifier, plus the guaranteed raw tail. `None` on a total miss.
+fn compact_stream(command: &str, body: &str, exit_code: i32) -> Option<String> {
+    dispatch(command, body, exit_code)
+        .or_else(|| classifier::compact(body))
+        .map(|compacted| with_guaranteed_tail(&compacted, body))
 }
 
 /// Route to a per-command parser by command prefix. `None` ⇒ no confident
@@ -140,16 +214,41 @@ fn last_subcommand(command: &str) -> &str {
     }
 }
 
-/// Append the last `GUARANTEED_TAIL_LINES` raw lines after the compacted body
-/// (deduped if the body already ends with them).
+/// Append the last `GUARANTEED_TAIL_LINES` raw lines after the compacted body.
+///
+/// The compacted body usually already ENDS with some of those lines (the
+/// generic classifier's head+tail keeps the final `TAIL_LINES`). Appending the
+/// full tail on top of that showed the model lines the command printed once,
+/// twice — a fabrication. So any suffix of the body that the tail already
+/// re-states is removed before the tail is appended: every one of the last
+/// `GUARANTEED_TAIL_LINES` lines is then present exactly once, in order.
 fn with_guaranteed_tail(body: &str, raw: &str) -> String {
-    let tail: Vec<&str> = raw.lines().collect();
-    let start = tail.len().saturating_sub(GUARANTEED_TAIL_LINES);
-    let tail_block = tail[start..].join("\n");
-    if body.trim_end().ends_with(tail_block.trim_end()) {
+    let raw_lines: Vec<&str> = raw.lines().collect();
+    let start = raw_lines.len().saturating_sub(GUARANTEED_TAIL_LINES);
+    let tail = &raw_lines[start..];
+    if tail.is_empty() {
         return body.to_string();
     }
-    format!("{body}\n--- last {GUARANTEED_TAIL_LINES} lines ---\n{tail_block}")
+
+    let mut body_lines: Vec<&str> = body.lines().collect();
+    // Longest suffix of `tail` that the body already ends with.
+    let mut overlap = 0usize;
+    for k in (1..=tail.len().min(body_lines.len())).rev() {
+        if body_lines[body_lines.len() - k..] == tail[tail.len() - k..] {
+            overlap = k;
+            break;
+        }
+    }
+    if overlap == tail.len() {
+        // The whole guaranteed tail is already the end of the body.
+        return body.to_string();
+    }
+    body_lines.truncate(body_lines.len() - overlap);
+    format!(
+        "{}\n--- last {GUARANTEED_TAIL_LINES} lines ---\n{}",
+        body_lines.join("\n"),
+        tail.join("\n")
+    )
 }
 
 #[cfg(test)]
@@ -217,7 +316,8 @@ mod tests {
     fn stderr_redirected_cargo_dispatches_to_cargo_parser() {
         // Build a large cargo-shaped output so the size gate is cleared and the
         // cargo-aware parser (not the generic shape classifier) handles it.
-        let noise = (0..100)
+        // The gate is on BYTES, so the fixture must exceed SIZE_GATE_BYTES.
+        let noise = (0..400)
             .map(|i| format!("   Compiling crate{i} v0.1.0"))
             .collect::<Vec<_>>()
             .join("\n");
