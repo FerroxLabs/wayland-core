@@ -3,6 +3,35 @@
 use super::*;
 
 /// Minimal read/exec toolchain dirs for a contained shell to run compilers.
+///
+/// # Why Windows needs more entries than Unix
+///
+/// On Linux the bwrap backend binds the host root read-only and on macOS the
+/// seatbelt profile allows `file-read*` broadly, so `/usr/bin/node` and
+/// `/usr/bin/python3` are reachable without anyone naming them. The Windows
+/// AppContainer backend is the opposite: NOTHING is reachable unless it carries
+/// an `ALL APPLICATION PACKAGES` ACE or this list puts it in the per-execution
+/// grant set. Measured on SeanDesktop (2026-08-10, `Get-Acl`):
+///
+/// | path | ALL APPLICATION PACKAGES ACE | consequence under `contained()` |
+/// |---|---|---|
+/// | `C:\Program Files\Git` (and its subtree) | present, inherited, ReadAndExecute | `git --version` exits 0 with no grant — do NOT add it |
+/// | `~\.cargo\bin`, `~\.rustup` | absent | already granted by the two entries below |
+/// | `C:\Program Files\nodejs` | **absent** | cmd cannot stat `node.exe`, so `node` is "not recognized" |
+/// | Python install dir | **absent** | same denial for `python` |
+///
+/// So the two additions are node and python, discovered from `PATH` rather than
+/// hardcoded, granted READ+EXECUTE only (never write):
+///
+/// * node's install directory — without it PATH resolution fails outright; an
+///   attacker gains the ability to execute the Node runtime, which stays inside
+///   the same filesystem ACL set and the same `NetworkPolicy::Deny` egress
+///   boundary as the shell that launched it.
+/// * python's install directory — identical denial and identical bounded gain.
+///
+/// `git`, `cargo` and `rustc` are deliberately NOT added: they were measured
+/// working without a grant, and every extra directory costs an inherited-ACE
+/// rewrite over its whole subtree, twice, inside the machine-wide mutation lock.
 pub(super) fn minimal_toolchain_read_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(home) = dirs::home_dir() {
@@ -11,6 +40,18 @@ pub(super) fn minimal_toolchain_read_dirs() -> Vec<PathBuf> {
             if p.exists() {
                 v.push(p);
             }
+        }
+    }
+    #[cfg(windows)]
+    for name in ["node", "python"] {
+        let Some(executable) = resolve_path_executable(name) else {
+            continue;
+        };
+        let Some(directory) = executable.parent() else {
+            continue;
+        };
+        if directory.is_dir() && !v.iter().any(|existing| existing == directory) {
+            v.push(directory.to_path_buf());
         }
     }
     v
