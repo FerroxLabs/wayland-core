@@ -16,8 +16,8 @@ use crate::context::ToolContext;
 
 mod policy;
 use crate::{Tool, ToolOutputSink};
-use policy::annotate_network_block;
 pub use policy::check_denylist;
+use policy::{SandboxScope, annotate_network_block, annotate_sandbox_denial};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -518,13 +518,19 @@ impl Tool for BashTool {
         );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
+        // B1: captured before `cmd` is consumed, so a failure can be attributed
+        // to a real policy decision instead of surfacing as a bare exit code.
+        let scope = SandboxScope::new(&manifest, cmd.cwd.as_deref());
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
                 content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             },
             result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)) => match result {
-                Ok(Ok(output)) => annotate_network_block(command, net, output_to_result(output)),
+                Ok(Ok(output)) => annotate_sandbox_denial(
+                    &scope,
+                    annotate_network_block(command, net, output_to_result(output)),
+                ),
                 Ok(Err(e)) => ToolResult { content: format!("Failed to execute command: {e}"), is_error: true },
                 Err(_) => ToolResult { content: format!("Command timed out after {timeout_ms}ms"), is_error: true },
             },
@@ -598,6 +604,8 @@ impl Tool for BashTool {
         );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
+        // B1: see `execute_with_ctx` — same attribution on the streaming path.
+        let scope = SandboxScope::new(&manifest, cmd.cwd.as_deref());
 
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
@@ -669,13 +677,16 @@ impl Tool for BashTool {
                     "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
                     exit_code, stdout_buf, stderr_buf
                 );
-                annotate_network_block(
-                    command,
-                    net,
-                    ToolResult {
-                        content,
-                        is_error: exit_code != 0,
-                    },
+                annotate_sandbox_denial(
+                    &scope,
+                    annotate_network_block(
+                        command,
+                        net,
+                        ToolResult {
+                            content,
+                            is_error: exit_code != 0,
+                        },
+                    ),
                 )
             }
         }

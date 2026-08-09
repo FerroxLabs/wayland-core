@@ -1,9 +1,11 @@
 //! Bash command policy classification and denylists (F20-03 Task 2 split).
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::RegexSet;
 use wcore_sandbox::NetworkPolicy;
+use wcore_sandbox::manifest::SandboxManifest;
 use wcore_types::tool::ToolResult;
 
 /// Does `command` look like it needs network egress? Used only to attach a
@@ -50,6 +52,180 @@ pub(super) fn looks_network_dependent(command: &str) -> bool {
         "https://",
     ];
     NEEDLES.iter().any(|n| c.contains(n))
+}
+
+/// The filesystem scope the OS sandbox was actually built from, captured
+/// before the [`SandboxCommand`](wcore_sandbox::SandboxCommand) is consumed by
+/// the backend, so a failed command can be attributed to a real policy
+/// decision rather than guessed at.
+#[derive(Debug, Clone, Default)]
+pub(super) struct SandboxScope {
+    /// The child's working directory — needed because tools report denied
+    /// paths RELATIVE to it (`fatal: unable to access '.git/config'`).
+    cwd: Option<PathBuf>,
+    /// `manifest.fs_read_deny` — paths the policy explicitly denies.
+    deny: Vec<PathBuf>,
+    /// `fs_read_allow` ∪ `fs_write_allow` — every root the manifest granted.
+    allow: Vec<PathBuf>,
+}
+
+impl SandboxScope {
+    pub(super) fn new(manifest: &SandboxManifest, cwd: Option<&Path>) -> Self {
+        let mut allow = manifest.fs_read_allow.clone();
+        allow.extend(manifest.fs_write_allow.iter().cloned());
+        Self {
+            cwd: cwd.map(Path::to_path_buf),
+            deny: manifest.fs_read_deny.clone(),
+            allow,
+        }
+    }
+
+    /// True when the manifest carried no FS scoping at all (no policy attached,
+    /// or `NoSandboxBackend`): nothing can be attributed, so stay silent.
+    fn is_unscoped(&self) -> bool {
+        self.deny.is_empty() && self.allow.is_empty()
+    }
+}
+
+/// Prefixes every supported backend grants unconditionally as part of process
+/// bootstrap (see `sandbox_exec::build_profile` / `bwrap` ro-binds). A path
+/// under one of these is NOT evidence of a policy denial, so it must never be
+/// reported as one. `/var`, `/tmp` and `/private` are deliberately ABSENT:
+/// macOS grants those three only as `literal` symlink nodes, not as subpaths,
+/// so `$TMPDIR/...` really is outside the sandbox.
+#[cfg(windows)]
+const ALWAYS_GRANTED_PREFIXES: &[&str] = &[r"C:\Windows", r"C:\Program Files"];
+#[cfg(not(windows))]
+const ALWAYS_GRANTED_PREFIXES: &[&str] = &[
+    "/usr", "/bin", "/sbin", "/dev", "/etc", "/opt", "/System", "/Library", "/proc", "/sys", "/nix",
+];
+
+/// Why a path named in a failed command's output was unreachable.
+#[derive(Debug, PartialEq, Eq)]
+enum DeniedBecause {
+    /// Explicitly listed in `manifest.fs_read_deny`.
+    PolicyDeny,
+    /// Not under any root the manifest granted.
+    NotGranted,
+}
+
+/// Pull the path-shaped tokens out of a tool result body. Deliberately crude:
+/// the caller only trusts a token once it matches the manifest, so a
+/// false-positive token costs nothing.
+fn candidate_paths(body: &str) -> Vec<&str> {
+    body.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
+        .map(|token| token.trim_end_matches([':', ',', '.', ';', ')', ']']))
+        .filter(|token| {
+            token.len() > 1
+                && (token.starts_with('/') || token.starts_with("./") || {
+                    // Bare relative paths only count when they contain a
+                    // separator, so ordinary words are not treated as paths.
+                    token.contains('/') && !token.contains("://")
+                })
+        })
+        .collect()
+}
+
+/// Classify one path token against the scope. `None` means "no evidence this
+/// path was blocked by the sandbox" — the default, so an unrelated failure is
+/// never given a fabricated cause.
+fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause)> {
+    let raw = Path::new(token);
+    let resolved = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        scope
+            .cwd
+            .as_ref()?
+            .join(raw.strip_prefix("./").unwrap_or(raw))
+    };
+    if scope.deny.iter().any(|d| resolved.starts_with(d)) {
+        return Some((resolved, DeniedBecause::PolicyDeny));
+    }
+    if scope.allow.iter().any(|a| resolved.starts_with(a)) {
+        return None;
+    }
+    if ALWAYS_GRANTED_PREFIXES
+        .iter()
+        .any(|p| resolved.starts_with(p))
+    {
+        return None;
+    }
+    Some((resolved, DeniedBecause::NotGranted))
+}
+
+/// When a sandboxed command FAILS and its output names a path this workspace's
+/// policy actually put out of reach, say so.
+///
+/// B1 (`+GIT-SBX`): under the STRICT profile — the default for every workspace
+/// that has not been trusted — `git` exits 128 on every invocation and the only
+/// thing the user sees is
+/// `fatal: unable to access '/Users/me/.gitconfig': Operation not permitted`,
+/// which reads like their machine is broken. Three separate policy decisions
+/// produce it (`$HOME/.gitconfig` is granted to the trusted profile but not the
+/// strict one; `<root>/.git/config` is on the secret deny-list; `<root>/.git/objects`
+/// is denied so `git log -p` cannot reconstruct a committed secret). The third is
+/// load-bearing anti-exfiltration and CANNOT be widened — measured on macOS
+/// seatbelt, `git status` / `diff` / `log` all need the object store, so there is
+/// no profile edit that restores git without also restoring `git log -p`. The
+/// denial therefore stays; what changes is that it is no longer mute.
+///
+/// Attribution is evidence-based, never guessed: a path is only named when it
+/// matches this manifest's own deny-list or falls outside every root the
+/// manifest granted.
+pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResult) -> ToolResult {
+    if !result.is_error || scope.is_unscoped() {
+        return result;
+    }
+    let mut denied: Vec<(PathBuf, DeniedBecause)> = Vec::new();
+    for token in candidate_paths(&result.content) {
+        if let Some(hit) = classify(scope, token)
+            && !denied.iter().any(|(seen, _)| *seen == hit.0)
+        {
+            denied.push(hit);
+        }
+    }
+    if denied.is_empty() {
+        return result;
+    }
+
+    result.content.push_str(
+        "\n\n⚠ The OS sandbox — not a broken machine and not a missing tool — put these \
+         paths out of reach of this command:",
+    );
+    for (path, why) in &denied {
+        let reason = match why {
+            DeniedBecause::PolicyDeny => "explicitly denied by this workspace's policy",
+            DeniedBecause::NotGranted => "outside every root granted to this workspace",
+        };
+        result
+            .content
+            .push_str(&format!("\n  • {} — {reason}", path.display()));
+    }
+    result.content.push_str(
+        "\nThis workspace is running under the STRICT (untrusted) sandbox profile, which is \
+         the default until a workspace is trusted.",
+    );
+    if scope
+        .deny
+        .iter()
+        .any(|denied| denied.ends_with(".git/objects"))
+    {
+        result.content.push_str(
+            " That profile also denies the git object store (`.git/objects`) so a committed \
+             secret cannot be reconstructed with `git log -p` / `git show`. `git status`, \
+             `diff`, `log` and `commit` all read that store, so NO git command can succeed \
+             here — retrying will not help, and git is not broken or missing.",
+        );
+    }
+    result.content.push_str(
+        "\nDo NOT report git, a compiler, node/npm, or the Command Line Tools as absent or \
+         needing installation, and do not invent any other cause. Remedy: run once with \
+         `--trust-workspace` in this directory to switch to the trusted-local profile, or \
+         `--dangerously-skip-permissions-and-sandbox` to turn the OS sandbox off entirely.",
+    );
+    result.is_error = true;
+    result
 }
 
 /// When a network-dependent command FAILS and the sandbox blocks network,

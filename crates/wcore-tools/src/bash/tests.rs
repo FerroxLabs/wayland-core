@@ -858,3 +858,170 @@ async fn bash_runs_inside_workspace_with_policy() {
     assert!(result.content.contains(&root.to_string_lossy().to_string()));
     assert!(root.join("out.txt").exists());
 }
+
+// ── B1 (+GIT-SBX): a sandbox denial must not present as a bare exit 128 ──────
+//
+// Reproduced on macOS 25.3 against wayland-core 0.12.26 under the DEFAULT
+// (strict / untrusted) profile: every git command exits 128 and the only
+// explanation the user gets is
+//   fatal: unable to access '/Users/me/.gitconfig': Operation not permitted
+//   fatal: unable to access '.git/config': Operation not permitted
+// which reads like a broken machine. Measured on seatbelt, the object-store
+// deny that makes `git status`/`diff`/`log` impossible is the same rule that
+// blocks `git log -p` reconstructing a committed secret, so the denial stays
+// and the SILENCE is what gets fixed.
+
+use std::path::{Path, PathBuf};
+
+fn b1_scope() -> super::policy::SandboxScope {
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![PathBuf::from("/w/repo")],
+        fs_write_allow: vec![PathBuf::from("/w/repo")],
+        fs_read_deny: vec![
+            PathBuf::from("/w/repo/.git/config"),
+            PathBuf::from("/w/repo/.git/objects"),
+            PathBuf::from("/w/repo/.env"),
+        ],
+        ..Default::default()
+    };
+    super::policy::SandboxScope::new(&manifest, Some(Path::new("/w/repo")))
+}
+
+#[test]
+fn sandbox_denial_names_the_policy_denied_path_and_a_remedy() {
+    let result = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                      fatal: unable to access '.git/config': Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    assert!(
+        result.content.contains("/w/repo/.git/config"),
+        "the denied path must be named; got:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("--trust-workspace"),
+        "the actionable remedy must be named; got:\n{}",
+        result.content
+    );
+    assert!(
+        result.is_error,
+        "a denied command stays an error; got:\n{}",
+        result.content
+    );
+}
+
+#[test]
+fn sandbox_denial_attributes_an_ungranted_path_to_the_sandbox_not_the_machine() {
+    let result = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                      fatal: unable to access '/Users/me/.gitconfig': Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    assert!(
+        result.content.contains("/Users/me/.gitconfig"),
+        "the ungranted path must be named; got:\n{}",
+        result.content
+    );
+    assert!(
+        result.content.to_lowercase().contains("sandbox"),
+        "the cause must be attributed to the sandbox; got:\n{}",
+        result.content
+    );
+}
+
+#[test]
+fn sandbox_denial_reports_the_object_store_when_git_is_structurally_dead() {
+    let result = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                      fatal: unable to access '.git/config': Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    assert!(
+        result.content.contains(".git/objects"),
+        "when the object store is denied, git cannot work at all and the message \
+         must say so rather than implying a retry will help; got:\n{}",
+        result.content
+    );
+}
+
+#[test]
+fn sandbox_denial_stays_silent_on_success_and_on_unrelated_failures() {
+    let ok = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 0\nSTDOUT:\n/w/repo/.git/config\nSTDERR:\n".to_string(),
+            is_error: false,
+        },
+    );
+    assert_eq!(
+        ok.content, "Exit code: 0\nSTDOUT:\n/w/repo/.git/config\nSTDERR:\n",
+        "a successful command must never be annotated"
+    );
+
+    let unrelated = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 2\nSTDOUT:\n\nSTDERR:\nmake: *** no rule to make target\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    assert!(
+        !unrelated.content.to_lowercase().contains("sandbox"),
+        "a failure with no denied path must not be given a fabricated cause; got:\n{}",
+        unrelated.content
+    );
+
+    // A granted path inside the workspace, and a system path every backend
+    // grants unconditionally, are both non-evidence.
+    let granted = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                      cat: /w/repo/missing.txt: No such file or directory\n\
+                      /usr/bin/foo: not found\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    assert!(
+        !granted.content.to_lowercase().contains("sandbox"),
+        "granted and always-granted paths are not denials; got:\n{}",
+        granted.content
+    );
+}
+
+#[test]
+fn sandbox_denial_is_inert_without_a_scoped_manifest() {
+    let unscoped = super::policy::SandboxScope::new(
+        &wcore_sandbox::manifest::SandboxManifest::default(),
+        Some(Path::new("/w/repo")),
+    );
+    let result = super::policy::annotate_sandbox_denial(
+        &unscoped,
+        ToolResult {
+            content: "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                      fatal: unable to access '/Users/me/.gitconfig': Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    assert!(
+        !result.content.to_lowercase().contains("sandbox"),
+        "with no FS scoping there is nothing to attribute; got:\n{}",
+        result.content
+    );
+}
