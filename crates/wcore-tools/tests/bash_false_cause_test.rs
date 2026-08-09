@@ -30,6 +30,11 @@ const FORBIDDING_CLAUSES: &[&str] = &["do NOT claim", "do not invent any other",
 
 /// The marker the true-cause branch writes immediately before the line it
 /// selected out of the command's output.
+///
+/// Its only reader is the Linux-gated quoted-cause leg below, so it carries the
+/// same gate: ungated it is dead code on every other target and fails
+/// `clippy -D warnings` there.
+#[cfg(target_os = "linux")]
 const QUOTED_CAUSE_MARKER: &str = "reports a different failure:\n";
 
 /// The command must actually have reached a shell. A pre-exec refusal (the
