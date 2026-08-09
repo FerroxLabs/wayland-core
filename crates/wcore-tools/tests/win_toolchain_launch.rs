@@ -354,6 +354,19 @@ fn user32_linkage_splits_the_spawnable_from_the_dead() {
 ///
 /// Graded from WORLD STATE, not stdout: each interpreter is asked to create a
 /// file, and the assertion is that the file is on disk afterwards.
+///
+/// STATUS: this test is RED against HEAD and the defect is OPEN. The obvious
+/// repair — putting the two install directories in
+/// `minimal_toolchain_read_dirs()` — was written, run, and REVERTED, because a
+/// grant is a DACL write and a normal (non-elevated) user does not hold
+/// WRITE_DAC on `C:\Program Files\nodejs`. Measured under a `schtasks /IT`
+/// task running as the interactive user: every sandboxed command, including
+/// `echo`, then failed with
+/// `SetNamedSecurityInfoW for \\?\C:\Program Files\nodejs: 0x5`. The same
+/// grant succeeds from an elevated shell, which is why an admin ssh session
+/// would have reported it as working. The real repair therefore has to make a
+/// discovery-derived grant OPTIONAL — skipped with a warning when the DACL
+/// cannot be written — instead of aborting the execution.
 #[test]
 #[ignore = "explicit native Windows toolchain acceptance"]
 fn node_and_python_run_under_the_default_posture() {
