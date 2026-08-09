@@ -85,6 +85,15 @@ const SYSTEM_RO_ETC: [&str; 10] = [
 /// resolver configuration names the host's DNS servers and search domains, so
 /// under [`NetworkPolicy::Deny`] — the default for agent-initiated Bash — it is
 /// pure leak with no corresponding capability.
+///
+/// This gate covers the `/etc/resolv.conf` SPELLING only. It is not sufficient
+/// on its own: on a systemd-resolved host the file is a symlink, and a caller
+/// that grants the CANONICALIZED target through `fs_read_allow` puts the same
+/// bytes back in the namespace under `/run/systemd/resolve/stub-resolv.conf`.
+/// That is exactly what `WorkspacePolicy::trusted_local` used to do, which made
+/// this gate inert for the policy the product actually uses. The matching
+/// policy-side gate is `wcore_tools::workspace_policy::discovery::network_scoped_reads`;
+/// both are needed, and neither replaces the other.
 const NETWORK_RO_ETC: [&str; 1] = ["/etc/resolv.conf"];
 
 #[cfg(all(target_os = "linux", feature = "seccomp"))]
@@ -629,6 +638,66 @@ enum DenyMountKind {
     Absent,
 }
 
+/// Basenames written by [`synthetic_etc_scaffold`] and bound over `/etc/<name>`.
+#[cfg(target_os = "linux")]
+const SYNTHETIC_ETC_FILES: [&str; 4] = ["passwd", "group", "hosts", "nsswitch.conf"];
+
+/// Materialise minimal stand-ins for the four `/etc` files the blanket `/etc`
+/// bind used to supply from the host.
+///
+/// Dropping the host copies outright is not free: `getpwuid(3)` starts failing,
+/// which breaks `pwd.getpwuid()` in Python and throws outright in Node's
+/// `os.userInfo()`, and without `/etc/hosts` + an nsswitch policy glibc cannot
+/// resolve `localhost` at all. Both were measured, not assumed. So the child
+/// gets files with the same SHAPE and none of the host's content: its own uid
+/// under a fixed sandbox name, loopback only, and a `files dns` policy that
+/// matches what is actually present in the namespace. Nothing here is derived
+/// from the host beyond the uid/gid the child already runs as and can read from
+/// `getuid(2)` regardless.
+///
+/// KNOWN RESIDUAL (open, not reachable through `BashTool`). The synthetic
+/// `passwd` gives the sandbox user `pw_dir` `/`. With `HOME` UNSET the child
+/// therefore falls back to `/` as its home, and `cargo` goes exit 0 → exit 1
+/// with "rustup could not choose a version of cargo to run" because the rustup
+/// shim looks for its toolchain under `$HOME/.rustup`. Measured on Ubuntu
+/// 24.04. It is unreachable in production because `HOME` is on
+/// `BASE_SANDBOX_ENV_ALLOWLIST`, so every `BashTool` child receives a real
+/// `HOME`; cargo exit 0 was re-proved through the real env builder. A caller
+/// that builds a manifest by hand and omits `HOME` will hit it.
+#[cfg(target_os = "linux")]
+fn synthetic_etc_scaffold() -> Result<tempfile::TempDir> {
+    // SAFETY: getuid/getgid are always-successful, thread-safe syscalls that
+    // take no arguments and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let dir = tempfile::tempdir()
+        .map_err(|e| SandboxError::ExecFailed(format!("create synthetic /etc scaffold: {e}")))?;
+    let files = [
+        (
+            "passwd",
+            format!(
+                "sandbox:x:{uid}:{gid}:sandboxed user:/:/bin/sh\n\
+                 nobody:x:65534:65534:nobody:/nonexistent:/bin/false\n"
+            ),
+        ),
+        ("group", format!("sandbox:x:{gid}:\nnogroup:x:65534:\n")),
+        (
+            "hosts",
+            "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n".to_owned(),
+        ),
+        (
+            "nsswitch.conf",
+            "passwd: files\ngroup: files\nshadow: files\n\
+             hosts: files dns\nservices: files\nprotocols: files\nnetworks: files\n"
+                .to_owned(),
+        ),
+    ];
+    for (name, body) in files {
+        std::fs::write(dir.path().join(name), body)
+            .map_err(|e| SandboxError::ExecFailed(format!("write synthetic /etc/{name}: {e}")))?;
+    }
+    Ok(dir)
+}
+
 /// Reduce classified `fs_read_deny` entries to the mounts bubblewrap can
 /// actually realize, preserving input order.
 ///
@@ -676,56 +745,6 @@ enum DenyMountKind {
 /// alias of a denied ancestor is NOT recognised and both denies are emitted —
 /// that is the safe direction (a redundant mount that may abort, never a
 /// silently discarded denial).
-/// Basenames written by [`synthetic_etc_scaffold`] and bound over `/etc/<name>`.
-#[cfg(target_os = "linux")]
-const SYNTHETIC_ETC_FILES: [&str; 4] = ["passwd", "group", "hosts", "nsswitch.conf"];
-
-/// Materialise minimal stand-ins for the four `/etc` files the blanket `/etc`
-/// bind used to supply from the host.
-///
-/// Dropping the host copies outright is not free: `getpwuid(3)` starts failing,
-/// which breaks `pwd.getpwuid()` in Python and throws outright in Node's
-/// `os.userInfo()`, and without `/etc/hosts` + an nsswitch policy glibc cannot
-/// resolve `localhost` at all. Both were measured, not assumed. So the child
-/// gets files with the same SHAPE and none of the host's content: its own uid
-/// under a fixed sandbox name, loopback only, and a `files dns` policy that
-/// matches what is actually present in the namespace. Nothing here is derived
-/// from the host beyond the uid/gid the child already runs as and can read from
-/// `getuid(2)` regardless.
-#[cfg(target_os = "linux")]
-fn synthetic_etc_scaffold() -> Result<tempfile::TempDir> {
-    // SAFETY: getuid/getgid are always-successful, thread-safe syscalls that
-    // take no arguments and cannot fail.
-    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let dir = tempfile::tempdir()
-        .map_err(|e| SandboxError::ExecFailed(format!("create synthetic /etc scaffold: {e}")))?;
-    let files = [
-        (
-            "passwd",
-            format!(
-                "sandbox:x:{uid}:{gid}:sandboxed user:/:/bin/sh\n\
-                 nobody:x:65534:65534:nobody:/nonexistent:/bin/false\n"
-            ),
-        ),
-        ("group", format!("sandbox:x:{gid}:\nnogroup:x:65534:\n")),
-        (
-            "hosts",
-            "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n".to_owned(),
-        ),
-        (
-            "nsswitch.conf",
-            "passwd: files\ngroup: files\nshadow: files\n\
-             hosts: files dns\nservices: files\nprotocols: files\nnetworks: files\n"
-                .to_owned(),
-        ),
-    ];
-    for (name, body) in files {
-        std::fs::write(dir.path().join(name), body)
-            .map_err(|e| SandboxError::ExecFailed(format!("write synthetic /etc/{name}: {e}")))?;
-    }
-    Ok(dir)
-}
-
 fn reduce_read_deny_mounts(entries: &[(PathBuf, DenyMountKind)]) -> Vec<(PathBuf, DenyMountKind)> {
     let mut kept = Vec::with_capacity(entries.len());
     for (index, (path, kind)) in entries.iter().enumerate() {

@@ -555,11 +555,18 @@ fn build_sandbox_pieces_trusted_sets_cwd_and_no_cache_redirect() {
 /// channel-attached session (fail-safe default = Deny) → curl is BLOCKED.
 ///
 /// Uses an IP target (`1.1.1.1`, `-k` for the SNI cert mismatch) to isolate
-/// the network-namespace gate my change controls. Name resolution is a
-/// SEPARATE, pre-existing sandbox-fs concern: bwrap ro-binds `/etc` but not
-/// `/run`, so a systemd-resolved host (`/etc/resolv.conf -> /run/...stub`)
-/// dangles the symlink and breaks DNS inside the sandbox even under Inherit
-/// — orthogonal to #657 and out of its scope.
+/// the network-namespace gate my change controls, not because DNS is broken.
+///
+/// This paragraph used to claim name resolution could not work inside the
+/// sandbox at all — "bwrap ro-binds `/etc` but not `/run`, so a
+/// systemd-resolved host (`/etc/resolv.conf -> /run/...stub`) dangles the
+/// symlink". That is no longer true and is left here only so the correction is
+/// findable. `WorkspacePolicy` grants the CANONICALIZED resolver path, which is
+/// the `/run/...` target itself, so under `Inherit` glibc resolves normally:
+/// measured on hetzner-dsm inside the real backend, `getent hosts
+/// one.one.one.one` exits 0 and `socket.gethostbyname` returns `1.1.1.1`. Under
+/// `Deny` that grant is withheld (see `discovery::network_scoped_reads`) and
+/// resolution fails with `EAI_AGAIN`, which is correct — there is no network.
 #[cfg(unix)]
 #[tokio::test]
 #[ignore = "live network + real sandbox backend (Hetzner) — run with --ignored"]
