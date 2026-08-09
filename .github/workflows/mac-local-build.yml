@@ -1,0 +1,53 @@
+name: mac local build (unpublished)
+
+# Produces a native macOS arm64 binary as a CI ARTIFACT ONLY.
+# No tag, no release, no npm publish. Deliberately separate from release.yml,
+# which is a publishing pipeline and carries contents:write.
+#
+# Exists because the hetzner zig cross-link SIGSEGVs on the real binary:
+# 579 object files plus wasmtime/aws-lc-sys/ring/sqlite-vec/blake3 and ~15
+# Apple frameworks. `cargo check --target aarch64-apple-darwin` works there;
+# a full link does not.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/mac-local-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build aarch64-apple-darwin
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustc --version
+          uname -m
+
+      - name: Build wcore-cli (release)
+        run: cargo build --release -p wcore-cli --target aarch64-apple-darwin
+
+      - name: Prove it is a real Mach-O arm64 binary
+        run: |
+          BIN=target/aarch64-apple-darwin/release/wayland-core
+          test -x "$BIN" || { echo "no binary produced"; exit 1; }
+          file "$BIN"
+          file "$BIN" | grep -q 'Mach-O 64-bit executable arm64' || {
+            echo "not a Mach-O arm64 executable"; exit 1; }
+          "$BIN" --version
+          shasum -a 256 "$BIN"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wayland-core-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/wayland-core
+          if-no-files-found: error
+          retention-days: 7
