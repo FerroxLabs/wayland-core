@@ -81,10 +81,23 @@ const CREDENTIAL_STORES: &[&str] = &[
     ".config/doctl",
 ];
 
-/// Always-mounted system credential paths the backends grant unconditionally
-/// (bwrap `--ro-bind /etc`; macOS allows `/Library`,`/System`). Emitted
-/// regardless of `readable_roots()` because they ARE mounted. Kept short and
-/// high-value — broad system reads remain a DAC + network-Deny residual.
+/// System credential paths denied to the child regardless of
+/// `readable_roots()`, because a backend may mount them without the policy
+/// having asked for them. Kept short and high-value — broad system reads remain
+/// a DAC + network-Deny residual.
+///
+/// **macOS: still literally always-mounted.** The seatbelt profile allows
+/// `/Library` and `/System`, so `/Library/Keychains` is inside the sandbox and
+/// this deny is the only thing keeping it out.
+///
+/// **Linux: no longer always-mounted, and this entry is now defence in depth.**
+/// It used to be load-bearing against the blanket `--ro-bind /etc /etc` the
+/// bwrap backend emitted; `SYSTEM_RO_ETC` (SEC-05/07/10) replaced that with a
+/// curated list that contains neither `/etc/docker` nor `/etc/kubernetes`, so
+/// those paths are absent from the namespace entirely and the deny mount is
+/// classified `Absent` and dropped. Keeping the entries costs nothing and keeps
+/// the denial correct if `SYSTEM_RO_ETC` ever grows or a caller grants an
+/// ancestor through `fs_read_allow`.
 #[cfg(target_os = "macos")]
 const SYSTEM_CREDENTIAL_STORES: &[&str] = &["/Library/Keychains"];
 #[cfg(target_os = "linux")]
@@ -104,6 +117,11 @@ pub struct WorkspacePolicy {
     trust: WorkspaceTrust,
     writable_extra: Vec<PathBuf>,
     readable_extra: Vec<PathBuf>,
+    /// Readable only while the policy grants a network — see
+    /// [`discovery::network_scoped_reads`]. Held separately from
+    /// `readable_extra` because the network posture is set AFTER construction
+    /// (`with_network`), so the decision cannot be taken in the constructor.
+    network_scoped_readable: Vec<PathBuf>,
     network: NetworkPolicy,
     cache_env: Vec<(String, String)>,
     /// Additional authority roots that must be unreadable to Bash even when a
@@ -184,12 +202,14 @@ impl WorkspacePolicy {
         readable_extra.extend(trusted_config_and_certificate_reads());
         readable_extra.sort();
         readable_extra.dedup();
+        let network_scoped_readable = network_scoped_reads();
 
         Self {
             root,
             trust: WorkspaceTrust::Trusted,
             writable_extra,
             readable_extra,
+            network_scoped_readable,
             // #657: the bare constructor is fail-safe — network is seeded from
             // `default_bash_network_policy()` (Deny unless `WAYLAND_BASH_ALLOW_NETWORK`).
             // Network egress is granted only for a GENUINELY-LOCAL session, and
@@ -229,6 +249,7 @@ impl WorkspacePolicy {
             })
             .collect();
         let readable_extra = minimal_toolchain_read_dirs();
+        let network_scoped_readable = Vec::new();
         let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
 
         Self {
@@ -236,6 +257,7 @@ impl WorkspacePolicy {
             trust: WorkspaceTrust::Contained,
             writable_extra,
             readable_extra,
+            network_scoped_readable,
             // #657: a Contained (untrusted / remote `Workspace`) posture runs
             // potentially attacker-influenced content, so egress stays DENIED to
             // keep the exfil boundary tight. `WAYLAND_BASH_ALLOW_NETWORK=1`
@@ -286,6 +308,7 @@ impl WorkspacePolicy {
         }
 
         let readable_extra = minimal_toolchain_read_dirs();
+        let network_scoped_readable = Vec::new();
         let writable_extra = vec![scratch.clone()];
         let mut cache_env = CACHE_ENV_DIRS
             .iter()
@@ -333,6 +356,7 @@ impl WorkspacePolicy {
             trust: WorkspaceTrust::Contained,
             writable_extra,
             readable_extra,
+            network_scoped_readable,
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             authority_read_deny: protected.clone(),
@@ -370,6 +394,13 @@ impl WorkspacePolicy {
     pub fn readable_roots(&self) -> Vec<PathBuf> {
         let mut v = self.writable_roots();
         v.extend(self.readable_extra.iter().cloned());
+        // Network-scoped reads are withheld from a Deny-network child: they
+        // describe the network it does not have, and naming the host's DNS
+        // servers and search domains is the whole of what they leak.
+        // `AllowHosts` still needs to resolve names, so only `Deny` withholds.
+        if !matches!(self.network, NetworkPolicy::Deny) {
+            v.extend(self.network_scoped_readable.iter().cloned());
+        }
         v.extend(self.session_read_grants.read().iter().cloned());
         v.sort();
         v.dedup();
@@ -991,7 +1022,7 @@ pub fn local_bash_network(has_channel_posture: bool) -> NetworkPolicy {
 mod discovery;
 use discovery::{
     capability_roots, detect_developer_capabilities, minimal_toolchain_read_dirs,
-    trusted_config_and_certificate_reads,
+    network_scoped_reads, trusted_config_and_certificate_reads,
 };
 
 #[cfg(test)]

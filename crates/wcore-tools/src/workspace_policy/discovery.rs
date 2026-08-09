@@ -153,13 +153,34 @@ pub(super) fn capability_roots(executable: &Path) -> Vec<PathBuf> {
     roots
 }
 
+/// Reads that are only useful to a child that HAS a network, and that leak host
+/// network topology to one that does not. Granted by `readable_roots()` only
+/// when the policy's `NetworkPolicy` is not `Deny`.
+///
+/// `/etc/resolv.conf` names the host's DNS servers and its search domains — on
+/// the host this was measured on, a private tailnet domain. It used to sit in
+/// [`trusted_config_and_certificate_reads`], which CANONICALIZES, so on a
+/// systemd-resolved host the grant landed on the resolved
+/// `/run/systemd/resolve/stub-resolv.conf`. That defeated the bwrap backend's
+/// `NETWORK_RO_ETC` gate: the backend correctly withheld `/etc/resolv.conf`
+/// under `Deny`, and the child read the resolved path instead. Gating here
+/// closes both spellings at once and does so for every backend, not just bwrap.
+pub(super) fn network_scoped_reads() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for path in [PathBuf::from("/etc/resolv.conf")] {
+        if path.exists() {
+            paths.push(canon(path));
+        }
+    }
+    paths
+}
+
 pub(super) fn trusted_config_and_certificate_reads() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for path in [
         PathBuf::from("/etc/ssl/certs"),
         PathBuf::from("/etc/ssl/cert.pem"),
         PathBuf::from("/etc/paths"),
-        PathBuf::from("/etc/resolv.conf"),
     ] {
         if path.exists() {
             paths.push(canon(path));
