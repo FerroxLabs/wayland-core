@@ -421,6 +421,65 @@ fn node_and_python_run_under_the_default_posture() {
     );
 }
 
+/// The acceptance the brief asked for, beyond `--version`: does each toolchain
+/// actually DO something, graded from world state?
+///
+/// * git — `init` + `add` + `commit` in a scratch repo, graded by asking git
+///   for the commit's own object id and by the presence of `.git/HEAD`.
+/// * cargo — build a hello-world, graded by the binary appearing on disk.
+///
+/// This asserts nothing; it prints, because on this tree node and python cannot
+/// start at all (see `node_and_python_run_under_the_default_posture`) and a
+/// hard assertion here would just be a second copy of that RED.
+#[test]
+#[ignore = "explicit native Windows toolchain measurement"]
+fn measure_toolchain_work_not_just_version() {
+    require_live();
+    assert_quiet();
+    let root = workspace("work");
+    let (_policy, ctx) = contained_ctx(&root);
+    control(&ctx, &root, "start");
+
+    // git: a real repository with a real commit.
+    let p = run(
+        &ctx,
+        "git init -q repo && cd repo && git -c user.name=t -c user.email=t@e \
+         -c commit.gpgsign=false init -q . && echo hi> a.txt && git add a.txt && \
+         git -c user.name=t -c user.email=t@e -c commit.gpgsign=false commit -q -m w && \
+         git rev-parse HEAD",
+    );
+    println!(
+        "WORK name=git exit={} head_on_disk={} stdout={:?} stderr={:?}",
+        p.exit_code,
+        root.join("repo").join(".git").join("HEAD").is_file(),
+        p.stdout.trim(),
+        p.stderr.trim()
+    );
+    control(&ctx, &root, "git");
+
+    // cargo: a hello-world that has to compile and link.
+    let p = run(
+        &ctx,
+        "cargo new --offline --bin hello -q && cd hello && cargo build --offline -q",
+    );
+    let binary = root
+        .join("hello")
+        .join("target")
+        .join("debug")
+        .join("hello.exe");
+    println!(
+        "WORK name=cargo exit={} binary_on_disk={} stdout={:?} stderr={:?}",
+        p.exit_code,
+        binary.is_file(),
+        p.stdout.trim(),
+        p.stderr.trim()
+    );
+    control(&ctx, &root, "cargo");
+
+    control(&ctx, &root, "end");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cost of the grant-set change, measured rather than assumed.
 ///
 /// Every extra directory in the read grant set is an inherited-ACE rewrite over
