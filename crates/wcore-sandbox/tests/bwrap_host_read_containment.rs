@@ -9,18 +9,36 @@
 //! only), never `(subpath "/etc")`. Linux was the permissive outlier because
 //! `SYSTEM_RO_DIRS` bound the whole of `/etc` read-only.
 //!
-//! Every containment assertion in this file is paired with a NEGATIVE CONTROL
-//! that runs the identical probe with the sandbox OFF and asserts the same
-//! marker IS observed. The gate recorded an instrument defect here — a wire
-//! predicate looking for macOS-only passwd shapes (`/usr/bin/false`,
-//! `nobody:*:`) that cannot exist on Ubuntu, which reported a false green — so
-//! markers are derived from the host file AT RUN TIME, never hardcoded, and a
-//! control that does not fire fails the test rather than passing it.
+//! Every containment assertion in this file is paired with TWO controls.
+//!
+//! 1. A NEGATIVE CONTROL that runs the identical probe with the sandbox OFF and
+//!    asserts the same marker IS observed. The gate recorded an instrument
+//!    defect here — a wire predicate looking for macOS-only passwd shapes
+//!    (`/usr/bin/false`, `nobody:*:`) that cannot exist on Ubuntu, which
+//!    reported a false green — so markers are derived from the host file AT RUN
+//!    TIME, never hardcoded, and a control that does not fire fails the test
+//!    rather than passing it.
+//!
+//! 2. A POSITIVE CONTROL that the child actually RAN INSIDE the namespace.
+//!    "The marker is not in the output" is satisfied just as well by a child
+//!    that never executed, and that is not a hypothetical: restoring `/etc` to
+//!    `SYSTEM_RO_DIRS` makes bwrap fail to build the namespace
+//!    (`bwrap: Can't create file at /etc/localtime: No such file or directory`),
+//!    every child including `/usr/bin/echo` exits 1 with empty stdout — and the
+//!    W1 revision of this file reported all four containment tests as PASS in
+//!    exactly that state. A security gate that goes green while the sandbox is
+//!    completely broken is worse than no gate. So each probe is wrapped as
+//!    `echo <nonce>-START; <escape>; echo <nonce>-END=$?`, and BOTH sentinels
+//!    must appear in the sandboxed output before the containment assertion is
+//!    allowed to mean anything. `-START` proves the shell ran; `-END=` proves
+//!    the escape command itself ran to completion rather than the child dying
+//!    partway.
 
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wcore_sandbox::backends::SandboxBackend;
 use wcore_sandbox::backends::bwrap::BubblewrapBackend;
 use wcore_sandbox::{SandboxCommand, SandboxManifest};
@@ -93,20 +111,73 @@ fn unsandboxed(root: &Path, argv: &[String]) -> String {
     )
 }
 
-async fn assert_contained(probe: &str, host_path: &str, argv: Vec<String>) {
+/// A nonce unique to this probe and this run, echoed by the child so its
+/// execution is observable. Derived from the clock and the pid so two probes in
+/// the same binary — and two runs against the same host — cannot collide.
+fn nonce(probe: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_nanos();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tag: String = probe
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    format!("WLPROOF{tag}{}{nanos:x}{seq:x}", std::process::id())
+}
+
+/// Wrap an escape command so the child proves it ran. `-START` is emitted
+/// before the escape, `-END=<status>` after it; see the module doc for why both
+/// are required.
+fn probe_argv(sh: &Path, nonce: &str, body: &str) -> Vec<String> {
+    vec![
+        sh.to_string_lossy().into_owned(),
+        "-c".into(),
+        format!("echo {nonce}-START; {body}; echo {nonce}-END=$?"),
+    ]
+}
+
+/// Fail unless `observed` carries both proof-of-execution sentinels. Without
+/// this, a containment assertion passes when the child never ran at all.
+fn assert_child_ran(probe: &str, nonce: &str, where_: &str, observed: &str) {
+    let start = format!("{nonce}-START");
+    let end = format!("{nonce}-END=");
+    assert!(
+        observed.contains(&start) && observed.contains(&end),
+        "{probe}: POSITIVE CONTROL DID NOT FIRE ({where_}) — the child did not \
+         run to completion, so any containment assertion against its output is \
+         VACUOUS. This is what a broken sandbox namespace looks like; do not \
+         read a green containment result out of it.\n  \
+         expected sentinels: {start:?} and {end:?}\n  \
+         saw -START: {}\n  saw -END: {}\n  child output: {observed:?}",
+        observed.contains(&start),
+        observed.contains(&end)
+    );
+}
+
+async fn assert_contained(probe: &str, host_path: &str, body: &str) {
     if backend().is_none() {
         eprintln!("skip {probe}: bwrap not available");
         return;
     }
+    let Some(sh) = bin("sh") else {
+        eprintln!("skip {probe}: no sh");
+        return;
+    };
     let Some(marker) = host_file_marker(host_path) else {
         eprintln!("skip {probe}: {host_path} is not readable on this host");
         return;
     };
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let nonce = nonce(probe);
+    let argv = probe_argv(&sh, &nonce, body);
 
     // Negative control first: with no sandbox the marker MUST be observed.
     let control = unsandboxed(&root, &argv);
+    assert_child_ran(probe, &nonce, "sandbox OFF", &control);
     assert!(
         control.contains(&marker),
         "{probe}: NEGATIVE CONTROL DID NOT FIRE — the sandbox-off probe did not \
@@ -115,6 +186,10 @@ async fn assert_contained(probe: &str, host_path: &str, argv: Vec<String>) {
     );
 
     let observed = sandboxed(&root, argv).await;
+    // Positive control: the child ran INSIDE the sandbox. Must precede the
+    // containment assertion — an empty output satisfies the containment
+    // assertion trivially and proves nothing.
+    assert_child_ran(probe, &nonce, "sandbox ON", &observed);
     assert!(
         !observed.contains(&marker),
         "{probe}: HOST READ ESCAPE — the sandboxed child read host-private \
@@ -122,50 +197,68 @@ async fn assert_contained(probe: &str, host_path: &str, argv: Vec<String>) {
     );
 }
 
+/// The positive control, on its own, as a named test. Every other test in this
+/// file depends on the bwrap namespace actually building; when it does not,
+/// this fails FIRST and says so, instead of leaving four silent green
+/// containment results to be misread as a security proof.
 #[tokio::test]
-async fn bwrap_denies_host_etc_passwd() {
-    let Some(cat) = bin("cat") else {
-        eprintln!("skip: no cat");
+async fn bwrap_namespace_builds_and_runs_a_trivial_child() {
+    if backend().is_none() {
+        eprintln!("skip: bwrap not available");
+        return;
+    }
+    let Some(sh) = bin("sh") else {
+        eprintln!("skip: no sh");
         return;
     };
-    assert_contained(
-        "SEC-07 /etc/passwd",
-        "/etc/passwd",
-        vec![cat.to_string_lossy().into_owned(), "/etc/passwd".into()],
-    )
-    .await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let nonce = nonce("namespace health");
+    let argv = probe_argv(&sh, &nonce, "true");
+
+    let backend = backend().expect("checked");
+    let out = backend
+        .execute(
+            &workspace_manifest(&root),
+            SandboxCommand {
+                argv,
+                cwd: Some(root.clone()),
+            },
+        )
+        .await
+        .expect("bwrap execute");
+    let observed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_child_ran("namespace health", &nonce, "sandbox ON", &observed);
+    assert_eq!(
+        out.exit_code, 0,
+        "the bwrap namespace must build and run a trivial child; \
+         exit={} output={observed:?}",
+        out.exit_code
+    );
+}
+
+#[tokio::test]
+async fn bwrap_denies_host_etc_passwd() {
+    assert_contained("SEC-07 /etc/passwd", "/etc/passwd", "cat /etc/passwd").await;
 }
 
 #[tokio::test]
 async fn bwrap_denies_host_etc_hosts() {
-    let Some(cat) = bin("cat") else {
-        eprintln!("skip: no cat");
-        return;
-    };
-    assert_contained(
-        "SEC-05 /etc/hosts",
-        "/etc/hosts",
-        vec![cat.to_string_lossy().into_owned(), "/etc/hosts".into()],
-    )
-    .await;
+    assert_contained("SEC-05 /etc/hosts", "/etc/hosts", "cat /etc/hosts").await;
 }
 
 /// The traversal spelling the gate actually measured — the workspace-relative
 /// `../../../../../../../../etc/passwd` that walks off the granted root.
 #[tokio::test]
 async fn bwrap_denies_host_etc_passwd_via_parent_traversal() {
-    let Some(sh) = bin("sh") else {
-        eprintln!("skip: no sh");
-        return;
-    };
     assert_contained(
         "SEC-07 traversal",
         "/etc/passwd",
-        vec![
-            sh.to_string_lossy().into_owned(),
-            "-c".into(),
-            "cat ../../../../../../../../etc/passwd".into(),
-        ],
+        "cat ../../../../../../../../etc/passwd",
     )
     .await;
 }
@@ -178,8 +271,8 @@ async fn bwrap_denies_host_root_home_listing() {
         eprintln!("skip: bwrap not available");
         return;
     }
-    let Some(ls) = bin("ls") else {
-        eprintln!("skip: no ls");
+    let Some(sh) = bin("sh") else {
+        eprintln!("skip: no sh");
         return;
     };
     let Ok(entries) = std::fs::read_dir("/root") else {
@@ -198,13 +291,11 @@ async fn bwrap_denies_host_root_home_listing() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
-    let argv = vec![
-        ls.to_string_lossy().into_owned(),
-        "-a".into(),
-        "/root".into(),
-    ];
+    let nonce = nonce("SEC-10 /root");
+    let argv = probe_argv(&sh, &nonce, "ls -a /root");
 
     let control = unsandboxed(&root, &argv);
+    assert_child_ran("SEC-10 /root", &nonce, "sandbox OFF", &control);
     assert!(
         control.contains(&marker),
         "SEC-10 /root: NEGATIVE CONTROL DID NOT FIRE — sandbox-off `ls -a /root` \
@@ -212,6 +303,7 @@ async fn bwrap_denies_host_root_home_listing() {
     );
 
     let observed = sandboxed(&root, argv).await;
+    assert_child_ran("SEC-10 /root", &nonce, "sandbox ON", &observed);
     assert!(
         !observed.contains(&marker),
         "SEC-10 /root: HOST READ ESCAPE — the sandboxed child listed the host's \
