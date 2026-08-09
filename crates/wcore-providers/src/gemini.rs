@@ -442,14 +442,29 @@ pub(crate) fn build_contents(
                         }
                     }));
                 }
-                ContentBlock::Thinking { thinking } => {
+                ContentBlock::Thinking { thinking, extra } => {
                     // Round-trip thinking text as a thought-flagged part so the
-                    // model has the prior reasoning context. The signature (if
-                    // any) was preserved on the corresponding ToolUse block.
-                    parts.push(json!({
+                    // model has the prior reasoning context.
+                    //
+                    // C-4b: Gemini is stateless about reasoning — a thought part
+                    // must be resent EXACTLY as it was received, signature
+                    // included. A `thoughtSignature` that arrived on the thought
+                    // part belongs back on the THOUGHT part; it is not
+                    // interchangeable with the signature on the `functionCall`
+                    // that followed it, and re-emitting the thought unsigned is
+                    // what makes the server reject the replayed turn.
+                    let mut part = json!({
                         "text": thinking,
                         "thought": true,
-                    }));
+                    });
+                    if let Some(sig) = extra
+                        .as_ref()
+                        .and_then(|e| e.get("thoughtSignature"))
+                        .and_then(Value::as_str)
+                    {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    parts.push(part);
                 }
                 ContentBlock::Image { mime, data } => {
                     // Gemini native shape: `parts:[{inlineData:{mimeType,data}}]`.
@@ -1253,6 +1268,65 @@ mod tests {
         let (_, contents) = build_contents(&messages, &compat());
         let part = &contents[0]["parts"][0];
         assert_eq!(part["thoughtSignature"], "sig-abc");
+    }
+
+    /// C-4b. The existing signature test above covers ONE part — a lone
+    /// `functionCall` — which is why the thought-part case shipped broken.
+    /// Here the assistant turn is MULTI-part and the SECOND part is the one
+    /// carrying the signature, matching what Gemini actually returns when it
+    /// reasons before calling a tool.
+    ///
+    /// Every part must go back exactly as it came: the unsigned thought stays
+    /// unsigned, the signed thought is re-signed IN PLACE at its own index,
+    /// and the call keeps its own distinct signature. Re-emitting the signed
+    /// thought as a bare `{"text":…,"thought":true}` — as the builder did —
+    /// silently strips reasoning material the server requires back.
+    #[test]
+    fn build_contents_round_trips_thought_signature_on_a_thought_part() {
+        let messages = vec![Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking {
+                    thinking: "First, read the file.".into(),
+                    extra: None,
+                },
+                ContentBlock::Thinking {
+                    thinking: "It is a config, so parse it.".into(),
+                    extra: Some(json!({"thoughtSignature": "sig-on-thought"})),
+                },
+                ContentBlock::ToolUse {
+                    id: gemini_id("Read"),
+                    name: "Read".into(),
+                    input: json!({}),
+                    extra: Some(json!({"thoughtSignature": "sig-on-call"})),
+                },
+            ],
+        )];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let parts = contents[0]["parts"].as_array().expect("parts array");
+        assert_eq!(parts.len(), 3, "every block must round-trip: {parts:?}");
+
+        assert_eq!(parts[0]["thought"], true);
+        assert!(
+            parts[0].get("thoughtSignature").is_none(),
+            "an unsigned thought must not acquire a signature: {}",
+            parts[0]
+        );
+
+        assert_eq!(parts[1]["thought"], true);
+        assert_eq!(
+            parts[1]["thoughtSignature"], "sig-on-thought",
+            "the signature Gemini put on the thought part must be resent on \
+             that same part, at that same index: {}",
+            parts[1]
+        );
+
+        assert_eq!(parts[2]["functionCall"]["name"], "Read");
+        assert_eq!(
+            parts[2]["thoughtSignature"], "sig-on-call",
+            "the call keeps its OWN signature — the two are not interchangeable"
+        );
     }
 
     #[test]
