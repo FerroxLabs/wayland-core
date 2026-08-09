@@ -74,12 +74,17 @@ fn escape_sbpl_string(s: &str) -> String {
 ///
 /// The root `/` is skipped: `build_profile` already grants it a `literal`
 /// read for the dyld bootstrap.
-fn ancestor_directories(manifest: &SandboxManifest) -> std::collections::BTreeSet<String> {
+fn ancestor_directories(
+    manifest: &SandboxManifest,
+    darwin_temp: Option<&std::path::Path>,
+) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     let granted = manifest
         .fs_read_allow
         .iter()
-        .chain(manifest.fs_write_allow.iter());
+        .chain(manifest.fs_write_allow.iter())
+        .map(|p| p.as_path())
+        .chain(darwin_temp);
     for path in granted {
         for ancestor in path.ancestors().skip(1) {
             let text = ancestor.to_string_lossy();
@@ -107,6 +112,49 @@ fn reject_unsafe_path(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// The per-user temporary directory Darwin's own tools use, read from
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` — the value `/var/folders/<a>/<b>/T`.
+///
+/// This is NOT `$TMPDIR`, and that distinction is the whole reason this
+/// function exists. `WorkspacePolicy` points `TMPDIR`/`TMP`/`TEMP` at the
+/// session's own granted scratch, which rescues every tool that reads the
+/// environment (clang, python3's `tempfile`, node's `os.tmpdir()`). Several
+/// Apple tools do not: `mktemp(1)` and the `xcrun` cache shim call `confstr`
+/// FIRST and only fall back to `$TMPDIR`, so under a deny-default profile they
+/// fail against a directory no environment variable can move. Measured on
+/// Darwin 25.3.0 with `TMPDIR` redirected: `mktemp` still returned
+/// `/var/folders/…/T/tmp.XXXXXXXXXX`, and inside the sandbox that became
+/// `mktemp: mkstemp failed on …: Operation not permitted`, while `git`,
+/// `python3` and `clang` each printed
+/// `couldn't create cache file '…/T/xcrun_db-XXXXXXXX'` on every invocation.
+///
+/// Canonicalized, because seatbelt matches the `/private`-rooted spelling: the
+/// `/var` the caller sees is a symlink and a `subpath` grant written through it
+/// does not match.
+///
+/// Returns `None` when `confstr` reports nothing or the directory does not
+/// resolve — the profile then simply omits the grant, which is the status quo
+/// ante rather than a widened one.
+fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `confstr` writes at most `buf.len()` bytes (including the NUL)
+    // into the buffer we own and keep alive for the call, and returns the
+    // length it needed. It touches no other caller memory.
+    let len = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            buf.len(),
+        )
+    };
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    buf.truncate(len - 1); // drop the trailing NUL confstr counts
+    let raw = String::from_utf8(buf).ok()?;
+    std::fs::canonicalize(raw).ok()
+}
+
 impl SandboxExecBackend {
     pub fn new() -> Self {
         Self {
@@ -124,6 +172,22 @@ impl SandboxExecBackend {
     ///
     /// Public for testing.
     pub fn build_profile(manifest: &SandboxManifest) -> Result<String> {
+        Self::build_profile_with_darwin_temp(manifest, darwin_user_temp_dir().as_deref())
+    }
+
+    /// [`build_profile`](Self::build_profile) with the Darwin per-user temp
+    /// directory supplied instead of read from `confstr`.
+    ///
+    /// The seam exists so the grant can be asserted against a fixed, known path
+    /// instead of whatever `/var/folders/<random>/<random>/T` the running host
+    /// happens to own — a test that reads the same `confstr` the code under test
+    /// reads would pass no matter what the code emitted.
+    ///
+    /// Public for testing.
+    pub fn build_profile_with_darwin_temp(
+        manifest: &SandboxManifest,
+        darwin_temp: Option<&std::path::Path>,
+    ) -> Result<String> {
         let mut p = String::new();
         p.push_str("(version 1)\n");
         p.push_str("(deny default)\n");
@@ -213,6 +277,28 @@ impl SandboxExecBackend {
             p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
             p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
+        // The Darwin per-user temp directory — see [`darwin_user_temp_dir`] for
+        // why `$TMPDIR` cannot stand in for it. Without this grant `mktemp(1)`
+        // is simply broken on macOS under BOTH the contained and the
+        // trusted_local profile, and `git`, `python3` and `clang` each emit two
+        // `couldn't create cache file` lines per invocation.
+        //
+        // EXPOSURE, stated plainly: this is read+write over the directory the
+        // user's other applications also use for transient files, so a
+        // sandboxed command can read and overwrite their temp state. It is
+        // per-uid — `confstr` returns a directory owned by, and reachable only
+        // by, the invoking user — so it grants no cross-user reach, and the
+        // session's own scratch grant (`$TMPDIR`, from `scratch_dirs`) already
+        // sits INSIDE this same tree, so the change widens an existing foothold
+        // from one subdirectory to its parent rather than opening a new region
+        // of the filesystem. `fs_read_deny` still wins over it: the deny block
+        // is emitted after this, and SBPL is last-match-wins.
+        if let Some(dir) = darwin_temp {
+            reject_unsafe_path(dir)?;
+            let escaped = escape_sbpl_string(&dir.to_string_lossy());
+            p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
+            p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
+        }
         // Path-resolution ancestors. `file-read-metadata` is the narrowest
         // seatbelt operation that satisfies `stat`/`lstat`/`realpath`: it does
         // NOT permit reading file contents and does NOT permit listing a
@@ -224,7 +310,7 @@ impl SandboxExecBackend {
         // full, so an attacker learns nothing it could not derive from its own
         // grant list. Emitted before the deny block so a `fs_read_deny` entry
         // still wins under SBPL last-match-wins.
-        for ancestor in ancestor_directories(manifest) {
+        for ancestor in ancestor_directories(manifest, darwin_temp) {
             p.push_str(&format!(
                 "(allow file-read-metadata (literal \"{}\"))\n",
                 escape_sbpl_string(&ancestor)
@@ -909,6 +995,119 @@ mod tests {
         );
     }
 
+    #[test]
+    fn profile_emits_fs_allowlist() {
+        let m = SandboxManifest {
+            fs_read_allow: vec!["/tmp/work".into()],
+            fs_write_allow: vec!["/var/tmp/scratch".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(p.contains("(allow file-read* (subpath \"/tmp/work\"))"));
+        assert!(p.contains("(allow file-read* (subpath \"/var/tmp/scratch\"))"));
+        assert!(p.contains("(allow file-write* (subpath \"/var/tmp/scratch\"))"));
+    }
+
+    /// The Darwin per-user temp directory must be granted read AND write, and
+    /// its ancestors must get the metadata grants `realpath(3)` needs — a
+    /// `subpath` grant on `/private/var/folders/a/b/T` alone leaves
+    /// `/private/var/folders` denied and the resolve fails before the grant is
+    /// ever consulted.
+    ///
+    /// A fixed path is injected rather than read from `confstr`, because a test
+    /// that called the same `confstr` the code calls would agree with the code
+    /// no matter which directory the code emitted.
+    #[test]
+    fn profile_grants_the_darwin_per_user_temp_dir() {
+        let t = std::path::Path::new("/private/var/folders/8h/probe/T");
+        let m = SandboxManifest::default();
+
+        let p = SandboxExecBackend::build_profile_with_darwin_temp(&m, Some(t))
+            .expect("profile builds");
+        assert!(
+            p.contains("(allow file-read* (subpath \"/private/var/folders/8h/probe/T\"))"),
+            "mkstemp opens O_RDWR, so a write-only grant is not enough: {p}"
+        );
+        assert!(
+            p.contains("(allow file-write* (subpath \"/private/var/folders/8h/probe/T\"))"),
+            "profile must let Darwin's confstr temp dir be written: {p}"
+        );
+        for ancestor in [
+            "/private",
+            "/private/var",
+            "/private/var/folders",
+            "/private/var/folders/8h",
+            "/private/var/folders/8h/probe",
+        ] {
+            assert!(
+                p.contains(&format!(
+                    "(allow file-read-metadata (literal \"{ancestor}\"))"
+                )),
+                "path resolution needs a metadata grant on {ancestor}: {p}"
+            );
+        }
+
+        // And the grant must be absent when the host reports no such directory,
+        // so the `None` arm cannot silently widen anything.
+        let none =
+            SandboxExecBackend::build_profile_with_darwin_temp(&m, None).expect("profile builds");
+        assert!(
+            !none.contains("/private/var/folders"),
+            "no confstr temp dir means no grant: {none}"
+        );
+    }
+
+    /// The new grant must not outrank a secret deny. SBPL is last-match-wins
+    /// and `fs_read_deny` is emitted after every allow, so a secret that
+    /// happens to live under the Darwin temp directory must still be denied.
+    #[test]
+    fn darwin_temp_grant_still_loses_to_a_read_deny() {
+        let t = std::path::Path::new("/private/var/folders/8h/probe/T");
+        let m = SandboxManifest {
+            fs_read_deny: vec!["/private/var/folders/8h/probe/T/secret".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile_with_darwin_temp(&m, Some(t))
+            .expect("profile builds");
+        let allow = p
+            .find("(allow file-write* (subpath \"/private/var/folders/8h/probe/T\"))")
+            .expect("temp grant present");
+        let deny = p
+            .find("(deny file-read* (subpath \"/private/var/folders/8h/probe/T/secret\"))")
+            .expect("deny present");
+        assert!(
+            deny > allow,
+            "the deny must come after the temp grant or last-match-wins hands the secret over: {p}"
+        );
+    }
+
+    /// The string tests above prove the profile grants the directory it was
+    /// GIVEN. This proves the directory it is given is the one Darwin's own
+    /// tools actually use — the failure mode that motivated the fix was
+    /// granting `$TMPDIR` and discovering `mktemp` never reads it.
+    #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    fn darwin_user_temp_dir_is_where_mktemp_puts_files() {
+        let dir = darwin_user_temp_dir().expect("confstr reports a per-user temp dir");
+
+        // Deliberately point TMPDIR somewhere else: if `mktemp` honoured the
+        // environment there would be no defect to fix, and this assertion
+        // would fail rather than quietly agreeing.
+        let decoy = tempfile::tempdir().expect("decoy tempdir");
+        let out = std::process::Command::new("/usr/bin/mktemp")
+            .env("TMPDIR", decoy.path())
+            .output()
+            .expect("run mktemp");
+        let printed = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let canon = std::fs::canonicalize(&printed).expect("mktemp's file exists");
+        let _ = std::fs::remove_file(&canon);
+
+        assert!(
+            canon.starts_with(&dir),
+            "mktemp wrote {canon:?} but the profile would grant {dir:?}"
+        );
+    }
+
     /// End to end, through the production `execute`: `mktemp` must produce a
     /// file this test can see from OUTSIDE the sandbox.
     ///
@@ -938,6 +1137,8 @@ mod tests {
             fs_write_allow: vec![canon_work.clone()],
             env: vec![
                 ("PATH".into(), "/usr/bin:/bin".into()),
+                // The redirect the workspace policy applies in production. It
+                // must not be what makes this pass.
                 ("TMPDIR".into(), canon_work.to_string_lossy().into_owned()),
             ],
             ..Default::default()
@@ -955,32 +1156,19 @@ mod tests {
             .expect("execute returns Ok");
 
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let printed = stdout.trim().to_owned();
+        let printed = stdout.trim();
         assert_eq!(
             out.exit_code,
             0,
             "mktemp must succeed inside the sandbox; stderr={:?}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let path = std::path::Path::new(&printed);
+        let path = std::path::Path::new(printed);
         assert!(
             path.is_absolute() && path.exists(),
             "the host must see the file the sandboxed mktemp created, got {printed:?}"
         );
         let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn profile_emits_fs_allowlist() {
-        let m = SandboxManifest {
-            fs_read_allow: vec!["/tmp/work".into()],
-            fs_write_allow: vec!["/var/tmp/scratch".into()],
-            ..Default::default()
-        };
-        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
-        assert!(p.contains("(allow file-read* (subpath \"/tmp/work\"))"));
-        assert!(p.contains("(allow file-read* (subpath \"/var/tmp/scratch\"))"));
-        assert!(p.contains("(allow file-write* (subpath \"/var/tmp/scratch\"))"));
     }
 
     #[test]
