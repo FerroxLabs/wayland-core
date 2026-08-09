@@ -22,6 +22,7 @@ use wcore_sandbox::backends::bwrap::BubblewrapBackend;
 use wcore_sandbox::backends::no_sandbox::NoSandboxBackend;
 #[cfg(target_os = "macos")]
 use wcore_sandbox::backends::sandbox_exec::SandboxExecBackend;
+use wcore_sandbox::test_support::run_contained_probe;
 use wcore_sandbox::{SandboxChunk, SandboxCommand, SandboxManifest};
 
 // AppContainerBackend is re-exported from the appcontainer module on every
@@ -222,6 +223,16 @@ async fn bwrap_confines_filesystem_writes_outside_allowlist() {
     // `fs_write_allow` must fail. The temp dir is created on the host but
     // deliberately omitted from the manifest, so inside the bwrap mount
     // namespace it does not exist as a writable bind — the write fails.
+    //
+    // Routed through `run_contained_probe` because the assertions below are
+    // otherwise satisfied by a sandbox that never ran the child at all. That is
+    // not theoretical: with a single `--ro-bind` onto an absent source injected
+    // into `BubblewrapBackend` — so that `/usr/bin/echo` itself exits 1 with
+    // empty stdout, and `bwrap_execute_echo_returns_exit_zero` above FAILS —
+    // the previous form of this test passed 6 runs out of 6. The probe now
+    // refuses to yield a result unless the child emitted its liveness markers
+    // from inside the namespace, so a dead sandbox is a hard failure here
+    // instead of a green.
     let backend = BubblewrapBackend::new();
     if !backend.is_available() {
         eprintln!("skip: bwrap not installed on this host");
@@ -235,24 +246,14 @@ async fn bwrap_confines_filesystem_writes_outside_allowlist() {
     let forbidden = tmp.path().join("escapee.txt");
 
     // Empty manifest -> tmp.path() is NOT bound writable into the sandbox.
-    let out = backend
-        .execute(
-            &SandboxManifest::default(),
-            SandboxCommand {
-                argv: vec![
-                    sh.into(),
-                    "-c".into(),
-                    format!("echo pwned > '{}'", forbidden.display()),
-                ],
-                cwd: None,
-            },
-        )
-        .await
-        .expect("bwrap execute must run (the child itself fails, not the backend)");
-    assert_ne!(
-        out.exit_code, 0,
-        "writing outside fs_write_allow must fail inside the sandbox",
-    );
+    let probe = run_contained_probe(
+        &backend,
+        &SandboxManifest::default(),
+        sh,
+        &format!("echo pwned > '{}'", forbidden.display()),
+    )
+    .await;
+    probe.assert_probe_failed("writing outside fs_write_allow must fail inside the sandbox");
     assert!(
         !forbidden.exists(),
         "the forbidden file must NOT appear on the host filesystem",

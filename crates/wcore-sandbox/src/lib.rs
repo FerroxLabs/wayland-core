@@ -21,6 +21,8 @@ pub mod directory_authority;
 pub mod error;
 pub mod manifest;
 pub mod process_capture;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use backends::HardContainmentMechanism;
 pub use directory_authority::{
