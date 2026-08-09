@@ -61,6 +61,37 @@ fn escape_sbpl_string(s: &str) -> String {
     out
 }
 
+/// Collect every proper ancestor DIRECTORY of the granted manifest paths.
+///
+/// Seatbelt grants are per-node: `(subpath "/Users/me/.cargo/bin")` makes that
+/// directory and its contents readable but leaves `/Users`, `/Users/me` and
+/// `/Users/me/.cargo` denied. Opening a file deep inside a granted subpath
+/// still works, but `realpath(3)` / `lstat(2)` resolve a path COMPONENT AT A
+/// TIME and fail on the first ungranted ancestor — which is why node aborts
+/// with `EPERM: operation not permitted, lstat '/Users'` and Homebrew's
+/// python3 with `realpath: /opt/homebrew/bin/: Operation not permitted` even
+/// though both interpreters live inside a granted subpath.
+///
+/// The root `/` is skipped: `build_profile` already grants it a `literal`
+/// read for the dyld bootstrap.
+fn ancestor_directories(manifest: &SandboxManifest) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let granted = manifest
+        .fs_read_allow
+        .iter()
+        .chain(manifest.fs_write_allow.iter());
+    for path in granted {
+        for ancestor in path.ancestors().skip(1) {
+            let text = ancestor.to_string_lossy();
+            if text.is_empty() || text == "/" {
+                continue;
+            }
+            out.insert(text.into_owned());
+        }
+    }
+    out
+}
+
 /// Reject a manifest path that cannot be safely represented in an SBPL
 /// profile. A NUL or a newline cannot appear in a profile string at all;
 /// rather than silently mangling such a path we fail the whole execution
@@ -126,6 +157,16 @@ impl SandboxExecBackend {
         p.push_str("(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/private/var/db/dyld\") (subpath \"/private/var/select\"))\n");
         p.push_str("(allow file-read* (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/dtracehelper\"))\n");
         p.push_str("(allow file-write* (literal \"/dev/null\"))\n");
+        // LibreSSL — the TLS stack Apple links into `cargo`, `curl` and every
+        // other system-linked client — opens `/private/etc/ssl/openssl.cnf`
+        // unconditionally at init. Without this grant `cargo --version` prints
+        // `Auto configuration failed … fopen('/private/etc/ssl/openssl.cnf',
+        // 'rb')` and exits before doing any work. A single `literal`, not a
+        // `subpath`: the sibling `x509v3.cnf` and the rest of `/private/etc`
+        // stay denied. The file is the world-readable system OpenSSL
+        // configuration and carries no key material, so the read grants an
+        // attacker nothing beyond the host's default cipher/CA settings.
+        p.push_str("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))\n");
         // TAHOE FIX: bake hw.* sysctl-read for zsh + future tools.
         p.push_str("(allow sysctl-read (sysctl-name-prefix \"hw.\"))\n");
         p.push_str("(allow sysctl-read (sysctl-name-prefix \"kern.\"))\n");
@@ -171,6 +212,23 @@ impl SandboxExecBackend {
             let escaped = escape_sbpl_string(&path.to_string_lossy());
             p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
             p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
+        }
+        // Path-resolution ancestors. `file-read-metadata` is the narrowest
+        // seatbelt operation that satisfies `stat`/`lstat`/`realpath`: it does
+        // NOT permit reading file contents and does NOT permit listing a
+        // directory (`readdir` needs `file-read-data` on the directory node),
+        // both externally re-confirmed under a live `sandbox-exec` — `ls
+        // /Users`, `cat ~/.ssh/id_ed25519` and `cat /etc/passwd` all stay
+        // "Operation not permitted" while `stat /Users` succeeds. Every path
+        // emitted here is a prefix of a path the manifest ALREADY grants in
+        // full, so an attacker learns nothing it could not derive from its own
+        // grant list. Emitted before the deny block so a `fs_read_deny` entry
+        // still wins under SBPL last-match-wins.
+        for ancestor in ancestor_directories(manifest) {
+            p.push_str(&format!(
+                "(allow file-read-metadata (literal \"{}\"))\n",
+                escape_sbpl_string(&ancestor)
+            ));
         }
         // Secret-read-deny: emitted AFTER all allows so SBPL last-match-wins
         // semantics make the deny authoritative even under an allowed subtree.
@@ -408,6 +466,137 @@ mod tests {
         assert!(
             deny_line.contains("\\\""),
             "expected escaped quote in: {deny_line}"
+        );
+    }
+
+    // ── macOS toolchain grant-set tests ───────────────────────────────────────
+    //
+    // Measured RED these encode (live `sandbox-exec` on darwin 25.3.0, profile
+    // reproduced from this generator, evidence in
+    // `RED-baseline.txt` / `negative-controls.txt`):
+    //   node    -> `Error: EPERM: operation not permitted, lstat '/Users'`
+    //   python3 -> `realpath: /opt/homebrew/bin/: Operation not permitted`
+    //   cargo   -> `fopen('/private/etc/ssl/openssl.cnf', 'rb')` Operation not permitted
+    // Both are grant-set defects in the generated profile, so both are
+    // falsifiable at generator level.
+
+    /// The manifest a genuinely-local macOS session produces: a workspace
+    /// under $HOME plus toolchain roots several levels below $HOME and /opt.
+    fn toolchain_manifest() -> SandboxManifest {
+        SandboxManifest {
+            fs_read_allow: vec!["/Users/alice/.cargo/bin".into(), "/opt/homebrew/bin".into()],
+            fs_write_allow: vec!["/Users/alice/proj".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn profile_grants_metadata_read_on_every_granted_path_ancestor() {
+        let p = SandboxExecBackend::build_profile(&toolchain_manifest()).expect("profile builds");
+        for ancestor in [
+            "/Users",
+            "/Users/alice",
+            "/Users/alice/.cargo",
+            "/opt",
+            "/opt/homebrew",
+        ] {
+            assert!(
+                p.contains(&format!(
+                    "(allow file-read-metadata (literal \"{ancestor}\"))"
+                )),
+                "missing ancestor metadata grant for {ancestor}; realpath()/lstat() \
+                 walks a path component at a time and EPERMs on the first \
+                 ungranted ancestor. Profile:\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_ancestor_grants_are_metadata_only_and_never_widen_to_home() {
+        let p = SandboxExecBackend::build_profile(&toolchain_manifest()).expect("profile builds");
+        // The ancestors must NOT become readable subtrees — that would hand a
+        // sandboxed command every file under $HOME.
+        for widened in [
+            "(allow file-read* (subpath \"/Users\"))",
+            "(allow file-read* (literal \"/Users\"))",
+            "(allow file-read* (subpath \"/Users/alice\"))",
+            "(allow file-read* (literal \"/Users/alice\"))",
+            "(allow file-write* (subpath \"/Users\"))",
+            "(allow file-write* (subpath \"/Users/alice\"))",
+            "(allow file-read* (subpath \"/opt\"))",
+        ] {
+            assert!(
+                !p.contains(widened),
+                "profile widened an ancestor into a full grant: {widened}\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_grants_system_openssl_config_as_a_literal() {
+        // LibreSSL (cargo/curl on macOS) opens this file at init.
+        let p =
+            SandboxExecBackend::build_profile(&SandboxManifest::default()).expect("profile builds");
+        assert!(
+            p.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"),
+            "missing the LibreSSL config grant; `cargo --version` fails with \
+             `Auto configuration failed … fopen('/private/etc/ssl/openssl.cnf')`.\n{p}"
+        );
+        // Narrow: the surrounding directory and its siblings stay denied.
+        for widened in [
+            "(allow file-read* (subpath \"/private/etc\"))",
+            "(allow file-read* (subpath \"/private/etc/ssl\"))",
+            "(allow file-read* (literal \"/private/etc/ssl/x509v3.cnf\"))",
+        ] {
+            assert!(
+                !p.contains(widened),
+                "openssl.cnf grant widened beyond the single file: {widened}\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_emits_ancestor_metadata_before_read_deny() {
+        // SBPL is last-match-wins: a secret-read deny must still override any
+        // grant, including the ancestor metadata block.
+        let m = SandboxManifest {
+            fs_read_allow: vec!["/Users/alice/proj".into()],
+            fs_read_deny: vec!["/Users/alice/proj/.env".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        let metadata_pos = p
+            .find("(allow file-read-metadata (literal \"/Users/alice\"))")
+            .expect("ancestor metadata grant must exist");
+        let deny_pos = p
+            .find("(deny file-read* (subpath \"/Users/alice/proj/.env\"))")
+            .expect("read-deny must exist");
+        assert!(
+            deny_pos > metadata_pos,
+            "read-deny must be emitted after the ancestor metadata grants \
+             (last-match-wins); metadata_pos={metadata_pos} deny_pos={deny_pos}"
+        );
+    }
+
+    #[test]
+    fn profile_ancestor_grants_are_escaped_and_deduplicated() {
+        // Two grants under one parent must not emit the parent twice, and a
+        // quote in a path must not break out of the SBPL string literal.
+        let m = SandboxManifest {
+            fs_read_allow: vec!["/Users/alice/a".into(), "/Users/alice/b".into()],
+            fs_write_allow: vec!["/Users/al\"ice/c".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert_eq!(
+            p.matches("(allow file-read-metadata (literal \"/Users/alice\"))")
+                .count(),
+            1,
+            "shared ancestor emitted more than once:\n{p}"
+        );
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/al\\\"ice\"))"),
+            "quote in an ancestor path must be escaped:\n{p}"
         );
     }
 
