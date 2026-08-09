@@ -10404,6 +10404,7 @@ dependencies = [
  "wcore-observability",
  "wcore-protocol",
  "wcore-repomap",
+ "wcore-safety",
  "wcore-sandbox",
  "wcore-types",
  "windows-sys 0.59.0",
