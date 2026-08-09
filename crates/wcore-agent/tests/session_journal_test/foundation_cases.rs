@@ -77,6 +77,7 @@ fn prepared_provider_request_snapshot_round_trips_every_request_field() {
                 },
                 ContentBlock::Thinking {
                     thinking: "reasoning".into(),
+                    extra: None,
                 },
                 ContentBlock::Image {
                     mime: "image/png".into(),

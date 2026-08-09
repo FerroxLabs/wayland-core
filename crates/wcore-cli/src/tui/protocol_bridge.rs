@@ -1703,7 +1703,7 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                         ContentBlock::Text { text } => {
                             turn.elements.push(TurnElement::Markdown(text.clone()));
                         }
-                        ContentBlock::Thinking { thinking } => {
+                        ContentBlock::Thinking { thinking, .. } => {
                             turn.elements.push(TurnElement::Thinking {
                                 body: thinking.clone(),
                                 secs: 0,
@@ -2250,6 +2250,7 @@ mod tests {
             vec![
                 ContentBlock::Thinking {
                     thinking: "let me reason".into(),
+                    extra: None,
                 },
                 ContentBlock::Text {
                     text: "the answer".into(),

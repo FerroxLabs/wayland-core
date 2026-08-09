@@ -391,7 +391,7 @@ impl OpenAIProvider {
                             .content
                             .iter()
                             .filter_map(|b| {
-                                if let ContentBlock::Thinking { thinking } = b {
+                                if let ContentBlock::Thinking { thinking, .. } = b {
                                     Some(thinking.as_str())
                                 } else {
                                     None
@@ -4240,6 +4240,7 @@ mod tests {
                 vec![
                     ContentBlock::Thinking {
                         thinking: "secret prior-turn reasoning".into(),
+                        extra: None,
                     },
                     ContentBlock::Text {
                         text: "answer one".into(),
@@ -4288,6 +4289,7 @@ mod tests {
                 vec![
                     ContentBlock::Thinking {
                         thinking: "prior reasoning".into(),
+                        extra: None,
                     },
                     ContentBlock::Text {
                         text: "answer one".into(),

@@ -168,7 +168,7 @@ pub fn degrade_conversation_overflow(
                         changed = true;
                     }
                 }
-                ContentBlock::Thinking { thinking }
+                ContentBlock::Thinking { thinking, .. }
                     if thinking.chars().count() > per_block_budget_chars
                         && !thinking.contains(TRUNC_MARKER) =>
                 {
@@ -459,7 +459,9 @@ mod tests {
             for b in &m.content {
                 match b {
                     ContentBlock::Text { text } => total += text.chars().count() as u64,
-                    ContentBlock::Thinking { thinking } => total += thinking.chars().count() as u64,
+                    ContentBlock::Thinking { thinking, .. } => {
+                        total += thinking.chars().count() as u64
+                    }
                     ContentBlock::ToolResult { content, .. } => {
                         total += content.chars().count() as u64
                     }

@@ -2030,7 +2030,7 @@ impl From<&wcore_types::message::ContentBlock> for PreparedContentBlockV1 {
                 content: content.clone(),
                 is_error: *is_error,
             },
-            ContentBlock::Thinking { thinking } => Self::Thinking {
+            ContentBlock::Thinking { thinking, .. } => Self::Thinking {
                 thinking: thinking.clone(),
             },
             ContentBlock::Image { mime, data } => Self::Image {
@@ -2065,7 +2065,10 @@ impl From<PreparedContentBlockV1> for wcore_types::message::ContentBlock {
                 content,
                 is_error,
             },
-            PreparedContentBlockV1::Thinking { thinking } => Self::Thinking { thinking },
+            PreparedContentBlockV1::Thinking { thinking } => Self::Thinking {
+                thinking,
+                extra: None,
+            },
             PreparedContentBlockV1::Image { mime, data } => Self::Image { mime, data },
         }
     }
