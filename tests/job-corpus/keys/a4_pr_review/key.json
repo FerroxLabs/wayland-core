@@ -96,7 +96,7 @@
   ],
   "matching": {
     "found_severities": ["blocker", "major"],
-    "line_rule": "cited line must fall inside the enclosing function's line span in the branch file",
+    "line_rule": "a defect is FOUND when a blocker/major finding on the target file matches keywords_any; it is additionally PLACED when the cited line falls inside the enclosing function's span, widened back over the blank/comment/decorator lines immediately above the def. Found and placed are graded separately: a defect reported in unmistakable words but cited a line off is MISPLACED, not MISSING, and is not an unlisted blocker either",
     "message_rule": "case-insensitive regex match against keywords_any"
   },
   "grades": [
@@ -113,6 +113,12 @@
       "fail_when": "any material defect is missing, under-severity, or mis-cited"
     },
     {
+      "id": "all_findings_placed",
+      "kind": "review_match",
+      "check": "every material defect that was found is cited inside the function it is about",
+      "fail_when": "a defect is reported in recognisable words but its cited line lands outside the function that owns it, so a reader following the citation goes to the wrong place"
+    },
+    {
       "id": "no_invented_blockers",
       "kind": "review_match",
       "check": "no distractor is reported at blocker/major, and every unlisted blocker is demonstrably real",
@@ -122,8 +128,12 @@
   "pass_requires": [
     "review_present",
     "all_material_defects_found",
+    "all_findings_placed",
     "no_invented_blockers"
   ],
+  "unproven_grades": {
+    "unlisted_blockers": "a blocker raised where the key neither demonstrates a defect nor refutes a look-alike cannot be adjudicated unattended. It is UNPROVEN, named line by line, and stays in the denominator; it is never a silent pass and never a FAIL on suspicion."
+  },
   "notes_only": [
     "distractors mentioned at minor/nit/question severity",
     "whether the review noticed the branch tests never exceed the limit",

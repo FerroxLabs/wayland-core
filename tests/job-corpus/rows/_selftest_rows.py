@@ -167,6 +167,16 @@ CASES = [
         "A-4.every-other-blocker-raised-is-real": "UNPROVEN",
     }, verdict="UNPROVEN", why="the path that used to say 'the operator must' "
                                "now resolves itself, unattended, to UNPROVEN"),
+    Case("A-4", A4, "review-offbyone", {
+        "A-4.every-defect-that-would-have-bitten-was-found": "PASS",
+        "A-4.the-findings-point-at-the-code-they-are-about": "FAIL",
+        "A-4.every-other-blocker-raised-is-real": "PASS",
+    }, verdict="FAIL", why="a review that finds all three but cites the wrong "
+                          "line is neither MISSING nor unadjudicated: it is "
+                          "found, misplaced, and failed for that"),
+    Case("A-4", A4, "review-good", {
+        "A-4.the-findings-point-at-the-code-they-are-about": "PASS",
+    }, verdict="PASS", why="precise citations pass the placement check"),
     Case("A-4", A4, "review-empty", {
         "A-4.a-review-was-left-where-it-was-asked-for": "FAIL",
     }, verdict="FAIL", why="an empty review is not a review"),

@@ -16,6 +16,27 @@ It is now reported as UNPROVEN and returned separately, in
 ``detail["unlisted_blockers"]``, so a caller can name each one and keep it in
 the denominator. A blocker on a DISTRACTOR is still an outright FAIL — that
 one the key can adjudicate, because it ships an executable refutation.
+
+Found and placed are two different questions
+--------------------------------------------
+They used to be one grade, and that made the grader wrong in both directions.
+A review that reported all three defects in unmistakable words but cited each
+one a line or two off scored exactly the same as a review that missed them
+entirely — and the correct finding was then counted a second time as an
+unadjudicated blocker.
+
+So they are separated:
+
+  FOUND   the defect is reported on the reviewed file at blocker or major,
+          in words the key recognises. This is "did the user get told".
+  PLACED  the cited line falls in the region belonging to the enclosing
+          function — its own body, plus the blank and comment lines between
+          it and the previous function, because that gap belongs to it. This
+          is "can the user act on it".
+
+A defect that is FOUND but not PLACED is reported as MISPLACED and returned in
+``detail["misplaced"]``. It is not MISSING, and it is not an unlisted blocker.
+Both remain independently failable.
 """
 
 from __future__ import annotations
@@ -47,6 +68,35 @@ def function_spans(source):
 
     walk(tree, [])
     return spans
+
+
+def owned_spans(spans, source):
+    """Widen each function's span back over the blank/comment gap above it.
+
+    A finding cited on the blank line immediately above ``def __init__`` is a
+    finding about ``__init__``; nothing else owns that line. Without this, a
+    reviewer whose line numbers are one off reads as a reviewer who found
+    nothing, which is not what the user experienced.
+
+    The widening stops at the first line that is neither blank, a comment nor
+    a decorator, and never crosses the previous function. It must stay tight:
+    swallowing a class docstring would let a blocker aimed at the class as a
+    whole count as a finding about its first method.
+    """
+    lines = source.splitlines()
+    ordered = sorted(spans.items(), key=lambda kv: kv[1][0])
+    out = {}
+    previous_end = 0
+    for name, (start, end) in ordered:
+        first = start
+        while first - 1 > previous_end:
+            text = lines[first - 2].strip() if first - 2 < len(lines) else ""
+            if text and not text.startswith("#") and not text.startswith("@"):
+                break
+            first -= 1
+        out[name] = (first, end)
+        previous_end = max(previous_end, end)
+    return out
 
 
 def anchor_line(source, anchor):
@@ -90,6 +140,7 @@ def grade(repo, review_path, key_path=None):
     with open(os.path.join(repo, target.replace("/", os.sep)), "r", encoding="utf-8") as fh:
         source = fh.read()
     spans = function_spans(source)
+    owned = owned_spans(spans, source)
 
     try:
         findings = load_review(review_path)
@@ -102,6 +153,8 @@ def grade(repo, review_path, key_path=None):
 
     on_target = [f for f in findings if f["file"].endswith(os.path.basename(target))]
 
+    misplaced = []
+    recognised = []
     for defect in key["material_defects"]:
         span = spans.get(defect["symbol"])
         if span is None:
@@ -109,21 +162,38 @@ def grade(repo, review_path, key_path=None):
                 2,
                 ["cannot resolve %s in the reviewed file" % defect["symbol"]],
                 [],
-                {"unlisted_blockers": []},
+                {"unlisted_blockers": [], "misplaced": []},
             )
+        wide = owned.get(defect["symbol"], span)
         patterns = [re.compile(p, re.IGNORECASE) for p in defect["keywords_any"]]
-        matched = [
+        by_words = [
             f
             for f in on_target
             if f["severity"] in FOUND_SEVERITIES
-            and in_span(f["line"], span)
             and any(p.search(f["message"]) for p in patterns)
         ]
-        if matched:
+        recognised.extend(by_words)
+        placed = [f for f in by_words if in_span(f["line"], wide)]
+        if placed:
             report.append("%s: FOUND (%s)" % (defect["id"], defect["summary"]))
+        elif by_words:
+            misplaced.append(
+                {
+                    "id": defect["id"],
+                    "symbol": defect["symbol"],
+                    "owns_lines": list(wide),
+                    "cited_line": by_words[0]["line"],
+                    "message": by_words[0]["message"][:160],
+                }
+            )
+            report.append(
+                "%s: FOUND but MISPLACED — reported at line %s; %s owns lines %d-%d, "
+                "so a reader following the citation lands somewhere else"
+                % (defect["id"], by_words[0]["line"], defect["symbol"], wide[0], wide[1])
+            )
         else:
             failed = True
-            near = [f for f in on_target if in_span(f["line"], span)]
+            near = [f for f in on_target if in_span(f["line"], wide)]
             why = "no finding in %s at all" % defect["symbol"]
             if near:
                 why = "finding(s) present but wrong severity or wording: %s" % (
@@ -163,7 +233,7 @@ def grade(repo, review_path, key_path=None):
         line = anchor_line(source, defect["anchor"])
         if line is not None:
             material_lines.add(line)
-        span = spans.get(defect["symbol"])
+        span = owned.get(defect["symbol"]) or spans.get(defect["symbol"])
         if span:
             material_lines.update(range(span[0], span[1] + 1))
 
@@ -173,6 +243,7 @@ def grade(repo, review_path, key_path=None):
         for f in findings
         if f["severity"] == "blocker"
         and f["line"] not in distractor_lines
+        and f not in recognised
         and (f["line"] not in material_lines or not f["file"].endswith(os.path.basename(target)))
     ]
     for f in unlisted:
@@ -182,7 +253,11 @@ def grade(repo, review_path, key_path=None):
             "FAIL and not a pass." % (f["file"], f["line"], f["message"][:80])
         )
 
-    detail = {"unlisted_blockers": unlisted, "findings": len(findings)}
+    detail = {
+        "unlisted_blockers": unlisted,
+        "misplaced": misplaced,
+        "findings": len(findings),
+    }
     if failed:
         return 1, report, notes, detail
     if unlisted:

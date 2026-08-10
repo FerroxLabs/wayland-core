@@ -197,6 +197,9 @@ def a4_review(repo, flavour) -> None:
                 "message": "this whole class should be replaced with a token bucket.",
             }
         )
+    elif flavour == "offbyone":
+        for finding in findings:
+            finding["line"] = max(1, int(finding["line"]) - 3)
     elif flavour == "empty":
         findings = []
 

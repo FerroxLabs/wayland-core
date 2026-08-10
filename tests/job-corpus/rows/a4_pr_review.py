@@ -162,6 +162,23 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
         {"report": report, "notes": notes},
     )
 
+    misplaced = detail.get("misplaced") or []
+    ctx.expect(
+        not misplaced,
+        ROW_ID + ".the-findings-point-at-the-code-they-are-about",
+        "every finding cites a line inside the function it is about, so the "
+        "author can click straight to it",
+        "the review reports the defect but sends the reader to the wrong "
+        "place: %s. A citation a reader cannot follow costs them the search "
+        "the review was supposed to save"
+        % "; ".join(
+            "%s cited at line %s but %s owns lines %d-%d"
+            % (m["id"], m["cited_line"], m["symbol"], m["owns_lines"][0], m["owns_lines"][1])
+            for m in misplaced[:4]
+        ),
+        {"misplaced": misplaced},
+    )
+
     unlisted = detail.get("unlisted_blockers") or []
     if unlisted:
         ctx.unproven(
