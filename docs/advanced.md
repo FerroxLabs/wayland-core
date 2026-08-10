@@ -363,6 +363,15 @@ A three-tier automatic compaction strategy that prevents context window overflow
 
 - **Emergency** is the last safety net at `effective_context_window - emergency_buffer`. Always active regardless of config. Blocks API calls and prompts the user to compact or start a new conversation.
 
+- **Autocompact is recoverable.** Before the fold replaces the buffer, the conversation as it stood is written to `<session-id>.precompact.jsonl` beside the session file, and the newest `precompact_archive_windows` windows are kept (default 3; `0` disables archiving). If a summary lost something you needed, resume from before the compaction instead of from the summary:
+
+  ```bash
+  wayland-core --resume <session-id> --restore-compaction latest   # newest window
+  wayland-core --resume <session-id> --restore-compaction 2        # a specific one
+  ```
+
+  The restored conversation is the pre-compaction buffer verbatim, so it will very likely compact again on the next turn — restore it to *read* what was dropped, or after raising `context_window`. A window number that was never archived is refused by name rather than silently falling back to the summary. Cost: up to `precompact_archive_windows` copies of a full context window on disk per session, bounded regardless of how long the session runs.
+
 - **The effective context window** is, in order of precedence: your `context_window` setting if you set one; otherwise the active model's real window when wayland-core knows the model; otherwise 200,000. So a 1,000,000-token model autocompacts at 967,000 and hard-stops at 997,000, a 128k model at 95,000 / 125,000, and an unknown model keeps the 167,000 / 197,000 defaults. Setting `context_window` explicitly always wins — including when you set it *below* what the model allows.
 
 ### Configuration
@@ -378,6 +387,8 @@ autocompact_buffer = 13000  # Buffer before autocompact triggers
 emergency_buffer = 3000     # Buffer before emergency block
 max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
+precompact_archive_windows = 3  # Pre-compaction conversations kept on disk
+                                # for --restore-compaction (0 disables)
 ```
 
 ### Smart auto-compaction (#280)
