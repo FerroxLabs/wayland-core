@@ -87,18 +87,104 @@ impl SandboxScope {
     }
 }
 
+/// The path syntax a prefix is written in. The two need different comparison
+/// rules — Windows is case-insensitive, accepts `/` and `\` interchangeably,
+/// and carries a `\\?\` verbatim decoration that POSIX has no equivalent for —
+/// so the syntax travels with the prefix instead of being inferred.
+#[derive(Clone, Copy)]
+enum PathSyntax {
+    Posix,
+    Windows,
+}
+
 /// Prefixes every supported backend grants unconditionally as part of process
 /// bootstrap (see `sandbox_exec::build_profile` / `bwrap` ro-binds). A path
 /// under one of these is NOT evidence of a policy denial, so it must never be
 /// reported as one. `/var`, `/tmp` and `/private` are deliberately ABSENT:
 /// macOS grants those three only as `literal` symlink nodes, not as subpaths,
 /// so `$TMPDIR/...` really is outside the sandbox.
-#[cfg(windows)]
-const ALWAYS_GRANTED_PREFIXES: &[&str] = &[r"C:\Windows", r"C:\Program Files"];
-#[cfg(not(windows))]
-const ALWAYS_GRANTED_PREFIXES: &[&str] = &[
-    "/usr", "/bin", "/sbin", "/dev", "/etc", "/opt", "/System", "/Library", "/proc", "/sys", "/nix",
+///
+/// Both spellings are live on every host rather than being `cfg`-selected. A
+/// Windows-spelled prefix cannot collide with a real POSIX path (`C:\…` is not
+/// a spelling a POSIX tool emits, and vice versa), the only consequence of a
+/// match is SILENCE — this annotation's safe direction — and keeping them live
+/// is what lets the Windows rule be exercised by the test suite on Linux and
+/// macOS instead of only on the one platform CI cannot introspect.
+const ALWAYS_GRANTED_PREFIXES: &[(PathSyntax, &str)] = &[
+    (PathSyntax::Windows, r"C:\Windows"),
+    (PathSyntax::Windows, r"C:\Program Files"),
+    (PathSyntax::Posix, "/usr"),
+    (PathSyntax::Posix, "/bin"),
+    (PathSyntax::Posix, "/sbin"),
+    (PathSyntax::Posix, "/dev"),
+    (PathSyntax::Posix, "/etc"),
+    (PathSyntax::Posix, "/opt"),
+    (PathSyntax::Posix, "/System"),
+    (PathSyntax::Posix, "/Library"),
+    (PathSyntax::Posix, "/proc"),
+    (PathSyntax::Posix, "/sys"),
+    (PathSyntax::Posix, "/nix"),
 ];
+
+/// True when `path` names `prefix`, or something under it, in POSIX syntax.
+fn posix_path_is_under(path: &str, prefix: &str) -> bool {
+    // Only an ABSOLUTE path can be under an absolute system prefix: a relative
+    // `usr/local/thing` inside the workspace is not `/usr`.
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut actual = path.split('/').filter(|c| !c.is_empty());
+    prefix
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .all(|want| actual.next() == Some(want))
+}
+
+/// True when `path` names `prefix`, or something under it, in Windows syntax.
+///
+/// [`Path::starts_with`] cannot do this job. `canonicalize` hands back the
+/// VERBATIM spelling of a Windows path (`\\?\C:\Windows\…`, whose prefix
+/// component is `VerbatimDisk('C')`) while the constants above are written in
+/// the ordinary form (`C:\Windows`, prefix component `Disk('C')`), and `Path`
+/// compares prefix KINDS: `VerbatimDisk('C') != Disk('C')`, so the comparison
+/// could never fire and every genuine `System32` path was reported as a sandbox
+/// denial. Normalising is the fix, not a second constant — the verbatim form is
+/// a decoration on the same path, not a different one:
+///
+/// * drop the `\\?\` decoration from both sides;
+/// * treat `/` and `\` alike, because Windows accepts both and its tools emit
+///   both (`C:/Windows/System32/…` from git, node, python; `C:\…` from cmd);
+/// * compare component-by-component and case-insensitively, because NTFS is
+///   case-insensitive and a component-wise compare is what stops
+///   `C:\Windowsfoo` from matching `C:\Windows`.
+fn windows_path_is_under(path: &str, prefix: &str) -> bool {
+    fn components(s: &str) -> impl Iterator<Item = &str> {
+        // `\\?\UNC\server\share` keeps its `UNC` component after the strip; it
+        // then fails to match any drive-rooted prefix, which is the safe
+        // direction (a UNC path is attributed exactly as it was before).
+        s.strip_prefix(r"\\?\")
+            .unwrap_or(s)
+            .split(['\\', '/'])
+            .filter(|c| !c.is_empty())
+    }
+    let mut actual = components(path);
+    components(prefix).all(|want| {
+        actual
+            .next()
+            .is_some_and(|got| got.eq_ignore_ascii_case(want))
+    })
+}
+
+/// True when `path` sits under a prefix the platform grants unconditionally,
+/// in either spelling.
+fn is_always_granted(path: &str) -> bool {
+    ALWAYS_GRANTED_PREFIXES
+        .iter()
+        .any(|(syntax, prefix)| match syntax {
+            PathSyntax::Posix => posix_path_is_under(path, prefix),
+            PathSyntax::Windows => windows_path_is_under(path, prefix),
+        })
+}
 
 /// Why a path named in a failed command's output was unreachable.
 #[derive(Debug, PartialEq, Eq)]
@@ -109,20 +195,35 @@ enum DeniedBecause {
     NotGranted,
 }
 
+/// Is this token path-shaped at all?
+///
+/// A false-positive token is NOT free, contrary to what the old rule assumed:
+/// a token that reaches [`classify`] and lands outside the granted roots is
+/// reported to the user as a sandbox denial. The old rule's `starts_with('/')`
+/// arm therefore fabricated denials out of Windows command-line SWITCHES —
+/// `/NOLOGO`, `/c`, `/t:Build` — which `classify` joined onto the child's cwd
+/// (`\\?\D:\` + `/NOLOGO` = `\\?\D:\NOLOGO`) and the advisory then blamed the
+/// sandbox for, recommending the user turn their sandbox OFF to fix a problem
+/// that did not exist.
+///
+/// A switch has no separator INSIDE it; every real path shape does (`/a/b`,
+/// `./a`, `a/b`). Requiring an interior separator drops the switches and keeps
+/// the paths. It also drops a single-component absolute path (`/tmp`), which
+/// costs only silence — this annotation's default and its safe direction —
+/// whereas keeping it costs a fabricated accusation.
+fn is_path_token(token: &str) -> bool {
+    if token.len() < 2 || token.contains("://") {
+        return false;
+    }
+    token.trim_start_matches('/').contains('/')
+}
+
 /// Pull the path-shaped tokens out of a tool result body. Deliberately crude:
-/// the caller only trusts a token once it matches the manifest, so a
-/// false-positive token costs nothing.
+/// the caller only trusts a token once it matches the manifest.
 fn candidate_paths(body: &str) -> Vec<&str> {
     body.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
         .map(|token| token.trim_end_matches([':', ',', '.', ';', ')', ']']))
-        .filter(|token| {
-            token.len() > 1
-                && (token.starts_with('/') || token.starts_with("./") || {
-                    // Bare relative paths only count when they contain a
-                    // separator, so ordinary words are not treated as paths.
-                    token.contains('/') && !token.contains("://")
-                })
-        })
+        .filter(|token| is_path_token(token))
         .collect()
 }
 
@@ -153,10 +254,11 @@ fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause
     if scope.allow.iter().any(|a| resolved.starts_with(a)) {
         return None;
     }
-    if ALWAYS_GRANTED_PREFIXES
-        .iter()
-        .any(|p| resolved.starts_with(p))
-    {
+    // Checked in BOTH spellings: as the child wrote it, and as it resolved.
+    // The token as written is what carries a Windows drive path on a POSIX host
+    // (where the join above turns it into nonsense under the cwd), and the
+    // resolved form is what carries Windows' verbatim `\\?\` decoration.
+    if is_always_granted(token) || is_always_granted(&resolved.to_string_lossy()) {
         return None;
     }
     Some((resolved, DeniedBecause::NotGranted))
@@ -689,4 +791,59 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_always_granted, is_path_token};
+
+    /// The verbatim spelling is the one `canonicalize` actually returns on
+    /// Windows, and it is a plain string here, so this runs on every host
+    /// rather than only on the platform it describes.
+    #[test]
+    fn every_spelling_of_a_granted_windows_system_path_matches() {
+        for path in [
+            r"\\?\C:\Windows\System32\kernel32.dll", // what canonicalize returns
+            r"C:\Windows\System32\kernel32.dll",     // what cmd / MSVC tools print
+            "C:/Windows/System32/kernel32.dll",      // what git / node / python print
+            r"\\?\c:\windows\system32\kernel32.dll", // NTFS is case-insensitive
+            r"C:\Windows",                           // the prefix itself
+        ] {
+            assert!(is_always_granted(path), "{path} must be always-granted");
+        }
+    }
+
+    #[test]
+    fn a_normalised_comparison_still_respects_component_boundaries() {
+        for path in [
+            r"C:\Windowsfoo\x",           // not under `C:\Windows`
+            r"D:\Windows\System32\x",     // a different drive
+            r"\\?\D:\Windows\System32\x", // …in verbatim form too
+            "/w/repo/.git/config",        // an ordinary workspace path
+            "usr/bin/foo",                // relative: not the system `/usr`
+        ] {
+            assert!(
+                !is_always_granted(path),
+                "{path} must NOT be treated as always-granted"
+            );
+        }
+        assert!(is_always_granted("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn a_command_line_switch_is_not_a_path_token() {
+        for switch in ["/NOLOGO", "/c", "/S", "/t:Build", "/MIR"] {
+            assert!(!is_path_token(switch), "{switch} is a switch, not a path");
+        }
+        for path in [
+            "/w/repo/.git/config",
+            "./relative/file",
+            "src/main.rs",
+            "C:/Windows/System32/kernel32.dll",
+        ] {
+            assert!(is_path_token(path), "{path} is a path");
+        }
+        // A URL is not a filesystem path.
+        assert!(!is_path_token("https://example.com/a/b"));
+    }
 }
