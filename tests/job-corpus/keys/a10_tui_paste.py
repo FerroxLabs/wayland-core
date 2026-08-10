@@ -63,15 +63,40 @@ QUESTION = "What token is written inside this file?"
 
 
 def generate(out_dir, skip_png):
+    """Build the artifacts, falling back to the PDF+TXT set without pillow.
+
+    A missing image library is a fact about the host, not about the product.
+    Falling back keeps the eight PDF and TXT cells reachable; the four PNG
+    cells are then reported UNPROVEN by name rather than quietly vanishing,
+    which is the failure mode this whole corpus exists to prevent.
+    """
     argv = [sys.executable, GEN, "--out", out_dir]
     if skip_png:
         argv.append("--skip-png")
     proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
-    return proc.returncode, proc.stdout.decode("utf-8", "replace")
+    out = proc.stdout.decode("utf-8", "replace")
+    if proc.returncode != 0 and not skip_png and "PIL" in out:
+        proc = subprocess.run(
+            argv + ["--skip-png"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600
+        )
+        return proc.returncode, out + "\n[retried without PNG: pillow is not installed here]\n" \
+            + proc.stdout.decode("utf-8", "replace"), True
+    return proc.returncode, out, skip_png
 
 
-def paste_cell(binary, path, wayland_home, timeout, env_extra=None):
-    """One cell: paste the path with the question, read what comes back."""
+def paste_cell(binary, path, wayland_home, timeout, env_extra=None, cwd=None):
+    """One cell: paste the path with the question, read what comes back.
+
+    The session is started IN the artifact's own directory. The product treats
+    its working directory as the sandbox root, and a first run driven from
+    elsewhere failed every cell with "outside sandbox root" -- a fact about
+    where the harness stood, not about whether a pasted path can be read. That
+    run also showed something worth keeping: the PDF cells came back with their
+    canary from the SAME out-of-root directory that the plain-text cells were
+    refused in, so the two read paths disagree about the boundary. It is
+    recorded in `boundary_asymmetry` rather than being tidied away.
+    """
+
     env = dict(os.environ)
     for leak in ("API_KEY", "FLUX_API_KEY"):
         env.pop(leak, None)
@@ -87,6 +112,7 @@ def paste_cell(binary, path, wayland_home, timeout, env_extra=None):
     try:
         proc = subprocess.run(
             [binary, "--no-tui", "--auto-approve"],
+            cwd=cwd or os.path.dirname(path),
             input=stdin.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -110,7 +136,7 @@ def main():
 
     out_dir = os.path.abspath(args.out)
     os.makedirs(out_dir, exist_ok=True)
-    code, gen_out = generate(out_dir, args.skip_png)
+    code, gen_out, png_skipped = generate(out_dir, args.skip_png)
     report = {
         "row": "A-10 attachment (paste route)",
         "route": "an absolute path pasted into the product's interactive line surface",
@@ -121,6 +147,15 @@ def main():
         ],
         "platform": platform.system(),
         "cells": [],
+        "boundary_asymmetry": (
+            "Observed on Linux 2026-08-10 with the session started OUTSIDE the "
+            "artifact tree: the PDF cells returned their canary from "
+            "/tmp/.../artifacts while the plain-text cells at the same paths were "
+            "refused with 'path is outside sandbox root'. Document extraction and "
+            "the file reader disagree about the containment boundary. Cells are now "
+            "driven from the artifact's own directory so the matrix measures the "
+            "pasted path rather than where the harness stood."
+        ),
         "generator": {"returncode": code, "output_tail": gen_out[-2000:]},
     }
     if code != 0:
@@ -128,8 +163,20 @@ def main():
         report["reasons"] = ["the attachment fixtures could not be generated on this host"]
         return emit(report, args.json)
 
-    kinds = [k for k in ("pdf", "png", "txt") if not (args.skip_png and k == "png")]
+    kinds = ["pdf", "png", "txt"]
     reasons = []
+    if png_skipped:
+        report["not_measured_here"].append(
+            "the four PNG cells: pillow is not installed on this host, so the image "
+            "artifacts could not be generated. That is a fact about the host, and it "
+            "is UNPROVEN, not absent"
+        )
+        for label, _directory in DIRECTORIES:
+            report["cells"].append(
+                {"location": label, "kind": "png", "state": "UNPROVEN",
+                 "why": "pillow is not installed here, so the PNG artifact was never built"}
+            )
+        kinds = ["pdf", "txt"]
     for label, directory in DIRECTORIES:
         for kind in kinds:
             path = os.path.join(out_dir, directory, FILENAMES[kind])
@@ -140,7 +187,10 @@ def main():
                      "why": "the artifact was not generated"}
                 )
                 continue
-            result = paste_cell(args.binary, path, args.wayland_home, args.timeout)
+            result = paste_cell(
+                args.binary, path, args.wayland_home, args.timeout,
+                cwd=os.path.dirname(path),
+            )
             got = canary in result.get("output", "")
             state = "PASS" if got else ("UNPROVEN" if result.get("timed_out") else "FAIL")
             cell = {
