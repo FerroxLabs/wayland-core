@@ -47,9 +47,7 @@ impl NoSandboxBackend {
             .first()
             .ok_or_else(|| SandboxError::ExecFailed("empty argv".into()))?;
         let mut builder = tokio::process::Command::new(program);
-        if cmd.argv.len() > 1 {
-            builder.args(&cmd.argv[1..]);
-        }
+        Self::append_args(&mut builder, &cmd.argv)?;
         if let Some(cwd) = &cmd.cwd {
             builder.current_dir(cwd);
         }
@@ -61,6 +59,43 @@ impl NoSandboxBackend {
         }
         builder.stdout(Stdio::piped()).stderr(Stdio::piped());
         Ok(builder)
+    }
+
+    /// Append `argv[1..]` to `builder`.
+    ///
+    /// Everywhere except a Windows `cmd.exe` invocation this is a plain
+    /// `args()` — argv is argv. A `cmd /C` payload is NOT argv: see
+    /// [`crate::backends::windows_cmdline`] for the measured corruption that
+    /// treating it as argv produces (`std` inserts CRT `\"` escapes that
+    /// `cmd.exe` does not undo, so the real child receives literal
+    /// backslashes and a split argument — loudly for `node`, and SILENTLY at
+    /// exit 0 for `python -c`).
+    #[cfg(not(windows))]
+    fn append_args(builder: &mut tokio::process::Command, argv: &[String]) -> Result<()> {
+        if argv.len() > 1 {
+            builder.args(&argv[1..]);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn append_args(builder: &mut tokio::process::Command, argv: &[String]) -> Result<()> {
+        use std::os::windows::process::CommandExt;
+
+        let payload_idx = super::windows_cmdline::cmd_payload_index(argv);
+        let std_builder = builder.as_std_mut();
+        for (idx, arg) in argv.iter().enumerate().skip(1) {
+            if Some(idx) == payload_idx {
+                // Refuse before spawning: cmd would truncate at the first line
+                // break, run the prefix, and return ITS status — success for
+                // work that never happened.
+                super::windows_cmdline::reject_undeliverable_cmd_payload(arg)?;
+                std_builder.raw_arg(super::windows_cmdline::quote_cmd_payload(arg));
+            } else {
+                std_builder.arg(arg);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -189,6 +224,202 @@ impl SandboxBackend for NoSandboxBackend {
         });
 
         Ok(rx)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_cmd_delivery_tests {
+    //! The Windows Bash surface runs `["cmd", "/C", <command>]` (see
+    //! `wcore_config::shell::bash_shell_argv_prefix`), and this backend is what
+    //! the relaxed Windows default and `WAYLAND_SANDBOX=none` both spawn
+    //! through. These are LIVE tests: they run a real `cmd.exe` and grade the
+    //! bytes it produced and the files it left on disk.
+
+    use super::*;
+
+    /// `["cmd", "/C", payload]` with the minimum env `cmd.exe` needs to start.
+    /// The env is still scrubbed — only these two names are injected.
+    fn cmd_job(payload: &str) -> (SandboxManifest, SandboxCommand) {
+        let mut manifest = SandboxManifest::default();
+        for key in ["PATH", "SYSTEMROOT"] {
+            if let Some(value) = std::env::var_os(key) {
+                manifest
+                    .env
+                    .push((key.to_string(), value.to_string_lossy().into_owned()));
+            }
+        }
+        (
+            manifest,
+            SandboxCommand {
+                argv: vec!["cmd".into(), "/C".into(), payload.into()],
+                cwd: None,
+            },
+        )
+    }
+
+    async fn run(payload: &str) -> SandboxOutput {
+        let (manifest, cmd) = cmd_job(payload);
+        NoSandboxBackend::new()
+            .execute(&manifest, cmd)
+            .await
+            .expect("cmd.exe must run")
+    }
+
+    /// **C1.** The command that runs must be the command that was written.
+    ///
+    /// `std::process::Command` joins argv with MSVC C-runtime rules, which
+    /// escape an embedded `"` as `\"`. `cmd.exe` does not undo backslash
+    /// escapes in its `/C` payload, so those backslashes reach the real child
+    /// as literal characters and the `"` they were escaping stops delimiting.
+    /// Measured before the fix: `node -e "…writeFileSync('n.txt', 'ok')"`
+    /// arrived as two arguments, the first beginning with a literal `"`.
+    ///
+    /// This asserts on the delivered TEXT, so it cannot be satisfied by the
+    /// multi-line refusal that closes C2's second instance.
+    #[tokio::test]
+    async fn a_quoted_argument_reaches_the_shell_without_crt_escapes() {
+        let output = run(r#"echo "alpha beta gamma""#).await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            output.exit_code,
+            0,
+            "stderr: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !stdout.contains('\\'),
+            "the payload carried no backslash; a `\\` in the output is a CRT \
+             escape that cmd.exe executed literally: {stdout:?}"
+        );
+        assert_eq!(
+            stdout.trim_end(),
+            r#""alpha beta gamma""#,
+            "cmd must receive the payload byte-for-byte"
+        );
+    }
+
+    /// The same delivery guarantee across every shape `cmd.exe` treats
+    /// specially. `&`, `|` and `^` are shell metacharacters and MUST still be
+    /// interpreted (BashTool is a shell surface, exactly like `sh -c`), and
+    /// `%VAR%` must still expand — from the SCRUBBED manifest env, not the
+    /// host's.
+    #[tokio::test]
+    async fn hostile_payload_shapes_keep_their_shell_semantics() {
+        assert_eq!(run("echo A & echo B").await.stdout, b"A \r\nB\r\n");
+        assert_eq!(
+            String::from_utf8_lossy(&run("echo hello | findstr hello").await.stdout).trim_end(),
+            "hello"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&run("echo a^^b").await.stdout).trim_end(),
+            "a^b"
+        );
+
+        // %VAR% resolves against the manifest env only.
+        let (mut manifest, cmd) = cmd_job("echo [%WCORE_CMD_PROBE%]");
+        manifest
+            .env
+            .push(("WCORE_CMD_PROBE".into(), "from-manifest".into()));
+        let out = NoSandboxBackend::new()
+            .execute(&manifest, cmd)
+            .await
+            .expect("cmd.exe must run");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            "[from-manifest]"
+        );
+
+        // A trailing backslash immediately before a closing quote — the shape
+        // CRT escaping doubles and cmd then executes literally.
+        assert_eq!(
+            String::from_utf8_lossy(&run(r#"echo "C:\dir\""#).await.stdout).trim_end(),
+            r#""C:\dir\""#
+        );
+
+        // A non-ASCII argument, graded on the FILESYSTEM rather than on
+        // stdout. `cmd`'s `echo` writes bytes in the console output code page,
+        // so a stdout comparison would be measuring CP437/CP1252 round-tripping
+        // (`日本` -> `??`) and not whether the argument was delivered. A file
+        // name is UTF-16 end to end, so its existence is a clean statement
+        // that the exact characters reached the shell.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("café 日本.txt");
+        let out = run(&format!(r#"echo ok> "{}""#, target.to_string_lossy())).await;
+        assert_eq!(
+            out.exit_code,
+            0,
+            "stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            target.exists(),
+            "a non-ASCII, space-bearing argument must reach cmd intact; \
+             directory now holds {:?}",
+            std::fs::read_dir(dir.path())
+                .map(|entries| entries.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+    }
+
+    /// **C2.** A `cmd /C` command line stops at the first line break: cmd runs
+    /// the prefix and returns ITS status. Measured before the fix, with a
+    /// payload whose two lines each write a distinct file: exit 0, empty
+    /// stderr, `a.txt` present, `b.txt` ABSENT. Nothing anywhere said half the
+    /// command had been discarded.
+    ///
+    /// This instance is INDEPENDENT of C1: applying only the quoting fix left
+    /// it reproducing exactly (measured `a.txt=true b.txt=false` under the
+    /// corrected join), so a fix for C1 cannot turn this test green.
+    #[tokio::test]
+    async fn a_multi_line_command_is_refused_rather_than_half_run_at_exit_zero() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let payload = format!(
+            "echo one>{}\necho two>{}",
+            a.to_string_lossy(),
+            b.to_string_lossy()
+        );
+
+        let (manifest, cmd) = cmd_job(&payload);
+        let error = NoSandboxBackend::new()
+            .execute(&manifest, cmd)
+            .await
+            .expect_err("a payload cmd.exe cannot carry whole must not be run at all");
+
+        assert!(
+            matches!(error, SandboxError::ExecFailed(_)),
+            "got {error:?}"
+        );
+        assert!(
+            !a.exists() && !b.exists(),
+            "a refused command must leave NO partial side effect: a={} b={}",
+            a.exists(),
+            b.exists()
+        );
+    }
+
+    /// Negative control for the refusal: the single-line spelling of the very
+    /// same work is accepted and both effects land. Without this, the test
+    /// above could be passed by refusing everything.
+    #[tokio::test]
+    async fn the_single_line_spelling_of_the_same_work_still_runs() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let output = run(&format!(
+            "echo one>{} && echo two>{}",
+            a.to_string_lossy(),
+            b.to_string_lossy()
+        ))
+        .await;
+        assert_eq!(output.exit_code, 0);
+        assert!(
+            a.exists() && b.exists(),
+            "a={} b={}",
+            a.exists(),
+            b.exists()
+        );
     }
 }
 

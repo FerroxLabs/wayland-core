@@ -29,6 +29,10 @@ pub mod process_tree;
 // `is_available()` probes a real `sandbox-exec` spawn, so it reports false
 // everywhere else.
 pub mod sandbox_exec;
+// Compiled on every platform for the same reason `sandbox_exec` is: the
+// `cmd /C` join rules are pure string handling, and they are the difference
+// between the command the operator wrote and the command that runs.
+pub(crate) mod windows_cmdline;
 
 /// Channel buffer for the streaming receiver. The default buffered impl
 /// only sends three messages, so any positive value works; a small buffer

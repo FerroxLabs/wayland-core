@@ -59,6 +59,40 @@ const BASE_SANDBOX_ENV_ALLOWLIST: &[&str] = &[
     "SSL_CERT_DIR",
     "CURL_CA_BUNDLE",
     "SYSTEMROOT", // Windows: required for most native binaries to start.
+    // ---- Windows MSVC toolchain discovery ----
+    //
+    // Without these, `cargo build` reaches the linker and dies, on a host
+    // where the byte-identical command succeeds outside the sandbox. Both
+    // names below were isolated by single-variable measurement on Windows 11
+    // 26200 with VS 2022 BuildTools 14.44; neither is secret-shaped (they are
+    // a fixed system path and a semicolon-joined list of library directories),
+    // and `PATH` — the third thing an MSVC build needs — already passes
+    // through above. Nothing broader is forwarded: adding
+    // `ProgramFiles`/`ProgramFiles(x86)`/`USERPROFILE`/`LOCALAPPDATA`/`APPDATA`
+    // was measured NOT to help, so they are deliberately absent.
+    //
+    // `ProgramData`: VS 2017+ records its installed instances under
+    // `%ProgramData%\Microsoft\VisualStudio\Packages\_Instances`, which is how
+    // rustc locates the MSVC toolchain and prepends its `bin` directory to the
+    // linker's PATH. Scrubbed, that lookup fails silently and rustc falls back
+    // to the first `link.exe` on the inherited PATH — on any host with Git for
+    // Windows installed that is GNU coreutils' `link`, which fails with
+    // `link: extra operand '<...>.rcgu.o'`. Measured: base allowlist + this one
+    // variable turns exit 101 / no `hello.exe` into exit 0 / `hello.exe`
+    // present. (Spelled in Windows' own casing rather than SCREAMING_CASE:
+    // the match is case-insensitive on Windows and exact off it, so this
+    // spelling is the one a test can exercise on every platform.)
+    "ProgramData",
+    // `LIB` / `INCLUDE`: set only by `vcvarsall.bat`. When the operator
+    // launched the engine FROM a Developer Command Prompt, the inherited PATH
+    // already resolves `link.exe` to MSVC and the toolchain is described by
+    // these two variables and nothing else. Measured in that configuration:
+    // scrubbed gives `LINK : fatal error LNK1181: cannot open input file
+    // 'kernel32.lib'`; forwarded gives exit 0. `INCLUDE` is the header
+    // counterpart `LIB` is the library half of — any dependency with a
+    // `cc`-crate build script needs it to find the CRT and SDK headers.
+    "LIB",
+    "INCLUDE",
 ];
 
 /// Substring / suffix patterns that mark an environment variable name as
@@ -321,6 +355,54 @@ mod tests {
                 !is_sensitive_env_var(name),
                 "{name} must NOT be flagged sensitive"
             );
+        }
+    }
+
+    /// **C3.** `cargo build` on Windows dies at the linker because the scrub
+    /// removes the MSVC toolchain's discovery inputs. Measured, single-variable
+    /// isolation on Windows 11 26200 / VS 2022 BuildTools 14.44:
+    ///
+    /// * base allowlist only -> exit 101, no `hello.exe`,
+    ///   `link: extra operand '<...>.rcgu.o'` (rustc could not find MSVC and
+    ///   fell back to Git-for-Windows' GNU coreutils `link.exe`);
+    /// * base + `ProgramData` alone -> exit 0, `hello.exe` present;
+    /// * from a Developer Command Prompt (MSVC already on PATH), base alone ->
+    ///   `LNK1181: cannot open input file 'kernel32.lib'`; base + `LIB` +
+    ///   `INCLUDE` -> exit 0.
+    ///
+    /// The scrub itself is deliberate and stays: this widens it by three
+    /// named, non-secret path variables, not by inheriting the environment.
+    #[test]
+    #[serial]
+    fn msvc_toolchain_discovery_vars_survive_the_scrub() {
+        let _g = guard();
+        // SAFETY: test-only env mutation, serialized by `guard()` + `serial`.
+        unsafe {
+            std::env::set_var("ProgramData", r"C:\ProgramData");
+            std::env::set_var("LIB", r"C:\vs\lib\x64");
+            std::env::set_var("INCLUDE", r"C:\vs\include");
+            // Negative control: a secret-shaped name must still be dropped
+            // even though it sits right next to the toolchain vars.
+            std::env::set_var("MSVC_SIGNING_TOKEN", "must-not-leak");
+        }
+        let env = build_sandboxed_env(&[]);
+        for name in ["ProgramData", "LIB", "INCLUDE"] {
+            assert!(
+                env.iter().any(|(k, _)| k.eq_ignore_ascii_case(name)),
+                "{name} must pass through so the MSVC linker can be found and \
+                 can resolve kernel32.lib; kept={:?}",
+                env.iter().map(|(k, _)| k).collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            !env.iter().any(|(k, _)| k == "MSVC_SIGNING_TOKEN"),
+            "the secret filter must still win next to the toolchain vars"
+        );
+        unsafe {
+            std::env::remove_var("ProgramData");
+            std::env::remove_var("LIB");
+            std::env::remove_var("INCLUDE");
+            std::env::remove_var("MSVC_SIGNING_TOKEN");
         }
     }
 
