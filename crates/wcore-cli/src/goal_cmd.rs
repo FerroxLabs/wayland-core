@@ -150,6 +150,20 @@ impl From<GoalStrategyArg> for GoalStrategy {
     }
 }
 
+/// How an operator settles a task the effect boundary refused to decide.
+///
+/// There is no `auto` and there must not be. The whole reason the boundary
+/// parks is that the answer is not derivable from anything the product can see;
+/// a default would be a guess wearing a flag's clothes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ResolveArg {
+    /// The operator has confirmed the effect DID land. Record it; run nothing.
+    Produced,
+    /// The operator has confirmed the effect did NOT land, or that re-running it
+    /// is harmless. Withdraw the intent and run the worker again.
+    Retry,
+}
+
 /// How another verb asks to be run INSIDE a Goal (F22C, Success Criterion 3).
 ///
 /// `workflow run`, `crucible` and `anvil forge` each take one of these as an
@@ -393,6 +407,15 @@ pub enum GoalCommand {
     ExecTask {
         #[arg(long)]
         effects_dir: PathBuf,
+        /// Settle a task the boundary parked because a previous attempt died
+        /// inside the effect window.
+        ///
+        /// Only an operator who has checked the real sink can answer this, which
+        /// is exactly why the product refuses to guess. `produced` records the
+        /// effect as landed without running anything; `retry` withdraws the
+        /// prior intent and runs the worker again.
+        #[arg(long)]
+        resolve: Option<ResolveArg>,
         /// The operator's argv, after `--`.
         #[arg(last = true)]
         argv: Vec<String>,
@@ -491,8 +514,21 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
             goal,
             expect,
         } => stream(&journal, &goal, expect),
-        GoalCommand::ExecTask { effects_dir, argv } => {
-            exec_task_from_env(&effects_dir, &argv).await
+        GoalCommand::ExecTask {
+            effects_dir,
+            resolve,
+            argv,
+        } => {
+            match exec_task_from_env(&effects_dir, &argv, resolve).await? {
+                ExecOutcome::Produced | ExecOutcome::AlreadyCommitted => Ok(()),
+                // A distinguished exit code rather than an error, because the
+                // caller has to tell "retry me" from "park me" and an error
+                // exit says the first. `goal run` reads this code back.
+                ExecOutcome::Indeterminate { detail } => {
+                    eprintln!("GOAL-EXEC-INDETERMINATE: {detail}");
+                    std::process::exit(EXIT_INDETERMINATE);
+                }
+            }
         }
         GoalCommand::Effects {
             effects_dir,
@@ -946,6 +982,12 @@ impl TaskExecutor for ChildProcessExecutor {
                     effect_digest: assignment.idempotency_key.clone(),
                 },
                 Ok(status) => match status.code() {
+                    // The effect boundary found a prior attempt's intent with no
+                    // commit. It refused to decide, and so does this: the task
+                    // is parked for resolution, never silently retried.
+                    Some(code) if code == EXIT_INDETERMINATE => TaskExecution::Indeterminate {
+                        reason: TaskUnknownReason::OwnerDiedMidAttempt,
+                    },
                     Some(code) => TaskExecution::Failed {
                         detail: format!("worker exited {code}"),
                     },
@@ -967,28 +1009,50 @@ impl TaskExecutor for ChildProcessExecutor {
 
 /// The effect boundary.
 ///
-/// ## The ordering here is load-bearing and was wrong once
+/// ## One marker cannot do this job, and for a while it was asked to
 ///
-/// The idempotency marker is created **after** the operator's command succeeds,
-/// not before it. The first draft of this function created it first, and that is
-/// a lost-effect bug rather than a stylistic choice: a worker killed mid-run
-/// leaves the marker behind with no effect, and every later retry then finds the
-/// marker and declines — so the task is permanently un-runnable and its effect
-/// never happens. "No lost completion" fails exactly as loudly as "no duplicate".
+/// The original design wrote a single idempotency marker AFTER the operator's
+/// command succeeded. That ordering was chosen to avoid the opposite bug — a
+/// marker written first, then a death, leaves the marker with no effect and the
+/// task permanently un-runnable — and the reasoning was right as far as it went.
+/// What it missed is that the two orderings are not a choice between a safe one
+/// and an unsafe one. They are a choice between **losing** an effect and
+/// **duplicating** one, and a single marker must pick a side:
 ///
-/// Creating it afterwards is safe because nothing else is allowed to be running
-/// this task concurrently: the ledger's claim is exclusive at the durable
-/// boundary and only one live claim exists per task. The marker's job is
-/// narrower than a lock — it stops a *retry after a death* from redoing work
-/// whose effect already landed. That is precisely the case the epoch fence
-/// structurally cannot reach, because it cannot get inside a process that
-/// already holds a directory.
+/// | Order | Death after the effect, before the record | Death after the record, before the effect |
+/// |---|---|---|
+/// | marker last | retry re-runs → **duplicate** | n/a |
+/// | marker first | n/a | retry declines → **lost** |
 ///
-/// The marker IS the effect: one `create_new`, then the payload, then an fsync.
-/// A kill between the create and the write leaves a present-but-empty effect,
-/// which still counts as produced and is still counted exactly once. That
-/// residual is stated rather than hidden; closing it entirely needs an atomic
-/// write-then-link, which buys nothing the criterion measures.
+/// The window is not narrow, either. A worker that performs its effect and then
+/// keeps working — the ordinary shape of "send the message, then reconcile" — is
+/// inside it for its whole run.
+///
+/// ## What is here instead: intent, effect, commit
+///
+/// Two records, so the three states are distinguishable on disk:
+///
+/// | On disk | Meaning | What this function does |
+/// |---|---|---|
+/// | commit | the effect landed and was recorded | decline, exactly once |
+/// | intent, no commit | a previous attempt died INSIDE the window | decide nothing; report indeterminate |
+/// | neither | nothing has run | record intent, run, commit |
+///
+/// The third row is the whole fix. An effect performed before its completion is
+/// durably recorded will always re-run — unless the *attempt* was durably
+/// recorded first, which is what makes the ambiguity visible instead of
+/// invisible.
+///
+/// ## What this does NOT claim
+///
+/// This does not make a non-idempotent external effect exactly-once. Nothing
+/// outside a transaction that spans the effect and its record can. What it
+/// guarantees is narrower and is the property the criterion actually needs: the
+/// product never SILENTLY duplicates and never silently loses. The ambiguous
+/// case is surfaced as [`ExecOutcome::Indeterminate`], the ledger parks the task
+/// through the path it already has for unknown outcomes, and a human settles it
+/// with `--resolve`.
+///
 /// Reads the assignment out of the environment `run` spawned this process with,
 /// then does the work.
 ///
@@ -998,33 +1062,102 @@ impl TaskExecutor for ChildProcessExecutor {
 /// the tests serialize against each other and go flaky in a way that looks
 /// exactly like the idempotency gate failing. Passing the assignment in means
 /// the gate is testable without touching the environment at all.
-async fn exec_task_from_env(effects_dir: &std::path::Path, argv: &[String]) -> anyhow::Result<()> {
+async fn exec_task_from_env(
+    effects_dir: &std::path::Path,
+    argv: &[String],
+    resolve: Option<ResolveArg>,
+) -> anyhow::Result<ExecOutcome> {
     let task = std::env::var(ENV_TASK).unwrap_or_else(|_| "unknown".to_owned());
     let key = std::env::var(ENV_KEY).map_err(|_| {
         anyhow::anyhow!("{ENV_KEY} is not set; refusing to produce an unkeyed effect")
     })?;
-    exec_task(effects_dir, argv, &task, &key).await
+    exec_task(effects_dir, argv, &task, &key, resolve).await
 }
+
+/// What one pass through the effect boundary established.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecOutcome {
+    /// The worker ran and its effect is now durably committed.
+    Produced,
+    /// A previous attempt's effect is already committed. Nothing ran.
+    AlreadyCommitted,
+    /// A previous attempt died INSIDE the effect window. Whether its effect
+    /// landed is unknowable from here, so nothing ran and nothing was decided.
+    Indeterminate { detail: String },
+}
+
+/// Exit code `exec-task` uses for [`ExecOutcome::Indeterminate`].
+///
+/// Distinguished from both success and a plain failure, because the caller must
+/// distinguish them: a failure means retry, an indeterminate means park. Same
+/// value as `EX_TEMPFAIL`, which is the closest existing convention.
+pub const EXIT_INDETERMINATE: i32 = 75;
 
 async fn exec_task(
     effects_dir: &std::path::Path,
     argv: &[String],
     task: &str,
     key: &str,
-) -> anyhow::Result<()> {
+    resolve: Option<ResolveArg>,
+) -> anyhow::Result<ExecOutcome> {
     if key.is_empty() {
         anyhow::bail!("{ENV_KEY} is empty; refusing to produce an unkeyed effect");
     }
     let effects = effects_dir.join("effects");
+    let intents = effects_dir.join("intents");
     std::fs::create_dir_all(&effects)?;
+    std::fs::create_dir_all(&intents)?;
+    let commit = effects.join(key);
+    let intent = intents.join(key);
 
-    // Cheap pre-check so a re-run does not pay for the worker again. It is NOT
-    // the gate — `create_new` below is — because between this read and that
-    // create there is a window, and a check that is not the gate must never be
-    // mistaken for one.
-    if effects.join(key).exists() {
-        println!("GOAL-EXEC: task={task} key={key} produced=no reason=idempotency-key-present");
-        return Ok(());
+    // The COMMIT is checked first and unconditionally. A leftover intent beside
+    // a commit is not ambiguous — the commit is written after the effect, so its
+    // presence settles the question no matter what else is on disk.
+    if commit.exists() {
+        println!("GOAL-EXEC: task={task} key={key} produced=no reason=effect-already-committed");
+        return Ok(ExecOutcome::AlreadyCommitted);
+    }
+
+    // An intent with no commit means a previous attempt was inside the window
+    // between "worker started" and "effect committed" when it died.
+    if intent.exists() {
+        let evidence = std::fs::read_to_string(&intent).unwrap_or_default();
+        let evidence = evidence.trim().to_owned();
+        match resolve {
+            None => {
+                println!(
+                    "GOAL-EXEC: task={task} key={key} produced=unknown \
+                     reason=prior-attempt-died-inside-the-effect-window intent=[{evidence}]"
+                );
+                return Ok(ExecOutcome::Indeterminate {
+                    detail: format!(
+                        "a prior attempt died between starting the worker and committing its \
+                         effect ({evidence}); re-running would duplicate the effect and skipping \
+                         would lose it, so this attempt decides neither"
+                    ),
+                });
+            }
+            Some(ResolveArg::Produced) => {
+                // The operator has established that the effect DID land. Commit
+                // it without running anything.
+                commit_effect(&commit, task)?;
+                std::fs::remove_file(&intent).ok();
+                println!(
+                    "GOAL-EXEC: task={task} key={key} produced=no \
+                     reason=operator-resolved-as-already-produced"
+                );
+                return Ok(ExecOutcome::AlreadyCommitted);
+            }
+            Some(ResolveArg::Retry) => {
+                // The operator has established that the effect did NOT land, or
+                // that it is idempotent. Clear the intent and fall through.
+                std::fs::remove_file(&intent).ok();
+                println!(
+                    "GOAL-EXEC: task={task} key={key} \
+                     note=operator-resolved-as-not-produced-retrying"
+                );
+            }
+        }
     }
 
     // The worker's sink for REAL effects. Created here rather than left to the
@@ -1035,6 +1168,13 @@ async fn exec_task(
     std::fs::create_dir_all(&observed)?;
 
     if !argv.is_empty() {
+        // THE INTENT, recorded BEFORE the effect. This is the half that was
+        // missing: with only a marker written afterwards, every death in the
+        // window [worker ran, marker written] was invisible to the retry, and
+        // the retry therefore re-ran the effect. See the ordering note above.
+        write_durably(&intent, &format!("task={task} pid={}", std::process::id()))?;
+        sync_dir(&intents);
+
         // Argv mode, never a shell string: the operator's command and every
         // argument reach the OS as separate argv entries, so a metacharacter in
         // a task label is data rather than syntax.
@@ -1047,28 +1187,71 @@ async fn exec_task(
             .await
             .map_err(|e| anyhow::anyhow!("worker command '{}' failed to start: {e}", argv[0]))?;
         if !status.success() {
+            // A worker that exited nonzero of its own accord reported that its
+            // effect did not land. That is a FAILURE, not an unknown, so the
+            // intent is withdrawn and the task stays plainly retryable.
+            std::fs::remove_file(&intent).ok();
             anyhow::bail!("worker command '{}' exited {status}", argv[0]);
         }
     }
 
-    // THE GATE. `create_new` is atomic on both platforms.
-    use std::io::Write;
-    let mut file = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(effects.join(key))
-    {
-        Ok(file) => file,
+    // THE COMMIT. `create_new` is atomic on both platforms.
+    match commit_effect(&commit, task) {
+        Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            println!("GOAL-EXEC: task={task} key={key} produced=no reason=idempotency-key-present");
-            return Ok(());
+            println!(
+                "GOAL-EXEC: task={task} key={key} produced=no reason=effect-already-committed"
+            );
+            return Ok(ExecOutcome::AlreadyCommitted);
         }
         Err(error) => return Err(anyhow::anyhow!("effect for {key}: {error}")),
-    };
-    writeln!(file, "{task}")?;
-    file.sync_all()?;
+    }
+    sync_dir(&effects);
+    std::fs::remove_file(&intent).ok();
     println!("GOAL-EXEC: task={task} key={key} produced=yes");
-    Ok(())
+    Ok(ExecOutcome::Produced)
+}
+
+/// Create the commit marker atomically, write its label, and flush it.
+fn commit_effect(commit: &std::path::Path, task: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(commit)?;
+    writeln!(file, "{task}")?;
+    file.sync_all()
+}
+
+/// Create a record atomically and get it to the platter before returning.
+///
+/// `create_new` rather than `create`: an intent that already exists is a state
+/// this function must never silently overwrite, because overwriting it would
+/// erase the evidence that a previous attempt was inside the window.
+fn write_durably(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    writeln!(file, "{body}")?;
+    file.sync_all()
+}
+
+/// Flush the directory entry itself, so a crash cannot lose a file that
+/// `sync_all` already durably wrote.
+///
+/// Best effort, and deliberately not fatal: Windows has no equivalent operation
+/// and returns an error for a directory handle opened this way. Failing the
+/// effect boundary because a durability *hint* is unavailable would trade a rare
+/// crash window for a certain outage.
+fn sync_dir(dir: &std::path::Path) {
+    #[cfg(unix)]
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// What is actually on disk after a run, counted in two independent currencies.
@@ -1163,7 +1346,7 @@ mod tests {
     #[tokio::test]
     async fn exec_task_refuses_to_produce_an_unkeyed_effect() {
         let dir = tempfile::tempdir().unwrap();
-        let error = exec_task(dir.path(), &[], "t-unkeyed", "")
+        let error = exec_task(dir.path(), &[], "t-unkeyed", "", None)
             .await
             .unwrap_err()
             .to_string();
@@ -1174,10 +1357,10 @@ mod tests {
     #[tokio::test]
     async fn exec_task_produces_once_and_refuses_the_second_attempt() {
         let dir = tempfile::tempdir().unwrap();
-        exec_task(dir.path(), &[], "t-once", "idem-t-once")
+        exec_task(dir.path(), &[], "t-once", "idem-t-once", None)
             .await
             .unwrap();
-        exec_task(dir.path(), &[], "t-once", "idem-t-once")
+        exec_task(dir.path(), &[], "t-once", "idem-t-once", None)
             .await
             .unwrap();
         assert_eq!(markers(dir.path()), (1, 1), "the effect landed twice");
@@ -1186,7 +1369,7 @@ mod tests {
     #[tokio::test]
     async fn exec_task_does_not_produce_an_effect_when_the_worker_command_fails() {
         let dir = tempfile::tempdir().unwrap();
-        let error = exec_task(dir.path(), &worker(3), "t-fail", "idem-t-fail")
+        let error = exec_task(dir.path(), &worker(3), "t-fail", "idem-t-fail", None)
             .await
             .unwrap_err()
             .to_string();
@@ -1205,7 +1388,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_worker_leaves_the_task_runnable_rather_than_permanently_blocked() {
         let dir = tempfile::tempdir().unwrap();
-        exec_task(dir.path(), &worker(3), "t-retry", "idem-t-retry")
+        exec_task(dir.path(), &worker(3), "t-retry", "idem-t-retry", None)
             .await
             .expect_err("the failing worker should surface its failure");
         assert_eq!(markers(dir.path()), (0, 0));
@@ -1213,7 +1396,7 @@ mod tests {
         // The retry must be able to produce. Before the fix this returned
         // `produced=no reason=idempotency-key-present` and the effect was lost
         // forever, which is a lost completion wearing an exactly-once costume.
-        exec_task(dir.path(), &worker(0), "t-retry", "idem-t-retry")
+        exec_task(dir.path(), &worker(0), "t-retry", "idem-t-retry", None)
             .await
             .expect("the retry must be able to produce the effect");
         assert_eq!(
@@ -1229,14 +1412,199 @@ mod tests {
     #[tokio::test]
     async fn the_gate_is_keyed_on_the_idempotency_key_not_on_the_task_label() {
         let dir = tempfile::tempdir().unwrap();
-        exec_task(dir.path(), &[], "shared-label", "idem-a")
+        exec_task(dir.path(), &[], "shared-label", "idem-a", None)
             .await
             .unwrap();
-        exec_task(dir.path(), &[], "shared-label", "idem-b")
+        exec_task(dir.path(), &[], "shared-label", "idem-b", None)
             .await
             .unwrap();
         // Two effects, both labelled the same: total 2, distinct labels 1.
         assert_eq!(markers(dir.path()), (2, 1));
+    }
+
+    /// A worker that really writes an effect, then exits.
+    fn effecting_worker() -> Vec<String> {
+        vec![
+            if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
+            if cfg!(windows) { "/c" } else { "-c" }.to_owned(),
+            if cfg!(windows) {
+                "echo %WAYLAND_GOAL_TASK% > \"%WAYLAND_GOAL_EFFECT_SINK%\\\
+                 %WAYLAND_GOAL_TASK%.%RANDOM%%RANDOM%\""
+                    .to_owned()
+            } else {
+                "printf '%s\\n' \"$WAYLAND_GOAL_TASK\" \
+                 > \"$WAYLAND_GOAL_EFFECT_SINK/$WAYLAND_GOAL_TASK.$$.$(date +%s%N)\""
+                    .to_owned()
+            },
+        ]
+    }
+
+    fn observed(dir: &std::path::Path) -> (usize, usize) {
+        let census = count_effects(dir).unwrap();
+        (census.observed_total, census.observed_distinct)
+    }
+
+    /// The on-disk state a process-tree kill leaves: an intent recorded, the
+    /// worker's effect possibly landed, no commit.
+    ///
+    /// Written directly rather than by killing a process, because a unit test
+    /// cannot kill its own runner. The REAL kill is exercised in the live proof;
+    /// this pins the decision the boundary makes when it finds that state.
+    fn plant_interrupted_attempt(dir: &std::path::Path, key: &str) {
+        std::fs::create_dir_all(dir.join("intents")).unwrap();
+        std::fs::write(dir.join("intents").join(key), "task=t-x pid=1\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_death_inside_the_effect_window_is_parked_rather_than_re_run() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_interrupted_attempt(dir.path(), "idem-t-window");
+
+        let outcome = exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-window",
+            "idem-t-window",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, ExecOutcome::Indeterminate { .. }),
+            "got: {outcome:?}"
+        );
+        // THE PROPERTY. The worker must not have run a second time.
+        assert_eq!(observed(dir.path()), (0, 0), "the effect was re-run");
+        assert_eq!(
+            markers(dir.path()),
+            (0, 0),
+            "an undecided attempt committed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_committed_effect_wins_over_a_leftover_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-both",
+            "idem-t-both",
+            None,
+        )
+        .await
+        .unwrap();
+        // A commit is written before its intent is removed, so a kill in that
+        // gap leaves both. The commit settles it.
+        plant_interrupted_attempt(dir.path(), "idem-t-both");
+
+        let outcome = exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-both",
+            "idem-t-both",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, ExecOutcome::AlreadyCommitted);
+        assert_eq!(observed(dir.path()), (1, 1), "the effect landed twice");
+    }
+
+    #[tokio::test]
+    async fn resolving_as_produced_commits_without_running_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_interrupted_attempt(dir.path(), "idem-t-res");
+
+        let outcome = exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-res",
+            "idem-t-res",
+            Some(ResolveArg::Produced),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, ExecOutcome::AlreadyCommitted);
+        assert_eq!(observed(dir.path()), (0, 0), "the worker ran anyway");
+        assert_eq!(markers(dir.path()), (1, 1));
+        assert!(!dir.path().join("intents").join("idem-t-res").exists());
+    }
+
+    #[tokio::test]
+    async fn resolving_as_retry_runs_the_worker_again() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_interrupted_attempt(dir.path(), "idem-t-red");
+
+        let outcome = exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-red",
+            "idem-t-red",
+            Some(ResolveArg::Retry),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, ExecOutcome::Produced);
+        assert_eq!(observed(dir.path()), (1, 1));
+        assert_eq!(markers(dir.path()), (1, 1));
+    }
+
+    /// A clean run must leave nothing that would park the NEXT task keyed the
+    /// same way. An intent that outlives its own commit is a stuck task.
+    #[tokio::test]
+    async fn a_clean_attempt_withdraws_its_own_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-clean",
+            "idem-t-clean",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!dir.path().join("intents").join("idem-t-clean").exists());
+    }
+
+    /// A worker that exits nonzero reported its own failure, which is NOT an
+    /// unknown: the intent must be withdrawn so the task stays plainly
+    /// retryable rather than parked forever.
+    #[tokio::test]
+    async fn a_failed_worker_withdraws_its_intent_and_stays_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        exec_task(dir.path(), &worker(3), "t-wf", "idem-t-wf", None)
+            .await
+            .expect_err("the failing worker should surface its failure");
+        assert!(!dir.path().join("intents").join("idem-t-wf").exists());
+
+        let outcome = exec_task(dir.path(), &effecting_worker(), "t-wf", "idem-t-wf", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, ExecOutcome::Produced);
+        assert_eq!(observed(dir.path()), (1, 1));
+    }
+
+    /// The instrument's own guard: a census over a worker that produced nothing
+    /// observable must be distinguishable from one that produced everything.
+    #[test]
+    fn the_census_reports_a_duplicate_the_marker_count_cannot_see() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("observed")).unwrap();
+        std::fs::create_dir_all(dir.path().join("effects")).unwrap();
+        // One key, one marker — and two real executions of the same task.
+        std::fs::write(dir.path().join("effects").join("idem-t"), "t\n").unwrap();
+        std::fs::write(dir.path().join("observed").join("t.1"), "t\n").unwrap();
+        std::fs::write(dir.path().join("observed").join("t.2"), "t\n").unwrap();
+
+        let census = count_effects(dir.path()).unwrap();
+        assert_eq!((census.markers_total, census.markers_distinct), (1, 1));
+        assert_eq!((census.observed_total, census.observed_distinct), (2, 1));
+        assert_eq!(census.duplicates(), 1);
     }
 
     #[test]
