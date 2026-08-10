@@ -512,6 +512,59 @@ fn canonical_workspace(workspace: String) -> String {
     dunce::simplified(&canonical).to_string_lossy().into_owned()
 }
 
+/// The backend name that means "no real sandbox exists, so refuse everything".
+/// A session on it has no shell at all, which is the opposite of what the
+/// local-shell notice announces.
+const FAIL_CLOSED_BACKEND: &str = "fail_closed";
+
+/// The local-shell activation notice, or `None` when there is nothing true to
+/// say. Pure so every arm of the decision is directly testable against a real
+/// backend instead of being reachable only on one platform.
+///
+/// It fires exactly when this session KEPT a shell that the exec gate in
+/// `wcore_tools::bash` would otherwise have refused, i.e. all four hold:
+///
+/// * `local_operator_principal` — the relaxation applied at all;
+/// * `secret_read_deny_required` — the policy still wants OS read-deny, so the
+///   old code path would have refused;
+/// * the backend does not enforce read-deny — the refusal's trigger;
+/// * the backend is not the operator-requested containment BYPASS, which has
+///   its own, louder banner.
+///
+/// And one more, which is the difference between a notice and a lie: the
+/// backend must not be `fail_closed`. `FailClosedBackend` is installed when no
+/// real platform backend exists, reports `is_available() == true` so selection
+/// admits it, keeps the trait-default `enforces_read_deny() == false`, and is
+/// not a bypass — so it satisfies every other clause while refusing every
+/// command it is handed. Announcing "local shell enabled" there would be false.
+///
+/// On Linux (bwrap) and macOS (sandbox_exec) `enforces_read_deny()` is true at
+/// the shipping default, so this returns `None` and those platforms emit
+/// nothing new.
+fn local_shell_notice(
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    runtime: &wcore_sandbox::SandboxRegistry,
+) -> Option<String> {
+    if !(policy.local_operator_principal()
+        && policy.secret_read_deny_required()
+        && !runtime.enforces_read_deny()
+        && !runtime.bypasses_containment()
+        && runtime.backend_name() != FAIL_CLOSED_BACKEND)
+    {
+        return None;
+    }
+    Some(format!(
+        "Local shell enabled WITHOUT OS secret containment: the active sandbox backend ({}) \
+         cannot enforce filesystem read-deny, so a Bash command in this session can read this \
+         workspace's secrets and your credential stores — the OS will not stop it. Still in \
+         force: kill-on-close process-tree ownership, per-command approval for Bash (unless you \
+         disabled approvals), the channel tool posture, and the Read/Write/Edit secret guard. \
+         This applies to your local keyboard session only; a channel or remote session on this \
+         backend still gets no shell.",
+        runtime.backend_name(),
+    ))
+}
+
 impl AgentBootstrap {
     pub fn new(config: Config, workspace: impl Into<String>, output: Arc<dyn OutputSink>) -> Self {
         Self {
@@ -2959,6 +3012,17 @@ impl AgentBootstrap {
         // profile. Untrusted repositories and every remote session stay in
         // the Contained profile; repository content cannot select this branch.
         let is_channel_remote = self.channel_tool_posture.is_some();
+        // THE local-shell seam. `channel_tool_posture` is the engine's own
+        // construction — it is `Some` for exactly the channel/remote engines
+        // `ChannelTurnDispatcher` builds and `None` for the CLI / TUI /
+        // json-stream engines an operator drives from their own keyboard. It is
+        // NOT workspace trust: an untrusted workspace driven by the operator is
+        // still the operator. Managed execution policy is excluded too — that is
+        // an administrator-imposed floor and this lane does not relax it.
+        //
+        // Repository content cannot reach either input.
+        let shell_principal_is_local_operator =
+            !is_channel_remote && !self.config.execution_policy.is_managed();
         if registry.workspace_policy().is_none() {
             let strict_workspace = is_channel_remote
                 || self.config.execution_policy.is_managed()
@@ -2980,8 +3044,14 @@ impl AgentBootstrap {
                         self.config.security.allow_sandboxed_shell_network,
                     )
                 };
-                wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
-                    .with_network(network)
+                let contained =
+                    wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
+                        .with_network(network);
+                if shell_principal_is_local_operator {
+                    contained.with_local_operator_principal()
+                } else {
+                    contained
+                }
             } else {
                 wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))
@@ -2998,6 +3068,35 @@ impl AgentBootstrap {
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
             }
             registry.set_workspace_policy(policy);
+        }
+
+        // The local-shell activation notice. It fires exactly when this session
+        // KEPT a shell that the exec gate would otherwise have refused: a
+        // local-operator policy that still wants OS secret-read-deny, running on
+        // a backend that cannot provide it (today: the Windows relaxed
+        // `windows_job_object` default). On Linux (bwrap) and macOS
+        // (sandbox_exec) `enforces_read_deny()` is true at the shipping default,
+        // so this condition is unreachable there and the operator sees nothing
+        // new — that is what keeps those two platforms byte-for-byte unchanged.
+        //
+        // Graded off the policy the registry ACTUALLY holds, not off the branch
+        // above, so a policy installed by `apply_posture` can never be described
+        // by a notice that did not apply to it.
+        {
+            let installed = registry.workspace_policy();
+            let runtime = registry.sandbox_runtime();
+            if let Some(policy) = installed.as_deref()
+                && let Some(notice) = local_shell_notice(policy, runtime.as_ref())
+            {
+                self.output.emit_info(&notice);
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    backend = runtime.backend_name(),
+                    shell_principal = "local_operator",
+                    secret_read_deny_enforced = false,
+                    "{notice}"
+                );
+            }
         }
 
         let effective_workspace_trust = if is_channel_remote {
@@ -5165,5 +5264,67 @@ mod tests {
         let inner = inner.expect("chatgpt inner build must not panic and must succeed");
         assert_eq!(inner.alias_key(), "openai-chatgpt");
         wrapped.expect("chatgpt wrapped build must not panic and must succeed");
+    }
+
+    /// The notice's whole truth table, driven against REAL backends rather than
+    /// whatever the host platform happens to ship. The `fail_closed` row is the
+    /// one that matters most: that backend satisfies every other clause and
+    /// then refuses every command, so announcing an enabled shell there would
+    /// be a lie about the thing the operator most needs to be right.
+    #[test]
+    fn local_shell_notice_only_fires_when_a_shell_was_actually_kept() {
+        use std::sync::Arc;
+        use wcore_sandbox::SandboxRegistry;
+        use wcore_sandbox::backends::bwrap::BubblewrapBackend;
+        use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
+        use wcore_tools::workspace_policy::WorkspacePolicy;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let local = WorkspacePolicy::contained(root).with_local_operator_principal();
+        let channel = WorkspacePolicy::contained(root);
+        let trusted = WorkspacePolicy::trusted_local(root);
+
+        let relaxed = SandboxRegistry::new(Arc::new(WindowsJobObjectBackend::new()));
+        assert!(!relaxed.enforces_read_deny());
+        assert!(!relaxed.bypasses_containment());
+
+        // FIRES: the only combination where a refusal was avoided.
+        let notice = local_shell_notice(&local, &relaxed)
+            .expect("a kept-but-uncontained local shell must be announced");
+        assert!(notice.contains("windows_job_object"), "{notice}");
+        assert!(
+            notice.contains("cannot enforce filesystem read-deny"),
+            "{notice}"
+        );
+        assert!(notice.contains("process-tree ownership"), "{notice}");
+        assert!(notice.contains("approval"), "{notice}");
+        assert!(notice.contains("channel tool posture"), "{notice}");
+        assert!(notice.contains("local keyboard session"), "{notice}");
+
+        // SILENT: no local-operator principal — the shell is still refused.
+        assert!(local_shell_notice(&channel, &relaxed).is_none());
+        // SILENT: the policy never required OS read-deny, so nothing changed.
+        assert!(local_shell_notice(&trusted, &relaxed).is_none());
+
+        // SILENT: a read-deny-enforcing backend. This is Linux and macOS at
+        // their shipping default, and it is why they emit nothing new.
+        let enforcing = SandboxRegistry::new(Arc::new(BubblewrapBackend::new()));
+        assert!(
+            enforcing.enforces_read_deny(),
+            "positive control: bwrap must claim read-deny enforcement, or the \
+             row below proves nothing"
+        );
+        assert!(local_shell_notice(&local, &enforcing).is_none());
+
+        // SILENT: fail-closed. Satisfies every other clause and runs nothing.
+        let failed = SandboxRegistry::new(Arc::new(wcore_sandbox::FailClosedBackend::new()));
+        assert_eq!(failed.backend_name(), super::FAIL_CLOSED_BACKEND);
+        assert!(!failed.enforces_read_deny());
+        assert!(!failed.bypasses_containment());
+        assert!(
+            local_shell_notice(&local, &failed).is_none(),
+            "fail_closed refuses every command; announcing an enabled shell there is a lie"
+        );
     }
 }

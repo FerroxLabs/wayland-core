@@ -33,6 +33,12 @@ pub mod sandbox_exec;
 // `cmd /C` join rules are pure string handling, and they are the difference
 // between the command the operator wrote and the command that runs.
 pub(crate) mod windows_cmdline;
+// The Windows RELAXED session default (kill-on-close Job Object only). Like
+// `appcontainer` and `sandbox_exec` it is compiled on every target so its
+// capability claims — above all the trait-default `enforces_read_deny() ==
+// false` that the channel-posture safety net depends on — are unit-testable
+// off Windows. Selection still reaches for it only on Windows.
+pub mod windows_job_object;
 
 /// Channel buffer for the streaming receiver. The default buffered impl
 /// only sends three messages, so any positive value works; a small buffer

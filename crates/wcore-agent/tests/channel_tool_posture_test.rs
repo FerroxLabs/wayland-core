@@ -188,3 +188,68 @@ async fn workspace_posture_jails_filesystem_reads() {
         "read OUTSIDE the workspace root must be refused by the jail"
     );
 }
+
+/// **The safety net firing under the Windows RELAXED default.**
+///
+/// The Windows session default is no longer AppContainer but
+/// `WindowsJobObjectBackend`, which has no OS filesystem confinement. That is
+/// only safe because the capability predicate moves with the backend: the
+/// relaxed backend does not claim `enforces_read_deny()`, so `apply_posture`
+/// withholds `Bash` from a remote `Workspace` session and the exec-time gate in
+/// `wcore_tools::bash` refuses one anyway.
+///
+/// This test wires the REAL production predicate off the REAL production
+/// backend into the REAL production posture function — no stand-in bool. It
+/// runs on every target because `WindowsJobObjectBackend` is compiled on every
+/// target; the Linux and macOS legs are what will catch a regression of it,
+/// since they run on every push.
+///
+/// The `true` arm is a positive control, and it is the whole reason this test
+/// is not vacuous: it proves `Bash` is dropped BECAUSE the predicate is false,
+/// not merely because the posture is `Workspace`.
+#[test]
+fn relaxed_windows_default_withholds_bash_from_workspace_posture() {
+    use wcore_sandbox::backends::SandboxBackend as _;
+    use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
+    use wcore_tools::registry::ToolRegistry;
+
+    let read_deny_enforced = WindowsJobObjectBackend::new().enforces_read_deny();
+    assert!(
+        !read_deny_enforced,
+        "the Windows relaxed default must not claim OS-level secret-read-deny; \
+         if it does, the drop below stops happening and a channel sender keeps a shell"
+    );
+
+    let tmp = tempdir().unwrap();
+    let scope = ChannelToolScope {
+        posture: ChannelToolPosture::Workspace,
+        workspace_root: tmp.path().to_path_buf(),
+    };
+
+    let mut relaxed = ToolRegistry::new();
+    relaxed.register(Box::new(wcore_tools::bash::BashTool));
+    relaxed.register(Box::new(wcore_tools::todo::TodoTool::new()));
+    wcore_agent::channel_tools::apply_posture(&mut relaxed, &scope, read_deny_enforced);
+    let relaxed_names = relaxed.tool_names();
+    assert!(
+        !relaxed_names.iter().any(|n| n == "Bash"),
+        "under the relaxed Windows default Bash must be withheld from a remote \
+         Workspace session, got: {relaxed_names:?}"
+    );
+    assert!(
+        relaxed_names.iter().any(|n| n == "todo"),
+        "the posture must narrow, not empty, the registry: {relaxed_names:?}"
+    );
+
+    // Positive control: the SAME posture over the SAME registry keeps Bash when
+    // the backend does claim read-deny enforcement. Without this the assertion
+    // above would also pass if `Workspace` simply never carried Bash.
+    let mut enforcing = ToolRegistry::new();
+    enforcing.register(Box::new(wcore_tools::bash::BashTool));
+    wcore_agent::channel_tools::apply_posture(&mut enforcing, &scope, true);
+    assert!(
+        enforcing.tool_names().iter().any(|n| n == "Bash"),
+        "positive control failed: Workspace must keep Bash on a read-deny-enforcing \
+         backend, otherwise the drop above proves nothing"
+    );
+}
