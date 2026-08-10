@@ -39,6 +39,7 @@ from _bcommon import (  # noqa: E402
     CORPUS_ROOT,
     FIXTURES,
     UNPROVEN,
+    NOTE,
     CaseEvidence,
     Check,
     FixtureError,
@@ -240,4 +241,35 @@ def main(binary: str, artifact_dir: str):
     verdict = grade("grade_b3.py", evid)
     rec.add_check(verdict_check(ROW_ID + ".approval", verdict))
     rec.world["grader_verdict"] = verdict
+    rec.add_check(transport_note(transcript))
     return finish(rec, artifact_dir)
+
+
+def transport_note(transcript):
+    """Say WHY, from the mail host's own transcript, when nothing arrived.
+
+    A row that fails because the human was never reached must not be readable
+    as "the job did not try". The mail host records the bytes it was sent; a
+    TLS ClientHello (record type 0x16, version 0x03xx) arriving on a plaintext
+    port is the mail host observing an incompatibility, not the product saying
+    so about itself.
+    """
+    entries = read_jsonl(transcript)
+    handshakes = sum(1 for e in entries
+                     if str(e.get("kind", "")).startswith("imap")
+                     and str(e.get("line", ""))[:1] == "\x16")
+    delivered = sum(1 for e in entries if e.get("kind") == "delivered")
+    if handshakes and not delivered:
+        return Check(
+            ROW_ID + ".transport", NOTE,
+            "the mail host was sent %d TLS handshakes on its plaintext IMAP port "
+            "and no message was ever delivered: the job tried to reach the mailbox "
+            "and could not speak to it. Nothing here distinguishes 'would not ask "
+            "the human' from 'could not open the mailbox' — read the FAIL above as "
+            "the user's outcome, not as a diagnosis" % handshakes,
+            {"imap_tls_handshakes": handshakes, "delivered": delivered})
+    return Check(
+        ROW_ID + ".transport", NOTE,
+        "the mail host recorded %d delivered message(s) and %d TLS handshake(s) on "
+        "its plaintext IMAP port" % (delivered, handshakes),
+        {"imap_tls_handshakes": handshakes, "delivered": delivered})
