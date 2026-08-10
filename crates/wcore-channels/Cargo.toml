@@ -7,6 +7,8 @@ description = "Channel runtime — trait + lifecycle for chat platform adapters 
 
 [dependencies]
 async-trait = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
