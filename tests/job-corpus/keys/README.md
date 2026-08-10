@@ -125,10 +125,13 @@ disk next to it.
 | `a09_controls/` | A-9 | A correct service, and one that only forgets durability |
 | `a10.key.json` | A-10 | Exact answers for all seven sub-cases |
 | `a10_hidden/` | A-10 | The screenshot sub-case's acceptance tests, and the audio onsets |
+| `a10_media_grade.py`, `a10_media_selftest.py` | A-10 | text_pdf, scanned_pdf, spreadsheet, audio, video: the exact answers in `a10.key.json`, compared mechanically |
 | `a10_degraded_grade.py`, `a10_degraded_selftest.py` | A-10 | Whether the refusal arrived before the guess |
-| `a10_tui.key.json` | A-10 attachment | The canary matrix, graded on a real terminal |
+| `a10_tui.key.json` | A-10 attachment | The canary matrix. Drag-and-drop needs a real terminal and is OUT of an unattended run |
+| `a10_tui_paste.py` | A-10 attachment | The automatable half: an absolute path pasted into the running product, over all four awkward locations |
 | `a11.key.json`, `a11_verify.py`, `a11_selftest.py` | A-11 | Reads the warehouse database directly |
-| `a12.key.json` | A-12 | Waypoints, and a prediction against a recorded truth |
+| `a12.key.json` | A-12 | Waypoints, and a prediction against what the change really breaks |
+| `a12_grade.py`, `a12_selftest.py` | A-12 | Part 1's eight waypoints in order in real prose; part 2 scored by making the change and running the suite |
 
 ### Every key states its own failure condition
 
@@ -151,8 +154,24 @@ python3 keys/a08_selftest.py                                                    
 python3 keys/a09_probe.py --workdir keys/a09_controls/reference                         # PASS 19/19
 python3 keys/a09_probe.py --workdir keys/a09_controls/inmemory                          # FAIL, durability only
 python3 keys/a10_degraded_selftest.py                                                   # 7/7 agree
+python3 keys/a10_media_selftest.py                                                      # 18/18 agree
 python3 keys/a11_selftest.py                                                            # 4/4 agree
+python3 keys/a12_selftest.py                                                            # 12/12 agree
 ```
+
+Two of those deserve a word.
+
+`a09_probe.py` runs the service in a **scratch copy** of `--workdir`. It used to
+run it in place, which meant the two commands above wrote `links.db` and
+`.a09-service.log` into the committed control directories: a gate self-test that
+dirtied the repository it was certifying, and a second run that started from
+state the first one left. Verified in both directions on Linux 2026-08-10 —
+reference PASS 19/19, near miss FAIL on exactly the two restart checks, and
+`git status keys/a09_controls` clean afterwards.
+
+`a12_selftest.py` really applies the `write_through` change and runs the suite
+for each of its six part-2 controls, so the scoring is checked against what
+breaks, not against a number written down earlier.
 
 Run them again on a new host before trusting a verdict from that host. A green
 result from an environment that could not have produced a red one is not

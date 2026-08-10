@@ -7,6 +7,15 @@ Nothing is graded by reading source or by believing a report. The service is
 started from `serve.json`, driven over HTTP like a user would drive it, stopped,
 started again to check the data is still there, and stopped for good.
 
+**The service always runs in a scratch copy of `--workdir`, never in the
+directory itself.** Running it in place made the grader a writer: probing the
+committed control implementations left `links.db` and `.a09-service.log` inside
+`keys/a09_controls/`, so a gate self-test dirtied the repository it was meant to
+certify, and the second run of a control started from state the first one left.
+The copy is made once and both service starts share it, which is what makes the
+restart check a real durability check rather than an artefact of a fresh
+directory.
+
 Standard library only, so it runs unchanged on Linux, macOS and Windows.
 """
 
@@ -15,10 +24,12 @@ import http.client
 import json
 import os
 import platform
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 
@@ -262,10 +273,38 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--json", default=None)
+    ap.add_argument(
+        "--keep-scratch",
+        action="store_true",
+        help="leave the scratch copy behind for inspection instead of deleting it",
+    )
     args = ap.parse_args()
 
-    workdir = os.path.abspath(args.workdir)
-    report = {"row": "A-9", "verdict": None, "reasons": [], "checks": []}
+    source = os.path.abspath(args.workdir)
+    scratch_root = tempfile.mkdtemp(prefix="a09-probe-")
+    try:
+        return _probe(source, scratch_root, args)
+    finally:
+        if args.keep_scratch:
+            print("scratch copy kept at %s" % scratch_root, file=sys.stderr)
+        else:
+            shutil.rmtree(scratch_root, ignore_errors=True)
+
+
+def _probe(source, scratch_root, args):
+    # Everything below happens in the copy. The directory the caller named is
+    # only ever read, so grading a committed control cannot dirty the repo and
+    # a second run cannot inherit the first run's database.
+    workdir = os.path.join(scratch_root, "work")
+    shutil.copytree(source, workdir, symlinks=True)
+    report = {
+        "row": "A-9",
+        "verdict": None,
+        "reasons": [],
+        "checks": [],
+        "graded_directory": source,
+        "scratch_copy": workdir,
+    }
     checks = Checks()
 
     serve_path = os.path.join(workdir, "serve.json")
