@@ -522,6 +522,84 @@ fn git_rustc_and_cargo_do_real_work_under_the_default_posture() {
     );
 }
 
+/// **W-H diagnosis.** Why does `rustc` reach the link step and then die inside
+/// `C:\Program Files\Git\usr\bin\link.exe` — MSYS coreutils `link`, not MSVC's?
+///
+/// The design question is whether our sandboxed PATH construction is at fault.
+/// It is not, and this case is what shows it. Measured on SEANDESKTOP with an
+/// ordinary unsandboxed shell, `where link` answers
+/// `C:\Program Files\Git\usr\bin\link.exe` — the MSYS one — because no MSVC
+/// directory is on the machine PATH at all. The sandbox passes the engine's
+/// `PATH` through verbatim (`windows_impl::process` copies the key), so the
+/// sandboxed and unsandboxed PATH answer the same. Yet unsandboxed `rustc`
+/// links fine, because it never consults PATH for the linker: forced to fail
+/// with an unresolved symbol it prints
+/// `"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\
+/// 14.44.35207\bin\HostX64\x64\link.exe"`, a full path it got from Visual
+/// Studio setup discovery. `Command::new("link.exe")` is only rustc's FALLBACK
+/// for when that discovery returns nothing.
+///
+/// So the question this case answers is: what does the discovery see from
+/// inside the container? Its rows are, in order, the PATH answer, the VS
+/// setup query the discovery is built on, the instance-metadata directory that
+/// query reads, and finally plain `rustc`, graded from world state.
+///
+/// It asserts nothing about the toolchain — it exists to be run TWICE, once
+/// with and once without an `ALL APPLICATION PACKAGES` read ace on
+/// `%ProgramData%\Microsoft\VisualStudio\Packages\_Instances`, so the rows can
+/// be diffed against a single changed variable.
+#[test]
+#[ignore = "explicit native Windows toolchain measurement"]
+fn measure_msvc_linker_discovery_under_the_sandbox() {
+    require_live();
+    assert_quiet();
+    let root = workspace("wh");
+    let (_policy, ctx) = contained_ctx(&root);
+    control(&ctx, &root, "start");
+
+    for (name, command) in [
+        ("where-link", "where link"),
+        (
+            "vswhere",
+            "\"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe\" \
+             -latest -products * -property installationPath",
+        ),
+        (
+            "instances-dir",
+            "dir /b \"%ProgramData%\\Microsoft\\VisualStudio\\Packages\\_Instances\"",
+        ),
+        (
+            "msvc-link-readable",
+            "dir /b \"%ProgramFiles%\\Microsoft Visual Studio\\2022\\*\\VC\\Tools\\MSVC\"",
+        ),
+    ] {
+        let p = run(&ctx, command);
+        println!(
+            "WH name={name} exit={} stdout={:?} stderr={:?}",
+            p.exit_code,
+            p.stdout.trim(),
+            p.stderr.trim()
+        );
+        control(&ctx, &root, name);
+    }
+
+    let p = run(
+        &ctx,
+        "echo fn main(){println!(\"wh\");}> wh.rs && rustc -o wh.exe wh.rs",
+    );
+    let binary = root.join("wh.exe");
+    println!(
+        "WH name=rustc-plain exit={} binary_on_disk={} stderr={:?}",
+        p.exit_code,
+        binary.is_file(),
+        p.stderr.trim()
+    );
+    control(&ctx, &root, "rustc-plain");
+
+    control(&ctx, &root, "end");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Cost of the sandbox per trivial command, measured rather than assumed.
 ///
 /// Every directory in the read grant set is an inherited-ACE rewrite over its
