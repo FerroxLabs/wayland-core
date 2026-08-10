@@ -14,6 +14,15 @@ tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+# DM pairing (dispatch/pairing.rs): SHA-256 so only a code DIGEST is ever
+# persisted, a CSPRNG to mint codes, constant-time comparison so a remote
+# sender cannot time-attack the code, and a cross-process advisory lock so
+# the operator CLI and the running gateway cannot lose each other's writes
+# to the one pairing file.
+sha2 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
+fd-lock = { workspace = true }
 wcore-config = { path = "../wcore-config" }
 
 [dev-dependencies]

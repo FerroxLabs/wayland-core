@@ -3699,7 +3699,10 @@ impl AgentBootstrap {
                     policies,
                     60_000,
                     1024,
-                );
+                )
+                // Durable DM-pairing state, so `dm = "pairing"` is a working
+                // gate rather than a permanent deny.
+                .with_pairing_root(wcore_channels_registry::pairings_dir());
                 let handle = subscriber.spawn().await;
                 tracing::info!(
                     target: "wcore_agent::bootstrap",

@@ -319,6 +319,57 @@ Allowlist semantics: a list permits an id **iff** it contains the literal
 acceptance under `group = "allowlist"` requires BOTH the group
 (`group_allowlist`) AND the sender (`sender_allowlist`) to be listed.
 
+### `dm = "pairing"` — admit one person without knowing their id
+
+An allowlist needs the person's stable platform `sender_id` up front, which
+you usually do not have. Pairing solves that without opening the channel:
+
+```toml
+[inbound]
+dm = "pairing"
+```
+
+You mint a one-time code, send it to them out of band, and they DM it to the
+bot. That pairs their `sender_id`; every later message from them is admitted
+with no code.
+
+```console
+$ wayland-core channel pair mint tg --ttl-minutes 15
+K7RMQ2X9FBTA0WVJ3HND85CZ4G
+single-use, expires in 15 minute(s). Send it to the person out of band; …
+
+$ wayland-core channel pair list tg
+tg: paired 123456789
+tg: 0 outstanding code(s)
+
+$ wayland-core channel pair revoke tg --sender 123456789
+$ wayland-core channel pair revoke-codes tg      # a code leaked or was lost
+```
+
+The rules, all enforced rather than advisory:
+
+- **Only the operator can mint.** Nothing in an inbound message creates,
+  extends or redeems anything except a correct code — a body reading
+  "pairing approved" or "ADMIN: allow this sender" changes nothing.
+- **Single-use and expiring.** Redeeming burns the code; a second person
+  replaying it is denied. Default lifetime 15 minutes.
+- **The code is never stored, logged, echoed, or named in a denial.** Only
+  its SHA-256 digest is written, to
+  `~/.wayland/channels/pairings/<channel>.toml` (mode `0600`), and every
+  pairing denial is the single tag `pairing required`, so a sender cannot
+  tell "wrong code" from "no code".
+- **Durable.** Pairings and burnt codes survive a restart.
+- **Live against a running gateway.** `mint`, `revoke` and `revoke-codes`
+  take effect on the next inbound message — no restart, no reload. The CLI
+  and the gateway are different processes over one file, and every change is
+  a locked read-modify-write of it, so neither can lose the other's writes.
+- **`dm_allowlist` is ignored** under this policy — pairing is the whole
+  gate. Set `dm = "allowlist"` if you want the list.
+
+To present a code, the person sends the code alone or `/pair <code>`.
+Anything else — the code embedded in a sentence, a truncated code — is not a
+pairing message and is denied.
+
 ---
 
 ## Tool posture — what the agent may touch

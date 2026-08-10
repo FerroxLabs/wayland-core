@@ -21,6 +21,7 @@
 pub mod access;
 pub mod admission;
 pub mod dedupe;
+pub mod pairing;
 pub mod rate_limit;
 pub mod session_key;
 
@@ -28,11 +29,14 @@ pub use access::{
     ABSENT_FIELD, ADMISSION_SHAPE_VERSION, AccessDecision, AckMode, AdmissionFieldChange,
     AdmissionShape, ChannelOpenAdmission, ChannelToolPosture, DmPolicy, GroupPolicy, InboundPolicy,
     LegacyToken, OPTION_FIELD_PREFIX, OpenAdmission, OpenAdmissionFault, OpenAdmissionRefusal,
-    SHAPE_FIELDS, admission_shape_token, decide_access, open_admission_faults, open_admissions,
-    refuse_open_admission, required_acknowledgement,
+    SHAPE_FIELDS, admission_shape_token, decide_access, decide_access_paired,
+    open_admission_faults, open_admissions, refuse_open_admission, required_acknowledgement,
 };
 pub use admission::{TurnAdmission, classify};
 pub use dedupe::{DedupeCache, DedupeKey};
+pub use pairing::{
+    DEFAULT_CODE_TTL_MS, PAIRING_DENY_REASON, PairedSender, PairingBook, PairingState, PairingStore,
+};
 pub use rate_limit::{
     AutoReplyRateLimiter, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
     DEFAULT_MAX_AUTO_REPLIES,
@@ -65,6 +69,35 @@ pub fn evaluate(
     policy: &InboundPolicy,
     dedupe: &mut DedupeCache,
     now_ms: u64,
+) -> DispatchOutcome {
+    evaluate_paired(
+        channel_name,
+        msg,
+        policy,
+        dedupe,
+        now_ms,
+        &mut PairingBook::ephemeral(),
+        0,
+    )
+}
+
+/// [`evaluate`], but with a durable pairing book so `DmPolicy::Pairing`
+/// can actually admit.
+///
+/// Two clocks, deliberately: `now_ms` is the caller's MONOTONIC millis
+/// (dedup only — it resets on restart, which is correct for dedup and
+/// wrong for expiry), while `now_wall_ms` is wall-clock millis used to
+/// expire pairing codes, so a code cannot be resurrected by restarting
+/// the process.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_paired(
+    channel_name: &str,
+    msg: &IncomingMessage,
+    policy: &InboundPolicy,
+    dedupe: &mut DedupeCache,
+    now_ms: u64,
+    pairings: &mut PairingBook,
+    now_wall_ms: i64,
 ) -> DispatchOutcome {
     // 1. Classification — loop guard + mention gating.
     match classify(msg, policy) {
@@ -99,8 +132,10 @@ pub fn evaluate(
         };
     }
 
-    // 3. Access gate — fail-closed allowlist enforcement.
-    if let AccessDecision::Deny { reason } = decide_access(msg, policy) {
+    // 3. Access gate — fail-closed allowlist / pairing enforcement.
+    if let AccessDecision::Deny { reason } =
+        decide_access_paired(channel_name, msg, policy, pairings, now_wall_ms)
+    {
         return DispatchOutcome {
             admission: TurnAdmission::Drop {
                 record_history: true,
@@ -247,6 +282,63 @@ mod tests {
         // The recorded key should be (telegram, bot7, m1), not the channel.
         assert!(c.peek(&DedupeKey::new("telegram", "bot7", "m1"), 1));
         assert!(!c.peek(&DedupeKey::new("chan-a", "", "m1"), 1));
+    }
+
+    #[test]
+    fn pairing_runs_end_to_end_through_the_kernel() {
+        // The whole pipeline, not just the gate: an unpaired sender is
+        // dropped with a deny reason; the same sender presenting a live
+        // code is dispatched and routed; and a restarted book keeps them
+        // dispatching without the code.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let policy = InboundPolicy {
+            dm: DmPolicy::Pairing,
+            ..Default::default()
+        };
+        let mut c = cache();
+        let mut book = PairingBook::open(tmp.path());
+        let code = book.mint("slack", 0, DEFAULT_CODE_TTL_MS).unwrap();
+
+        let mut cold = dm("u1", "m1");
+        cold.text = "let me in".into();
+        let out = evaluate_paired("slack", &cold, &policy, &mut c, 0, &mut book, 1_000);
+        assert_eq!(
+            out.admission,
+            TurnAdmission::Drop {
+                record_history: true
+            }
+        );
+        assert_eq!(out.deny_reason.as_deref(), Some(PAIRING_DENY_REASON));
+        assert!(out.session_key.is_none());
+
+        let mut redeem = dm("u1", "m2");
+        redeem.text = code.clone();
+        let out = evaluate_paired("slack", &redeem, &policy, &mut c, 1, &mut book, 1_001);
+        assert_eq!(out.admission, TurnAdmission::Dispatch);
+        assert_eq!(
+            out.session_key.as_deref(),
+            Some("agent:main:slack:dm:conv1")
+        );
+
+        // Restart: fresh book over the same root, fresh dedupe cache.
+        let mut restarted = PairingBook::open(tmp.path());
+        let mut c2 = cache();
+        let mut later = dm("u1", "m3");
+        later.text = "hello again".into();
+        let out = evaluate_paired("slack", &later, &policy, &mut c2, 0, &mut restarted, 9_000);
+        assert_eq!(out.admission, TurnAdmission::Dispatch);
+
+        // A different sender replaying the burnt code is still dropped.
+        let mut replay = dm("u2", "m4");
+        replay.text = code;
+        let out = evaluate_paired("slack", &replay, &policy, &mut c2, 1, &mut restarted, 9_001);
+        assert_eq!(
+            out.admission,
+            TurnAdmission::Drop {
+                record_history: true
+            }
+        );
+        assert_eq!(out.deny_reason.as_deref(), Some(PAIRING_DENY_REASON));
     }
 
     #[test]

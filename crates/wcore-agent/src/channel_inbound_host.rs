@@ -292,7 +292,10 @@ pub async fn spawn(
         Arc::clone(&policies),
         DEDUPE_TTL_MS,
         DEDUPE_MAX,
-    );
+    )
+    // Durable DM-pairing state, so `dm = "pairing"` is a working gate rather
+    // than a permanent deny.
+    .with_pairing_root(wcore_channels_registry::pairings_dir());
     let subscriber = subscriber.spawn().await;
 
     let webhook = crate::inbound_webhook::spawn(Arc::clone(&manager), &webhook_cfg);
