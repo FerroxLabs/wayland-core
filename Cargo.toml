@@ -350,12 +350,6 @@ dirs = "6"
 # Regular expressions (for argument substitution in skills)
 regex = "1"
 
-# Unicode properties + compatibility normalisation. Used by the inbound
-# untrusted-content fence to fold marker forgeries by Unicode CLASS
-# (Default_Ignorable / Cf / Mn / Me, and NFKD) rather than by hand-list.
-unicode-normalization = "0.1"
-unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
-
 # File system change notification (for skill hot-reload)
 notify = "8"
 

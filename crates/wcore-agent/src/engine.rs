@@ -3690,6 +3690,14 @@ impl AgentEngine {
         self.tools.tool_names()
     }
 
+    /// The live system prompt this engine sends. Read-only; the security
+    /// tests for the untrusted-channel directive assert against it, and a
+    /// host may surface it. Mutation still goes through
+    /// [`Self::set_system_prompt`].
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
     /// Wave OR: returns the registry by mutable reference only when no
     /// per-turn `AgentNodeExecutor` adapter (or any other Arc clone) is
     /// active. The CLI's MCP-server registration site mutates the registry
@@ -5857,6 +5865,46 @@ impl AgentEngine {
         }
         content.extend(additional_content);
         self.messages.push(Message::now(Role::User, content));
+    }
+
+    /// Attach a product-side, request-only text block to a user-role tail
+    /// message WITHOUT putting it after the sender's own words.
+    ///
+    /// SECURITY (P3). The last user message can carry a remote channel
+    /// participant's text (`channel_dispatch::build_turn_prompt`), and that
+    /// text is deliberately the TERMINAL span of the message: the untrusted
+    /// region ends where the message ends, which is the one boundary a sender
+    /// cannot write. Pushing product instructions after it rebuilds exactly
+    /// the trusted position that three rounds of forged
+    /// `<<<END_WAYLAND_UNTRUSTED_INBOUND {id}>>>` markers were reaching for —
+    /// and on the OpenAI family it is worse than adjacency, because
+    /// `openai.rs::build_messages` joins a user turn's text blocks into ONE
+    /// flat string, so a forged closing marker would sit directly above
+    /// genuine product text in a single indistinguishable blob.
+    ///
+    /// Measured on the wire before this existed: a channel turn arrived as
+    /// `…attacker bytes\nSkill hint: …\nCurrent date: 2026-08-10`.
+    ///
+    /// Placement rule: insert before a trailing text block (keeping the
+    /// sender's words last and preserving the caller-order of successive
+    /// injected blocks), otherwise push. The "otherwise" arm matters for a
+    /// tool-results tail — Anthropic requires `tool_result` blocks first, so
+    /// a text block must never be inserted ahead of them.
+    ///
+    /// Callers: the per-turn skill hint, the current-date line, and PrePrompt
+    /// plugin contributions (which carry their own `trust="untrusted"`
+    /// envelope). What they have in common is not trust — it is that they are
+    /// added by us, so they must not occupy the terminal position reserved
+    /// for the remote participant's raw text.
+    fn attach_transient_block(message: &mut Message, text: String) {
+        let block = ContentBlock::Text { text };
+        match message.content.last() {
+            Some(ContentBlock::Text { .. }) => {
+                let at = message.content.len() - 1;
+                message.content.insert(at, block);
+            }
+            _ => message.content.push(block),
+        }
     }
 
     /// AUDIT D-6 — synthesize the `ToolResult` blocks needed to repair a
@@ -9749,7 +9797,7 @@ impl AgentEngine {
                         && let Some(last) = request.messages.last_mut()
                         && matches!(last.role, Role::User)
                     {
-                        last.content.push(ContentBlock::Text { text: hint });
+                        Self::attach_transient_block(last, hint);
                     }
 
                     // Cache-stability (token-opt, finding #174): inject the current date
@@ -9763,11 +9811,10 @@ impl AgentEngine {
                     if let Some(last) = request.messages.last_mut()
                         && matches!(last.role, Role::User)
                     {
-                        last.content.push(ContentBlock::Text {
-                            text: crate::context::current_date_block(
-                                &crate::context::today_string(),
-                            ),
-                        });
+                        Self::attach_transient_block(
+                            last,
+                            crate::context::current_date_block(&crate::context::today_string()),
+                        );
                     }
 
                     // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
@@ -14232,7 +14279,9 @@ impl AgentEngine {
             return;
         }
         for text in to_append {
-            last.content.push(ContentBlock::Text { text });
+            // Trusted product/plugin context must not land after the user's
+            // own words — see `attach_transient_block`.
+            Self::attach_transient_block(last, text);
         }
     }
 
@@ -29163,18 +29212,26 @@ mod session_start_apply_tests {
             "must append to the tail, not push a new message"
         );
         let blocks = &messages[0].content;
-        assert_eq!(blocks.len(), 2, "original text + appended contribution");
-        let appended = match blocks.last() {
+        assert_eq!(blocks.len(), 2, "original text + injected contribution");
+        // P3 — the injected block goes BEFORE the user's own words, never
+        // after them: a channel turn's tail text is a remote participant's
+        // message and must stay the terminal span of the turn. See
+        // `AgentEngine::attach_transient_block`.
+        let injected = match blocks.first() {
             Some(ContentBlock::Text { text }) => text,
-            other => panic!("expected appended text block, got {other:?}"),
+            other => panic!("expected injected text block, got {other:?}"),
         };
         assert!(
-            appended.contains("trust=\"untrusted\""),
+            injected.contains("trust=\"untrusted\""),
             "must carry the untrusted envelope"
         );
         assert!(
-            appended.contains("RECALL-A"),
+            injected.contains("RECALL-A"),
             "must carry the contribution body"
+        );
+        assert!(
+            matches!(blocks.last(), Some(ContentBlock::Text { text }) if text == "hello"),
+            "the user's own words must remain the last block, got {blocks:?}"
         );
     }
 
@@ -29259,9 +29316,9 @@ mod session_start_apply_tests {
         let outcome = pre_prompt_outcome(&huge);
         super::AgentEngine::apply_pre_prompt_contribution(&mut messages, &outcome);
 
-        let appended = match messages[0].content.last() {
+        let appended = match messages[0].content.first() {
             Some(ContentBlock::Text { text }) => text,
-            other => panic!("expected appended text block, got {other:?}"),
+            other => panic!("expected injected text block, got {other:?}"),
         };
         assert!(
             appended.contains("[truncated]"),

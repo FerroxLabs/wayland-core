@@ -2342,6 +2342,27 @@ impl AgentBootstrap {
         {
             system_prompt.push_str(&block);
         }
+        // SECURITY (P3) — an engine attached to a remote messaging channel
+        // carries the standing untrusted-content rule in its SYSTEM prompt.
+        //
+        // This is the half of the inbound boundary the transport enforces.
+        // Provider request bodies are JSON: the system prompt is a separate
+        // field (Anthropic `system`, OpenAI `{"role":"system"}`) and a
+        // sender's bytes are a string value inside a USER message, so no byte
+        // a remote participant writes can terminate that string, add a
+        // sibling field, or otherwise reach this text. It replaces the
+        // in-band `<<<…>>>` marker protocol, which three rounds of Unicode
+        // bypasses showed cannot be made unforgeable — see the module docs on
+        // `wcore_channels::untrusted`.
+        //
+        // Placed AFTER every other block so it is the last thing in the
+        // system prompt, adjacent to the conversation it governs, and applied
+        // for EVERY posture (including `Full`): the posture decides which
+        // tools a remote sender can reach, not whether their words are
+        // untrusted.
+        if self.channel_tool_posture.is_some() {
+            system_prompt.push_str(wcore_channels::untrusted::UNTRUSTED_CHANNEL_SESSION_DIRECTIVE);
+        }
         self.config.system_prompt = Some(system_prompt);
 
         // W6 — opt the catalog into cross-project skill resolution. The

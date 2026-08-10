@@ -232,43 +232,75 @@ impl RecoveryCheckpoint {
                 )));
             }
 
-            let allows_transient_tail =
-                index + 1 == durable_messages.len() && matches!(durable.role, Role::User);
-            if prepared.content.len() < durable.content.len()
-                || (!allows_transient_tail && prepared.content.len() != durable.content.len())
-            {
+            let allows_transient = index + 1 == durable_messages.len()
+                && matches!(durable.role, Role::User)
+                && prepared.content.len() > durable.content.len();
+            if prepared.content.len() < durable.content.len() {
                 return Err(JournalError::InvalidTransition(format!(
                     "prepared request message {index} does not preserve durable content"
                 )));
             }
-            for (prepared_block, durable_block) in prepared.content.iter().zip(&durable.content) {
-                let prepared_value =
-                    serde_json::to_value(prepared_block).map_err(|source| JournalError::Json {
-                        context: "encoding prepared request block for recovery binding",
-                        source,
-                    })?;
-                let durable_value =
-                    serde_json::to_value(durable_block).map_err(|source| JournalError::Json {
-                        context: "encoding durable conversation block for recovery binding",
-                        source,
-                    })?;
-                if prepared_value != durable_value {
+            if !allows_transient {
+                if prepared.content.len() != durable.content.len() {
                     return Err(JournalError::InvalidTransition(format!(
-                        "prepared request message {index} changes durable content"
+                        "prepared request message {index} does not preserve durable content"
+                    )));
+                }
+                for (prepared_block, durable_block) in prepared.content.iter().zip(&durable.content)
+                {
+                    if Self::block_value(prepared_block)? != Self::block_value(durable_block)? {
+                        return Err(JournalError::InvalidTransition(format!(
+                            "prepared request message {index} changes durable content"
+                        )));
+                    }
+                }
+                continue;
+            }
+
+            // The durable blocks must survive IN ORDER; anything extra must be
+            // text. Extras may appear ANYWHERE in the message, not only at the
+            // end: `AgentEngine::attach_transient_block` deliberately
+            // places the per-turn skill hint, the current-date line and
+            // PrePrompt hook contributions BEFORE a trailing user text block,
+            // so a remote channel participant's words stay the terminal span
+            // of the turn (P3 — the untrusted region must end where the
+            // message ends). An append-only rule here would force those blocks
+            // back after the untrusted body.
+            //
+            // This still rejects every mutation the append-only rule rejected:
+            // a changed durable block matches nothing, so the walk finishes
+            // with durable blocks unconsumed and fails below.
+            let mut durable_blocks = durable.content.iter().peekable();
+            for prepared_block in &prepared.content {
+                if let Some(next_durable) = durable_blocks.peek()
+                    && Self::block_value(prepared_block)? == Self::block_value(next_durable)?
+                {
+                    durable_blocks.next();
+                    continue;
+                }
+                if !matches!(prepared_block, ContentBlock::Text { .. }) {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "prepared request message {index} carries a non-text transient block"
                     )));
                 }
             }
-            if prepared.content[durable.content.len()..]
-                .iter()
-                .any(|block| !matches!(block, ContentBlock::Text { .. }))
-            {
+            if durable_blocks.next().is_some() {
                 return Err(JournalError::InvalidTransition(format!(
-                    "prepared request message {index} carries a non-text transient tail"
+                    "prepared request message {index} changes durable content"
                 )));
             }
         }
 
         Ok(request)
+    }
+
+    /// Canonical JSON for one content block, used to compare a prepared
+    /// request against the durable conversation.
+    fn block_value(block: &ContentBlock) -> Result<serde_json::Value, JournalError> {
+        serde_json::to_value(block).map_err(|source| JournalError::Json {
+            context: "encoding a content block for recovery binding",
+            source,
+        })
     }
 
     fn validate(&self) -> Result<(), JournalError> {

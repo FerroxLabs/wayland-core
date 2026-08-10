@@ -9554,8 +9554,6 @@ version = "0.12.26"
 dependencies = [
  "async-trait",
  "chrono",
- "rand 0.8.6",
- "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -9563,8 +9561,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "unicode-normalization",
- "unicode-properties",
  "wcore-config",
 ]
 
