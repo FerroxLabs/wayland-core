@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _common as C  # noqa: E402
 
-from harness.result import NA, UNPROVEN, Check  # noqa: E402
+from harness.result import NA, NOTE, UNPROVEN, Check  # noqa: E402
 from harness.rowctx import RowContext  # noqa: E402
 from harness.runner import RowRunner  # noqa: E402
 
@@ -156,7 +156,7 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
     # must not write the key where anyone can read it, and must not tell the
     # user it saved something it did not.
     bare_add = ctx.runner.run(
-        ["auth", "add", cred.provider, cred.key],
+        ["auth", "add", *C.auth_flags(cred), cred.provider, cred.key],
         extra_env={"NO_COLOR": "1"},
         role="provision",
         timeout=180,
@@ -199,6 +199,10 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
         )
 
     # ------------------------------------- authenticate, following the remedy
+    if C.auth_flags(cred):
+        ctx.record.add_check(
+            Check(ROW_ID + ".auth-validation-skipped", NOTE, C.NO_VALIDATE_WHY)
+        )
     add, listed = C.authenticate(ctx, cred)
     now_stored = C.provider_is_listed(ctx, listed, cred)
     ctx.expect(

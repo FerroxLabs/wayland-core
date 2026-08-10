@@ -108,6 +108,27 @@ def credential() -> Optional[Credential]:
     )
 
 
+#: Why the harness may skip `auth add`'s live validation.
+NO_VALIDATE_WHY = (
+    "`auth add` validates the key against the provider's OWN endpoint and "
+    "takes no --base-url, so a key issued by an OpenAI-compatible gateway is "
+    "rejected 401 there. The product's own stated remedy is --no-validate, so "
+    "that is what an operator on a gateway does and what the harness does. "
+    "Storage and usability are still graded: the job below runs with no key on "
+    "argv and no provider key in the environment."
+)
+
+
+def auth_flags(cred: "Credential") -> List[str]:
+    """Flags for `auth add`.
+
+    Empty on a stock provider — the validating path stays under test there.
+    ``--no-validate`` only when the operator declared a base_url, which is the
+    only case in which the validation endpoint is provably the wrong one.
+    """
+    return ["--no-validate"] if cred.base_url else []
+
+
 def redact(rec, secrets: Sequence[str]) -> None:
     """Replace secret values in a recorded command's argv.
 
@@ -475,7 +496,7 @@ def authenticate(
     recorded argvs immediately, before anything is written to disk.
     """
     add = ctx.runner.run(
-        ["auth", "add", cred.provider, cred.key],
+        ["auth", "add", *auth_flags(cred), cred.provider, cred.key],
         extra_env=product_env(cred),
         role=role,
         timeout=180,
