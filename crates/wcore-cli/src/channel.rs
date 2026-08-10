@@ -156,6 +156,56 @@ pub enum ChannelCmd {
     /// Store, list and remove the credentials a channel config refers to.
     #[command(subcommand)]
     Credential(CredentialCmd),
+    /// Mint, list and revoke DM pairing for a channel running
+    /// `[inbound] dm = "pairing"`.
+    #[command(subcommand)]
+    Pair(PairCmd),
+}
+
+/// `wayland-core channel pair …` — the OPERATOR half of DM pairing.
+///
+/// # Why this verb has to exist
+///
+/// `dm = "pairing"` denies until someone presents a valid one-time code, and
+/// a code can only come from here. Nothing a remote sender can put in a
+/// message mints one. Without this verb the policy is unusable and the only
+/// working way to admit a person is `dm_allowlist = ["*"]`, which admits
+/// everyone who can find the bot — the defect this closes.
+///
+/// # Why the code is printed here and nowhere else
+///
+/// `mint` prints the code exactly once, to the operator's own terminal. Only
+/// its SHA-256 digest is written to disk, the bot never echoes it, and it
+/// never appears in a log line or a deny reason. Deliver it out of band; if
+/// it is lost, mint another and `revoke-codes` the old one.
+#[derive(Debug, Clone, Subcommand)]
+pub enum PairCmd {
+    /// Mint a single-use pairing code for `channel` and print it once.
+    Mint {
+        /// Channel name — the config file stem under `<home>/channels`.
+        channel: String,
+        /// Minutes the code stays redeemable. Default 15.
+        #[arg(long, value_name = "MINUTES", default_value_t = 15)]
+        ttl_minutes: u32,
+    },
+    /// Show who is paired on `channel`, and how many codes are outstanding.
+    ///
+    /// Never prints a code or a digest.
+    List {
+        channel: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke one paired sender, so their next message is denied again.
+    Revoke {
+        channel: String,
+        /// The stable platform sender id, as shown by `channel pair list`.
+        #[arg(long, value_name = "SENDER_ID")]
+        sender: String,
+    },
+    /// Invalidate every outstanding code on `channel`, leaving existing
+    /// pairings intact. Use after a code leaks or is lost.
+    RevokeCodes { channel: String },
 }
 
 /// `wayland-core channel credential …` — the write side of the credential
@@ -371,7 +421,145 @@ pub async fn run(args: ChannelArgs) -> Result<()> {
             json,
         } => actions(name.as_deref(), &require, json).await,
         ChannelCmd::Credential(cmd) => credential(cmd),
+        ChannelCmd::Pair(cmd) => pair(cmd),
     }
+}
+
+// ---------------------------------------------------------------------------
+// pair — the operator half of DM pairing
+// ---------------------------------------------------------------------------
+
+/// Open the pairing book the RUNNING inbound stack reads.
+///
+/// Routed through `wcore_channels_registry::pairings_dir`, the same seam the
+/// subscriber uses, so a code minted here is looked for where it was written.
+/// Resolving the directory independently is the F24-C3-H1 shape: a gate whose
+/// operator surface and runtime disagree never opens.
+fn pair_book() -> wcore_channels::PairingBook {
+    wcore_channels::PairingBook::open(wcore_channels_registry::pairings_dir())
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Warn when the channel's own policy will never consult pairing, so an
+/// operator does not hand out a code that cannot possibly work.
+fn warn_if_not_pairing_policy(channel: &str) {
+    let dir = match home() {
+        Ok(h) => channels_dir(&h),
+        Err(_) => return,
+    };
+    let path = dir.join(format!("{channel}.toml"));
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        eprintln!("warning: no channel config at {}", path.display());
+        return;
+    };
+    match wcore_channels::config::parse_channel_config(&path.display().to_string(), &body) {
+        Ok(cfg) if cfg.inbound.dm == wcore_channels::DmPolicy::Pairing => {}
+        // Report the TOML spelling the operator actually wrote, not the
+        // Rust variant name.
+        Ok(cfg) => eprintln!(
+            "warning: {channel} has [inbound] dm = {:?}, not \"pairing\" — \
+             pairing state is not consulted for this channel",
+            match cfg.inbound.dm {
+                wcore_channels::DmPolicy::Open => "open",
+                wcore_channels::DmPolicy::Allowlist => "allowlist",
+                wcore_channels::DmPolicy::Pairing => "pairing",
+                wcore_channels::DmPolicy::Disabled => "disabled",
+            }
+        ),
+        Err(e) => eprintln!("warning: cannot read {}: {e}", path.display()),
+    }
+}
+
+fn pair(cmd: PairCmd) -> Result<()> {
+    match cmd {
+        PairCmd::Mint {
+            channel,
+            ttl_minutes,
+        } => pair_mint(&channel, ttl_minutes),
+        PairCmd::List { channel, json } => pair_list(&channel, json),
+        PairCmd::Revoke { channel, sender } => pair_revoke(&channel, &sender),
+        PairCmd::RevokeCodes { channel } => pair_revoke_codes(&channel),
+    }
+}
+
+fn pair_mint(channel: &str, ttl_minutes: u32) -> Result<()> {
+    if ttl_minutes == 0 {
+        bail!("--ttl-minutes must be at least 1; a code that expires on arrival admits nobody");
+    }
+    warn_if_not_pairing_policy(channel);
+    let ttl_ms = i64::from(ttl_minutes) * 60_000;
+    let code = pair_book()
+        .mint(channel, now_ms(), ttl_ms)
+        .with_context(|| format!("cannot mint a pairing code for {channel}"))?;
+    // The one and only time this string is ever printed. It is not logged,
+    // not stored (only its digest is), and never sent to the channel.
+    println!("{code}");
+    eprintln!(
+        "single-use, expires in {ttl_minutes} minute(s). Send it to the person out of band; \
+         they DM it to the bot (bare, or `/pair <code>`)."
+    );
+    Ok(())
+}
+
+fn pair_list(channel: &str, json: bool) -> Result<()> {
+    let mut book = pair_book();
+    let paired = book
+        .paired_senders(channel)
+        .with_context(|| format!("cannot read pairing state for {channel}"))?;
+    let live = book
+        .live_code_count(channel, now_ms())
+        .with_context(|| format!("cannot read pairing state for {channel}"))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "channel": channel,
+                "paired": paired
+                    .iter()
+                    .map(|p| serde_json::json!({
+                        "sender_id": p.sender_id,
+                        "paired_at_ms": p.paired_at_ms,
+                    }))
+                    .collect::<Vec<_>>(),
+                "outstanding_codes": live,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if paired.is_empty() {
+        println!("{channel}: nobody paired");
+    } else {
+        for p in &paired {
+            println!("{channel}: paired {}", p.sender_id);
+        }
+    }
+    println!("{channel}: {live} outstanding code(s)");
+    Ok(())
+}
+
+fn pair_revoke(channel: &str, sender: &str) -> Result<()> {
+    let removed = pair_book()
+        .unpair(channel, sender)
+        .with_context(|| format!("cannot update pairing state for {channel}"))?;
+    if removed {
+        println!("{channel}: revoked {sender}");
+        Ok(())
+    } else {
+        bail!("{channel}: {sender} was not paired");
+    }
+}
+
+fn pair_revoke_codes(channel: &str) -> Result<()> {
+    let n = pair_book()
+        .revoke_codes(channel)
+        .with_context(|| format!("cannot update pairing state for {channel}"))?;
+    println!("{channel}: invalidated {n} outstanding code(s)");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

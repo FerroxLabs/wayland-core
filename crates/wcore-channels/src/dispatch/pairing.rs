@@ -329,9 +329,17 @@ impl PairingStore {
         Self { root: root.into() }
     }
 
-    /// `<channel config root>/pairings`.
-    pub fn default_root() -> PathBuf {
-        crate::config::ChannelConfigLoader::default_root().join("pairings")
+    /// The pairing directory that belongs to a channel config directory:
+    /// `<channels_dir>/pairings`.
+    ///
+    /// There is deliberately no `default_root()` that resolves `$HOME` on
+    /// its own. Pairing state MUST live beside the configs the RUNTIME
+    /// actually read — the F24-C3-H1 rule — and this crate cannot see the
+    /// profile home the host resolved. A store minted into one directory
+    /// and read from another is a pairing feature that silently never
+    /// works, so every caller names its channels dir.
+    pub fn beside_configs(channels_dir: impl AsRef<Path>) -> Self {
+        Self::new(channels_dir.as_ref().join("pairings"))
     }
 
     fn path_for(&self, channel: &str) -> Result<PathBuf, ChannelError> {
