@@ -324,8 +324,11 @@ pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResu
         result.content.push_str(
             " That profile also denies the git object store (`.git/objects`) so a committed \
              secret cannot be reconstructed with `git log -p` / `git show`. `git status`, \
-             `diff`, `log` and `commit` all read that store, so NO git command can succeed \
-             here — retrying will not help, and git is not broken or missing.",
+             `diff`, `log` and `commit` all read that store, so no git command run from \
+             Bash can succeed here — retrying will not help, and git is not broken or \
+             missing. The `Git` TOOL is a different surface and is NOT sandboxed: use it \
+             for status, diff, log, blame, add, commit, branch_checkout, push and \
+             pr_create instead of shelling out to git.",
         );
     }
     // No clause here may forbid the model from reporting a cause: the W2/W3
@@ -366,7 +369,18 @@ const EGRESS_FAILURE_NEEDLES: &[&str] = &[
     "couldn't connect to server",
     "could not connect to server",
     "failed to establish a new connection",
-    "unable to access",
+    // `unable to access` is GIT'S phrasing for two unrelated failures:
+    //   fatal: unable to access 'https://github.com/o/r/': Could not resolve host
+    //   warning: unable to access '.git/config': Permission denied
+    // Only the first is egress. The bare needle claimed both, and because
+    // network evidence wins outright it beat the `permission denied` on the
+    // very same line — so the A-2 corpus row was told its `git remote get-url`
+    // failed for want of a network when the OS sandbox had denied a local
+    // file. Require the URL. The genuine remote failure still matches here AND
+    // on its own `could not resolve host` / `failed to connect to` clause, so
+    // narrowing this costs no true positive.
+    "unable to access 'http",
+    "unable to access \"http",
     "ssl connect error",
     "network-outbound",
 ];

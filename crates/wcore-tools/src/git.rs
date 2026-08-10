@@ -18,6 +18,23 @@
 //! No auto-commit. The `commit` op requires an explicit `message` field;
 //! the agent supplies one (potentially generated via
 //! `git_commit_message::commit_message_from_trace` — see T13).
+//!
+//! **Review-ready by default.** Committing onto the repository's default
+//! branch is refused unless the caller passes `allow_default_branch: true`.
+//! Landing straight on someone's trunk leaves nothing to review and nothing
+//! to revert cleanly, and it is the path of least resistance for a model that
+//! is simply never asked to choose — so it now takes the same explicit intent
+//! any other irreversible action does. `push` and `pr_create` complete the
+//! route the refusal points at.
+//!
+//! `pr_create` drives the `gh` CLI from `PATH`, in the same argv mode as
+//! `git`. It lives here rather than in `github_tool` because that tool speaks
+//! the REST API through a host-provided HTTP backend, which an offline or
+//! contained workspace does not have; `gh` is the surface a developer's
+//! machine actually carries. Under the STRICT Bash sandbox, `git` and `gh`
+//! cannot run from `Bash` at all (`<root>/.git/config` is on the secret
+//! deny-list), so this tool is the ONLY route a contained session has to a
+//! branch, a push or a pull request.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -61,17 +78,27 @@ pub enum GitOp {
         name: String,
         create: Option<bool>,
     },
+    Push {
+        remote: Option<String>,
+        branch: Option<String>,
+    },
+    PrCreate {
+        title: String,
+        body: Option<String>,
+        base: Option<String>,
+        branch: Option<String>,
+    },
     StashSave,
     StashPop,
 }
 
 pub struct GitTool;
 
-/// Run a git invocation with arguments passed as separate argv entries
-/// and `cwd` as the working directory. No shell wrapping, so the input
-/// strings are safe regardless of shell-metacharacter content.
-async fn run_git(cwd: &str, args: &[&str]) -> ToolResult {
-    let mut cmd = shell_command_argv("git", args);
+/// Run `program` with arguments passed as separate argv entries and `cwd`
+/// as the working directory. No shell wrapping, so the input strings are
+/// safe regardless of shell-metacharacter content.
+async fn run_program(program: &str, cwd: &str, args: &[&str]) -> ToolResult {
+    let mut cmd = shell_command_argv(program, args);
     cmd.current_dir(cwd);
     match cmd.output().await {
         Ok(output) => {
@@ -91,9 +118,85 @@ async fn run_git(cwd: &str, args: &[&str]) -> ToolResult {
             }
         }
         Err(e) => ToolResult {
-            content: format!("Git: failed to spawn git: {e}"),
+            content: format!("Git: failed to spawn {program}: {e}"),
             is_error: true,
         },
+    }
+}
+
+/// `git`, the common case.
+async fn run_git(cwd: &str, args: &[&str]) -> ToolResult {
+    run_program("git", cwd, args).await
+}
+
+/// Refs and remote names travel as their own argv entries, so a leading `-`
+/// can never break out of the argument list — but git's OWN option parser
+/// will still read `-f` as a flag and quietly do something the caller never
+/// asked for. Reject the shape instead of guessing at the intent.
+fn reject_option_shaped(kind: &str, value: &str) -> Option<ToolResult> {
+    if value.is_empty() || value.starts_with('-') {
+        return Some(ToolResult {
+            content: format!(
+                "Git: {kind} {value:?} is not usable — it must be non-empty and must not \
+                 begin with '-'"
+            ),
+            is_error: true,
+        });
+    }
+    None
+}
+
+/// The branch currently checked out, or `None` on a detached / unborn HEAD.
+async fn current_branch(cwd: &str) -> Option<String> {
+    let result = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
+    if result.is_error {
+        return None;
+    }
+    let name = result.content.trim().to_string();
+    if name.is_empty() || name == "HEAD" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Conventional trunk names, used only when the remote has published no
+/// `origin/HEAD` for this clone to read.
+const CONVENTIONAL_DEFAULT_BRANCHES: &[&str] = &["main", "master", "trunk", "develop"];
+
+/// The trunk the REMOTE published, via `refs/remotes/origin/HEAD`. `None`
+/// when the remote published none — a shallow clone, or an origin added by
+/// hand, has no such ref.
+async fn published_default_branch(cwd: &str) -> Option<String> {
+    let head = run_git(
+        cwd,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await;
+    if head.is_error {
+        return None;
+    }
+    head.content
+        .trim()
+        .strip_prefix("origin/")
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// The branch a pull request should target when the caller named no base.
+async fn default_branch_name(cwd: &str) -> String {
+    published_default_branch(cwd)
+        .await
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Whether `branch` is the branch this repository treats as its trunk. With
+/// nothing published, fall back to the conventional names rather than fail
+/// open onto someone's trunk.
+async fn is_default_branch(cwd: &str, branch: &str) -> bool {
+    match published_default_branch(cwd).await {
+        Some(published) => published == branch,
+        None => CONVENTIONAL_DEFAULT_BRANCHES.contains(&branch),
     }
 }
 
@@ -104,10 +207,17 @@ impl Tool for GitTool {
     }
 
     fn description(&self) -> &str {
-        "Read or mutate git state in the current repo. Pass an `op` field naming the operation \
-         (status | diff | log | blame | add_all | add_paths | commit | branch_current | branch_list | \
-         branch_checkout | stash_save | stash_pop). Read-only ops are safe to run in parallel. \
-         Commit requires a non-empty `message`. Optional `cwd` overrides the working directory."
+        "Read or mutate git state in the current repo, and open a pull request for it. Pass an \
+         `op` field naming the operation (status | diff | log | blame | add_all | add_paths | \
+         commit | branch_current | branch_list | branch_checkout | push | pr_create | stash_save | \
+         stash_pop). Read-only ops are safe to run in parallel. Commit requires a non-empty \
+         `message`. Work that is meant to be reviewed goes on its own branch: \
+         `branch_checkout` with `create: true` (staged changes come with you), then `commit`, then \
+         `push`, then `pr_create` — committing onto the repository's default branch is REFUSED \
+         unless you also pass `allow_default_branch: true`. `push` takes optional `remote` \
+         (default `origin`) and `branch` (default: current). `pr_create` drives the `gh` CLI and \
+         takes `title` (required), `body`, `base` and `branch`; push the branch first. Optional \
+         `cwd` overrides the working directory."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -123,6 +233,12 @@ impl Tool for GitTool {
                 "message": { "type": "string" },
                 "name": { "type": "string" },
                 "create": { "type": "boolean" },
+                "allow_default_branch": { "type": "boolean" },
+                "remote": { "type": "string" },
+                "branch": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" },
+                "base": { "type": "string" },
                 "cwd": { "type": "string" }
             },
             "required": ["op"]
@@ -229,6 +345,33 @@ impl Tool for GitTool {
                         };
                     }
                 };
+                // Landing on the trunk is irreversible in the way that
+                // matters to a reviewer: there is no branch to open, and no
+                // clean revert. Require the same explicit intent as any other
+                // irreversible action, and say exactly how to supply it.
+                let allow_default = input
+                    .get("allow_default_branch")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !allow_default
+                    && let Some(branch) = current_branch(cwd).await
+                    && is_default_branch(cwd, &branch).await
+                {
+                    return ToolResult {
+                        content: format!(
+                            "Git: refusing to commit onto {branch:?} — this repository's \
+                             default branch. Work that is meant to be reviewed belongs on its \
+                             own branch: there is nothing to open a pull request against and \
+                             nothing to revert cleanly once it is on the trunk. Run \
+                             {{\"op\":\"branch_checkout\",\"name\":\"<branch>\",\"create\":true}} \
+                             first — anything already staged comes with you — then commit, then \
+                             {{\"op\":\"push\"}} and {{\"op\":\"pr_create\",\"title\":\"…\"}}. \
+                             If this commit really is meant to land on {branch:?}, re-send the \
+                             same call with \"allow_default_branch\": true."
+                        ),
+                        is_error: true,
+                    };
+                }
                 // Message is a single argv entry — no quoting / escaping
                 // needed; shell metacharacters in the message body are
                 // never interpreted.
@@ -250,15 +393,106 @@ impl Tool for GitTool {
                     .get("create")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                if let Some(err) = reject_option_shaped("branch name", name) {
+                    return err;
+                }
+                // `git checkout [-b] <name> --`. The `--` goes AFTER the ref:
+                // it ends the ref and opens an (empty) pathspec list, so a
+                // branch that shares a name with a file cannot be read as a
+                // path checkout. Putting it BEFORE the ref — as this did
+                // until the A-2 corpus row caught it — made `-b` swallow the
+                // `--` as the new branch name (`fatal: … a branch '--' cannot
+                // be created from it`) and made the non-create form a
+                // `git checkout -- <pathspec>` file restore that never
+                // switched branch at all. Both forms were unusable.
                 let mut args: Vec<&str> = vec!["checkout"];
                 if create {
                     args.push("-b");
                 }
-                // `--` separates options from the ref name so a ref name
-                // beginning with `-` cannot be misread as a flag.
-                args.push("--");
                 args.push(name);
+                args.push("--");
                 run_git(cwd, &args).await
+            }
+            "push" => {
+                let remote = input
+                    .get("remote")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("origin");
+                if let Some(err) = reject_option_shaped("remote name", remote) {
+                    return err;
+                }
+                let branch = match input.get("branch").and_then(|v| v.as_str()) {
+                    Some(b) => b.to_string(),
+                    None => match current_branch(cwd).await {
+                        Some(b) => b,
+                        None => {
+                            return ToolResult {
+                                content: "Git::Push: HEAD is detached or unborn, so there is \
+                                          no branch to push — pass 'branch'"
+                                    .to_string(),
+                                is_error: true,
+                            };
+                        }
+                    },
+                };
+                if let Some(err) = reject_option_shaped("branch name", &branch) {
+                    return err;
+                }
+                run_git(cwd, &["push", "--set-upstream", remote, &branch]).await
+            }
+            "pr_create" => {
+                let title = match input.get("title").and_then(|v| v.as_str()) {
+                    Some(t) if !t.is_empty() => t,
+                    _ => {
+                        return ToolResult {
+                            content: "Git::PrCreate requires non-empty 'title'".to_string(),
+                            is_error: true,
+                        };
+                    }
+                };
+                let body = input.get("body").and_then(|v| v.as_str()).unwrap_or("");
+                let head = match input.get("branch").and_then(|v| v.as_str()) {
+                    Some(b) => b.to_string(),
+                    None => match current_branch(cwd).await {
+                        Some(b) => b,
+                        None => {
+                            return ToolResult {
+                                content: "Git::PrCreate: HEAD is detached or unborn, so there \
+                                          is no branch to open a pull request for — pass \
+                                          'branch'"
+                                    .to_string(),
+                                is_error: true,
+                            };
+                        }
+                    },
+                };
+                let base = match input.get("base").and_then(|v| v.as_str()) {
+                    Some(b) => b.to_string(),
+                    None => default_branch_name(cwd).await,
+                };
+                for (kind, value) in [("branch name", &head), ("base branch name", &base)] {
+                    if let Some(err) = reject_option_shaped(kind, value) {
+                        return err;
+                    }
+                }
+                if head == base {
+                    return ToolResult {
+                        content: format!(
+                            "Git::PrCreate: head and base are both {head:?} — create a branch \
+                             for the work first"
+                        ),
+                        is_error: true,
+                    };
+                }
+                run_program(
+                    "gh",
+                    cwd,
+                    &[
+                        "pr", "create", "--head", &head, "--base", &base, "--title", title,
+                        "--body", body,
+                    ],
+                )
+                .await
             }
             "stash_save" => run_git(cwd, &["stash", "push", "-m", "wcore-stash"]).await,
             "stash_pop" => run_git(cwd, &["stash", "pop"]).await,
