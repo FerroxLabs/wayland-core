@@ -136,7 +136,7 @@ fn hostile_text() -> String {
 /// The inbound message a connector would hand the dispatcher: hostile text
 /// plus one attachment whose `url` the sender controls.
 fn hostile_message() -> wcore_channels::IncomingMessage {
-    let mut msg = wcore_channels::IncomingMessage::new("m1", "c1", "alice", &hostile_text(), 0);
+    let mut msg = wcore_channels::IncomingMessage::new("m1", "c1", "alice", hostile_text(), 0);
     msg.attachments = vec![wcore_channels::Attachment {
         url: format!("https://evil.example/{ATTACHMENT_NONCE}.png"),
         content_type: Some("image/png".into()),
@@ -638,7 +638,7 @@ async fn the_control_proves_the_directive_assertion_can_fail() {
 /// directive enumerates. Graded against the sender's own bytes.
 #[test]
 fn the_channel_funnel_adds_no_product_text_to_a_text_only_turn() {
-    let msg = wcore_channels::IncomingMessage::new("m1", "c1", "alice", &hostile_text(), 0);
+    let msg = wcore_channels::IncomingMessage::new("m1", "c1", "alice", hostile_text(), 0);
     assert_eq!(
         build_turn_prompt(&msg),
         hostile_text(),
