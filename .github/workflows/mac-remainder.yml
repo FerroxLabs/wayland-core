@@ -19,6 +19,7 @@ on:
     branches:
       - fix/macos-remainder
       - fix/macos-toolchains-green
+      - accept2/integration
   # The lane needs a binary on demand, not only when a commit lands: a macOS
   # release build is the long pole in every fix/measure cycle and re-pushing
   # just to re-trigger cancels the run already in flight.
