@@ -1,0 +1,86 @@
+[
+  {
+    "index": 0,
+    "voice": "Daniel",
+    "text": "Right. Quick planning sync for the migration. Control phrase for this recording is harbour lantern nine.",
+    "starts_at_s": 0.35,
+    "ends_at_s": 6.471
+  },
+  {
+    "index": 1,
+    "voice": "Samantha",
+    "text": "Before we start, are we still blocked on the staging refresh?",
+    "starts_at_s": 6.821,
+    "ends_at_s": 10.343
+  },
+  {
+    "index": 2,
+    "voice": "Daniel",
+    "text": "Partly. Storage is the constraint. We will come back to it.",
+    "starts_at_s": 10.693,
+    "ends_at_s": 14.542
+  },
+  {
+    "index": 3,
+    "voice": "Samantha",
+    "text": "On the job runner. I still think we should cap the batch size at five hundred rows per job.",
+    "starts_at_s": 14.892,
+    "ends_at_s": 19.797
+  },
+  {
+    "index": 4,
+    "voice": "Daniel",
+    "text": "Five hundred is the number that broke us in February. The database team were very clear about that.",
+    "starts_at_s": 20.147,
+    "ends_at_s": 25.625
+  },
+  {
+    "index": 5,
+    "voice": "Samantha",
+    "text": "That is fair. So what number do you want instead?",
+    "starts_at_s": 25.975,
+    "ends_at_s": 28.794
+  },
+  {
+    "index": 6,
+    "voice": "Daniel",
+    "text": "Give me a moment. The cutover date and the batch size interact.",
+    "starts_at_s": 29.144,
+    "ends_at_s": 32.885
+  },
+  {
+    "index": 7,
+    "voice": "Samantha",
+    "text": "Take your time.",
+    "starts_at_s": 33.235,
+    "ends_at_s": 34.152
+  },
+  {
+    "index": 8,
+    "voice": "Daniel",
+    "text": "Here is the decision. We are moving the cutover to the fourteenth of March, and we are capping the batch size at two hundred and fifty rows per job.",
+    "starts_at_s": 34.502,
+    "ends_at_s": 42.634
+  },
+  {
+    "index": 9,
+    "voice": "Samantha",
+    "text": "Two hundred and fifty. I will update the runbook this afternoon.",
+    "starts_at_s": 42.984,
+    "ends_at_s": 46.525
+  },
+  {
+    "index": 10,
+    "voice": "Daniel",
+    "text": "Good. Back to storage. How much headroom do we actually have?",
+    "starts_at_s": 46.875,
+    "ends_at_s": 50.767
+  },
+  {
+    "index": 11,
+    "voice": "Samantha",
+    "text": "About forty percent, but it drops when the nightly export runs.",
+    "starts_at_s": 51.117,
+    "ends_at_s": 54.794
+  }
+]

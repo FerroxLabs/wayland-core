@@ -1,0 +1,53 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 625 >>
+stream
+BT /F1 13 Tf 60 760 Td 16 TL
+(MERIDIAN FREIGHT SERVICES LTD) Tj T*
+(VAT Registration No: GB 384 2915 77) Tj T*
+() Tj T*
+(INVOICE  INV-2026-05502) Tj T*
+(Invoice date: 04 May 2026) Tj T*
+(Bill to: Halverson Retail Group) Tj T*
+() Tj T*
+(Description                 Qty     Unit      Amount) Tj T*
+(Pallet handling             100    24.50     2,450.00) Tj T*
+(Cross-dock transfer          40    31.25     1,250.00) Tj T*
+(Fuel surcharge                1   420.00       420.00) Tj T*
+() Tj T*
+(Subtotal                                     4,120.00) Tj T*
+() Tj T*
+(Continued on page 2 - see credit note and total due.) Tj T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 293 >>
+stream
+BT /F1 13 Tf 60 760 Td 16 TL
+(INVOICE  INV-2026-05502  \(page 2\)) Tj T*
+() Tj T*
+(Credit note CN-2026-
+xref
+0 8
+0000000000 65535 f 
+0000000019 00000 n 
+0000000019 00000 n 
+0000000019 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+999999999
+%%EOF
