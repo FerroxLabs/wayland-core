@@ -173,16 +173,29 @@ fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
 /// that very directory. A subpath grant turned that suite's escape attempt into
 /// a success. The containment property is real and the subpath grant broke it.
 ///
-/// So the grant is written as the naming those tools actually use:
-///   * `<T>/<prefix>.XXXXXXXXXX` and anything beneath it — `mktemp(1)`'s
-///     template is a prefix, a dot and exactly ten random alphanumerics, and
-///     `mktemp -d` needs its contents too.
-///   * `<T>/xcrun_db-XXXXXXXX` — the xcrun shim's cache file, which `git`,
-///     `python3` and `clang` each try to create twice per invocation.
+/// So the grant is written as the naming the one tool that is actually BROKEN
+/// uses: `<T>/<prefix>.XXXXXXXXXX` and anything beneath it. `mktemp(1)`'s
+/// template is a prefix, a dot and exactly ten random alphanumerics, and
+/// `mktemp -d` needs its contents too.
 ///
 /// The first component may not start with a dot, which is what keeps the
 /// `tempfile` crate's `.tmpXXXXXX` scratch directories — and therefore that
 /// acceptance suite's escape target — outside the grant.
+///
+/// **`xcrun_db` is deliberately NOT covered, and that was measured, not
+/// assumed.** The xcrun shim's "couldn't create cache file" line appears twice
+/// on every sandboxed `git`, `python3` and `clang`, so an earlier revision of
+/// this grant included `<T>/xcrun_db-XXXXXXXX`. Run against the real product
+/// binary it removed nothing: xcrun writes the temp file and then RENAMES it
+/// onto `<T>/xcrun_db`, which the pattern does not cover, so the message simply
+/// changed from "couldn't create" to "couldn't replace" — and the now-creatable
+/// temp files were left behind, 50 of them after one evening of probes.
+/// Covering the destination too would fix the noise and is refused on purpose:
+/// `<T>/xcrun_db` maps tool names to resolved paths for every `xcrun` the user
+/// runs, including outside this sandbox, so a writable cache is a route to
+/// making another process execute an attacker-chosen binary. Two cosmetic
+/// stderr lines are not worth that, and the failure is cosmetic — `git
+/// --version`, `python3` and `clang` all still exit 0 through it.
 ///
 /// Residual exposure: a sandboxed command can create junk at those names, and
 /// can read another process's `mktemp` file IF it guesses the name. It cannot
@@ -217,11 +230,9 @@ fn darwin_temp_regex(dir: &std::path::Path) -> Option<String> {
         }
         prefix.push(ch);
     }
-    let alnum = "[A-Za-z0-9]";
-    let ten = alnum.repeat(10); // mktemp's XXXXXXXXXX
-    let eight = alnum.repeat(8); // xcrun_db-XXXXXXXX
+    let ten = "[A-Za-z0-9]".repeat(10); // mktemp's XXXXXXXXXX
     Some(format!(
-        "^{prefix}/([A-Za-z0-9_][A-Za-z0-9_.-]*\\.{ten}(/.*)?|xcrun_db-{eight})$"
+        "^{prefix}/[A-Za-z0-9_][A-Za-z0-9_.-]*\\.{ten}(/.*)?$"
     ))
 }
 
@@ -1170,8 +1181,18 @@ mod tests {
         );
         assert_eq!(
             rx.matches("[A-Za-z0-9]").count(),
-            18,
-            "the ten mktemp and eight xcrun_db positions must be written out: {rx}"
+            10,
+            "mktemp's ten template positions must be written out: {rx}"
+        );
+
+        // xcrun's cache must stay outside the grant. Covering the temp file
+        // alone changed the error text and littered 50 orphans in one evening;
+        // covering its rename destination would make `<T>/xcrun_db` — the
+        // tool-path cache every `xcrun` on this account consults — writable
+        // from inside the sandbox.
+        assert!(
+            !rx.contains("xcrun"),
+            "the xcrun cache is deliberately not granted: {rx}"
         );
     }
 
