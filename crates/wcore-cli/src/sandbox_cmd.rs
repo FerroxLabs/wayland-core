@@ -33,6 +33,21 @@
 //! transitive and this surface degrades into a test hook that proves only
 //! itself.
 //!
+//! THE SHELL PRINCIPAL. This verb is reachable from exactly one place —
+//! `TopCmd::Sandbox`, parsed from this host's argv in `main.rs`. There is no
+//! channel, host-protocol, slash-command or MCP route to it, so the principal
+//! driving it IS the local operator, the same principal as the CLI / TUI
+//! session beside it. It therefore takes the same local-operator shell
+//! carve-out the session takes, through the SAME predicate —
+//! `WorkspacePolicy::with_shell_principal` — and not a second copy of the
+//! condition. Before that, this verb refused every shell on a backend that
+//! cannot enforce OS secret-read-deny (the Windows relaxed default) while the
+//! session it is supposed to be evidence ABOUT ran fine, so the containment
+//! differential it exists to produce could not be produced on the one platform
+//! that most needed it. The administrator's Managed floor is honoured here
+//! exactly as it is in a session: without that, this verb would be a
+//! one-command way to obtain the shell a Managed policy refuses.
+//!
 //! NOT A BYPASS. The selector is `required_for_session`, which refuses the
 //! `none` backend outright (`WAYLAND_SANDBOX=none` is an error, not a
 //! downgrade) and falls closed to `FailClosedBackend` when the platform offers
@@ -47,6 +62,7 @@ use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use tokio_util::sync::CancellationToken;
+use wcore_config::config::CliArgs;
 use wcore_sandbox::SandboxRegistry;
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
@@ -146,14 +162,34 @@ fn resolve_workspace(workspace: Option<PathBuf>) -> anyhow::Result<PathBuf> {
         .map_err(|error| anyhow::anyhow!("sandbox workspace {}: {error}", raw.display()))
 }
 
+/// Build the workspace policy the sandboxed child runs under.
+///
+/// The same strict `contained` profile a hosted session builds, carrying the
+/// same shell-principal decision — see the module docs. `channel_posture_present`
+/// is passed as a literal `false` because it is structurally false for this
+/// verb, not because it was forgotten: argv is the only route in.
+///
+/// Exposed so `sandbox_exec_principal_parity` can compare it against the policy
+/// the production bootstrap installs for the same inputs.
+pub fn sandbox_policy(
+    workspace: &std::path::Path,
+    managed_execution_floor: bool,
+) -> WorkspacePolicy {
+    WorkspacePolicy::contained(workspace).with_shell_principal(false, managed_execution_floor)
+}
+
 /// Build the tool context the sandboxed child runs under.
 ///
 /// This is the same shape a hosted agent session builds: the strict
 /// `contained` workspace profile, plus the registry-owned, containment-required
 /// session runtime. Exposed (rather than inlined) so its properties are
 /// directly assertable in tests.
-pub fn sandbox_context(workspace: &std::path::Path, registry: Arc<SandboxRegistry>) -> ToolContext {
-    let policy = Arc::new(WorkspacePolicy::contained(workspace));
+pub fn sandbox_context(
+    workspace: &std::path::Path,
+    registry: Arc<SandboxRegistry>,
+    managed_execution_floor: bool,
+) -> ToolContext {
+    let policy = Arc::new(sandbox_policy(workspace, managed_execution_floor));
     ToolContext::new(
         "sandbox-exec",
         CancellationToken::new(),
@@ -213,7 +249,14 @@ async fn run_exec(
         SandboxRegistry::required_for_session(None)
             .map_err(|error| anyhow::anyhow!("sandbox selection: {error}"))?,
     );
-    let ctx = sandbox_context(&workspace, registry);
+    // Read the administrator's Managed floor from the merged config files. Not
+    // `Config::resolve` — this verb runs no model and must work on a host that
+    // has never been onboarded. An unreadable config is refused rather than
+    // treated as "unmanaged".
+    let managed_execution_floor =
+        wcore_config::config::Config::resolve_managed_execution_floor(&CliArgs::default())
+            .map_err(|error| anyhow::anyhow!("execution policy: {error}"))?;
+    let ctx = sandbox_context(&workspace, registry, managed_execution_floor);
 
     // THE agent shell tool, not a copy of it. See the module docs.
     let result = wcore_tools::bash::BashTool
@@ -279,7 +322,7 @@ mod tests {
             Arc::new(SandboxRegistry::required_for_session(None).expect("select a backend"));
         let expected_backend = registry.backend_name().to_owned();
 
-        let ctx = sandbox_context(&root, registry);
+        let ctx = sandbox_context(&root, registry, false);
 
         let policy = ctx.workspace.as_deref().expect("workspace policy attached");
         assert_eq!(policy.root(), root.as_path());

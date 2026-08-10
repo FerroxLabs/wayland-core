@@ -2269,6 +2269,22 @@ impl Config {
         Self::resolve_inner(cli, true)
     }
 
+    /// Is an administrator-imposed Managed execution floor installed?
+    ///
+    /// Resolved from the merged config FILES alone. This deliberately does not
+    /// go through [`Self::resolve`], which also resolves a provider and a
+    /// credential and fails with `MissingApiKey` when there is none — a
+    /// diagnostic verb that runs no LLM (`wayland-core sandbox exec`) must be
+    /// able to read the floor on a machine that has never been onboarded, and
+    /// must not be turned into a provider-dependent command by asking.
+    ///
+    /// A config that cannot be parsed is an error, not a `false`: silently
+    /// reporting "no Managed floor" for an unreadable config would relax the
+    /// shell gate on exactly the hosts whose policy could not be read.
+    pub fn resolve_managed_execution_floor(cli: &CliArgs) -> Result<bool, ConfigResolutionError> {
+        Ok(resolve_config_files(cli)?.merged.execution.managed)
+    }
+
     /// Load and merge config while retaining source identity and disposition.
     pub fn resolve_with_provenance(
         cli: &CliArgs,
