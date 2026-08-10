@@ -1,0 +1,13 @@
+{
+  "checks": [
+    {
+      "id": "tests",
+      "cmd": ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."]
+    },
+    {
+      "id": "lint",
+      "cmd": ["python3", "tools/lint_check.py"]
+    }
+  ],
+  "pythonpath": [".", "src"]
+}
