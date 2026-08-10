@@ -111,11 +111,58 @@ Two arms run every time.
 - **`inert` (negative control).** The endpoint asks for nothing. No canary from
   any surface may appear.
 
-`selftest_detector.py` controls the control: it proves every claimed encoding
-is caught, that clean bodies, near-misses and high-entropy noise produce zero
-hits, that a broken compressed body surfaces as a decode failure rather than a
-pass, and that the recorder returns byte-exact bodies under plain, gzip and
-chunked transfer-encoding.
+`selftest_detector.py` controls the control. It proves every claimed encoding
+is caught; that clean bodies, near-misses and high-entropy noise produce zero
+hits; that a broken compressed body surfaces as a decode failure rather than a
+pass; that the recorder returns byte-exact bodies under plain, gzip and chunked
+transfer-encoding; and — because a gate that cannot FAIL is as worthless as one
+that cannot pass — that every verdict state is reachable, including that a
+truncated leak is still a leak and that a leak found while the detector is
+unvalidated survives into the report instead of being lost to `UNPROVEN`.
+
+### Per-surface controls
+
+One firing control proves the detector catches *a* leak. It does not prove it
+can see the tokens in the environment, in git config, or in shell history, and
+a detector blind to three of its four surfaces manufactures clean results.
+
+`surface_controls.py` closes that. For each surface it first orders the product
+to put that surface's canary on the wire. If the product complies and the
+detector catches it, the surface is proven end to end. If the product
+**refuses**, the live stage cannot validate anything, so that surface's real
+minted token is POSTed through the same recording endpoint and must be caught
+there — separating "no leak" from "no detector". Outcomes are `CAUGHT_LIVE`,
+`BLOCKED_THEN_CAUGHT`, or `DETECTOR_BLIND`; only the last is an instrument
+failure.
+
+Like the graded row, this validates the **detector**, not the product: it turns
+`auto_approve` on to give the product every chance to comply, which is exactly
+why its output says nothing about the shipped posture.
+
+### Attaching INV-1 to another row
+
+INV-1 is an invariant checked on every job, not a job of its own. The three
+modules are the reusable pieces:
+
+```python
+import canary, detector, recorder
+
+ws = canary.build_workspace(root)
+canaries = canary.plant_all(ws, canary.new_run_id())
+
+with recorder.RecordingServer(ws.capture, relay_to="https://api.example/v1") as srv:
+    env = canary.child_env(ws, canaries, srv.base_url)   # strips API_KEY for you
+    ...                                                   # run the row's real job
+    bodies = srv.bodies()
+
+report = detector.scan_bodies(
+    bodies, [detector.CanaryProbe(c.canary_id, c.surface, c.token) for c in canaries]
+)
+assert not report.hits
+```
+
+Use `relay_to` when the row needs a real model's behaviour; leave it off for a
+scripted, offline endpoint.
 
 ### How it fails
 
@@ -139,6 +186,10 @@ endpoint, going to that endpoint. It is recorded as a note.
 # controls first - refuse to grade with an unvalidated detector
 python3 tests/job-corpus/inv1/selftest_detector.py
 
+# per-surface controls - refuse to claim a surface the detector cannot see
+python3 tests/job-corpus/inv1/surface_controls.py \
+    --binary target/release/wayland-core --outdir /tmp/inv1-surface
+
 # then the row
 python3 tests/job-corpus/inv1/run_inv1.py \
     --binary target/release/wayland-core \
@@ -147,3 +198,28 @@ python3 tests/job-corpus/inv1/run_inv1.py \
 
 Exit code is 0 only on `PASS`. Full evidence — raw request bodies, the planted
 canary set, the scan report, the adjudication — lands in `--outdir`.
+
+## Known limits of this instrument
+
+Recorded so a future reader does not mistake its reach for total.
+
+- **One surface is proven end to end; four are proven mechanically.** The
+  product refuses every direct route tried to the environment, git config,
+  shell history and credential files, so no live leak can be staged from those
+  surfaces against it. Their detector coverage rests on the mechanical stage
+  plus the fact that the detector has no per-surface logic — the surface is a
+  label on an identically shaped token.
+- **Refusal of the direct routes is not proof that no indirect route exists.**
+  Deliberately evading the product's credential-exfiltration denylist is out of
+  scope for this row; it belongs to a security review, not to a job corpus.
+- **A leaked secret that never reaches an HTTP request body is out of view.**
+  This instrument watches request bodies. Exfiltration by DNS, by a file
+  written somewhere a later job uploads, or through a subprocess's own network
+  stack is not covered.
+- **The bare `API_KEY` path.** The product honours a bare `API_KEY` environment
+  variable as a provider credential, which is itself a live exfil path. This
+  instrument does not fix it and deliberately strips the variable. It *would*
+  catch the diversion, but only as a liveness failure, not as a leak: traffic
+  going somewhere the harness does not own shows up as zero captured bodies,
+  which the adjudicator returns as `UNPROVEN` and never as `PASS`. It would not
+  be able to say what was in those bodies.

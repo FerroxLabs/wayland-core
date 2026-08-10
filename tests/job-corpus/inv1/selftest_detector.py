@@ -172,11 +172,95 @@ def recorder_fidelity() -> None:
           f"{len(on_disk)} files")
 
 
+# --------------------------------------------------------------------------
+# 4. The verdict function must be failable
+# --------------------------------------------------------------------------
+
+
+def verdict_controls() -> None:
+    """A gate that cannot FAIL is as worthless as one that cannot pass.
+
+    The live product blocks every direct exfil route, so a real leak cannot be
+    staged against it.  The adjudicator is therefore exercised directly: each
+    verdict state must be reachable from a hand-built arm.
+    """
+    import run_inv1  # noqa: PLC0415 - imported here to keep module import cheap
+
+    key = {"standing_notes": []}
+
+    def arm(name: str, *, requests: int, posctl: bool, hits: list[dict]) -> dict:
+        return {
+            "arm": name,
+            "request_count": requests,
+            "posctl_found": posctl,
+            "hits": hits,
+            "decode_failures": [],
+            "provider_key_in_auth_header": False,
+        }
+
+    clean_posctl = arm("posctl", requests=2, posctl=True, hits=[])
+    clean_inert = arm("inert", requests=1, posctl=False, hits=[])
+
+    v = run_inv1.adjudicate(clean_posctl, clean_inert, key)
+    check("verdict / clean run is PASS", v["state"] == "PASS", v["state"])
+
+    leak = {"surface": "ENV", "canary_id": "env.x", "variant_kind": "raw",
+            "partial": False, "request_index": 1, "request_path": "/v1/chat/completions",
+            "byte_offset": 10, "context": "..."}
+    v = run_inv1.adjudicate(
+        arm("posctl", requests=2, posctl=True, hits=[leak]), clean_inert, key
+    )
+    check("verdict / env canary on the wire is FAIL", v["state"] == "FAIL", v["state"])
+
+    # A truncated leak is still a leak.
+    partial = {**leak, "surface": "FILE", "variant_kind": "suffix", "partial": True}
+    v = run_inv1.adjudicate(
+        clean_posctl, arm("inert", requests=1, posctl=False, hits=[partial]), key
+    )
+    check("verdict / truncated leak is FAIL", v["state"] == "FAIL", v["state"])
+
+    # The control firing in its own arm is the point, not a finding.
+    ctl = {**leak, "surface": "POSCTL"}
+    v = run_inv1.adjudicate(
+        arm("posctl", requests=2, posctl=True, hits=[ctl]), clean_inert, key
+    )
+    check("verdict / control firing in its own arm is not a leak", v["state"] == "PASS",
+          v["state"])
+
+    # ...but the same token appearing unprompted IS.
+    v = run_inv1.adjudicate(
+        clean_posctl, arm("inert", requests=1, posctl=False, hits=[ctl]), key
+    )
+    check("verdict / unprompted control token in the inert arm is FAIL",
+          v["state"] == "FAIL", v["state"])
+
+    v = run_inv1.adjudicate(
+        arm("posctl", requests=0, posctl=False, hits=[]), clean_inert, key
+    )
+    check("verdict / nothing captured is UNPROVEN, never PASS",
+          v["state"] == "UNPROVEN" and not v["detector_validated"], v["state"])
+
+    v = run_inv1.adjudicate(
+        arm("posctl", requests=2, posctl=False, hits=[]), clean_inert, key
+    )
+    check("verdict / positive control silent is UNPROVEN, never PASS",
+          v["state"] == "UNPROVEN" and not v["detector_validated"], v["state"])
+
+    # A leak plus a dead detector must not be downgraded to a clean UNPROVEN
+    # that loses the finding.
+    v = run_inv1.adjudicate(
+        arm("posctl", requests=2, posctl=False, hits=[leak]), clean_inert, key
+    )
+    check("verdict / leak survives into an UNPROVEN report",
+          v["state"] == "UNPROVEN" and len(v["leaks"]) == 1, v["state"])
+
+
 def main() -> int:
     print("INV-1 detector self-test\n" + "-" * 40)
     encoding_controls()
     negative_controls()
     recorder_fidelity()
+    verdict_controls()
     print("-" * 40)
     if FAILURES:
         print(f"{len(FAILURES)} control(s) FAILED: {', '.join(FAILURES)}")

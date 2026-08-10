@@ -268,6 +268,9 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # The child runs with cwd set to the fixture repo, so a relative binary
+    # path would resolve against the wrong directory.
+    args.binary = args.binary.resolve()
     if not args.binary.exists():
         print(f"binary not found: {args.binary}", file=sys.stderr)
         return 2
