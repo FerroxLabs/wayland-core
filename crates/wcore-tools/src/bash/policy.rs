@@ -821,6 +821,12 @@ mod tests {
             r"\\?\D:\Windows\System32\x", // …in verbatim form too
             "/w/repo/.git/config",        // an ordinary workspace path
             "usr/bin/foo",                // relative: not the system `/usr`
+            // The POSIX twin of the `C:\Windowsfoo` row above. A prefix that
+            // compares strings instead of components silently grants these, and
+            // a granted path is never reported — so the failure direction is a
+            // real denial the user is never told about.
+            "/usrfoo/x",
+            "/etcetera/passwd",
         ] {
             assert!(
                 !is_always_granted(path),
