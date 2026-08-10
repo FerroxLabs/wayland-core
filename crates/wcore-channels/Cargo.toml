@@ -14,6 +14,12 @@ tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+# DM pairing (dispatch/pairing.rs): SHA-256 so only a code DIGEST is ever
+# persisted, a CSPRNG to mint codes, and constant-time comparison so a
+# remote sender cannot time-attack the code.
+sha2 = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }
 wcore-config = { path = "../wcore-config" }
 
 [dev-dependencies]

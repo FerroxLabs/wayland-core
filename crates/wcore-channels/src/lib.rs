@@ -38,9 +38,10 @@ pub use config::{
 };
 pub use dispatch::{
     AccessDecision, AckMode, AutoReplyRateLimiter, ChannelToolPosture, DEFAULT_AUTO_REPLY_WINDOW,
-    DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome,
-    DmPolicy, GroupPolicy, InboundPolicy, TurnAdmission, build_session_key, classify,
-    decide_access, evaluate,
+    DEFAULT_CODE_TTL_MS, DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache,
+    DedupeKey, DispatchOutcome, DmPolicy, GroupPolicy, InboundPolicy, PAIRING_DENY_REASON,
+    PairedSender, PairingBook, PairingState, PairingStore, TurnAdmission, build_session_key,
+    classify, decide_access, decide_access_paired, evaluate, evaluate_paired,
 };
 pub use error::ChannelError;
 pub use event::{
