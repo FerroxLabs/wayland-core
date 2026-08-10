@@ -148,11 +148,18 @@ carries a control that was actually run:
 python3 keys/a07_grade.py --workdir <copy of fixture + keys/a07_controls/good/tests>   # PASS 8/8
 python3 keys/a07_grade.py --workdir <copy of fixture + keys/a07_controls/weak/tests>   # FAIL 0/8
 python3 keys/a08_selftest.py                                                            # 4/4 agree
-python3 keys/a09_probe.py --workdir keys/a09_controls/reference                         # PASS 19/19
-python3 keys/a09_probe.py --workdir keys/a09_controls/inmemory                          # FAIL, durability only
+python3 keys/a09_probe.py --workdir keys/a09_controls/reference   # PASS 19/19; leaves the tree clean
+python3 keys/a09_probe.py --workdir keys/a09_controls/inmemory   # FAIL, durability only; leaves the tree clean
 python3 keys/a10_degraded_selftest.py                                                   # 7/7 agree
 python3 keys/a11_selftest.py                                                            # 4/4 agree
 ```
+
+`a09_probe.py` copies `--workdir` into a scratch directory and grades the copy,
+so the two committed control directories above are the same bytes after a run
+as before it. Check with `git status` after running them: a grader that modifies
+the thing it grades has destroyed the control it depends on. (It used to run in
+place, leaving `.a09-service.log` and `links.db` inside
+`keys/a09_controls/reference/`.)
 
 Run them again on a new host before trusting a verdict from that host. A green
 result from an environment that could not have produced a red one is not
