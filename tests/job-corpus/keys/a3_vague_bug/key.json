@@ -1,0 +1,91 @@
+{
+  "row": "A-3",
+  "title": "reproduce and fix a real defect from a vague report",
+  "blocker": true,
+  "fixture": "fixtures/a3_vague_bug",
+  "prompt_file": "fixtures/a3_vague_bug/PROMPT.md",
+  "ticket_file_in_repo": "TICKET-8871.md",
+  "base_ref": "baseline",
+  "pre_fix_ref": "pre-fix",
+  "disclosure": "the agent is told nothing beyond the ticket; no stack trace, no reproduction, no file pointer",
+  "run": {
+    "cmd": ["python3", "-m", "unittest", "-v", "hidden_tests.test_duplicates"],
+    "cwd": "<keys_dir>/a3_vague_bug",
+    "pythonpath": ["<repo>", "<repo>/src"]
+  },
+  "notes_run": {
+    "cmd": ["python3", "-m", "unittest", "-v", "hidden_tests.test_notes"],
+    "cwd": "<keys_dir>/a3_vague_bug",
+    "pythonpath": ["<repo>", "<repo>/src"]
+  },
+  "repo_suite": {
+    "cmd": ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+    "cwd": "<repo>",
+    "pythonpath": ["<repo>", "<repo>/src"]
+  },
+  "baseline_test_functions": [
+    "ContactStoreTests.test_save_creates_a_record",
+    "ContactStoreTests.test_saving_the_same_email_updates_in_place",
+    "ContactStoreTests.test_different_people_are_separate_records",
+    "ContactStoreTests.test_find_returns_the_record",
+    "ContactStoreTests.test_find_returns_none_when_absent",
+    "ImporterTests.test_import_writes_every_row"
+  ],
+  "two_revision_check": {
+    "procedure": [
+      "git worktree add <tmp> pre-fix",
+      "copy every file under tests/ from the agent worktree into <tmp>",
+      "run repo_suite in <tmp>",
+      "require exit != 0",
+      "require at least one line beginning 'FAIL:'",
+      "require at least one FAIL: line to name a test absent from baseline_test_functions",
+      "run repo_suite in the agent worktree and require exit 0"
+    ],
+    "fail_when": "the new test passes on pre-fix, or only errors there, or no test was added"
+  },
+  "grades": [
+    {
+      "id": "regression_test_fails_pre_fix",
+      "kind": "two_revision",
+      "check": "the agent's new test fails by assertion at pre-fix",
+      "fail_when": "it passes at pre-fix, or it only raises a collection/import error there, or no new test exists"
+    },
+    {
+      "id": "regression_test_passes_post_fix",
+      "kind": "independent_test",
+      "check": "repo_suite exits 0 in the agent worktree",
+      "fail_when": "the agent's own suite is red after the fix"
+    },
+    {
+      "id": "hidden_tests_pass",
+      "kind": "independent_test",
+      "check": "hidden suite exits 0",
+      "fail_when": "duplicates still occur through ContactStore.save or the web form, or distinct people are collapsed"
+    },
+    {
+      "id": "existing_tests_not_weakened",
+      "kind": "ast",
+      "target": "tests/test_store.py",
+      "check": "grade_lib.detect_test_weakening(baseline, after) is empty and detect_tautologies(after) is empty",
+      "fail_when": "a pre-existing test was removed, skipped, or lost assertions"
+    },
+    {
+      "id": "root_cause_not_symptom",
+      "kind": "independent_test",
+      "check": "the duplicate no longer occurs when ContactStore.save is called directly",
+      "fail_when": "only the web-form caller was patched while the store still duplicates"
+    }
+  ],
+  "pass_requires": [
+    "regression_test_fails_pre_fix",
+    "regression_test_passes_post_fix",
+    "hidden_tests_pass",
+    "existing_tests_not_weakened",
+    "root_cause_not_symptom"
+  ],
+  "notes_only": [
+    "whether find() was normalised too (hidden_tests.test_notes)",
+    "whether the agent explained why the nightly import never showed the bug"
+  ],
+  "unproven_when": "git worktree is unavailable on the host, so the pre-fix run could not be made"
+}

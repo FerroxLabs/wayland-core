@@ -1,0 +1,30 @@
+[
+  {
+    "file": "src/gatekeeper/limiter.py",
+    "line": 0,
+    "severity": "blocker",
+    "message": "Off-by-one: `len(hits) > self.limit` admits limit + 1 requests per window. With limit=2 a caller gets 3 through. Should be `len(hits) >= self.limit`.",
+    "_anchor": "if len(hits) > self.limit:"
+  },
+  {
+    "file": "src/gatekeeper/limiter.py",
+    "line": 0,
+    "severity": "blocker",
+    "message": "`buckets={}` is a mutable default argument, evaluated once at import, so every RateLimiter in the process shares one bucket dict. Use `buckets=None` and allocate per instance.",
+    "_anchor": "def __init__(self, limit, window, buckets={}):"
+  },
+  {
+    "file": "src/gatekeeper/limiter.py",
+    "line": 0,
+    "severity": "blocker",
+    "message": "`sweep()` deletes from `self.buckets` while iterating `self.buckets.items()`, which raises RuntimeError: dictionary changed size during iteration on the first idle key. Iterate over `list(self.buckets.items())`.",
+    "_anchor": "del self.buckets[key]"
+  },
+  {
+    "file": "src/gatekeeper/limiter.py",
+    "line": 0,
+    "severity": "nit",
+    "message": "`hits.pop(0)` is O(n); a deque would be tidier, though n is bounded by limit so this is not worth blocking on.",
+    "_anchor": "hits.pop(0)"
+  }
+]

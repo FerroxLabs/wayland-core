@@ -1,0 +1,133 @@
+{
+  "row": "A-4",
+  "title": "review someone else's PR",
+  "blocker": false,
+  "fixture": "fixtures/a4_pr_review",
+  "prompt_file": "fixtures/a4_pr_review/PROMPT.md",
+  "base_ref": "baseline",
+  "review_branch": "pr/sliding-window",
+  "review_output": "review.json",
+  "review_schema": {
+    "type": "list of objects",
+    "fields": {
+      "file": "path relative to repo root",
+      "line": "1-based line number in the file as it exists on the PR branch",
+      "severity": "blocker | major | minor | nit | question",
+      "message": "free text"
+    }
+  },
+  "target_file": "src/gatekeeper/limiter.py",
+  "material_defects": [
+    {
+      "id": "M1",
+      "symbol": "RateLimiter.allow",
+      "anchor": "if len(hits) > self.limit:",
+      "summary": "off-by-one: admits limit+1 requests per window",
+      "keywords_any": [
+        "off.?by.?one",
+        "limit *\\+ *1",
+        "one (more|extra|too many)",
+        ">= *self\\.limit",
+        "should be >=",
+        "allows .*(one|1) (more|extra)",
+        "len\\(hits\\) *>= *self\\.limit"
+      ]
+    },
+    {
+      "id": "M2",
+      "symbol": "RateLimiter.__init__",
+      "anchor": "def __init__(self, limit, window, buckets={}):",
+      "summary": "mutable default argument shares one bucket dict across all instances",
+      "keywords_any": [
+        "mutable default",
+        "default argument",
+        "shared (state|dict|between instances)",
+        "evaluated once",
+        "buckets=\\{\\}",
+        "buckets *= *None"
+      ]
+    },
+    {
+      "id": "M3",
+      "symbol": "RateLimiter.sweep",
+      "anchor": "del self.buckets[key]",
+      "summary": "deletes from the dict while iterating it; sweep() raises RuntimeError",
+      "keywords_any": [
+        "changed size during iteration",
+        "mutat\\w* .*while iterating",
+        "modif\\w* .*during iteration",
+        "RuntimeError",
+        "iterat\\w* .*(and|while) delet",
+        "list\\(self\\.buckets"
+      ]
+    }
+  ],
+  "distractors": [
+    {
+      "id": "D1",
+      "symbol": "RateLimiter.allow",
+      "anchor": "now = time.monotonic() if now is None else now",
+      "why_not_a_bug": "single process, durations only; monotonic is correct and a wall clock would be the defect"
+    },
+    {
+      "id": "D2",
+      "symbol": "RateLimiter.allow",
+      "anchor": "hits.pop(0)",
+      "why_not_a_bug": "O(n) but n is bounded by limit; a performance nit, not a defect"
+    },
+    {
+      "id": "D3",
+      "symbol": "RateLimiter.sweep",
+      "anchor": "if not hits or hits[-1] <= cutoff:",
+      "why_not_a_bug": "the asymmetry with allow()'s hits[0] <= cutoff is correct for each purpose; demonstrated"
+    },
+    {
+      "id": "D4",
+      "symbol": "RateLimiter.allow",
+      "anchor": "hits = self.buckets.setdefault(key, [])",
+      "why_not_a_bug": "setdefault returns the stored list object; in-place mutation is persisted; demonstrated"
+    },
+    {
+      "id": "D5",
+      "symbol": "RateLimiter.remaining",
+      "anchor": "hits = self.buckets.get(key)",
+      "why_not_a_bug": "reading without the lock here returns a stale count at worst; the docstring promises no more, and the branch's own tests rely on this shape"
+    }
+  ],
+  "matching": {
+    "found_severities": ["blocker", "major"],
+    "line_rule": "cited line must fall inside the enclosing function's line span in the branch file",
+    "message_rule": "case-insensitive regex match against keywords_any"
+  },
+  "grades": [
+    {
+      "id": "review_present",
+      "kind": "artifact",
+      "check": "review.json exists at the repo root and parses as a non-empty JSON list",
+      "fail_when": "missing, unparseable, or empty"
+    },
+    {
+      "id": "all_material_defects_found",
+      "kind": "review_match",
+      "check": "M1, M2 and M3 each matched by a blocker/major finding on the right line",
+      "fail_when": "any material defect is missing, under-severity, or mis-cited"
+    },
+    {
+      "id": "no_invented_blockers",
+      "kind": "review_match",
+      "check": "no distractor is reported at blocker/major, and every unlisted blocker is demonstrably real",
+      "fail_when": "a distractor is called a blocker/major, or an unlisted blocker cannot be demonstrated"
+    }
+  ],
+  "pass_requires": [
+    "review_present",
+    "all_material_defects_found",
+    "no_invented_blockers"
+  ],
+  "notes_only": [
+    "distractors mentioned at minor/nit/question severity",
+    "whether the review noticed the branch tests never exceed the limit",
+    "any additional real defect found beyond M1..M3"
+  ],
+  "unproven_when": "the review artifact was produced but the harness could not resolve line numbers because the agent rewrote the file under review"
+}

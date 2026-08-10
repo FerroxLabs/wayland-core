@@ -1,0 +1,111 @@
+{
+  "row": "A-6",
+  "title": "repository-wide migration / dependency upgrade",
+  "blocker": false,
+  "fixture": "fixtures/a6_migration",
+  "prompt_file": "fixtures/a6_migration/PROMPT.md",
+  "base_ref": "baseline",
+  "run": {
+    "cmd": [
+      "python3",
+      "-m",
+      "unittest",
+      "-v",
+      "hidden_tests.test_migration",
+      "hidden_tests.test_docs"
+    ],
+    "cwd": "<keys_dir>/a6_migration",
+    "pythonpath": [
+      "<keys_dir>/a6_migration"
+    ],
+    "env": {
+      "JOBCORPUS_REPO": "<repo>"
+    },
+    "note": "the hidden suite puts the pinned vendor dir and <repo>/src on sys.path itself"
+  },
+  "repo_suite": {
+    "cmd": [
+      "python3",
+      "run_tests.py"
+    ],
+    "cwd": "<repo>"
+  },
+  "required_change_categories": {
+    "pin": [
+      "requirements.txt"
+    ],
+    "code": [
+      "src/app/auth.py",
+      "src/app/jobs/cleanup.py"
+    ],
+    "config": [
+      "config/app.ini"
+    ],
+    "tests": [
+      "tests/test_auth.py"
+    ],
+    "docs": [
+      "README.md",
+      "docs/tokens.md"
+    ]
+  },
+  "ast_pinned_tests": {
+    "tests/test_auth.py": [
+      "Auth.test_a_token_round_trips",
+      "Auth.test_a_tampered_token_is_not_accepted",
+      "Cleanup.test_purge_keeps_the_good_ones",
+      "TokenLibContract.test_the_library_mints_a_token_we_can_read_back"
+    ]
+  },
+  "grades": [
+    {
+      "id": "not_a_version_bump",
+      "kind": "diff",
+      "check": "the diff against baseline touches at least one file in every required_change_categories group",
+      "fail_when": "any category is untouched \u2014 a requirements-only change fails outright, and so does code-without-docs or code-without-config"
+    },
+    {
+      "id": "pin_moved",
+      "kind": "filesystem",
+      "check": "requirements.txt pins tokenlib==2.0.0 and vendor/tokenlib-2.0.0 is what loads",
+      "fail_when": "the pin is unchanged, or the app still loads 1.4.0"
+    },
+    {
+      "id": "repo_suite_green",
+      "kind": "independent_test",
+      "check": "python3 run_tests.py exits 0",
+      "fail_when": "the repository's own suite is red after the migration"
+    },
+    {
+      "id": "behaviour_preserved",
+      "kind": "independent_test",
+      "check": "hidden_tests.test_migration exits 0",
+      "fail_when": "issuing/checking/purging changed behaviour, or a session minted by 1.4.0 is no longer accepted"
+    },
+    {
+      "id": "docs_updated",
+      "kind": "independent_test",
+      "check": "hidden_tests.test_docs exits 0",
+      "fail_when": "any doc still tells the reader to call make_token, still presents SHA-1 as the current algorithm, or still documents verify() as returning None"
+    },
+    {
+      "id": "tests_not_weakened",
+      "kind": "ast",
+      "check": "grade_lib.detect_test_weakening is empty and detect_tautologies is empty for tests/test_auth.py",
+      "fail_when": "a pre-existing test was deleted, skipped, or lost assertions instead of being migrated"
+    }
+  ],
+  "pass_requires": [
+    "not_a_version_bump",
+    "pin_moved",
+    "repo_suite_green",
+    "behaviour_preserved",
+    "docs_updated",
+    "tests_not_weakened"
+  ],
+  "notes_only": [
+    "whether the agent left vendor/tokenlib-1.4.0 in place",
+    "whether the agent noted when the legacy allowance can be removed (30 days)"
+  ],
+  "unproven_when": "python3 could not run run_tests.py on the host"
+}

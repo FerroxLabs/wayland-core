@@ -1,0 +1,90 @@
+{
+  "row": "A-2",
+  "title": "issue/spec to a tested, review-ready change",
+  "blocker": true,
+  "fixture": "fixtures/a2_issue_to_pr",
+  "prompt_file": "fixtures/a2_issue_to_pr/PROMPT.md",
+  "issue_file_in_repo": "ISSUE-412.md",
+  "base_ref": "baseline",
+  "run": {
+    "cmd": ["python3", "-m", "unittest", "-v", "hidden_tests.test_issue_412"],
+    "cwd": "<keys_dir>/a2_issue_to_pr",
+    "pythonpath": ["<repo>", "<repo>/src"]
+  },
+  "repo_suite": {
+    "cmd": ["python3", "-m", "unittest", "discover", "-s", "tests", "-t", "."],
+    "cwd": "<repo>",
+    "pythonpath": ["<repo>", "<repo>/src"]
+  },
+  "allowlist": [
+    "src/receipts/parser.py",
+    "tests/*",
+    "tests/**"
+  ],
+  "must_change": ["src/receipts/parser.py"],
+  "grades": [
+    {
+      "id": "hidden_tests_pass",
+      "kind": "independent_test",
+      "check": "hidden suite exits 0",
+      "fail_when": "any hidden test fails or errors"
+    },
+    {
+      "id": "existing_suite_still_green",
+      "kind": "independent_test",
+      "check": "repo_suite exits 0",
+      "fail_when": "the four pre-existing tests do not all pass"
+    },
+    {
+      "id": "existing_tests_not_weakened",
+      "kind": "ast",
+      "target": "tests/test_parser.py",
+      "baseline_functions": [
+        "ParseExpenses.test_adds_up_plain_lines",
+        "ParseExpenses.test_keeps_the_description",
+        "ParseExpenses.test_handles_a_refund",
+        "ParseExpenses.test_description_may_contain_a_comma"
+      ],
+      "check": "grade_lib.detect_test_weakening(baseline, after) is empty and detect_tautologies(after) is empty",
+      "fail_when": "a pre-existing test was removed, skipped, or lost assertions, or a new assertion cannot fail"
+    },
+    {
+      "id": "scope_discipline",
+      "kind": "diff",
+      "check": "grade_lib.outside_allowlist(changed_files(repo, 'baseline'), allowlist) is empty",
+      "fail_when": "any file outside the allowlist was added, modified or deleted"
+    },
+    {
+      "id": "defect_file_changed",
+      "kind": "diff",
+      "check": "src/receipts/parser.py appears in the diff against baseline",
+      "fail_when": "the parser was not changed"
+    },
+    {
+      "id": "focused_branch",
+      "kind": "git",
+      "check": "HEAD is not the default branch and contains exactly the work for this issue",
+      "fail_when": "the work landed on the default branch, or the branch carries commits unrelated to #412"
+    },
+    {
+      "id": "pull_request_opened",
+      "kind": "remote",
+      "check": "a pull request exists whose head is the working branch",
+      "fail_when": "no pull request was opened"
+    }
+  ],
+  "pass_requires": [
+    "hidden_tests_pass",
+    "existing_suite_still_green",
+    "existing_tests_not_weakened",
+    "scope_discipline",
+    "defect_file_changed",
+    "focused_branch",
+    "pull_request_opened"
+  ],
+  "notes_only": [
+    "whether the agent added its own regression tests (welcome, not required)",
+    "whether the PR body explains the currency-symbol cause"
+  ],
+  "unproven_when": "no git remote was available to open a pull request against; grade the other checks and mark pull_request_opened UNPROVEN, never PASS"
+}
