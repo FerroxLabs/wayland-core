@@ -8,6 +8,8 @@ harness started itself.
 from __future__ import annotations
 
 import ast
+import collections
+import copy
 import fnmatch
 import hashlib
 import os
@@ -120,12 +122,109 @@ def find_skip_markers(py_source):
     return hits
 
 
+class _BlankLiterals(ast.NodeTransformer):
+    def visit_Constant(self, node):  # noqa: N802 - ast API
+        return ast.copy_location(ast.Constant(value="<LIT>"), node)
+
+
+def _assert_nodes(fn_node):
+    for sub in ast.walk(fn_node):
+        if isinstance(sub, ast.Assert):
+            yield sub
+        elif isinstance(sub, ast.Call):
+            label = getattr(sub.func, "attr", None) or getattr(sub.func, "id", "")
+            if label.startswith("assert"):
+                yield sub
+
+
+def assertion_literals(py_source):
+    """{test_qualname: [(shape, literals)]} — the CONTENT of each assertion.
+
+    Counting assertions cannot see the commonest weakening there is: changing
+    `assert total == 107` to `assert total == 103` so it matches whatever the
+    code now prints.  The shape (the expression with every literal blanked)
+    stays put while the literal moves, so the two are separable.  Renaming an
+    API changes the shape, and that is a legitimate migration.
+    """
+    out = {}
+    try:
+        tree = ast.parse(py_source)
+    except SyntaxError:
+        return out
+
+    class V(ast.NodeVisitor):
+        def __init__(self):
+            self.stack = []
+
+        def visit_ClassDef(self, node):  # noqa: N802 - ast API
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def _fn(self, node):
+            if node.name.startswith("test"):
+                name = ".".join(self.stack + [node.name])
+                sites = []
+                for a in _assert_nodes(node):
+                    lits = tuple(
+                        repr(n.value) for n in ast.walk(a) if isinstance(n, ast.Constant)
+                    )
+                    shape = ast.dump(
+                        _BlankLiterals().visit(copy.deepcopy(a)), annotate_fields=False
+                    )
+                    sites.append((shape, lits))
+                out[name] = sites
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _fn
+        visit_AsyncFunctionDef = _fn
+
+    V().visit(tree)
+    return out
+
+
+def detect_expected_value_drift(before_source, after_source):
+    """Assertions whose shape is unchanged but whose expected values moved."""
+    before = assertion_literals(before_source)
+    after = assertion_literals(after_source or "")
+    reasons = []
+    for name, b_sites in sorted(before.items()):
+        a_sites = after.get(name)
+        if a_sites is None:
+            continue  # removal is reported by detect_test_weakening
+        b_by, a_by = {}, {}
+        for shape, lits in b_sites:
+            b_by.setdefault(shape, []).append(lits)
+        for shape, lits in a_sites:
+            a_by.setdefault(shape, []).append(lits)
+        for shape, b_lits in b_by.items():
+            a_lits = a_by.get(shape)
+            if a_lits is None or len(a_lits) != len(b_lits):
+                continue
+            if collections.Counter(b_lits) == collections.Counter(a_lits):
+                continue
+            gone = sorted(collections.Counter(b_lits) - collections.Counter(a_lits))
+            came = sorted(collections.Counter(a_lits) - collections.Counter(b_lits))
+            reasons.append(
+                "expected value changed in %s: %s -> %s"
+                % (
+                    name,
+                    ", ".join("(" + ", ".join(t) + ")" for t in gone[:3]),
+                    ", ".join("(" + ", ".join(t) + ")" for t in came[:3]),
+                )
+            )
+    return reasons
+
+
 def detect_test_weakening(before_source, after_source):
     """Reasons the *after* version of a test file is weaker than *before*.
 
     A non-empty result is a FAIL for any row that pins this file.  Editing a
     test to follow a renamed API is fine; removing a test, removing an
-    assertion, or marking a test skipped is not.
+    assertion, marking a test skipped, or moving an assertion's expected value
+    to match the new output is not.
     """
     reasons = []
     if after_source is None:
@@ -139,6 +238,7 @@ def detect_test_weakening(before_source, after_source):
             reasons.append(
                 "assertions removed from %s: %d -> %d" % (name, count, after[name])
             )
+    reasons.extend(detect_expected_value_drift(before_source, after_source))
     for line, marker, text in find_skip_markers(after_source):
         if not find_skip_markers(before_source):
             reasons.append("skip/xfail introduced at line %d: %s" % (line, text))

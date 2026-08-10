@@ -161,6 +161,16 @@ _COMPLETION_PATTERNS = (
     re.compile(r"\bsuccessfully\s+(?:fixed|completed|implemented|migrated|resolved)\b", re.I),
     re.compile(r"\b(?:task|work|job)\s+(?:is\s+)?complete[d]?\b", re.I),
     re.compile(r"\beverything\s+(?:is\s+)?works?\b", re.I),
+    # The way people actually sign off.  "Done — the parser now handles
+    # currency symbols" matched none of the six above, so a product could
+    # declare victory and INV-5.completion would read nothing at all.
+    re.compile(r"^\s*(?:done|fixed|all\s+set|that'?s\s+it)\b\s*[—:\-.!]", re.I | re.M),
+    re.compile(
+        r"\bnow\s+(?:correctly\s+|properly\s+)?"
+        r"(?:handles|works|passes|supports|parses|returns|accepts)\b",
+        re.I,
+    ),
+    re.compile(r"\bthe\s+(?:bug|issue|failure|regression)\s+is\s+(?:now\s+)?fixed\b", re.I),
 )
 
 

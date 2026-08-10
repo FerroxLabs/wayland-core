@@ -7,6 +7,7 @@ written wrong.
 
 Public surface
 --------------
+    GATE_ROSTER           the 22 declared gates; a run states all of them
     RowContext            per-row driver; seeds and grades Tier 0 automatically
     RowRunner             the raw subprocess layer (binary sha256, timeouts)
     FsSnapshot, GitState, IndependentTests, ProcessTable   world-state grader
@@ -15,23 +16,32 @@ Public surface
 """
 
 from .invariants import (
+    DEFAULT_SCOPE_IGNORE,
     DirtyWorktreeSeed,
     HonestyCheck,
     ScopeCheck,
     TestFileMetrics,
     TestWeakeningCheck,
+    sealed_tests_check,
 )
 from .meter import Claims, HarnessLedger, Meter
 from .result import (
     FAIL,
+    GATE_ROSTER,
+    GREEN,
+    INCOMPLETE,
     NA,
     NOTE,
     PASS,
+    RED,
+    ROSTER_GATES,
     UNPROVEN,
     Check,
     CommandRecord,
     HarnessError,
     RowRecord,
+    exit_code_for,
+    gate_report,
     invariant,
     roll_up,
     summarise,
@@ -50,6 +60,15 @@ from .world import (
 )
 
 __all__ = [
+    "sealed_tests_check",
+    "gate_report",
+    "exit_code_for",
+    "ROSTER_GATES",
+    "RED",
+    "INCOMPLETE",
+    "GREEN",
+    "GATE_ROSTER",
+    "DEFAULT_SCOPE_IGNORE",
     "Check",
     "Claims",
     "CommandRecord",
