@@ -16,6 +16,8 @@ tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-properties = { workspace = true }
 wcore-config = { path = "../wcore-config" }
 
 [dev-dependencies]
