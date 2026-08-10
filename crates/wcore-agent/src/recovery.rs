@@ -262,10 +262,9 @@ impl RecoveryCheckpoint {
             // end: `AgentEngine::attach_transient_block` deliberately
             // places the per-turn skill hint, the current-date line and
             // PrePrompt hook contributions BEFORE a trailing user text block,
-            // so a remote channel participant's words stay the terminal span
-            // of the turn (P3 — the untrusted region must end where the
-            // message ends). An append-only rule here would force those blocks
-            // back after the untrusted body.
+            // so product wording never sits downstream of a remote channel
+            // participant's words (P3). An append-only rule here would force
+            // those blocks back after the untrusted body.
             //
             // This still rejects every mutation the append-only rule rejected:
             // a changed durable block matches nothing, so the walk finishes

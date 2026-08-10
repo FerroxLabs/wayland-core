@@ -5871,11 +5871,9 @@ impl AgentEngine {
     /// message WITHOUT putting it after the sender's own words.
     ///
     /// SECURITY (P3). The last user message can carry a remote channel
-    /// participant's text (`channel_dispatch::build_turn_prompt`), and that
-    /// text is deliberately the TERMINAL span of the message: the untrusted
-    /// region ends where the message ends, which is the one boundary a sender
-    /// cannot write. Pushing product instructions after it rebuilds exactly
-    /// the trusted position that three rounds of forged
+    /// participant's text (`channel_dispatch::build_turn_prompt`). Pushing a
+    /// product block after it would put product wording downstream of
+    /// attacker wording, which is the position three rounds of forged
     /// `<<<END_WAYLAND_UNTRUSTED_INBOUND {id}>>>` markers were reaching for —
     /// and on the OpenAI family it is worse than adjacency, because
     /// `openai.rs::build_messages` joins a user turn's text blocks into ONE
@@ -5885,17 +5883,26 @@ impl AgentEngine {
     /// Measured on the wire before this existed: a channel turn arrived as
     /// `…attacker bytes\nSkill hint: …\nCurrent date: 2026-08-10`.
     ///
+    /// This is hygiene, not the boundary. The boundary is role separation:
+    /// `UNTRUSTED_CHANNEL_SESSION_DIRECTIVE` in the SYSTEM prompt tells the
+    /// model a user turn is data in its entirety and names each block below
+    /// by its literal prefix, so nothing here has to be distinguishable to be
+    /// safe. (An earlier round did claim the sender's bytes were terminal;
+    /// they are not, for any message with an attachment — see the module docs
+    /// on `wcore_channels::untrusted`.)
+    ///
     /// Placement rule: insert before a trailing text block (keeping the
     /// sender's words last and preserving the caller-order of successive
     /// injected blocks), otherwise push. The "otherwise" arm matters for a
     /// tool-results tail — Anthropic requires `tool_result` blocks first, so
     /// a text block must never be inserted ahead of them.
     ///
-    /// Callers: the per-turn skill hint, the current-date line, and PrePrompt
-    /// plugin contributions (which carry their own `trust="untrusted"`
-    /// envelope). What they have in common is not trust — it is that they are
-    /// added by us, so they must not occupy the terminal position reserved
-    /// for the remote participant's raw text.
+    /// Callers: the per-turn skill hint (`Skill hint: …`), the current-date
+    /// line (`Current date: …`), and PrePrompt plugin contributions (their
+    /// own `<plugin-context … trust="untrusted">` envelope). All three are
+    /// named in the system directive; adding a FOURTH caller without adding
+    /// it there makes that directive false — `untrusted_channel_wire_test`
+    /// grades the composition of the turn on the wire and will go red.
     fn attach_transient_block(message: &mut Message, text: String) {
         let block = ContentBlock::Text { text };
         match message.content.last() {

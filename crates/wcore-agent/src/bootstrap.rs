@@ -2345,15 +2345,20 @@ impl AgentBootstrap {
         // SECURITY (P3) — an engine attached to a remote messaging channel
         // carries the standing untrusted-content rule in its SYSTEM prompt.
         //
-        // This is the half of the inbound boundary the transport enforces.
-        // Provider request bodies are JSON: the system prompt is a separate
-        // field (Anthropic `system`, OpenAI `{"role":"system"}`) and a
-        // sender's bytes are a string value inside a USER message, so no byte
-        // a remote participant writes can terminate that string, add a
+        // This push is the WHOLE inbound boundary, and the transport enforces
+        // it. Provider request bodies are JSON: the system prompt is a
+        // separate field (Anthropic `system`, OpenAI `{"role":"system"}`) and
+        // a sender's bytes are a string value inside a USER message, so no
+        // byte a remote participant writes can terminate that string, add a
         // sibling field, or otherwise reach this text. It replaces the
         // in-band `<<<…>>>` marker protocol, which three rounds of Unicode
-        // bypasses showed cannot be made unforgeable — see the module docs on
-        // `wcore_channels::untrusted`.
+        // bypasses showed cannot be made unforgeable, and the round-3
+        // in-turn prologue, which contradicted its own claim by being
+        // product-written text inside the turn it said held none — see the
+        // module docs on `wcore_channels::untrusted`.
+        //
+        // Delete this line and `untrusted_channel_wire_test` goes red on
+        // every leg: the directive is the only thing carrying the rule.
         //
         // Placed AFTER every other block so it is the last thing in the
         // system prompt, adjacent to the conversation it governs, and applied
