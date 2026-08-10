@@ -352,6 +352,16 @@ impl OpenAdmission {
 /// A `"*"` in `group_allowlist` alone is NOT listed: senders are still gated
 /// by `sender_allowlist`, so the admitted set stays enumerated. When both are
 /// `"*"` the `sender_allowlist` finding already fires.
+///
+/// # Both matches are exhaustive by NAME, and neither has a `_` arm
+///
+/// This function's answer for a policy is "this admits senders nobody named"
+/// or "this does not", and a catch-all answers the second for every variant
+/// that has not been thought about yet — silently, at compile time, with no
+/// test able to see it. So every posture is spelled out. Adding a
+/// [`DmPolicy`] or [`GroupPolicy`] variant breaks this build until somebody
+/// classifies it, which is the only mechanism that survives the author
+/// leaving.
 pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
     let mut out = Vec::new();
 
@@ -372,7 +382,23 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
                      instead of the \"*\" wildcard"
                 .into(),
         }),
-        _ => {}
+
+        // `Allowlist` reaching here means the guard above did not hold, i.e.
+        // the list names people (or names nobody, which admits nobody).
+        DmPolicy::Allowlist => {}
+
+        // `Pairing` is bounded, and this arm is where that is DECIDED rather
+        // than defaulted. It is fail-closed in this tree, and on the branch
+        // that implements the handshake it becomes permissive-on-success — in
+        // both shapes the admitted set is "senders who redeemed a code the
+        // operator issued", which is precisely the "somebody named them" this
+        // gate looks for. `dm_allowlist` is not consulted under `Pairing`, so
+        // a `"*"` sitting in it is inert and flagging it would be an
+        // over-refusal the operator could satisfy only by deleting a dead key.
+        DmPolicy::Pairing => {}
+
+        // Admits nobody at all.
+        DmPolicy::Disabled => {}
     }
 
     match policy.group {
@@ -396,7 +422,15 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
                     .into(),
             })
         }
-        _ => {}
+
+        // `Allowlist` reaching here is one of the two bounded cases: either
+        // `sender_allowlist` names people, or `group_allowlist` is EMPTY, in
+        // which case the conversation test denies first and a `"*"` sender
+        // wildcard admits nobody.
+        GroupPolicy::Allowlist => {}
+
+        // Admits nobody at all.
+        GroupPolicy::Disabled => {}
     }
 
     out
@@ -1904,6 +1938,72 @@ mod tests {
             "control: the corpus must contain BOTH open and bounded configurations, or the \
              assertions above are vacuous; got {flagged} open of {checked}"
         );
+    }
+
+    #[test]
+    fn every_policy_variant_has_a_named_verdict_under_the_most_open_lists() {
+        // The sweep above walks the space; this pins each VARIANT's verdict by
+        // name, under the widest lists it could be paired with, so the reason
+        // for each answer is written down where the next person reads it.
+        //
+        // It exists because `open_admissions` used to end each match with
+        // `_ => {}`. Under a catch-all, a new posture — however permissive —
+        // was silently classified "bounded", and no test in this file could
+        // have noticed: the sweep only enumerates the variants that exist when
+        // it is written. The `matches!` tripwires below stop compiling when a
+        // variant is added, which is the part a runtime assertion cannot do.
+        let wide = |dm: DmPolicy, group: GroupPolicy| InboundPolicy {
+            dm,
+            group,
+            dm_allowlist: vec![WILDCARD.into()],
+            group_allowlist: vec!["G1".into()],
+            sender_allowlist: vec![WILDCARD.into()],
+            ..Default::default()
+        };
+
+        // DM axis, group held Disabled so only the DM verdict can speak.
+        for (dm, expect) in [
+            (DmPolicy::Open, vec!["dm"]),
+            (DmPolicy::Allowlist, vec!["dm_allowlist"]),
+            // The variant the note is about. A pairing channel admits the
+            // senders who redeemed an operator-issued code — a named set — so
+            // it is NOT an open admission, in this tree where it is
+            // fail-closed and on the branch where the handshake is live. The
+            // inert `"*"` in `dm_allowlist` must not be flagged either.
+            (DmPolicy::Pairing, vec![]),
+            (DmPolicy::Disabled, vec![]),
+        ] {
+            assert!(
+                matches!(
+                    dm,
+                    DmPolicy::Open | DmPolicy::Allowlist | DmPolicy::Pairing | DmPolicy::Disabled
+                ),
+                "tripwire: a new DmPolicy variant must be classified in `open_admissions` and \
+                 given a row here, not absorbed by a catch-all"
+            );
+            let policy = wide(dm.clone(), GroupPolicy::Disabled);
+            let got: Vec<&str> = open_admissions(&policy).iter().map(|o| o.field).collect();
+            assert_eq!(got, expect, "dm = {}", dm_policy_name(&dm));
+        }
+
+        // Group axis, DM held Disabled for the same reason.
+        for (group, expect) in [
+            (GroupPolicy::Open, vec!["group"]),
+            (GroupPolicy::Allowlist, vec!["sender_allowlist"]),
+            (GroupPolicy::Disabled, vec![]),
+        ] {
+            assert!(
+                matches!(
+                    group,
+                    GroupPolicy::Open | GroupPolicy::Allowlist | GroupPolicy::Disabled
+                ),
+                "tripwire: a new GroupPolicy variant must be classified in `open_admissions` and \
+                 given a row here, not absorbed by a catch-all"
+            );
+            let policy = wide(DmPolicy::Disabled, group.clone());
+            let got: Vec<&str> = open_admissions(&policy).iter().map(|o| o.field).collect();
+            assert_eq!(got, expect, "group = {}", group_policy_name(&group));
+        }
     }
 
     #[test]

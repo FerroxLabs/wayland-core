@@ -12,7 +12,7 @@
 //! | Entry point | Site | Open-admission refusal | Unreadable config is fatal |
 //! |---|---|---|---|
 //! | headless one-shot / line-REPL (`wayland-core "<prompt>"`, `--no-tui`) | `main.rs` `.enable_inbound_dispatch(true)` on the REPL bootstrap | [`headless_one_shot_refuses_before_it_runs_a_turn`] | [`headless_one_shot_refuses_an_unparseable_channel_file`] |
-//! | interactive TUI | the TUI bootstrap, same builder | shares `AgentBootstrap::build` with the row above; needs a TTY, see the residual note below | same |
+//! | interactive TUI | the TUI bootstrap, same builder | [`interactive_tui_refuses_before_it_paints`] (unix, on a real PTY) | [`interactive_tui_refuses_an_unparseable_channel_file`] |
 //! | `--json-stream` host (the Wayland desktop app) | the json-stream bootstrap | [`json_stream_host_receives_one_clean_error_frame`] | [`json_stream_host_receives_an_error_frame_for_an_unparseable_channel_file`] |
 //! | `gateway run` | `channel_inbound_host::spawn` | [`gateway_run_refuses_even_with_the_webhook_disabled`] | [`gateway_run_refuses_an_unparseable_channel_file`] |
 //! | `channel reload` on a running host | `InboundHost::reload_policies` | `wcore-agent`'s `p2_open_admission_refusal_test` LEG 8 | already strict before this change |
@@ -43,9 +43,18 @@
 //! real agent turn against a mock provider, so "it did not refuse" is proved
 //! by output the gate could not have produced.
 //!
-//! **Residual, named:** the TUI row is not driven here. It needs a PTY, and it
-//! reaches the gate through the same `AgentBootstrap::build` call the headless
-//! row exercises, with the same `enable_inbound_dispatch(true)`.
+//! The TUI row is driven on a real pseudo-terminal rather than reasoned about
+//! from the headless row. It is the one entry point that enters the alternate
+//! screen BEFORE `AgentBootstrap::build`, so "the same builder refuses" is not
+//! enough: what an operator actually gets is whatever survives the terminal
+//! being restored on the way out, and only a PTY can show that.
+//!
+//! **Residual, named:** the TUI legs are `#[cfg(unix)]`. `portable_pty`'s
+//! ConPTY backend on a headless Windows runner does not surface the child's
+//! output to the master end (see `goal_control_tui_pty.rs` for the same
+//! constraint), so the Windows terminal leg of this row is NOT measured here.
+//! Windows keeps the headless, json-stream and gateway rows, which are
+//! cross-platform.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -603,4 +612,109 @@ fn gateway_run_stays_up_on_a_bounded_channel() {
         !stderr.contains(REFUSAL),
         "and must not have logged the open-admission refusal. stderr:\n{stderr}"
     );
+}
+
+// ------------------------------------------------------------------ TUI (PTY)
+
+/// The TUI on a real pseudo-terminal.
+///
+/// `cwd` is the project dir rather than the profile home so the run has the
+/// same two authorities every other case here has. `ANTHROPIC_API_KEY` is
+/// injected through `extra_env` because the PTY helper strips provider keys out
+/// of the child for hermeticity and re-applies caller overrides afterwards.
+#[cfg(unix)]
+fn tui(case: &Case) -> support::pty::Pty {
+    support::pty::Pty::spawn_with_args_env(
+        &case.home,
+        &case.project,
+        // Taller and wider than the default 40x120: the refusal is a
+        // multi-paragraph message and the vt100 grid this is read off has no
+        // scrollback, so a short screen would drop the first line — the one
+        // carrying [`REFUSAL`] — and turn a real failure into a green test.
+        100,
+        200,
+        &["--project-dir", &case.project.display().to_string()],
+        &[("ANTHROPIC_API_KEY", dummy_key())],
+    )
+}
+
+/// How long the TUI legs wait. Same reasoning as [`RUN_TIMEOUT`]: a refusal
+/// that never returns is a gate that cannot fail.
+#[cfg(unix)]
+const TUI_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// THE INTERACTIVE SURFACE. The TUI enters the alternate screen BEFORE
+/// `AgentBootstrap::build`, so this is the one row where a refusal has to
+/// survive the terminal being handed back: the operator must end up looking at
+/// the reason, not at a restored blank prompt or a half-painted frame.
+#[cfg(unix)]
+#[test]
+fn interactive_tui_refuses_before_it_paints() {
+    let case = Case::new(OPEN_INBOUND, None);
+    let mut pty = tui(&case);
+
+    pty.wait_for(
+        |s| s.contains(REFUSAL) && s.contains("p2chan"),
+        TUI_TIMEOUT,
+        "the open-admission refusal, naming the channel",
+    );
+    let status = pty
+        .wait_for_exit(TUI_TIMEOUT)
+        .expect("the TUI must EXIT on a refusal rather than stay up on an open configuration");
+    assert!(
+        !status.success(),
+        "and must exit non-zero. screen:\n{}",
+        pty.screen_text()
+    );
+}
+
+/// V-C on the TUI. One unparseable sibling used to empty the policy list, and
+/// this surface never saw a gate at all.
+#[cfg(unix)]
+#[test]
+fn interactive_tui_refuses_an_unparseable_channel_file() {
+    for (label, inbound) in [("open", OPEN_INBOUND), ("bounded", BOUNDED_INBOUND)] {
+        let case = Case::new(inbound, None);
+        write_junk(&case.home);
+        let mut pty = tui(&case);
+
+        pty.wait_for(
+            |s| s.contains(UNREADABLE) && s.contains("junk.toml"),
+            TUI_TIMEOUT,
+            "the unreadable-config refusal, naming the file",
+        );
+        let status = pty
+            .wait_for_exit(TUI_TIMEOUT)
+            .unwrap_or_else(|| panic!("{label}: the TUI must EXIT on an unreadable channel dir"));
+        assert!(
+            !status.success(),
+            "{label}: and must exit non-zero. screen:\n{}",
+            pty.screen_text()
+        );
+    }
+}
+
+/// POSITIVE CONTROL. Without it, a TUI that could never start on this harness
+/// would pass both legs above: every assertion there is satisfied by a process
+/// that refuses for an unrelated reason and dies.
+#[cfg(unix)]
+#[test]
+fn interactive_tui_paints_on_a_bounded_channel() {
+    let case = Case::new(BOUNDED_INBOUND, None);
+    let mut pty = tui(&case);
+
+    // The status bar carries the model out of this case's own `config.toml`,
+    // so seeing it proves the run got past `AgentBootstrap::build` — the call
+    // the gate lives inside — and painted. Asserted rather than "some glyph
+    // appeared" because a half-painted splash would satisfy the weaker check.
+    pty.wait_for(
+        |s| {
+            s.contains("claude-sonnet-4-20250514")
+                && !s.contains(REFUSAL)
+                && !s.contains(UNREADABLE)
+        },
+        TUI_TIMEOUT,
+        "a painted TUI, showing this profile's model, with no refusal on it",
+    );
+    pty.quit();
 }
