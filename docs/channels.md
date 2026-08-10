@@ -201,7 +201,7 @@ acknowledgement is ONE token, and the refusal prints it for you to paste:
 ```toml
 [inbound]
 dm = "open"
-acknowledge_open_admission = ["admission-v2 platform=telegram enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0 group_sessions_per_user=true thread_sessions_per_user=false options.allowed_chat_ids=a:1:s:123456789 options.credential_handle=s:telegram%2Eacme%2Ebot_token"]
+acknowledge_open_admission = ["admission-v2 name=acme platform=telegram enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0 group_sessions_per_user=true thread_sessions_per_user=false options.allowed_chat_ids=a:1:s:123456789 options.credential_handle=s:telegram%2Eacme%2Ebot_token"]
 ```
 
 Don't type it: run the product, read the refusal, paste the line it prints.
@@ -210,8 +210,8 @@ Don't type it: run the product, read the refusal, paste the line it prints.
 
 It renders every setting that decides who is admitted, what they can
 trigger without addressing the bot, and what the resulting turn may read or
-do to this host: `platform`, `enabled`, `dm`, `dm_allowlist`, `group`,
-`group_allowlist`, `sender_allowlist`, `require_mention`, `tools`,
+do to this host: `name`, `platform`, `enabled`, `dm`, `dm_allowlist`,
+`group`, `group_allowlist`, `sender_allowlist`, `require_mention`, `tools`,
 `tool_workspace_root`, `group_sessions_per_user`, `thread_sessions_per_user`,
 **and every key in `[options]`**. The two session flags are in the token
 because turning `group_sessions_per_user` off collapses every sender in a
@@ -223,9 +223,13 @@ refuses until you look at the new shape.
 
 `tools` is in there because "anyone may DM this bot" is a materially
 different decision at the safe `conversational` floor than at `full` host
-access, and moving between them is one word. `ack` and the two
-session-shaping flags are NOT in there — they change neither who reaches
-the agent nor what the turn may do.
+access, and moving between them is one word. `name` is in there for the
+same read-what-someone-else-said reason as the session flags: the channel
+name is the first component of every session key its turns run under, so
+renaming a channel (file and `name` together) re-points them at whatever
+history is already stored under the new name — which, if that name belonged
+to another channel, is that channel's conversations. Renaming an open
+channel therefore asks you to acknowledge again.
 
 #### Why `[options]` is in the token, all of it
 

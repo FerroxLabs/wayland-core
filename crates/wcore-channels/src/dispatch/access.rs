@@ -472,6 +472,19 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v2";
 /// admitted principal can trigger without addressing the bot, or what the
 /// resulting turn is allowed to do to this host**:
 ///
+/// - `name` — the channel's identity, and the FIRST component of every session
+///   key its turns run under: `build_session_key` composes
+///   `agent:main:<name>:…`, `ChannelTurnDispatcher::hashed_session_id` hashes
+///   that string, and `engine_for` RESUMES the session already on disk under
+///   that id (`wcore-agent/src/channel_dispatch.rs`). Renaming a channel
+///   therefore re-points every future turn at a different persisted history —
+///   and if that name previously belonged to another channel, admitted senders
+///   resume ITS conversation, operator messages included. That is the same
+///   confidentiality axis `group_sessions_per_user` is in the shape for, one
+///   scope wider, and it is a one-line edit (plus the matching file rename the
+///   loader's stem check demands). It also makes the consent name the thing it
+///   consents to: without it, a token written for `sandbox` is equally valid
+///   for whatever that file is called tomorrow.
 /// - `platform` — which adapter parses `[options]`, and therefore what every
 ///   key in it MEANS. `allowed_senders` is an email delivery filter and nothing
 ///   at all to a Slack channel, so a token that fixed the options but floated
@@ -511,10 +524,13 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v2";
 ///
 /// # What is deliberately OUT, and why
 ///
-/// An exclusion here is a DECISION, not an omission: [`shape_fields`]
-/// destructures [`InboundPolicy`] exhaustively, so every field must be either
-/// rendered or explicitly discarded with a reason written at the binding. Two
-/// are discarded:
+/// An exclusion here is a DECISION, not an omission. BOTH structs that feed the
+/// shape are destructured exhaustively — [`crate::config::ChannelConfig`] in
+/// [`ChannelConfig::admission_shape`] and [`InboundPolicy`] in
+/// [`shape_fields`] — so every field must be either rendered or explicitly
+/// discarded with a reason written at the binding. `ChannelConfig` discards
+/// NOTHING: all five of its fields are in the token. `InboundPolicy` discards
+/// two:
 ///
 /// - `ack` — how the bot signals it is working (reactions / typing). Purely
 ///   OUTBOUND presentation. It cannot change who is admitted, what an admitted
@@ -524,7 +540,20 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v2";
 ///   it is excluded by construction rather than by judgement.
 ///
 /// Everything else is in, and the line is drawn at reach and authority.
-pub const SHAPE_FIELDS: [&str; 12] = [
+///
+/// # The `..` trap, and why a comment is not the guard
+///
+/// rustc's third suggestion for the E0027 both destructurings raise is "or
+/// always ignore missing fields here" — i.e. add `..`. Taking it compiles,
+/// keeps every existing test green, and silently re-opens the hole. A comment
+/// the compiler argues against is not a guard, so the compile-time half is
+/// backed by a runtime one: `a_field_added_to_*_cannot_be_left_out_of_the_
+/// consent` reads the field set back off serde (the only reflection Rust
+/// offers, and the one thing that cannot fall behind the struct) and fails
+/// unless every field is either proven to move the token or named in that
+/// test's exclusion list. Those tests go red in the `..` world.
+pub const SHAPE_FIELDS: [&str; 13] = [
+    "name",
     "platform",
     "enabled",
     "dm",
@@ -609,6 +638,8 @@ pub const OPTION_FIELD_PREFIX: &str = "options.";
 /// before rendering, exactly as the `[inbound]` allowlists are.
 #[derive(Debug, Clone, Copy)]
 pub struct AdmissionShape<'a> {
+    /// `name` from [`crate::config::ChannelConfig`].
+    pub name: &'a str,
     /// `platform` from [`crate::config::ChannelConfig`].
     pub platform: &'a str,
     /// `enabled` from [`crate::config::ChannelConfig`].
@@ -623,12 +654,14 @@ impl<'a> AdmissionShape<'a> {
     /// Build a shape from its parts. Prefer [`ChannelConfig::admission_shape`]
     /// — it cannot omit one.
     pub fn new(
+        name: &'a str,
         platform: &'a str,
         enabled: bool,
         options: &'a toml::Table,
         inbound: &'a InboundPolicy,
     ) -> Self {
         Self {
+            name,
             platform,
             enabled,
             options,
@@ -640,16 +673,34 @@ impl<'a> AdmissionShape<'a> {
 impl ChannelConfig {
     /// This channel's admission shape — every setting a consent is bound to.
     ///
-    /// Borrowing the whole `ChannelConfig` is the point: the gate cannot be
-    /// handed a subset of the file, so a field cannot be dropped on the way in.
-    /// The previous signature took `(name, enabled, &inbound)` and that is
-    /// precisely how `[options]` stayed outside the token.
+    /// Borrowing the whole `ChannelConfig` is necessary but NOT sufficient, and
+    /// the difference is what this method got wrong once. Taking `&self` stops
+    /// a CALLER handing the gate a subset of the file; it does nothing about
+    /// this method reading four of the five fields by field access and
+    /// dropping the fifth. A reach-relevant field added to `ChannelConfig` and
+    /// populated with an attacker id was invisible to the token while the whole
+    /// suite stayed green — the same enumeration defect [`shape_fields`] closes
+    /// one level down, at the level that projects the file INTO the gate.
+    ///
+    /// So the projection destructures EXHAUSTIVELY, deliberately without a `..`
+    /// rest pattern: a sixth field does not compile (E0027) until someone
+    /// decides here whether a consent is bound to it. Every binding is either
+    /// carried into the shape or discarded with a written reason. Do not
+    /// silence a new field with `..` or `_` — write why.
     pub fn admission_shape(&self) -> AdmissionShape<'_> {
+        let ChannelConfig {
+            name,
+            platform,
+            enabled,
+            options,
+            inbound,
+        } = self;
         AdmissionShape {
-            platform: &self.platform,
-            enabled: self.enabled,
-            options: &self.options,
-            inbound: &self.inbound,
+            name,
+            platform,
+            enabled: *enabled,
+            options,
+            inbound,
         }
     }
 }
@@ -887,6 +938,7 @@ fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
     } = shape.inbound;
 
     let mut fields: Vec<(String, String)> = vec![
+        ("name".into(), escape_entry(shape.name)),
         ("platform".into(), escape_entry(shape.platform)),
         ("enabled".into(), shape.enabled.to_string()),
         ("dm".into(), dm_policy_name(dm).to_string()),
@@ -1741,35 +1793,40 @@ mod tests {
         }
     }
 
+    /// The channel every single-channel helper below models.
+    ///
+    /// ONE name, deliberately. `name` is inside the admission shape, so a
+    /// helper that acknowledges a shape under one name and then runs the gate
+    /// under another refuses for the RENAME rather than for the thing under
+    /// test. These helpers used to take a descriptive per-leg name (`"narrow"`
+    /// then `"widened"`, `"off"` then `"on"`) and did exactly that.
+    const CHANNEL: &str = "ch";
+
     /// Run the gate over ONE `[inbound]`-only channel.
-    fn refuse_one(
-        name: &str,
-        enabled: bool,
-        policy: &InboundPolicy,
-    ) -> Result<(), OpenAdmissionRefusal> {
-        refuse_open_admission([&config(name, enabled, policy)])
+    fn refuse_one(enabled: bool, policy: &InboundPolicy) -> Result<(), OpenAdmissionRefusal> {
+        refuse_open_admission([&config(CHANNEL, enabled, policy)])
     }
 
     /// The token for one `[inbound]`-only channel.
     fn token_of(enabled: bool, policy: &InboundPolicy) -> String {
-        admission_shape_token(&config("t", enabled, policy).admission_shape())
+        admission_shape_token(&config(CHANNEL, enabled, policy).admission_shape())
     }
 
     /// The faults of one `[inbound]`-only channel.
     fn faults_of(enabled: bool, policy: &InboundPolicy) -> Vec<OpenAdmissionFault> {
-        open_admission_faults(&config("t", enabled, policy).admission_shape())
+        open_admission_faults(&config(CHANNEL, enabled, policy).admission_shape())
     }
 
     /// The required acknowledgement of one `[inbound]`-only channel.
     fn required_of(enabled: bool, policy: &InboundPolicy) -> Vec<String> {
-        required_acknowledgement(&config("t", enabled, policy).admission_shape())
+        required_acknowledgement(&config(CHANNEL, enabled, policy).admission_shape())
     }
 
     /// `policy` with its own required acknowledgement written in.
     fn acknowledged(enabled: bool, policy: &InboundPolicy) -> InboundPolicy {
         InboundPolicy {
             acknowledge_open_admission: required_acknowledgement(
-                &config("t", enabled, policy).admission_shape(),
+                &config(CHANNEL, enabled, policy).admission_shape(),
             ),
             ..policy.clone()
         }
@@ -1792,10 +1849,10 @@ mod tests {
         // This is the whole defect, at the level of the pure gate: if a bounded
         // channel accepts a consent for shapes it does not have, that file is a
         // standing consent to every future opening.
-        let refusal = refuse_one("preacked", true, &preacked_but_bounded())
+        let refusal = refuse_one(true, &preacked_but_bounded())
             .expect_err("pre-arming a bounded channel must refuse, not be silently accepted");
         let refused = &refusal.channels[0];
-        assert_eq!(refused.channel, "preacked");
+        assert_eq!(refused.channel, CHANNEL);
         assert_eq!(
             refused.faults.len(),
             4,
@@ -1836,7 +1893,7 @@ mod tests {
             "an open channel requires exactly its own shape token"
         );
         let exact = acknowledged(true, &open);
-        refuse_one("exact", true, &exact)
+        refuse_one(true, &exact)
             .expect("an acknowledgement that names the live shape exactly must be accepted");
 
         // The SAME token twice. Under the first cut this was accepted, which
@@ -1845,8 +1902,8 @@ mod tests {
             acknowledge_open_admission: vec![required[0].clone(), required[0].clone()],
             ..open.clone()
         };
-        let refusal = refuse_one("doubled", true, &doubled)
-            .expect_err("a repeated consent is not an exact match");
+        let refusal =
+            refuse_one(true, &doubled).expect_err("a repeated consent is not an exact match");
         assert_eq!(
             refusal.channels[0].faults,
             vec![OpenAdmissionFault::NotExactlyOne { count: 2 }]
@@ -1859,7 +1916,7 @@ mod tests {
             ..open.clone()
         };
         assert_eq!(
-            refuse_one("extra", true, &extra)
+            refuse_one(true, &extra)
                 .expect_err("two entries must refuse")
                 .channels[0]
                 .faults,
@@ -1874,14 +1931,13 @@ mod tests {
         // `group_allowlist` to `["*"]` grows that to anyone, anywhere. Under a
         // per-field token list this changed NO token and nothing refused.
         let narrow = acknowledged(true, &open_over_one_group());
-        refuse_one("narrow", true, &narrow)
-            .expect("control: the narrow shape, acknowledged, is accepted");
+        refuse_one(true, &narrow).expect("control: the narrow shape, acknowledged, is accepted");
 
         let widened = InboundPolicy {
             group_allowlist: vec![WILDCARD.into()],
             ..narrow.clone()
         };
-        let refusal = refuse_one("widened", true, &widened)
+        let refusal = refuse_one(true, &widened)
             .expect_err("widening a field the consent did not single out must still refuse");
         let faults = &refusal.channels[0].faults;
         assert!(
@@ -1916,11 +1972,10 @@ mod tests {
             ..Default::default()
         };
         let off = acknowledged(false, &open);
-        refuse_one("off", false, &off)
+        refuse_one(false, &off)
             .expect("control: the switched-off shape, acknowledged, is accepted");
 
-        let refusal =
-            refuse_one("on", true, &off).expect_err("flipping enabled must be a new decision");
+        let refusal = refuse_one(true, &off).expect_err("flipping enabled must be a new decision");
         assert!(
             matches!(
                 refusal.channels[0].faults.as_slice(),
@@ -1943,7 +1998,7 @@ mod tests {
             ..Default::default()
         };
         for enabled in [false, true] {
-            refuse_one("bounded", enabled, &bounded)
+            refuse_one(enabled, &bounded)
                 .expect("a bounded channel needs no consent at either setting");
         }
     }
@@ -1965,14 +2020,14 @@ mod tests {
             "control: the fixture consents at the safe floor"
         );
         let consented = acknowledged(true, &open);
-        refuse_one("floor", true, &consented).expect("control: the acknowledged floor starts");
+        refuse_one(true, &consented).expect("control: the acknowledged floor starts");
 
         for escalated in [ChannelToolPosture::Workspace, ChannelToolPosture::Full] {
             let policy = InboundPolicy {
                 tools: escalated,
                 ..consented.clone()
             };
-            let refusal = match refuse_one("escalated", true, &policy) {
+            let refusal = match refuse_one(true, &policy) {
                 Ok(()) => panic!(
                     "{escalated:?}: escalating the tool posture under a live open-admission \
                      consent must refuse"
@@ -2000,13 +2055,13 @@ mod tests {
                 ..open.clone()
             },
         );
-        refuse_one("jailed", true, &jailed).expect("control: the jailed shape starts");
+        refuse_one(true, &jailed).expect("control: the jailed shape starts");
         let widened = InboundPolicy {
             tool_workspace_root: Some("/".into()),
             ..jailed.clone()
         };
-        let refusal = refuse_one("widened", true, &widened)
-            .expect_err("moving the jail root must demand fresh consent");
+        let refusal =
+            refuse_one(true, &widened).expect_err("moving the jail root must demand fresh consent");
         assert!(
             refusal
                 .to_string()
@@ -2033,7 +2088,7 @@ mod tests {
                 group_allowlist: cosmetic.clone(),
                 ..consented.clone()
             };
-            refuse_one("cosmetic", true, &reordered).unwrap_or_else(|e| {
+            refuse_one(true, &reordered).unwrap_or_else(|e| {
                 panic!("{cosmetic:?} admits exactly the same principals and must not refuse: {e}")
             });
         }
@@ -2384,7 +2439,7 @@ mod tests {
                 legacy: Some(LegacyToken::ShapeV1),
             }]
         );
-        let msg = refuse_one("upgraded", true, &open)
+        let msg = refuse_one(true, &open)
             .expect_err("a v1 token must not be honoured")
             .to_string();
         assert!(
@@ -2400,6 +2455,183 @@ mod tests {
         );
     }
 
+    /// The field names serde sees on `value`.
+    ///
+    /// This is the only reflection Rust offers, and the only view of a struct
+    /// that CANNOT fall behind its definition: both structs that feed the
+    /// admission shape derive `Serialize`, so a field added tomorrow appears
+    /// here with nobody having to remember to add it. A hand-written list is
+    /// the failure mode these tests exist to catch, so they must not be built
+    /// on one.
+    ///
+    /// JSON rather than TOML because `Option::None` has no TOML rendering and
+    /// the fixtures must be able to exercise an absent `tool_workspace_root`.
+    fn serialized_field_names<T: Serialize>(value: &T) -> Vec<String> {
+        let mut names: Vec<String> = serde_json::to_value(value)
+            .expect("fixture must serialize")
+            .as_object()
+            .expect("a struct serializes to an object")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn sorted(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<String> {
+        let mut out: Vec<String> = values.into_iter().map(Into::into).collect();
+        out.sort();
+        out
+    }
+
+    /// THE `..` GUARD, config side.
+    ///
+    /// `ChannelConfig::admission_shape` destructures exhaustively, so adding a
+    /// sixth field is an E0027. That is the compile-time half — and rustc's own
+    /// third suggestion for E0027 is "or always ignore missing fields here",
+    /// i.e. add `..`, which compiles, keeps every other test in this module
+    /// green, and silently re-opens the widening. A comment telling the next
+    /// author not to take that suggestion is not a guard. This is.
+    ///
+    /// It reads the field set off serde and demands that every field be
+    /// ACCOUNTED FOR: either proven to move the token, or named in the
+    /// exclusion list below with its reason written at the binding. A field
+    /// silenced by `..` is in neither, and this fails naming it.
+    #[test]
+    fn a_field_added_to_channel_config_cannot_be_left_out_of_the_consent() {
+        // EXCLUSIONS. Empty, and that is the finding: `name` was the one
+        // plausible candidate, and it turned out to be the first component of
+        // every session key this channel's turns resume under. See the `name`
+        // entry in `SHAPE_FIELDS`' documentation.
+        const OUTSIDE_THE_SHAPE: [&str; 0] = [];
+
+        let base = config("t", true, &open_over_one_group());
+        let base_token = admission_shape_token(&base.admission_shape());
+
+        // One mutation per field, each to a different but still-valid value.
+        // A field is inside the consent iff its mutation moves the token.
+        let bound: Vec<(&str, ChannelConfig)> = vec![
+            (
+                "name",
+                ChannelConfig {
+                    name: "renamed".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "platform",
+                ChannelConfig {
+                    platform: "discord".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "enabled",
+                ChannelConfig {
+                    enabled: false,
+                    ..base.clone()
+                },
+            ),
+            (
+                "options",
+                ChannelConfig {
+                    options: "allowed_channel_ids = [\"C1\"]"
+                        .parse()
+                        .expect("fixture options must parse"),
+                    ..base.clone()
+                },
+            ),
+            (
+                "inbound",
+                ChannelConfig {
+                    inbound: InboundPolicy {
+                        group_allowlist: vec!["G2".into()],
+                        ..base.inbound.clone()
+                    },
+                    ..base.clone()
+                },
+            ),
+        ];
+
+        assert_eq!(
+            sorted(
+                bound
+                    .iter()
+                    .map(|(field, _)| *field)
+                    .chain(OUTSIDE_THE_SHAPE)
+            ),
+            serialized_field_names(&base),
+            "a field was added to or removed from ChannelConfig. Decide whether a consent is \
+             bound to it: give it a mutation above if it is, or add it to OUTSIDE_THE_SHAPE and \
+             write WHY it cannot widen reach or confidentiality at its binding in \
+             `admission_shape`. Do not silence it with `..`"
+        );
+
+        for (field, mutated) in &bound {
+            assert_ne!(
+                admission_shape_token(&mutated.admission_shape()),
+                base_token,
+                "`{field}` is claimed to be inside the consent, but changing it did not change \
+                 the token — so a consent written before the change silently covers after it"
+            );
+        }
+    }
+
+    /// THE `..` GUARD, `[inbound]` side. Same reasoning as its config sibling:
+    /// `shape_fields` destructures `InboundPolicy` exhaustively, and this is
+    /// what catches the `..` that would silence the E0027.
+    #[test]
+    fn a_field_added_to_inbound_policy_cannot_be_left_out_of_the_consent() {
+        // EXCLUSIONS, with the reasons written at the bindings in
+        // `shape_fields` and restated in `SHAPE_FIELDS`' documentation. The
+        // negative direction is asserted below: an excluded field must NOT
+        // move the token, or the exclusion is a lie.
+        const OUTSIDE_THE_SHAPE: [&str; 2] = ["ack", "acknowledge_open_admission"];
+
+        let base = open_over_one_group();
+        let base_token = token_of(true, &base);
+
+        // The `[inbound]` half of SHAPE_FIELDS is everything except the three
+        // fields that come from `ChannelConfig`. Derived rather than retyped,
+        // so the two lists cannot drift apart.
+        let from_channel_config = ["name", "platform", "enabled"];
+        let rendered_inbound: Vec<&str> = SHAPE_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| !from_channel_config.contains(field))
+            .collect();
+
+        assert_eq!(
+            sorted(rendered_inbound.iter().copied().chain(OUTSIDE_THE_SHAPE)),
+            serialized_field_names(&base),
+            "a field was added to or removed from InboundPolicy. Decide whether a consent is \
+             bound to it: render it in `shape_fields` and add it to SHAPE_FIELDS if it is, or \
+             discard it there with a written reason and add it to OUTSIDE_THE_SHAPE. Do not \
+             silence it with `..`"
+        );
+
+        // The exclusions really are inert. `every_field_in_the_shape_is_load_\
+        // bearing` proves the positive direction for the rendered ones.
+        let noisier_ack = InboundPolicy {
+            ack: AckMode::Reactions,
+            ..base.clone()
+        };
+        assert_eq!(
+            token_of(true, &noisier_ack),
+            base_token,
+            "`ack` is excluded, so it must not move the token"
+        );
+        let already_acked = InboundPolicy {
+            acknowledge_open_admission: vec![base_token.clone()],
+            ..base.clone()
+        };
+        assert_eq!(
+            token_of(true, &already_acked),
+            base_token,
+            "`acknowledge_open_admission` is excluded, so it must not move the token"
+        );
+    }
+
     #[test]
     fn every_field_in_the_shape_is_load_bearing() {
         // The property that makes "consent is a function of the WHOLE shape"
@@ -2409,8 +2641,8 @@ mod tests {
         let base = open_over_one_group();
         let base_token = token_of(true, &base);
 
-        // `platform` is not on `InboundPolicy`, so it is varied through the
-        // config rather than through the variant list below.
+        // `platform` and `name` are not on `InboundPolicy`, so they are varied
+        // through the config rather than through the variant list below.
         let other_platform = ChannelConfig {
             platform: "discord".to_string(),
             ..config("t", true, &base)
@@ -2420,6 +2652,15 @@ mod tests {
             base_token,
             "changing `platform` must change the token: it decides which adapter reads [options], \
              and therefore what every key in it means"
+        );
+
+        let renamed = config("t2", true, &base);
+        assert_ne!(
+            admission_shape_token(&renamed.admission_shape()),
+            base_token,
+            "changing `name` must change the token: it is the first component of every session \
+             key this channel's turns run under, so a rename re-points them at another channel's \
+             persisted history"
         );
 
         let variants: Vec<(&str, bool, InboundPolicy)> = vec![
@@ -2506,10 +2747,11 @@ mod tests {
             ),
         ];
         assert_eq!(
-            variants.len() + 1,
+            variants.len() + 2,
             SHAPE_FIELDS.len(),
-            "every field in SHAPE_FIELDS must have a variant here (+1 for `platform`, varied \
-             above), or a field could be dropped from the rendering with nothing to catch it"
+            "every field in SHAPE_FIELDS must have a variant here (+2 for `name` and `platform`, \
+             varied above), or a field could be dropped from the rendering with nothing to catch \
+             it"
         );
 
         let mut seen = vec![base_token.clone()];
@@ -2569,11 +2811,11 @@ mod tests {
 
         // And the pair really is the whole exclusion set: everything else on
         // the struct is load-bearing, which the sibling test proves field by
-        // field. Two excluded + `platform` and `enabled` coming from
+        // field. Two excluded + `name`, `platform` and `enabled` coming from
         // `ChannelConfig` rather than `InboundPolicy` is the arithmetic.
         assert_eq!(
             SHAPE_FIELDS.len(),
-            12,
+            13,
             "SHAPE_FIELDS changed size: re-decide the exclusions above rather than editing this \
              number"
         );
@@ -2692,7 +2934,7 @@ mod tests {
             acknowledge_open_admission: vec![token.clone()],
             ..Default::default()
         };
-        let refusal = refuse_one("narrowed", true, &narrowed)
+        let refusal = refuse_one(true, &narrowed)
             .expect_err("a leftover consent must be cleared deliberately, not honoured silently");
         assert_eq!(
             refusal.channels[0].faults,
@@ -2718,8 +2960,7 @@ mod tests {
             acknowledge_open_admission: vec!["dm=open".into()],
             ..Default::default()
         };
-        let refusal =
-            refuse_one("upgraded", true, &open).expect_err("the old spelling must not be honoured");
+        let refusal = refuse_one(true, &open).expect_err("the old spelling must not be honoured");
         assert_eq!(
             refusal.channels[0].faults,
             vec![OpenAdmissionFault::Unreadable {
@@ -2805,7 +3046,7 @@ mod tests {
                                 // the gate accepts. A shape the operator cannot
                                 // acknowledge is a wedge, not a gate.
                                 for enabled in [false, true] {
-                                    refuse_one("sat", enabled, &acknowledged(enabled, &policy))
+                                    refuse_one(enabled, &acknowledged(enabled, &policy))
                                         .unwrap_or_else(|e| {
                                             panic!(
                                                 "the advertised token must be accepted for \
@@ -2942,7 +3183,7 @@ mod tests {
             // The refusal must NAME what is open, whatever the fault is — an
             // operator asked to re-consent has to see what they consent to.
             let refusal =
-                refuse_one("s", true, policy).expect_err("an unacknowledged open shape refuses");
+                refuse_one(true, policy).expect_err("an unacknowledged open shape refuses");
             let msg = refusal.to_string();
             assert!(
                 msg.contains(&found[0].found) && msg.contains(found[0].consequence()),
