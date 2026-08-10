@@ -27,6 +27,7 @@ pub mod media;
 pub mod mock;
 pub mod outgoing;
 pub mod probe;
+pub mod untrusted;
 pub mod webhook;
 
 pub use actions::{ActionSupport, NativeActions};
