@@ -192,6 +192,17 @@ fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
 /// Returns `None` if the directory cannot be represented in an SBPL regex
 /// literal — a `"` would close the literal and a `\` would start an escape.
 /// Failing closed there costs `mktemp`; failing open would be an injection.
+///
+/// **The counted classes are written out, not `{10}`.** SBPL's regex engine
+/// does not implement the bounded-repetition interval, and it does not say so:
+/// a profile containing `{10}` loads without complaint and the rule then never
+/// matches anything. Measured on Darwin 25.3.0 against raw `sandbox-exec` —
+/// with `{10}` `mktemp` returned `Operation not permitted`; with the same
+/// pattern's interval expanded to ten `[A-Za-z0-9]` classes it succeeded, and
+/// the wide control `^<T>/` succeeded too, which is what separates "the engine
+/// rejected my syntax" from "regex grants do not work here". A construct that
+/// silently never matches is the worst failure mode available in a security
+/// policy, so it is named here rather than left as a magic expansion.
 fn darwin_temp_regex(dir: &std::path::Path) -> Option<String> {
     let text = dir.to_string_lossy();
     if text.contains('"') || text.contains('\\') {
@@ -206,8 +217,11 @@ fn darwin_temp_regex(dir: &std::path::Path) -> Option<String> {
         }
         prefix.push(ch);
     }
+    let alnum = "[A-Za-z0-9]";
+    let ten = alnum.repeat(10); // mktemp's XXXXXXXXXX
+    let eight = alnum.repeat(8); // xcrun_db-XXXXXXXX
     Some(format!(
-        "^{prefix}/([A-Za-z0-9_][A-Za-z0-9_.-]*\\.[A-Za-z0-9]{{10}}(/.*)?|xcrun_db-[A-Za-z0-9]{{8}})$"
+        "^{prefix}/([A-Za-z0-9_][A-Za-z0-9_.-]*\\.{ten}(/.*)?|xcrun_db-{eight})$"
     ))
 }
 
@@ -1146,6 +1160,19 @@ mod tests {
         let rx = darwin_temp_regex(std::path::Path::new("/private/var/a.b/T"))
             .expect("an ordinary dotted component is representable");
         assert!(rx.contains("a\\.b"), "unescaped regex metacharacter: {rx}");
+
+        // SBPL's regex engine has no `{n}` interval and does not report one —
+        // the rule simply never matches, which on Darwin 25.3.0 left `mktemp`
+        // at "Operation not permitted" while the profile loaded cleanly.
+        assert!(
+            !rx.contains('{'),
+            "a bounded-repetition interval silently never matches under SBPL: {rx}"
+        );
+        assert_eq!(
+            rx.matches("[A-Za-z0-9]").count(),
+            18,
+            "the ten mktemp and eight xcrun_db positions must be written out: {rx}"
+        );
     }
 
     /// The new grant must not outrank a secret deny. SBPL is last-match-wins
