@@ -25,6 +25,18 @@
 //! Resource limits enforced via `--rlimit-as` / pre-exec setrlimit wrapper.
 //! Returns `ResourceLimitEnforcement::BestEffort` because rlimit is subject
 //! to OOM-killer races and Linux's overcommit semantics.
+//!
+//! `SandboxManifest::fs_metadata_read_allow` is deliberately NOT translated
+//! here, and that is not an oversight. bwrap builds the child's mount namespace
+//! CONSTRUCTIVELY: a path that was never bound is absent, so `stat` on it
+//! returns **ENOENT**, not EPERM. Measured on Ubuntu 24.04 / kernel 6.8 with
+//! `/root` unbound: `os.stat("/root/.gitconfig")` → `errno 2 No such file or
+//! directory`. That is strictly LESS information than a metadata grant asks
+//! for, and it is the answer libgit2 already tolerates — which is why `cargo
+//! new` works on Linux and died on macOS. Binding the path `--ro-bind` to
+//! satisfy the grant would hand the child the file's CONTENTS, a widening the
+//! caller never asked for, so the entry is dropped instead.
+//! `bwrap_argv_never_binds_a_metadata_only_path` pins that.
 
 use super::SandboxBackend;
 use crate::error::{Result, SandboxError};

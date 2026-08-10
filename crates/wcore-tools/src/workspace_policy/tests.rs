@@ -997,3 +997,133 @@ fn trusted_local_keeps_the_operators_own_git_config() {
         );
     }
 }
+
+/// The `contained` profile must let a child STAT both paths libgit2 probes for
+/// a global git configuration.
+///
+/// libgit2 derives them from `$HOME` / `$XDG_CONFIG_HOME` and ignores
+/// `GIT_CONFIG_GLOBAL`, so the redirect in `git_config_env` — which does fix
+/// `git(1)` — leaves `cargo new` dead: measured on Darwin 25.3.0, exit 101,
+/// `failed to stat '<home>/.gitconfig'; class=Config (7)`. Under seatbelt an
+/// ungranted path is EPERM and libgit2 treats that as fatal; ENOENT it would
+/// have tolerated, which is why the identical code works on Linux bwrap.
+///
+/// BOTH paths, not just the first: with only `~/.gitconfig` granted, a host
+/// that has an XDG git config failed identically one path along (measured).
+#[test]
+fn contained_grants_stat_on_both_libgit2_global_config_probes() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let home = dirs::home_dir().expect("home directory");
+    let granted = policy.metadata_readable_roots();
+    for expected in [
+        home.join(".gitconfig"),
+        home.join(".config").join("git").join("config"),
+    ] {
+        assert!(
+            granted.contains(&expected),
+            "libgit2 probes {expected:?} and dies on EPERM; granted={granted:?}"
+        );
+    }
+}
+
+/// The grant must NOT be gated on the file existing.
+///
+/// A bwrap-shaped intuition ("no file, no problem") is wrong here: seatbelt
+/// answers EPERM for an ungranted path whether or not it exists. Measured — a
+/// profile granting metadata on a decoy path instead left `cargo new` at exit
+/// 101 with the same `failed to stat` error, on the same host.
+#[test]
+fn contained_metadata_grant_is_not_gated_on_existence() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let granted = policy.metadata_readable_roots();
+    assert_eq!(
+        granted.len(),
+        2,
+        "both probes must be granted unconditionally, not filtered by exists(); \
+         granted={granted:?}"
+    );
+    for path in &granted {
+        assert!(
+            path.is_absolute(),
+            "seatbelt needs a literal path: {path:?}"
+        );
+    }
+}
+
+/// A metadata grant must never become a READ grant. `~/.gitconfig` carries the
+/// operator's identity and any `[url … insteadOf]` rewrite, which can embed a
+/// credential — the exact thing `git_config_env` was written to keep away from
+/// untrusted workspace content.
+#[test]
+fn contained_never_makes_the_global_git_config_readable() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let readable = policy.readable_roots();
+    let metadata = policy.metadata_readable_roots();
+    // Without this the assertion below is satisfied by an EMPTY grant list —
+    // confirmed by mutation: reverting the policy to `Vec::new()` left this
+    // test green while the other three went red.
+    assert!(
+        !metadata.is_empty(),
+        "nothing was granted, so the no-widening assertion would be vacuous"
+    );
+    for metadata_only in metadata {
+        assert!(
+            !readable.iter().any(|root| metadata_only.starts_with(root)),
+            "{metadata_only:?} became readable via {readable:?}"
+        );
+    }
+}
+
+/// The interpreter grant gives the contained shell a package manager's PROGRAM
+/// FILES and never its configuration or its state.
+///
+/// Before this the contained profile knew only about Rust, so `node` and `npm`
+/// were exit 127 on a Homebrew host — not because the tool was missing but
+/// because `ls -l /opt/homebrew/bin/node` was `Operation not permitted`. The
+/// repair must not swing to the other extreme: `<prefix>/var` holds live
+/// service state (`postgresql@16`, `postgresql@17` on the host this was
+/// measured on) and `<prefix>/etc` holds service configuration.
+#[test]
+fn contained_interpreter_grant_excludes_package_manager_config_and_state() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let readable = WorkspacePolicy::contained(dir.path()).readable_roots();
+    let mut saw_a_prefix = false;
+    for prefix in ["/opt/homebrew", "/opt/local", "/usr/local"] {
+        let prefix = Path::new(prefix);
+        if !prefix.exists() {
+            continue;
+        }
+        for root in &readable {
+            if !root.starts_with(prefix) {
+                continue;
+            }
+            saw_a_prefix = true;
+            assert_ne!(
+                root.as_path(),
+                prefix,
+                "the whole package prefix was granted to untrusted content"
+            );
+            for forbidden in ["var", "Caskroom", "Library"] {
+                assert!(
+                    !root.starts_with(prefix.join(forbidden)),
+                    "{root:?} reaches {forbidden} — configuration/state, not program files"
+                );
+            }
+            // `etc` yields exactly one thing: the OpenSSL config FILE that
+            // every keg-linked binary opens at init. Never the directory —
+            // an OpenSSL etc directory has a `private/` sibling.
+            if root.starts_with(prefix.join("etc")) {
+                assert!(
+                    root.is_file() && root.file_name() == Some(std::ffi::OsStr::new("openssl.cnf")),
+                    "{root:?} is an etc grant that is not the openssl config file"
+                );
+            }
+        }
+    }
+    if !saw_a_prefix {
+        eprintln!("note: no package-manager prefix on this host; prefix assertions vacuous");
+    }
+}

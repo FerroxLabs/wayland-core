@@ -392,3 +392,75 @@ async fn bwrap_still_runs_the_host_toolchains() {
         "no toolchain was exercised — this regression gate proved nothing"
     );
 }
+
+/// `fs_metadata_read_allow` must not become a readable bind on bwrap.
+///
+/// The field exists for seatbelt, where an ungranted path is EPERM and libgit2
+/// treats that as fatal. bwrap has no metadata-only bind, so the only way to
+/// "honour" the grant here would be `--ro-bind`, which hands over the file's
+/// CONTENTS — a widening the caller never asked for. The backend drops the
+/// entry instead, and it can afford to: bwrap builds the namespace
+/// constructively, so the unbound path answers ENOENT, which is exactly the
+/// answer libgit2 tolerates. Measured on Ubuntu 24.04 / kernel 6.8 with `/root`
+/// unbound: `stat("/root/.gitconfig")` → errno 2.
+///
+/// Both controls, per this file's discipline: the child must prove it ran, and
+/// the same read with the sandbox OFF must produce the secret.
+#[tokio::test]
+async fn bwrap_never_binds_a_metadata_only_path() {
+    const PROBE: &str = "metadata_only_path";
+    let Some(backend) = backend() else {
+        eprintln!("skip {PROBE}: bwrap not available");
+        return;
+    };
+    let Some(sh) = bin("sh") else {
+        eprintln!("skip {PROBE}: no sh");
+        return;
+    };
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    // Outside the workspace, so the ONLY thing that could expose it is the
+    // metadata grant being translated into a bind.
+    let outside = tempfile::tempdir().expect("tempdir");
+    let secret = std::fs::canonicalize(outside.path())
+        .expect("canonicalize")
+        .join(".gitconfig");
+    let marker = "WLMETADATAONLYSECRETMARKER";
+    std::fs::write(&secret, format!("[user]\n\tname = {marker}\n")).expect("write secret");
+
+    let nonce = nonce(PROBE);
+    let body = format!("cat {} ; stat -c %s {}", secret.display(), secret.display());
+    let argv = probe_argv(&sh, &nonce, &body);
+
+    // NEGATIVE CONTROL — with no sandbox the marker IS observable, so the
+    // assertion below measures the sandbox and not a missing file.
+    let control = unsandboxed(&root, &argv);
+    assert_child_ran(PROBE, &nonce, "sandbox OFF", &control);
+    assert!(
+        control.contains(marker),
+        "{PROBE}: NEGATIVE CONTROL DID NOT FIRE — {control:?}"
+    );
+
+    let mut manifest = workspace_manifest(&root);
+    manifest.fs_metadata_read_allow = vec![secret.clone()];
+    let out = backend
+        .execute(
+            &manifest,
+            SandboxCommand {
+                argv,
+                cwd: Some(root.clone()),
+            },
+        )
+        .await
+        .expect("bwrap execute");
+    let observed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_child_ran(PROBE, &nonce, "sandbox ON", &observed);
+    assert!(
+        !observed.contains(marker),
+        "{PROBE}: a metadata grant was widened into a content read — {observed:?}"
+    );
+}

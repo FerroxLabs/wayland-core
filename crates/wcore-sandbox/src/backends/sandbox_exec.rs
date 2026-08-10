@@ -83,6 +83,7 @@ fn ancestor_directories(
         .fs_read_allow
         .iter()
         .chain(manifest.fs_write_allow.iter())
+        .chain(manifest.fs_metadata_read_allow.iter())
         .map(|p| p.as_path())
         .chain(darwin_temp);
     for path in granted {
@@ -404,6 +405,51 @@ impl SandboxExecBackend {
                 p.push_str(&format!("(allow file-read* (regex #\"{rx}\"))\n"));
                 p.push_str(&format!("(allow file-write* (regex #\"{rx}\"))\n"));
             }
+        }
+        // Metadata-only grants (`SandboxManifest::fs_metadata_read_allow`).
+        // `literal`, never `subpath`: the caller is naming ONE file it needs the
+        // child to be able to `stat`, and a subpath would hand over the whole
+        // directory's metadata and let `realpath` walk it. `file-read-metadata`
+        // does NOT permit reading contents and does NOT permit `readdir` — the
+        // same operation the ancestor block below relies on, live-verified in
+        // `live_integrity_macos.rs`.
+        //
+        // A denied path is SKIPPED here rather than emitted and overridden
+        // later, because "emitted and overridden later" does not work.
+        //
+        // SBPL is last-match-wins only WITHIN one operation. It resolves across
+        // operations by specificity, and `file-read-metadata` is more specific
+        // than the `file-read*` wildcard the deny block emits. Measured on
+        // Darwin 25.3.0, and it is why the live negative control failed on the
+        // first CI cycle rather than in review:
+        //
+        //   (allow file-read-metadata (literal F))
+        //   (deny  file-read*         (subpath  F))   <- later, and LOSES
+        //   $ stat -f %z F  ->  12          # the deny did not bite
+        //
+        // whereas the same deny after a WILDCARD allow does bite:
+        //
+        //   (allow file-read* (subpath <dir>))
+        //   (deny  file-read* (subpath F))
+        //   $ stat -f %z F  ->  Operation not permitted
+        //
+        // So the deny is enforced HERE, at profile construction, by never
+        // minting the grant: fail-closed by omission, and independent of any
+        // precedence subtlety in a future macOS revision. `starts_with` so a
+        // deny on an ancestor directory covers the file underneath it.
+        for path in &manifest.fs_metadata_read_allow {
+            reject_unsafe_path(path)?;
+            if manifest
+                .fs_read_deny
+                .iter()
+                .any(|denied| path.starts_with(denied))
+            {
+                continue;
+            }
+            p.push_str(&format!(
+                "(allow file-read-metadata (literal \"{}\"))\n",
+                escape_sbpl_string(&path.to_string_lossy())
+            ));
         }
         // Path-resolution ancestors. `file-read-metadata` is the narrowest
         // seatbelt operation that satisfies `stat`/`lstat`/`realpath`: it does
@@ -789,6 +835,120 @@ mod tests {
         assert!(
             p.contains("(allow file-read-metadata (literal \"/Users/al\\\"ice\"))"),
             "quote in an ancestor path must be escaped:\n{p}"
+        );
+    }
+
+    /// `fs_metadata_read_allow` must produce a METADATA grant and nothing else.
+    ///
+    /// The whole point of the channel is that the child learns the file exists
+    /// without reading a byte of it, so a `file-read*` grant on the same path —
+    /// in either the `literal` or the `subpath` spelling — is the failure this
+    /// pins. `/Users/alice/.gitconfig` is the real caller: libgit2 hard-errors
+    /// on the EPERM seatbelt returns for an ungranted path, and the file holds
+    /// the operator's identity and any `[url … insteadOf]` credential rewrite.
+    #[test]
+    fn metadata_read_allow_grants_metadata_and_never_content() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.gitconfig".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/alice/.gitconfig\"))"),
+            "metadata grant missing; libgit2 dies on the EPERM without it:\n{p}"
+        );
+        for widened in [
+            "(allow file-read* (subpath \"/Users/alice/.gitconfig\"))",
+            "(allow file-read* (literal \"/Users/alice/.gitconfig\"))",
+            "(allow file-read-data (literal \"/Users/alice/.gitconfig\"))",
+            "(allow file-read-metadata (subpath \"/Users/alice/.gitconfig\"))",
+        ] {
+            assert!(
+                !p.contains(widened),
+                "metadata grant widened into a content read: {widened}\n{p}"
+            );
+        }
+        // The ancestors it needs to be reachable are metadata-only too, and the
+        // home directory itself must not become readable.
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/alice\"))"),
+            "metadata grant needs its ancestors resolvable:\n{p}"
+        );
+        assert!(
+            !p.contains("(allow file-read* (subpath \"/Users/alice\"))"),
+            "metadata grant must not make the home directory readable:\n{p}"
+        );
+    }
+
+    /// A metadata grant must lose to `fs_read_deny` — and it can only do that
+    /// by never being emitted.
+    ///
+    /// Ordering is NOT enough, which is the whole reason this test exists in
+    /// this shape. Measured on Darwin 25.3.0: `(deny file-read* (subpath F))`
+    /// placed AFTER `(allow file-read-metadata (literal F))` does not stop
+    /// `stat F` — SBPL breaks ties across operations by specificity, and the
+    /// wildcard deny is less specific than the metadata allow. The first
+    /// version of this change relied on order and the live negative control on
+    /// a real macOS kernel caught it.
+    #[test]
+    fn a_denied_path_never_receives_a_metadata_grant() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.gitconfig".into()],
+            fs_read_deny: vec!["/Users/alice/.gitconfig".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            !p.contains("(allow file-read-metadata (literal \"/Users/alice/.gitconfig\"))"),
+            "a denied path was granted stat; ordering does not save this:\n{p}"
+        );
+        assert!(
+            p.contains("(deny file-read* (subpath \"/Users/alice/.gitconfig\"))"),
+            "the deny itself must still be emitted:\n{p}"
+        );
+    }
+
+    /// The deny wins through a parent directory too, not only on an exact
+    /// path match — otherwise denying a credential DIRECTORY would leave every
+    /// file under it stat-able by name.
+    #[test]
+    fn a_metadata_grant_under_a_denied_directory_is_also_withheld() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.config/git/config".into()],
+            fs_read_deny: vec!["/Users/alice/.config".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            !p.contains("(allow file-read-metadata (literal \"/Users/alice/.config/git/config\"))"),
+            "a deny on the parent directory must withhold the grant:\n{p}"
+        );
+        // A SIBLING of the denied tree is unaffected — the filter must be a
+        // prefix test, not "any deny disables every metadata grant".
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.gitconfig".into()],
+            fs_read_deny: vec!["/Users/alice/.config".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/alice/.gitconfig\"))"),
+            "an unrelated deny must not withhold this grant:\n{p}"
+        );
+    }
+
+    /// The same malformed-path refusal the content channels get. A NUL or
+    /// newline cannot be represented in an SBPL string, and silently mangling
+    /// it would emit a profile that grants something the caller never named.
+    #[test]
+    fn metadata_read_allow_rejects_a_path_that_cannot_be_represented() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.git\nconfig".into()],
+            ..Default::default()
+        };
+        assert!(
+            SandboxExecBackend::build_profile(&m).is_err(),
+            "a newline-bearing metadata path must be refused, not mangled"
         );
     }
 

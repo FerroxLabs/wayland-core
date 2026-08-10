@@ -134,6 +134,11 @@ fn build_sandbox_pieces_for_session(
         // tools' dynamic `is_project_secret` guard already avoids. Local-keyboard
         // (Trusted, no project-secret denial) is returned unchanged, no walk.
         manifest.fs_read_deny = p.secret_deny_paths_dynamic();
+        // Stat-only, never content — see
+        // `SandboxManifest::fs_metadata_read_allow`. Assigned after
+        // `fs_read_deny` for readability only: SBPL last-match-wins is what
+        // makes the deny authoritative, and the backend emits in that order.
+        manifest.fs_metadata_read_allow = p.metadata_readable_roots();
         // The policy's confined values REPLACE any same-named entry the
         // ambient passthrough already contributed, rather than being appended
         // beside it.

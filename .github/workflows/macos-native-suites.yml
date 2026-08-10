@@ -177,7 +177,13 @@ jobs:
             grep -E "running [0-9]+ test|test result|skip:" "${log}" || true
           }
           check_suite hard_process_containment_macos /tmp/containment.log 1
-          check_suite live_integrity_macos /tmp/integrity.log 1
+          # 2 = required_live_macos_retained_directory_confines_writes and
+          # required_live_macos_metadata_grant_permits_stat_and_nothing_else.
+          # This number is a PIN, not a formality: it is what caught the second
+          # case being added, and it is the only thing standing between this
+          # gate and a suite that quietly stops collecting a case. Bump it in
+          # the same commit that adds or removes a `required_live_macos_*` test.
+          check_suite live_integrity_macos /tmp/integrity.log 2
           echo "=== recorded cargo exit codes ==="
           cat /tmp/containment.rc /tmp/integrity.rc 2>/dev/null || echo "(none recorded)"
           if [ "${fail}" -ne 0 ]; then

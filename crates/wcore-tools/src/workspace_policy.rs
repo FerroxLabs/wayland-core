@@ -124,6 +124,16 @@ pub struct WorkspacePolicy {
     /// `readable_extra` because the network posture is set AFTER construction
     /// (`with_network`), so the decision cannot be taken in the constructor.
     network_scoped_readable: Vec<PathBuf>,
+    /// Paths the child may `stat` but never read — see
+    /// [`wcore_sandbox::SandboxManifest::fs_metadata_read_allow`] for the
+    /// backend contract and [`discovery::libgit2_global_config_probes`] for the
+    /// only thing that currently needs it.
+    ///
+    /// Held apart from `readable_extra` on purpose: these are NOT readable
+    /// roots. Folding them in would hand the child the file's contents, which
+    /// for `~/.gitconfig` means the operator's identity and any
+    /// `[url … insteadOf]` rewrite they have configured.
+    metadata_readable: Vec<PathBuf>,
     network: NetworkPolicy,
     cache_env: Vec<(String, String)>,
     /// Additional authority roots that must be unreadable to Bash even when a
@@ -214,6 +224,10 @@ impl WorkspacePolicy {
             writable_extra,
             readable_extra,
             network_scoped_readable,
+            // Nothing to grant: `trusted_config_and_certificate_reads` already
+            // gives this profile the CONTENTS of `~/.gitconfig`, so the
+            // metadata channel would be redundant here.
+            metadata_readable: Vec::new(),
             // #657: the bare constructor is fail-safe — network is seeded from
             // `default_bash_network_policy()`, an unconditional Deny.
             // Network egress is granted only for a GENUINELY-LOCAL session, and
@@ -252,7 +266,7 @@ impl WorkspacePolicy {
                 )
             })
             .collect();
-        let readable_extra = minimal_toolchain_read_dirs();
+        let readable_extra = contained_toolchain_read_dirs();
         let network_scoped_readable = Vec::new();
         let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
         cache_env.extend(temp_env(&writable_extra));
@@ -264,6 +278,7 @@ impl WorkspacePolicy {
             writable_extra,
             readable_extra,
             network_scoped_readable,
+            metadata_readable: libgit2_global_config_probes(),
             // #657: a Contained (untrusted / remote `Workspace`) posture runs
             // potentially attacker-influenced content, so egress stays DENIED to
             // keep the exfil boundary tight. The operator's config-file
@@ -315,7 +330,7 @@ impl WorkspacePolicy {
             }
         }
 
-        let readable_extra = minimal_toolchain_read_dirs();
+        let readable_extra = contained_toolchain_read_dirs();
         let network_scoped_readable = Vec::new();
         let writable_extra = vec![scratch.clone()];
         let mut cache_env = CACHE_ENV_DIRS
@@ -337,6 +352,13 @@ impl WorkspacePolicy {
                 scratch.join("tmp").to_string_lossy().into_owned(),
             )
         }));
+        // Same redirect `contained` applies, for the same reason: this profile
+        // does not grant `$HOME/.gitconfig` either, and git opens it
+        // unconditionally, so without this every `git` invocation inside a
+        // delegated forge dies at exit 128 under seatbelt. `deny_git_authority_env`
+        // strips an AMBIENT `GIT_CONFIG*` out of the passthrough; this is the
+        // policy's own value and is applied after that filter, on purpose.
+        cache_env.extend(git_config_env(&scratch.join("cache")));
 
         // The delegated child's TMPDIR/TMP/TEMP and tool caches resolve UNDER
         // the private scratch root; those subdirectories must exist and be
@@ -365,6 +387,7 @@ impl WorkspacePolicy {
             writable_extra,
             readable_extra,
             network_scoped_readable,
+            metadata_readable: libgit2_global_config_probes(),
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             authority_read_deny: protected.clone(),
@@ -413,6 +436,15 @@ impl WorkspacePolicy {
         v.sort();
         v.dedup();
         v
+    }
+    /// Paths the child may `stat` but never read the contents of.
+    ///
+    /// Deliberately NOT merged into [`Self::readable_roots`] — see the field
+    /// doc. Also deliberately not filtered by `exists()`: under seatbelt an
+    /// absent path is EPERM too, so a host with no `~/.gitconfig` needs the
+    /// grant just as much as one that has it.
+    pub fn metadata_readable_roots(&self) -> Vec<PathBuf> {
+        self.metadata_readable.clone()
     }
     pub fn network(&self) -> NetworkPolicy {
         self.network.clone()
@@ -1147,8 +1179,8 @@ pub fn operator_bash_network(allow_sandboxed_shell_network: bool) -> NetworkPoli
 
 mod discovery;
 use discovery::{
-    capability_roots, detect_developer_capabilities, minimal_toolchain_read_dirs,
-    network_scoped_reads, trusted_config_and_certificate_reads,
+    capability_roots, contained_toolchain_read_dirs, detect_developer_capabilities,
+    libgit2_global_config_probes, network_scoped_reads, trusted_config_and_certificate_reads,
 };
 
 #[cfg(test)]

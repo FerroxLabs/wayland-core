@@ -51,6 +51,18 @@ jobs:
       - name: cargo test -p wcore-sandbox --lib
         run: cargo test -p wcore-sandbox --lib -- --nocapture
 
+      # `--lib` does not reach `tests/`, so the live seatbelt boundary proofs
+      # were compiled by nobody and executed by nobody: `clippy --target
+      # aarch64-apple-darwin` on hetzner type-checks them, and this job only ran
+      # the unit tests. `--include-ignored` (not `--ignored`) so the suite's own
+      # zero-execution guard runs in the same invocation it is guarding.
+      - name: live seatbelt boundary proofs
+        env:
+          WAYLAND_SANDBOX_LIVE_MACOS: "1"
+        run: |
+          cargo test -p wcore-sandbox --test live_integrity_macos \
+            -- --include-ignored --nocapture
+
   artifact:
     name: build aarch64-apple-darwin
     # Only when the commit asks for it: a release build of wcore-cli is ~1 h of
