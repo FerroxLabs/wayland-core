@@ -534,6 +534,11 @@ mod windows_impl {
     mod shared_verdict;
     #[cfg(test)]
     mod tests;
+    // Kept out of `tests` because that file is already over the 1000-line
+    // limit, and because these cases must be runnable in isolation: they grade
+    // the process-global probe verdict BEFORE anything has probed.
+    #[cfg(test)]
+    mod read_deny_claim_tests;
     mod window_station;
 
     pub use process::AppContainerBackend;
