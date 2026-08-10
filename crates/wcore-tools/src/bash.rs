@@ -513,8 +513,14 @@ impl Tool for BashTool {
         }
         // Task 8 — exec-time capability gate. The same immutable session
         // runtime that executes the command decides whether it may run.
+        //
+        // The predicate is `shell_requires_os_read_deny()`, NOT
+        // `secret_read_deny_required()`: a session whose only shell principal is
+        // the local operator keeps its shell on a backend that cannot enforce
+        // OS read-deny (see `WorkspacePolicy::shell_requires_os_read_deny`).
+        // Every channel/remote, Managed and delegated principal is unchanged.
         if let Some(p) = ctx.workspace.as_deref()
-            && p.secret_read_deny_required()
+            && p.shell_requires_os_read_deny()
             && !backend.enforces_read_deny()
             && !backend.bypasses_containment()
         {
@@ -599,8 +605,9 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
+        // Same predicate as `execute_with_ctx` — see the note there.
         if let Some(p) = ctx.workspace.as_deref()
-            && p.secret_read_deny_required()
+            && p.shell_requires_os_read_deny()
             && !backend.enforces_read_deny()
             && !backend.bypasses_containment()
         {

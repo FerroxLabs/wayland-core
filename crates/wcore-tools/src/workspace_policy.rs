@@ -144,6 +144,18 @@ pub struct WorkspacePolicy {
     /// project-secret denial (`with_project_secret_deny`, i.e. Full/remote). A
     /// genuinely-local `Trusted` session leaves it false and keeps its shell.
     secret_read_deny_required: bool,
+    /// The ONLY principal that can drive this session's shell is the local
+    /// operator at their own keyboard — there is no channel/remote scope on the
+    /// engine that owns this policy. See
+    /// [`shell_requires_os_read_deny`](Self::shell_requires_os_read_deny) for
+    /// what it buys and why it is not `secret_read_deny_required`'s inverse.
+    ///
+    /// FAIL-SAFE DEFAULT: `false` in every constructor. A policy only becomes a
+    /// local-operator policy by an explicit
+    /// [`with_local_operator_principal`](Self::with_local_operator_principal) at
+    /// the one bootstrap seam that can see the channel scope, so a new
+    /// construction path cannot acquire the relaxation by omission.
+    local_operator_principal: bool,
     developer_capabilities: Arc<RwLock<Vec<DeveloperCapability>>>,
     /// Read-only roots approved by the local desktop host for this process
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
@@ -232,6 +244,7 @@ impl WorkspacePolicy {
             // Bash read-deny-enforcement gate does not apply. `with_project_secret_deny`
             // flips this to true for a Full/remote session (#667).
             secret_read_deny_required: false,
+            local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(developer_capabilities)),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
@@ -279,6 +292,7 @@ impl WorkspacePolicy {
             // Contained denies project secrets → Bash must be refused when the
             // backend can't enforce read-deny (else `cat .env` fails open).
             secret_read_deny_required: true,
+            local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
@@ -371,6 +385,9 @@ impl WorkspacePolicy {
             deny_git_authority_env: true,
             delegated_scratch: Some(scratch),
             secret_read_deny_required: true,
+            // A delegated mutation is issued BY an orchestrator, not typed by the
+            // operator, so it is never a local-operator principal.
+            local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         })
@@ -479,6 +496,64 @@ impl WorkspacePolicy {
         // must also be refused when the backend can't enforce read-deny.
         self.secret_read_deny_required = true;
         self
+    }
+
+    /// Declare that the only principal who can drive this session's shell is
+    /// the local operator at their own keyboard.
+    ///
+    /// Set at exactly one seam — `AgentBootstrap::build`, where
+    /// `channel_tool_posture` is known — and only when that scope is absent and
+    /// the execution policy is not Managed. Repository content cannot select it:
+    /// the input is the engine's own construction, never anything read off disk.
+    ///
+    /// Effect: [`shell_requires_os_read_deny`](Self::shell_requires_os_read_deny)
+    /// goes false, so `bash.rs` stops refusing the shell on a backend that
+    /// cannot enforce OS-level secret-read-deny. Nothing else moves —
+    /// `secret_read_deny_required` is untouched, so the OS deny LIST
+    /// ([`secret_deny_paths_dynamic`](Self::secret_deny_paths_dynamic)) is still
+    /// computed and still handed to the backend, and a backend that CAN enforce
+    /// it still does. The tool-layer `SecretDenyFs` on Read/Write/Edit is a
+    /// different guard entirely and is unaffected.
+    #[must_use]
+    pub fn with_local_operator_principal(mut self) -> Self {
+        self.local_operator_principal = true;
+        self
+    }
+
+    /// True when this policy's shell may only be driven by the local operator.
+    #[must_use]
+    pub fn local_operator_principal(&self) -> bool {
+        self.local_operator_principal
+    }
+
+    /// THE exec-time shell gate predicate: `Bash` must be REFUSED when this is
+    /// true and the active backend neither enforces read-deny nor is an
+    /// operator-requested containment bypass.
+    ///
+    /// It is `secret_read_deny_required` AND NOT `local_operator_principal`,
+    /// because the two flags answer different questions:
+    ///
+    /// * `secret_read_deny_required` — *does this policy's confidentiality story
+    ///   depend on the OS enforcing `fs_read_deny`?* True for `Contained` and for
+    ///   any `Trusted` policy that opted into project-secret denial.
+    /// * `local_operator_principal` — *who can drive the shell?* When the answer
+    ///   is "only the human who launched this process", the confidentiality the
+    ///   deny list protects is that human's own, from that human. The refusal
+    ///   buys nothing and costs the entire shell: it fires on every fresh clone
+    ///   (untrusted workspace ⇒ `contained`), and the product's own printed
+    ///   remedy — `--trust-workspace` — hands back a `trusted_local` policy with
+    ///   `secret_read_deny_required == false` and therefore the SAME uncontained
+    ///   shell, with no extra authority and no extra OS enforcement. A gate whose
+    ///   documented one-command bypass grants the identical capability is a
+    ///   usability cost, not a boundary.
+    ///
+    /// The refusal is UNCHANGED for every principal that is not the local
+    /// operator: channel/remote sessions of any posture, Managed execution
+    /// policy, and delegated orchestrator mutations all leave
+    /// `local_operator_principal` false and are still refused.
+    #[must_use]
+    pub fn shell_requires_os_read_deny(&self) -> bool {
+        self.secret_read_deny_required && !self.local_operator_principal
     }
 
     /// Deny explicit orchestrator authority roots to shell commands.
