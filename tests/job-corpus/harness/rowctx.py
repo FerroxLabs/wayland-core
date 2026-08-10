@@ -30,7 +30,8 @@ from .invariants import (
     TestWeakeningCheck,
     sealed_tests_check,
 )
-from .meter import HarnessLedger, Meter
+from .leakwatch import LeakWatch
+from .meter import HarnessLedger, Meter, PriceBook
 from .result import FAIL, NA, NOTE, PASS, UNPROVEN, Check, RowRecord
 from .runner import RowRunner, prepare_workspace
 from .world import FsSnapshot, GitState, IndependentTests, TestRun, sha256_file
@@ -86,6 +87,10 @@ class RowContext:
         test_authoring_globs: Sequence[str] = (),
         key_path: Optional[str] = None,
         key_sha256: Optional[str] = None,
+        leak_upstream: Optional[str] = None,
+        leak_scenario: Any = None,
+        leak_model: str = "jobcorpus-model",
+        price_file: Optional[str] = None,
     ) -> None:
         if not (workspace or fixture):
             raise ValueError("RowContext needs either a workspace or a fixture to copy")
@@ -106,6 +111,10 @@ class RowContext:
         self.seed_user_work = seed_user_work
 
         self.meter = Meter(meter_path or os.path.join(self.artifact_dir, "meter.jsonl"))
+        #: The prices the harness is prepared to state, pinned in a file.  A
+        #: model that is not in it is UNPRICED, and unpriced traffic is what
+        #: makes a product's "$0.00" a false statement rather than a small one.
+        self.prices = PriceBook(price_file)
         self.ledger = HarnessLedger()
         self.runner = RowRunner(
             row_id=row_id,
@@ -139,6 +148,18 @@ class RowContext:
             self.declared_scope,
             ignore=self.scope_ignore,
             not_applicable_reason=self.scope_not_applicable,
+        )
+        # INV-1 is not a row that stands beside the corpus; it is a condition on
+        # every job.  The watch plants the secrets and owns the wire, and grades
+        # whether anything of the user's left the machine — on this row, like
+        # the other four.
+        self._leak = LeakWatch(
+            row_id=row_id,
+            home=self.runner.home,
+            capture_dir=os.path.join(self.artifact_dir, "capture"),
+            upstream=leak_upstream,
+            scenario=leak_scenario,
+            model=leak_model,
         )
         self._indep: Optional[IndependentTests] = None
         self.git_before: Optional[GitState] = None
@@ -196,9 +217,26 @@ class RowContext:
 
     # -- lifecycle -------------------------------------------------------
     def __enter__(self) -> "RowContext":
+        # INV-1 first: the secrets and the recording endpoint have to be in
+        # place before the product can be started, and the env they need is
+        # merged into the runner's base environment rather than handed to the
+        # row, so a row cannot forget to pass it on.
+        self.runner.base_env.update(self._leak.seed())
+        for key in self.runner.scrubbed:
+            self.runner.base_env.pop(key, None)
+        self.record.world["leak_watch_base_url"] = self._leak.base_url
+
         self.git_before = GitState(self.workspace)
         if self.seed_user_work:
             self._dirty.seed()
+            # The harness just wrote those files AS THE USER.  Recording them
+            # is what gives INV-5.attribution something true to compare a
+            # product's "user edited N files" against; without it the ledger was
+            # empty on every row and the check could only ever fire on the
+            # trivial "claimed something, user did nothing" case.
+            self.ledger.record_edits(
+                sorted(self._dirty.seeded), "unsaved work the user left in the editor"
+            )
         self._weak.seed()
         if self.test_command:
             self._indep = IndependentTests(
@@ -224,7 +262,12 @@ class RowContext:
                     % (exc_type.__name__, exc),
                 )
             )
-        self.finish()
+        try:
+            self.finish()
+        finally:
+            # The recording endpoint holds a listening socket and a thread; a
+            # harness crash must not leave either behind for the next row.
+            self._leak.stop()
         return False
 
     # -- driving the product --------------------------------------------
@@ -235,6 +278,22 @@ class RowContext:
 
     def product_output(self) -> str:
         return self.runner.all_output(role="product")
+
+    @property
+    def provider_base_url(self) -> str:
+        """The harness-owned endpoint every row's provider must point at.
+
+        A row that configures its own provider and skips this takes itself out
+        of INV-1's view, which the invariant reports as UNPROVEN rather than
+        quietly passing.
+        """
+        return self._leak.base_url
+
+    def scenario(self, scenario: Any) -> None:
+        """Script the harness-owned endpoint's answers for this row."""
+        if self._leak.server is not None:
+            self._leak.server.scenario = scenario
+        self._leak.scenario = scenario
 
     # -- the harness acting as the user ----------------------------------
     def user_edit(self, relpath: str, content: bytes, reason: str = "user edit") -> str:
@@ -307,6 +366,31 @@ class RowContext:
 
         if self.test_command:
             self.run_independent_tests()
+
+        # INV-1 and INV-5 both read the wire, so the wire is read once, here,
+        # before anything is graded.  The meter's numbers are the recorder's:
+        # request count, model identity and token usage all come off captured
+        # bytes, none of them from anything the product said about itself.
+        product_ran = any(c.role == "product" for c in self.record.commands)
+        traffic = self._leak.traffic()
+        metered = self.meter.record_traffic(traffic, self.prices)
+        self.record.world["wire_traffic"] = traffic
+        self.record.world["metered_requests"] = metered
+        self.record.world["price_book"] = {
+            "path": self.prices.path,
+            "loaded": self.prices.loaded,
+            "error": self.prices.error,
+            "models": sorted(self.prices.models),
+        }
+        leak_checks = self._leak.check(product_ran)
+        self._leak.stop()
+        self.record.world["leak_watch"] = {
+            "planted": [p.to_dict() for p in self._leak.planted],
+            "requests": self._leak.manifest().get("request_count", 0),
+            "scan": self._leak.scan,
+            "mechanical_control": self._leak.mechanical,
+        }
+        self.record.add_checks(leak_checks)
 
         if self.meter.path and os.path.exists(self.meter.path):
             self.meter.load()

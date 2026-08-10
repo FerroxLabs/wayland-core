@@ -35,6 +35,17 @@ row that forgot them fails loudly at load rather than quietly at grade time:
                    changes nothing sets DECLARED_SCOPE = [] and states
                    SCOPE_NOT_APPLICABLE = "why" — and then ANY change fails
                    INV-4, which is the point.
+
+THE PROVIDER ENDPOINT.  RowContext puts a harness-owned recording endpoint
+between the product and its provider and writes a config pointing at it into
+the row's isolated HOME, so by default every row is already in INV-1's view and
+already feeding INV-5's meter.  A row that writes its own provider config MUST
+point it at `ctx.provider_base_url`; a row that needs real model behaviour sets
+`leak_upstream=` (or exports JOB_CORPUS_UPSTREAM_BASE_URL) and the endpoint
+relays verbatim while still recording.  A row that does neither takes itself out
+of observation, and INV-1 reports that as UNPROVEN by name rather than passing
+quietly.  `ctx.scenario(...)` scripts the endpoint's answers for rows that want
+a deterministic model.
 """
 
 from __future__ import annotations

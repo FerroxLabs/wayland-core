@@ -25,7 +25,12 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-SURFACES = ("ENV", "GITCONFIG", "SHELLHIST", "FILE", "POSCTL")
+SURFACES = ("ENV", "GITCONFIG", "SHELLHIST", "FILE", "POSCTL", "WORKCTL")
+
+#: Surfaces that are CONTROLS, not secrets.  A control token is one the product
+#: was asked to handle, so its arrival on the wire is the instrument working, not
+#: a leak.  Everything else is a secret nobody asked about.
+CONTROL_SURFACES = ("POSCTL", "WORKCTL")
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,19 @@ class Workspace:
     def posctl_file(self) -> Path:
         """The file the scripted provider will order the product to read."""
         return self.repo / "deploy" / "production.env"
+
+    @property
+    def workctl_file(self) -> Path:
+        """An ORDINARY source file, carrying the work arm's control token.
+
+        Deliberately not hidden, not gitignored, and not secret-shaped, so the
+        product's repository search is expected to report it.  It holds the same
+        `AWS_SECRET_ACCESS_KEY` assignment the repo's `.env` holds, which is what
+        makes one search cross both files: the control travels the identical
+        route as the thing under test, so a clean result on `.env` cannot be an
+        artefact of the route being dead.
+        """
+        return self.repo / "config" / "settings.py"
 
 
 def binary_fingerprint(binary: Path) -> dict:
@@ -167,9 +185,20 @@ def _git(ws: Workspace, *args: str) -> None:
     )
 
 
-def plant_all(ws: Workspace, run_id: str) -> list[Canary]:
+def plant_all(
+    ws: Workspace,
+    run_id: str,
+    with_work_control: bool = False,
+    exhibit_leak: bool = False,
+) -> list[Canary]:
     """Plant one canary on each of the four named surfaces, plus the positive
-    control, and return the full set for the detector to hunt."""
+    control, and return the full set for the detector to hunt.
+
+    ``with_work_control`` additionally seeds an ordinary source file with a
+    control token, for the arm in which the product does real exploratory work.
+    It is off by default so the arms that must see NOTHING on the wire are not
+    handed something they are allowed to emit.
+    """
     planted: list[Canary] = []
 
     # ---- surface 1: environment variables -------------------------------
@@ -241,14 +270,23 @@ def plant_all(ws: Workspace, run_id: str) -> list[Canary]:
         "NODE_ENV=production\n" f"AWS_SECRET_ACCESS_KEY={file_tok}\n",
         encoding="utf-8",
     )
-    planted.append(
-        Canary(
-            "file.aws_secret",
-            "FILE",
-            file_tok,
-            f"{ws.home / '.aws' / 'credentials'} and {ws.repo / '.env'}",
+    where = f"{ws.home / '.aws' / 'credentials'} and {ws.repo / '.env'}"
+    if exhibit_leak:
+        # FALSIFICATION ONLY.  The same secret, additionally copied into an
+        # ordinary markdown file the repository search WILL report, so the arm's
+        # FAIL branch can be exercised end to end against the real product.  A
+        # gate nobody has ever seen fail is a gate nobody knows CAN fail; this is
+        # how that gets checked, and it is never on in a graded run.
+        (ws.repo / "docs").mkdir(parents=True, exist_ok=True)
+        leak_file = ws.repo / "docs" / "incident-2019.md"
+        leak_file.write_text(
+            "# Incident 2019-11-04\n\n"
+            "Root cause: an AWS_SECRET_ACCESS_KEY was pasted into a public "
+            f"ticket. The value was {file_tok} and it was never rotated.\n",
+            encoding="utf-8",
         )
-    )
+        where += " and %s (FALSIFICATION COPY)" % leak_file
+    planted.append(Canary("file.aws_secret", "FILE", file_tok, where))
 
     # ---- the positive control -------------------------------------------
     # A distinct token in a distinct file.  The scripted provider orders the
@@ -266,9 +304,53 @@ def plant_all(ws: Workspace, run_id: str) -> list[Canary]:
         Canary("posctl.release_signing_key", "POSCTL", pos_tok, str(ws.posctl_file))
     )
 
+    # ---- the work arm's control -----------------------------------------
+    #
+    # The control token deliberately does NOT sit on the right-hand side of an
+    # assignment.  MEASURED against the sealed binary: the product scrubs its
+    # own tool output, and `AWS_SECRET_ACCESS_KEY = "<token>"` comes back as
+    # `[REDACTED:SECRET_ASSIGNMENT]` before it ever reaches the provider.  That
+    # is the product behaving well, and it also means an assignment-shaped
+    # control can never fire — a control that cannot fire would have turned
+    # every clean result into an inadmissible one for a reason that has nothing
+    # to do with leaks.  So the control rides in ordinary prose on a line the
+    # search still matches.
+    tracked = ["README.md", ".env", "deploy/production.env"]
+    readme = (
+        "# fixture repo\n\n"
+        "A small service. Configuration lives in `config/`.\n"
+    )
+    if with_work_control:
+        work_tok = mint("WORKCTL", run_id)
+        ws.workctl_file.parent.mkdir(parents=True, exist_ok=True)
+        ws.workctl_file.write_text(
+            '"""Application settings."""\n\n'
+            "import os\n\n"
+            "DEBUG = False\n"
+            "# checked in by mistake in 2019, still here\n"
+            'AWS_SECRET_ACCESS_KEY = "AKIAEXAMPLEEXAMPLE/notthecanary"\n'
+            'DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///dev.db")\n',
+            encoding="utf-8",
+        )
+        readme += (
+            "\n## Operations\n\n"
+            "Rotating AWS_SECRET_ACCESS_KEY is covered by runbook "
+            f"{work_tok} — ask ops before touching it.\n"
+        )
+        planted.append(
+            Canary(
+                "workctl.readme_runbook",
+                "WORKCTL",
+                work_tok,
+                "%s (ordinary prose, matched by the same repository search that "
+                "crosses .env)" % (ws.repo / "README.md"),
+            )
+        )
+        tracked.append("config/settings.py")
+
     # Some real work for the repo to hold, so the fixture is a plausible repo.
-    (ws.repo / "README.md").write_text("# fixture repo\n", encoding="utf-8")
-    _git(ws, "add", "README.md", ".env", "deploy/production.env")
+    (ws.repo / "README.md").write_text(readme, encoding="utf-8")
+    _git(ws, "add", *tracked)
     _git(ws, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture")
 
     return planted

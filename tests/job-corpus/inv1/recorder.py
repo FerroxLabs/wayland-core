@@ -26,6 +26,7 @@ the grader reads the wire, not a summary of the wire.
 from __future__ import annotations
 
 import http.client
+import itertools
 import json
 import threading
 import time
@@ -72,9 +73,23 @@ def sse_text(text: str, model: str = "jobcorpus-model") -> bytes:
     return out
 
 
+_CALL_SEQ = itertools.count(1)
+
+
 def sse_tool_call(
-    name: str, arguments: dict, call_id: str = "call_jobcorpus_1", model: str = "jobcorpus-model"
+    name: str, arguments: dict, call_id: str | None = None, model: str = "jobcorpus-model"
 ) -> bytes:
+    """One scripted tool call.
+
+    The id is unique per call by default.  Reusing one id across turns is not a
+    cosmetic sin: the product's durable journal keys hook authority on
+    (turn, call_id, index) and rejects the second turn outright — "duplicate
+    hook phase authority ... PreToolUse" — so every tool call after the first
+    silently does not run.  A scripted scenario that does that is measuring the
+    harness's own bug, not the product.
+    """
+    if call_id is None:
+        call_id = "call_jobcorpus_%d" % next(_CALL_SEQ)
     delta = {
         "role": "assistant",
         "content": None,
@@ -89,6 +104,19 @@ def sse_tool_call(
     }
     out = _chunk(_envelope(delta, None, model))
     out += _chunk(_envelope({}, "tool_calls", model))
+    # A real OpenAI-compatible provider reports usage on a tool-call turn too.
+    # Omitting it made the harness's own endpoint the reason a turn came out
+    # "unpriced", which would have been the fixture incriminating the product.
+    out += _chunk(
+        {
+            "id": "jobcorpus-1",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
     out += b"data: [DONE]\n\n"
     return out
 
@@ -147,6 +175,35 @@ def positive_control_scenario(target_path: str) -> Scenario:
     )
 
 
+def work_scenario(repo: Path, control_file: Path, readme: Path) -> Scenario:
+    """Ordinary exploratory work: search the repo, read a file, look around.
+
+    This is the arm that matters.  The ``posctl`` scenario asks for one file by
+    name and the ``inert`` scenario asks for nothing at all in 0.19 seconds —
+    neither of them is how a secret actually escapes.  A secret escapes while
+    the agent is doing the job you gave it: grepping a tree, opening files,
+    listing a directory, and shipping everything it found to the model.
+
+    Turn 1 is the load-bearing one.  A single repository-wide search crosses
+    BOTH a secret-shaped file (``.env``, whose canary must never appear) and an
+    ordinary source file (``control_file``, whose canary must).  One grep, one
+    request body, one detector: the control and the thing under test travel the
+    identical route, so a clean result cannot be an artefact of the route being
+    dead.
+    """
+    return Scenario(
+        turns=[
+            lambda _req: sse_tool_call(
+                "Grep", {"pattern": "AWS_SECRET_ACCESS_KEY", "path": str(repo)}
+            ),
+            lambda _req: sse_tool_call("Read", {"file_path": str(control_file)}),
+            lambda _req: sse_tool_call("Read", {"file_path": str(readme)}),
+            lambda _req: sse_tool_call("Bash", {"command": "ls -la"}),
+            lambda _req: sse_text("Explored the repository."),
+        ]
+    )
+
+
 def inert_scenario() -> Scenario:
     """Answers immediately with text and requests no tool.  Used as the
     negative control: nothing the product was not asked for should appear."""
@@ -156,6 +213,86 @@ def inert_scenario() -> Scenario:
 # --------------------------------------------------------------------------
 # The server
 # --------------------------------------------------------------------------
+
+
+def _loads(raw: bytes):
+    try:
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _model_of(req: dict, response: bytes) -> str | None:
+    """The model identity as it appears ON THE WIRE.
+
+    Preference order is deliberate: what the product ASKED for is what the
+    product is accountable for.  The provider's echo is the fallback, because a
+    provider is free to substitute (and when it does, the substitution is the
+    interesting fact, not the request).
+    """
+    asked = req.get("model")
+    if isinstance(asked, str) and asked:
+        return asked
+    for obj in _response_objects(response):
+        got = obj.get("model")
+        if isinstance(got, str) and got:
+            return got
+    return None
+
+
+def _response_objects(response: bytes) -> list[dict]:
+    """Every JSON object in a response, plain or server-sent-events."""
+    if not response:
+        return []
+    whole = _loads(response)
+    if isinstance(whole, dict):
+        return [whole]
+    out: list[dict] = []
+    for line in response.split(b"\n"):
+        line = line.strip()
+        if line.startswith(b"data:"):
+            line = line[5:].strip()
+        if not line or line == b"[DONE]":
+            continue
+        obj = _loads(line)
+        if isinstance(obj, dict):
+            out.append(obj)
+    return out
+
+
+#: Token-count field names, in the two shapes the wire actually uses.
+_USAGE_KEYS = (
+    ("prompt_tokens", "completion_tokens"),  # OpenAI-compatible
+    ("input_tokens", "output_tokens"),  # Anthropic-compatible
+)
+
+
+def _usage_from_response(response: bytes) -> dict:
+    """Token counts as the PROVIDER reported them, or nothing.
+
+    Returning nothing is a first-class outcome: a request whose token cost the
+    harness could not read is a request the harness cannot price, and saying so
+    is what stops `$0.00` being manufactured out of silence.
+    """
+    for obj in _response_objects(response):
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for in_key, out_key in _USAGE_KEYS:
+            if in_key in usage or out_key in usage:
+                return {
+                    "input_tokens": _int_or_none(usage.get(in_key)),
+                    "output_tokens": _int_or_none(usage.get(out_key)),
+                    "source": "provider_usage",
+                }
+    return {"input_tokens": None, "output_tokens": None, "source": None}
+
+
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -168,6 +305,12 @@ class Capture:
     headers: dict[str, str]
     body: bytes
     content_encoding: str | None
+    #: The bytes this endpoint sent back.  Retained because the provider's own
+    #: `usage` block is the only honest token count available to the harness:
+    #: a token figure the PRODUCT reports is a claim, and INV-5 exists to check
+    #: claims against something else.
+    response_body: bytes = b""
+    response_status: int | None = None
 
     def sidecar(self) -> dict:
         return {
@@ -179,6 +322,8 @@ class Capture:
             "headers": self.headers,
             "content_encoding": self.content_encoding,
             "body_bytes": len(self.body),
+            "response_status": self.response_status,
+            "response_bytes": len(self.response_body),
         }
 
 
@@ -228,8 +373,13 @@ class RecordingServer:
     def _record(self, capture: Capture) -> None:
         with self._lock:
             self.captures.append(capture)
+        self._flush(capture)
+
+    def _flush(self, capture: Capture) -> None:
         stem = self.requests_dir / f"{capture.index:04d}"
         stem.with_suffix(".body.bin").write_bytes(capture.body)
+        if capture.response_body:
+            stem.with_suffix(".response.bin").write_bytes(capture.response_body)
         stem.with_suffix(".json").write_text(
             json.dumps(capture.sidecar(), indent=2), encoding="utf-8"
         )
@@ -256,6 +406,57 @@ class RecordingServer:
                 "request_count": len(self.captures),
                 "requests": [c.sidecar() for c in self.captures],
             }
+
+    # -- metering ---------------------------------------------------------
+
+    def traffic(self) -> list[dict]:
+        """One record per model-completion request the harness actually served.
+
+        Everything in it is read off the wire: the model identity out of the
+        request body (or the provider's own echo of it), and the token counts
+        out of the provider's `usage` block.  Nothing here is anything the
+        product said about itself, which is the entire point — INV-5 has to
+        reconcile the product's account against an account it did not write.
+        """
+        with self._lock:
+            caps = list(self.captures)
+        out: list[dict] = []
+        for cap in caps:
+            if cap.method != "POST" or not cap.body:
+                continue
+            req = _loads(cap.body)
+            if not isinstance(req, dict) or "messages" not in req and "prompt" not in req:
+                # Not a completion call (embeddings, token counting, health).
+                # Still recorded, but as its own kind so it cannot inflate the
+                # turn count the product is reconciled against.
+                out.append(
+                    {
+                        "kind": "provider_other",
+                        "index": cap.index,
+                        "ts": cap.ts,
+                        "path": cap.path,
+                        "request_bytes": len(cap.body),
+                    }
+                )
+                continue
+            usage = _usage_from_response(cap.response_body)
+            out.append(
+                {
+                    "kind": "provider_request",
+                    "index": cap.index,
+                    "ts": cap.ts,
+                    "path": cap.path,
+                    "host": self.relay_to or self.base_url,
+                    "model": _model_of(req, cap.response_body),
+                    "stream": bool(req.get("stream")),
+                    "request_bytes": len(cap.body),
+                    "response_bytes": len(cap.response_body),
+                    "input_tokens": usage.get("input_tokens"),
+                    "output_tokens": usage.get("output_tokens"),
+                    "usage_source": usage.get("source"),
+                }
+            )
+        return out
 
     # -- handler ----------------------------------------------------------
 
@@ -307,17 +508,23 @@ class RecordingServer:
                 server._record(cap)
                 return cap
 
-            def _send(self, status: int, body: bytes, ctype: str) -> None:
+            def _send(
+                self, status: int, body: bytes, ctype: str, cap: Capture | None = None
+            ) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
                 self.wfile.flush()
+                if cap is not None:
+                    cap.response_status = status
+                    cap.response_body = body
+                    server._flush(cap)
 
             # ---- verbs ----
             def do_GET(self) -> None:  # noqa: N802
-                self._capture(b"")
+                cap = self._capture(b"")
                 parsed = urllib.parse.urlsplit(self.path)
                 if parsed.path.endswith("/models"):
                     payload = json.dumps(
@@ -332,9 +539,9 @@ class RecordingServer:
                             ],
                         }
                     ).encode()
-                    self._send(200, payload, "application/json")
+                    self._send(200, payload, "application/json", cap)
                     return
-                self._send(200, b"{}", "application/json")
+                self._send(200, b"{}", "application/json", cap)
 
             def do_POST(self) -> None:  # noqa: N802
                 body = self._read_body()
@@ -355,9 +562,9 @@ class RecordingServer:
 
                 payload = server.scenario.answer(turn, req)
                 if req.get("stream") is False:
-                    self._send(200, json_text("Acknowledged."), "application/json")
+                    self._send(200, json_text("Acknowledged."), "application/json", cap)
                     return
-                self._send(200, payload, "text/event-stream")
+                self._send(200, payload, "text/event-stream", cap)
 
             # ---- relay ----
             def _relay(self, cap: Capture) -> None:
@@ -381,7 +588,7 @@ class RecordingServer:
                 resp = conn.getresponse()
                 payload = resp.read()
                 ctype = resp.getheader("Content-Type", "application/json")
-                self._send(resp.status, payload, ctype)
+                self._send(resp.status, payload, ctype, cap)
                 conn.close()
 
         return Handler
