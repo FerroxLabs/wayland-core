@@ -256,6 +256,7 @@ impl WorkspacePolicy {
         let network_scoped_readable = Vec::new();
         let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
         cache_env.extend(temp_env(&writable_extra));
+        cache_env.extend(git_config_env(&cache_root));
 
         Self {
             root,
@@ -985,6 +986,48 @@ fn scratch_dirs(trust: WorkspaceTrust) -> Vec<PathBuf> {
 ///
 /// Empty when the scratch grant could not be established: with no writable
 /// scratch to point at, redirecting would only relocate the failure.
+/// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` pointed into the workspace's own
+/// cache root, for the same reason `CARGO_HOME` and `npm_config_cache` are.
+///
+/// Under the `contained` profile — **the profile a workspace gets by default,
+/// because [`EffectiveWorkspaceTrust`] starts untrusted** — `$HOME/.gitconfig`
+/// is deliberately not granted. git reads it unconditionally at startup, so on
+/// macOS seatbelt the result was that `git` did not work AT ALL: measured on
+/// Darwin 25.3.0, `git init` exited 128 with
+/// `fatal: unable to access '/Users/<me>/.gitconfig': Operation not permitted`,
+/// and so did every other subcommand.
+///
+/// The fix is to stop git reading the host file rather than to grant it. This
+/// REMOVES authority: the sandboxed child no longer sees the operator's global
+/// git configuration at all, which also means a `[url … insteadOf]` rewrite
+/// carrying an embedded credential can no longer be applied on behalf of
+/// untrusted workspace content. Both variables are absolute file paths (git
+/// requires that), inside `<root>/.wcache`, which is already a writable root —
+/// so `git config --global` inside the sandbox lands in a real file scoped to
+/// the workspace instead of being silently discarded.
+///
+/// This does NOT fix `cargo new`, and that is not an oversight: cargo's VCS
+/// init goes through libgit2, which computes the global config path from
+/// `$HOME` and ignores `GIT_CONFIG_GLOBAL` entirely — measured, it still fails
+/// with `failed to stat '/Users/<me>/.gitconfig'; class=Config (7)`. Closing
+/// that needs a metadata-only grant on the file, which needs a manifest channel
+/// that does not exist yet; see the lane report rather than a silent widening.
+fn git_config_env(cache_root: &Path) -> Vec<(String, String)> {
+    let git = cache_root.join("git");
+    [
+        ("GIT_CONFIG_GLOBAL", "config"),
+        ("GIT_CONFIG_SYSTEM", "system"),
+    ]
+    .into_iter()
+    .map(|(var, file)| {
+        (
+            var.to_owned(),
+            git.join(file).to_string_lossy().into_owned(),
+        )
+    })
+    .collect()
+}
+
 fn temp_env(scratch: &[PathBuf]) -> Vec<(String, String)> {
     let Some(dir) = scratch.first() else {
         return Vec::new();

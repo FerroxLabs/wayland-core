@@ -938,3 +938,62 @@ fn capability_roots_keeps_the_scope_segment_for_a_scoped_node_package() {
         "grant widened to the whole @acme scope {scope:?}: {roots:?}"
     );
 }
+
+/// The `contained` profile must stop git reading the operator's global config
+/// instead of being granted it.
+///
+/// This profile is what a workspace gets BY DEFAULT — `EffectiveWorkspaceTrust`
+/// starts untrusted — and `$HOME/.gitconfig` is deliberately not in its
+/// readable roots. git opens that file unconditionally, so before this redirect
+/// every git invocation under macOS seatbelt died with
+/// `fatal: unable to access '<home>/.gitconfig': Operation not permitted`.
+///
+/// Both values must be ABSOLUTE paths inside the workspace cache root: git
+/// requires an absolute path for these variables, and the cache root is already
+/// a writable root, so `git config --global` inside the sandbox lands in a real
+/// scoped file rather than being silently discarded.
+#[test]
+fn contained_redirects_git_global_config_into_the_workspace_cache() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let cache_root = policy.root().join(".wcache");
+
+    for var in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        let value = policy
+            .cache_env()
+            .iter()
+            .find(|(k, _)| k == var)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| {
+                panic!("{var} must be redirected; git reads the host file without it")
+            });
+        let value = Path::new(&value);
+        assert!(
+            value.is_absolute(),
+            "git rejects a relative {var}, so the redirect would be silently ignored: {value:?}"
+        );
+        assert!(
+            value.starts_with(&cache_root),
+            "{var} must point inside the workspace cache root {cache_root:?}, got {value:?}"
+        );
+    }
+}
+
+/// The same redirect must NOT be applied to `trusted_local`.
+///
+/// That profile grants `$HOME/.gitconfig` on purpose — a local operator working
+/// in their own trusted checkout should keep their identity, aliases and
+/// includes. Redirecting there would be a silent behaviour change for the
+/// common case, dressed up as a security fix.
+#[test]
+fn trusted_local_keeps_the_operators_own_git_config() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::trusted_local(dir.path());
+    for var in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        assert!(
+            policy.cache_env().iter().all(|(k, _)| k != var),
+            "the trusted profile grants the operator's own ~/.gitconfig and must \
+             not redirect {var} away from it"
+        );
+    }
+}
