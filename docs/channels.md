@@ -201,7 +201,7 @@ acknowledgement is ONE token, and the refusal prints it for you to paste:
 ```toml
 [inbound]
 dm = "open"
-acknowledge_open_admission = ["admission-v2 platform=telegram enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0 options.allowed_chat_ids=a:1:s:123456789 options.credential_handle=s:telegram%2Eacme%2Ebot_token"]
+acknowledge_open_admission = ["admission-v2 platform=telegram enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0 group_sessions_per_user=true thread_sessions_per_user=false options.allowed_chat_ids=a:1:s:123456789 options.credential_handle=s:telegram%2Eacme%2Ebot_token"]
 ```
 
 Don't type it: run the product, read the refusal, paste the line it prints.
@@ -209,10 +209,15 @@ Don't type it: run the product, read the refusal, paste the line it prints.
 #### The token is the channel's whole admission shape
 
 It renders every setting that decides who is admitted, what they can
-trigger without addressing the bot, and what the resulting turn may do to
-this host: `platform`, `enabled`, `dm`, `dm_allowlist`, `group`,
+trigger without addressing the bot, and what the resulting turn may read or
+do to this host: `platform`, `enabled`, `dm`, `dm_allowlist`, `group`,
 `group_allowlist`, `sender_allowlist`, `require_mention`, `tools`,
-`tool_workspace_root`, **and every key in `[options]`**. Change any of them
+`tool_workspace_root`, `group_sessions_per_user`, `thread_sessions_per_user`,
+**and every key in `[options]`**. The two session flags are in the token
+because turning `group_sessions_per_user` off collapses every sender in a
+group into ONE agent session, so each turn runs with every other sender's
+history — including yours — in context. Only `ack` is left out, and it is
+outbound presentation. Change any of them
 and the token changes, so the old consent stops applying and the process
 refuses until you look at the new shape.
 

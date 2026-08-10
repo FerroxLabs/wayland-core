@@ -495,15 +495,36 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v2";
 ///   radius nobody looked at — which is the whole failure mode this key exists
 ///   to prevent, arriving through the authority axis instead of the admission
 ///   one.
+/// - `group_sessions_per_user`, `thread_sessions_per_user` — whether admitted
+///   senders share ONE agent session. These were once excluded as "cosmetic",
+///   on the reasoning that they change neither who reaches the agent nor what
+///   the turn may do. The second half of that is false. With
+///   `group_sessions_per_user = false` every sender in a group collapses into
+///   the single session key `agent:main:<channel>:<conversation_id>` (see
+///   [`crate::dispatch::build_session_key`]), so each turn is run with every
+///   other sender's history in context — including the operator's. On a channel
+///   that already admits an unbounded set of senders, flipping that one bool
+///   turns "N mutually blind strangers" into "every stranger reads what
+///   everyone, operator included, has said". It is a change in what an admitted
+///   turn may READ rather than in who is admitted, but it is squarely inside
+///   "what the turn may do", so it is inside the token.
 ///
 /// # What is deliberately OUT, and why
 ///
-/// `ack` (how the bot signals it is working) and the two session-shaping flags
-/// (`group_sessions_per_user`, `thread_sessions_per_user`). None of them change
-/// who reaches the agent or what the turn may do, and every field in here is a
-/// field whose edit costs the operator a re-acknowledgement — so the line is
-/// drawn at reach and authority, not at "everything on the struct".
-pub const SHAPE_FIELDS: [&str; 10] = [
+/// An exclusion here is a DECISION, not an omission: [`shape_fields`]
+/// destructures [`InboundPolicy`] exhaustively, so every field must be either
+/// rendered or explicitly discarded with a reason written at the binding. Two
+/// are discarded:
+///
+/// - `ack` — how the bot signals it is working (reactions / typing). Purely
+///   OUTBOUND presentation. It cannot change who is admitted, what an admitted
+///   turn may read, or what it may do to this host.
+/// - `acknowledge_open_admission` — the field that HOLDS this token. Rendering
+///   it would make the token contain itself, which no fixed point can satisfy;
+///   it is excluded by construction rather than by judgement.
+///
+/// Everything else is in, and the line is drawn at reach and authority.
+pub const SHAPE_FIELDS: [&str; 12] = [
     "platform",
     "enabled",
     "dm",
@@ -514,6 +535,8 @@ pub const SHAPE_FIELDS: [&str; 10] = [
     "require_mention",
     "tools",
     "tool_workspace_root",
+    "group_sessions_per_user",
+    "thread_sessions_per_user",
 ];
 
 /// Prefix every rendered `[options]` key carries in a token, so the dynamic
@@ -540,6 +563,18 @@ pub const OPTION_FIELD_PREFIX: &str = "options.";
 /// with that ONE line deleted used to produce a byte-identical token, and the
 /// widened config started on the narrow config's consent. That is the same
 /// defect the whole-shape token was built to close, one config section over.
+///
+/// **Read that table as four EXAMPLES, not as the contract.** It lists the four
+/// keys with the empty-means-everyone inversion; it is not the set of
+/// `[options]` keys that touch reach. matrix `options.user_id` is the
+/// counter-example: it is the id the mention gate matches against
+/// (`wcore-channel-matrix/src/sync.rs`, `body.contains(bot_user_id)`), so it
+/// decides which group messages count as addressed to the bot and therefore
+/// which ones drive a turn under `require_mention`. It carries no inversion, so
+/// it is not in the table, and it is nonetheless bound by the consent — because
+/// the token renders the whole table and never consults a list like this one.
+/// Any summary of "which options matter" is a snapshot that can rot; the gate
+/// deliberately does not depend on one.
 ///
 /// # Why this is the whole table rather than a declared key list
 ///
@@ -809,26 +844,69 @@ fn render_options(options: &toml::Table) -> Vec<(String, String)> {
 /// `(field, canonical value)` for the whole shape: every field in
 /// [`SHAPE_FIELDS`] in order, then every `[options]` leaf, sorted.
 fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
-    let policy = shape.inbound;
+    // EXHAUSTIVE destructuring, deliberately WITHOUT a `..` rest pattern.
+    //
+    // This is the compile-time half of the gate, and it is the reason there is
+    // no hand-maintained list of `[inbound]` keys to fall out of date. Reading
+    // the policy by field access (`policy.dm`, `policy.group`, …) made adding a
+    // fourteenth reach-relevant field to `InboundPolicy` a silent no-op: it
+    // compiled, every access test stayed green, and the emitted token simply
+    // did not mention it — so a consent written against the narrow value
+    // covered the widened one. That is the SAME defect the whole-`[options]`
+    // rendering exists to close (see [`AdmissionShape`]), one config section
+    // over, and "the enumeration IS the failure mode" applies to `[inbound]`
+    // exactly as it applies to `[options]`.
+    //
+    // With no `..`, field thirteen does not compile until someone decides here
+    // whether it belongs in the consent. A build error is the intended
+    // behaviour: the cost of a new field is one deliberate line, and the
+    // alternative is a widening nobody sees.
+    //
+    // Every binding below is therefore either RENDERED or discarded with a
+    // written reason. Do not silence a new field with `_` — write why.
+    let InboundPolicy {
+        dm,
+        group,
+        require_mention,
+        dm_allowlist,
+        group_allowlist,
+        sender_allowlist,
+        group_sessions_per_user,
+        thread_sessions_per_user,
+        tools,
+        tool_workspace_root,
+        // EXCLUDED — outbound presentation only. `ack` decides whether the bot
+        // adds a reaction or a typing indicator to a message it is already
+        // working on. It cannot change who is admitted, what an admitted turn
+        // may read, or what that turn may do to this host.
+        ack: _,
+        // EXCLUDED — by construction, not by judgement. This is the field that
+        // HOLDS the token being built; rendering it would require the token to
+        // contain itself.
+        acknowledge_open_admission: _,
+    } = shape.inbound;
+
     let mut fields: Vec<(String, String)> = vec![
         ("platform".into(), escape_entry(shape.platform)),
         ("enabled".into(), shape.enabled.to_string()),
-        ("dm".into(), dm_policy_name(&policy.dm).to_string()),
-        ("dm_allowlist".into(), canonical_list(&policy.dm_allowlist)),
-        ("group".into(), group_policy_name(&policy.group).to_string()),
-        (
-            "group_allowlist".into(),
-            canonical_list(&policy.group_allowlist),
-        ),
-        (
-            "sender_allowlist".into(),
-            canonical_list(&policy.sender_allowlist),
-        ),
-        ("require_mention".into(), policy.require_mention.to_string()),
-        ("tools".into(), posture_name(policy.tools).to_string()),
+        ("dm".into(), dm_policy_name(dm).to_string()),
+        ("dm_allowlist".into(), canonical_list(dm_allowlist)),
+        ("group".into(), group_policy_name(group).to_string()),
+        ("group_allowlist".into(), canonical_list(group_allowlist)),
+        ("sender_allowlist".into(), canonical_list(sender_allowlist)),
+        ("require_mention".into(), require_mention.to_string()),
+        ("tools".into(), posture_name(*tools).to_string()),
         (
             "tool_workspace_root".into(),
-            canonical_opt(policy.tool_workspace_root.as_deref()),
+            canonical_opt(tool_workspace_root.as_deref()),
+        ),
+        (
+            "group_sessions_per_user".into(),
+            group_sessions_per_user.to_string(),
+        ),
+        (
+            "thread_sessions_per_user".into(),
+            thread_sessions_per_user.to_string(),
         ),
     ];
     debug_assert!(
@@ -2231,9 +2309,12 @@ mod tests {
                 SHAPE_FIELDS.len() + 1,
                 "{options:?} must contribute exactly ONE options field: {rendered}"
             );
-            assert_eq!(
-                parsed[SHAPE_FIELDS.len() - 1].0,
-                "tool_workspace_root",
+            assert!(
+                parsed
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .take(SHAPE_FIELDS.len())
+                    .eq(SHAPE_FIELDS),
                 "and must not have displaced a fixed field: {rendered}"
             );
         }
@@ -2407,6 +2488,22 @@ mod tests {
                     ..base.clone()
                 },
             ),
+            (
+                "group_sessions_per_user",
+                true,
+                InboundPolicy {
+                    group_sessions_per_user: false,
+                    ..base.clone()
+                },
+            ),
+            (
+                "thread_sessions_per_user",
+                true,
+                InboundPolicy {
+                    thread_sessions_per_user: true,
+                    ..base.clone()
+                },
+            ),
         ];
         assert_eq!(
             variants.len() + 1,
@@ -2429,6 +2526,57 @@ mod tests {
             );
             seen.push(token);
         }
+    }
+
+    #[test]
+    fn the_two_excluded_fields_are_excluded_on_purpose() {
+        // `shape_fields` destructures `InboundPolicy` without `..`, so the two
+        // discarded bindings are a written decision rather than an oversight.
+        // This pins the decision from the other side: including either one
+        // would be a defect, not an improvement.
+        let base = open_over_one_group();
+        let base_token = token_of(true, &base);
+
+        // `ack` is outbound presentation — a reaction or a typing indicator on
+        // a message the bot is already working on. It moves neither reach nor
+        // authority, so charging the operator a re-acknowledgement for it would
+        // be pure over-refusal.
+        let noisier_ack = InboundPolicy {
+            ack: AckMode::Reactions,
+            ..base.clone()
+        };
+        assert_eq!(
+            token_of(true, &noisier_ack),
+            base_token,
+            "`ack` must NOT be in the token: it cannot change who is admitted, what an admitted \
+             turn may read, or what it may do to this host"
+        );
+
+        // `acknowledge_open_admission` is the field that HOLDS the token. If it
+        // were rendered, the token would have to contain itself: writing the
+        // token an operator was told to write would immediately change the
+        // token they now need, and no acknowledgement could ever converge.
+        let already_acked = InboundPolicy {
+            acknowledge_open_admission: vec![base_token.clone()],
+            ..base.clone()
+        };
+        assert_eq!(
+            token_of(true, &already_acked),
+            base_token,
+            "`acknowledge_open_admission` must NOT be in the token it holds, or acknowledging a \
+             channel would invalidate the acknowledgement that was just written"
+        );
+
+        // And the pair really is the whole exclusion set: everything else on
+        // the struct is load-bearing, which the sibling test proves field by
+        // field. Two excluded + `platform` and `enabled` coming from
+        // `ChannelConfig` rather than `InboundPolicy` is the arithmetic.
+        assert_eq!(
+            SHAPE_FIELDS.len(),
+            12,
+            "SHAPE_FIELDS changed size: re-decide the exclusions above rather than editing this \
+             number"
+        );
     }
 
     #[test]
