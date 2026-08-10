@@ -3540,11 +3540,17 @@ impl AgentBootstrap {
                 // the posture while refreshing the policy is the failure mode
                 // that is WORSE than the original bug, because it is not
                 // fail-closed. One derivation, one object, one swap.
+                //
+                // P2: `from_configs` refuses a channel that admits an
+                // unbounded set of senders. The session does not start —
+                // `?` here rather than a warning, because a warning leaves
+                // the open configuration reachable, and the whole point is
+                // that it should not be.
                 let policies = std::sync::Arc::new(
                     crate::channel_policy::ChannelPolicyRegistry::from_configs(
                         channel_configs,
                         std::path::Path::new(&self.workspace),
-                    ),
+                    )?,
                 );
 
                 // Inbound-media enricher: resolve image/audio attachments to

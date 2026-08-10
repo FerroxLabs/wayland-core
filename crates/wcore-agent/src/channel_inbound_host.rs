@@ -125,11 +125,22 @@ impl InboundHost {
     /// policy loader hard-errors — so swapping in whatever came back would let
     /// one typo'd file deny every already-working channel. That is the same
     /// defect this method exists to fix, arriving from the other direction.
+    ///
+    /// # It also refuses an admits-everyone config (P2)
+    ///
+    /// The same refusal `spawn` applies at cold start runs here, because both
+    /// go through `ChannelPolicySnapshot::from_configs`. A gate that only ran
+    /// at startup would be walked around by exactly the route F24-C3-H5
+    /// documents: edit a channel to `dm = "open"`, run `channel reload`, and
+    /// the open policy would be live in a process that had already passed its
+    /// startup check. The derivation refuses before a snapshot exists, so
+    /// nothing is swapped and the bounded policies already in effect stay in
+    /// effect.
     pub fn reload_policies(&self) -> Result<usize, wcore_channels::ChannelError> {
         let configs = crate::bootstrap::try_load_channel_policy_configs()?;
-        Ok(self
-            .policies
-            .replace_from_configs(configs, std::path::Path::new(&self.workspace)))
+        self.policies
+            .replace_from_configs(configs, std::path::Path::new(&self.workspace))
+            .map_err(|refusal| wcore_channels::ChannelError::Config(refusal.to_string()))
     }
 
     /// Stop the webhook host and abort the subscriber.
@@ -169,6 +180,17 @@ pub enum InboundHostError {
         /// The unparseable value, echoed back verbatim.
         bind: String,
     },
+
+    /// P2. One or more channels admit an unbounded set of senders and have not
+    /// acknowledged it. Starting would put an agent with this host's tools
+    /// behind a door anyone can open, so the stack is not assembled at all.
+    ///
+    /// Unlike [`Self::ProviderUnavailable`] this is never a degrade-and-carry-on
+    /// condition: the caller must refuse to start. A gateway that logged it and
+    /// continued would be back to discouraging the dangerous configuration
+    /// instead of making it unreachable.
+    #[error("{0}")]
+    OpenAdmission(#[from] wcore_channels::OpenAdmissionRefusal),
 }
 
 /// Assemble and spawn the inbound stack over `manager`.
@@ -204,12 +226,16 @@ pub async fn spawn(
     // path all read. The derivation used to be open-coded here (and again in
     // `bootstrap.rs`), which is what made it possible to refresh the access
     // policy and silently forget the tool posture.
+    //
+    // P2: `from_configs` REFUSES an admits-everyone channel. It is checked here
+    // — before the provider is built and before anything is spawned — so the
+    // failure costs nothing and cannot leave a half-armed stack behind.
     let channel_configs = crate::bootstrap::load_channel_policy_configs();
     let policies_loaded = channel_configs.len();
     let policies = Arc::new(crate::channel_policy::ChannelPolicyRegistry::from_configs(
         channel_configs,
         std::path::Path::new(&workspace),
-    ));
+    )?);
 
     let provider = crate::bootstrap::create_provider_with_oauth(config)
         .map_err(|e| InboundHostError::ProviderUnavailable(e.to_string()))?;

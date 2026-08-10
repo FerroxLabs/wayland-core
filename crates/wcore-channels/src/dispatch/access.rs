@@ -159,6 +159,27 @@ pub struct InboundPolicy {
     /// (reactions / typing). Defaults to [`AckMode::Off`].
     #[serde(default)]
     pub ack: AckMode,
+    /// Per-field opt-out from the admits-everyone startup refusal.
+    ///
+    /// Each entry is the NAME of an `[inbound]` key this channel is
+    /// deliberately leaving open — one of `"dm"`, `"dm_allowlist"`,
+    /// `"group"`, `"sender_allowlist"`. See [`open_admissions`] and
+    /// [`refuse_open_admission`].
+    ///
+    /// It is a list of field names rather than a boolean on purpose: a
+    /// blanket `allow_open = true` written once keeps silently covering
+    /// every field the operator opens afterwards. Naming each field means
+    /// opening a SECOND one refuses again, so the acknowledgement cannot
+    /// outlive the decision it recorded.
+    ///
+    /// **Where it can be set.** This key lives in the channel's own file
+    /// under `<profile home>/channels/<name>.toml` — the only source
+    /// [`crate::config::ChannelConfigLoader`] ever reads. A project-local
+    /// `.wayland-core.toml` travels with a cloned repository and is
+    /// untrusted; it deserializes into `wcore_config`'s `Config`, which has
+    /// no channel-policy surface at all, so it cannot reach this field.
+    #[serde(default)]
+    pub acknowledge_open_admission: Vec<String>,
 }
 
 fn default_dm_policy() -> DmPolicy {
@@ -189,6 +210,7 @@ impl Default for InboundPolicy {
             tools: ChannelToolPosture::Conversational,
             tool_workspace_root: None,
             ack: AckMode::Off,
+            acknowledge_open_admission: Vec::new(),
         }
     }
 }
@@ -203,10 +225,196 @@ pub enum AccessDecision {
     Deny { reason: String },
 }
 
-/// True iff `list` permits `id`: contains the `"*"` wildcard, or contains
+/// The allowlist entry that matches every id. Named so the startup gate in
+/// [`open_admissions`] tests for exactly what [`permits`] honours, rather
+/// than for a second, drift-prone spelling of the same thing.
+pub const WILDCARD: &str = "*";
+
+/// True iff `list` permits `id`: contains the [`WILDCARD`] entry, or contains
 /// `id` exactly. An empty list permits nothing (fail-closed).
 fn permits(list: &[String], id: &str) -> bool {
-    list.iter().any(|e| e == "*" || e == id)
+    list.iter().any(|e| e == WILDCARD || e == id)
+}
+
+/// True iff `list` permits an arbitrary id nobody enumerated — i.e. it holds
+/// the [`WILDCARD`]. This is `permits` over the set of all ids.
+fn permits_anyone(list: &[String]) -> bool {
+    list.iter().any(|e| e == WILDCARD)
+}
+
+/// One way a channel's `[inbound]` config admits an unbounded set of senders.
+///
+/// "Unbounded" means [`decide_access`] returns [`AccessDecision::Allow`] for a
+/// `sender_id` the config never names — so the operator cannot say who can
+/// drive the agent, and the answer is "whoever finds the bot".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAdmission {
+    /// The `[inbound]` key at fault, spelled as it appears in the TOML. This
+    /// is also the token an operator lists in
+    /// [`InboundPolicy::acknowledge_open_admission`] to accept it.
+    pub field: &'static str,
+    /// What that key is set to, as the operator wrote it.
+    pub found: String,
+    /// The exact narrower configuration to use instead.
+    pub remedy: String,
+}
+
+/// Every admits-everyone shape in `policy`, ignoring any acknowledgement.
+///
+/// Each arm mirrors a branch of [`decide_access`] that reaches
+/// [`AccessDecision::Allow`] without consulting the sender id, so this list
+/// cannot claim a shape is open that the gate would actually deny:
+///
+/// - `dm = "open"` — the `DmPolicy::Open` arm allows unconditionally.
+/// - `dm = "allowlist"` with `"*"` in `dm_allowlist` — `permits` matches any.
+///   `dm = "disabled"` / `"pairing"` deny BEFORE the allowlist is consulted,
+///   so a `"*"` under those is inert and is deliberately not flagged.
+/// - `group = "open"` — the `GroupPolicy::Open` arm allows unconditionally.
+/// - `group = "allowlist"` with `"*"` in `sender_allowlist` AND a non-empty
+///   `group_allowlist` — any sender in a reachable conversation is admitted.
+///   With an EMPTY `group_allowlist` nothing matches the conversation test
+///   first, so the sender wildcard admits nobody and is not flagged.
+///
+/// A `"*"` in `group_allowlist` alone is NOT listed: senders are still gated
+/// by `sender_allowlist`, so the admitted set stays enumerated. When both are
+/// `"*"` the `sender_allowlist` finding already fires.
+pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
+    let mut out = Vec::new();
+
+    match policy.dm {
+        DmPolicy::Open => out.push(OpenAdmission {
+            field: "dm",
+            found: "dm = \"open\"".into(),
+            remedy: "dm = \"allowlist\" with dm_allowlist = [\"<sender id>\", ...] naming each \
+                     person permitted to DM this bot"
+                .into(),
+        }),
+        DmPolicy::Allowlist if permits_anyone(&policy.dm_allowlist) => out.push(OpenAdmission {
+            field: "dm_allowlist",
+            found: "dm_allowlist = [\"*\"]".into(),
+            remedy: "dm_allowlist = [\"<sender id>\", ...] naming each permitted sender id \
+                     instead of the \"*\" wildcard"
+                .into(),
+        }),
+        _ => {}
+    }
+
+    match policy.group {
+        GroupPolicy::Open => out.push(OpenAdmission {
+            field: "group",
+            found: "group = \"open\"".into(),
+            remedy: "group = \"allowlist\" with group_allowlist = [\"<conversation id>\", ...] \
+                     and sender_allowlist = [\"<sender id>\", ...]"
+                .into(),
+        }),
+        GroupPolicy::Allowlist
+            if permits_anyone(&policy.sender_allowlist) && !policy.group_allowlist.is_empty() =>
+        {
+            out.push(OpenAdmission {
+                field: "sender_allowlist",
+                found: "sender_allowlist = [\"*\"]".into(),
+                remedy: "sender_allowlist = [\"<sender id>\", ...] naming each permitted sender \
+                         instead of the \"*\" wildcard"
+                    .into(),
+            })
+        }
+        _ => {}
+    }
+
+    out
+}
+
+/// [`open_admissions`] minus the shapes this channel's
+/// [`InboundPolicy::acknowledge_open_admission`] names.
+pub fn unacknowledged_open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
+    open_admissions(policy)
+        .into_iter()
+        .filter(|f| {
+            !policy
+                .acknowledge_open_admission
+                .iter()
+                .any(|a| a == f.field)
+        })
+        .collect()
+}
+
+/// Refusal to start over one or more channels that admit everyone.
+///
+/// Carries every offending `(channel, finding)` pair rather than the first,
+/// so an operator fixes the whole configuration in one pass instead of
+/// discovering the next one on the next failed start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAdmissionRefusal {
+    /// `(channel name, finding)`, in channel order.
+    pub findings: Vec<(String, OpenAdmission)>,
+}
+
+impl std::fmt::Display for OpenAdmissionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "refusing to start: {} inbound channel configuration(s) admit an unbounded set of \
+             senders — anyone who can reach the platform could drive this agent.",
+            self.findings.len()
+        )?;
+        for (channel, finding) in &self.findings {
+            writeln!(
+                f,
+                "  channel {channel:?}: [inbound] {} — {}. Use instead: {}",
+                finding.found,
+                match finding.field {
+                    "dm" | "dm_allowlist" => "every DM from every account is admitted",
+                    "group" => "every group and channel message is admitted",
+                    _ => "every sender in an allowlisted conversation is admitted",
+                },
+                finding.remedy
+            )?;
+        }
+        write!(
+            f,
+            "If a channel is genuinely meant to be open, acknowledge each open field BY NAME in \
+             that channel's own file (<profile home>/channels/<name>.toml):\n    [inbound]\n    \
+             acknowledge_open_admission = [{}]\nThat key is read only from the profile-scoped \
+             channel file — a project-local .wayland-core.toml cannot set it — and it must name \
+             every open field, so opening another one refuses again.",
+            self.findings
+                .iter()
+                .map(|(_, finding)| format!("{:?}", finding.field))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+impl std::error::Error for OpenAdmissionRefusal {}
+
+/// THE STARTUP GATE. `Err` iff any channel admits an unbounded set of senders
+/// without acknowledging it.
+///
+/// Callers must refuse to start (or, on a reload, refuse to swap) rather than
+/// warn: a warning leaves the dangerous configuration reachable, which is the
+/// state this function exists to make impossible.
+///
+/// Channels are checked whether or not they are `enabled`. A disabled channel
+/// admits nobody today, but its policy is loaded into the live registry all
+/// the same, and `enabled = true` is a one-word edit away — refusing now is
+/// what keeps the acknowledgement contemporaneous with the decision.
+pub fn refuse_open_admission<'a>(
+    channels: impl IntoIterator<Item = (&'a str, &'a InboundPolicy)>,
+) -> Result<(), OpenAdmissionRefusal> {
+    let findings: Vec<(String, OpenAdmission)> = channels
+        .into_iter()
+        .flat_map(|(name, policy)| {
+            unacknowledged_open_admissions(policy)
+                .into_iter()
+                .map(move |f| (name.to_string(), f))
+        })
+        .collect();
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(OpenAdmissionRefusal { findings })
+    }
 }
 
 /// The fail-closed access gate. Decides whether `msg` is permitted under

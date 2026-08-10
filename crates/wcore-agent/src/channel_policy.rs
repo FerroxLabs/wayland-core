@@ -61,8 +61,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use wcore_channels::InboundPolicy;
 use wcore_channels::config::ChannelConfig;
+use wcore_channels::{InboundPolicy, OpenAdmissionRefusal, refuse_open_admission};
 
 use crate::channel_tools::ChannelToolScope;
 
@@ -93,7 +93,28 @@ impl ChannelPolicySnapshot {
     ///
     /// `default_workspace_root` is the working directory a channel that names
     /// no `tool_workspace_root` is jailed to.
-    pub fn from_configs(configs: Vec<ChannelConfig>, default_workspace_root: &Path) -> Self {
+    ///
+    /// # The admits-everyone refusal
+    ///
+    /// P2. This is also the ONE place an inbound configuration that admits an
+    /// unbounded set of senders is rejected — see
+    /// [`wcore_channels::refuse_open_admission`]. It is fallible for that
+    /// reason and for no other.
+    ///
+    /// The check lives HERE, and not at either call site, because the two
+    /// lifecycles that install a policy — cold start
+    /// ([`crate::channel_inbound_host::spawn`], [`crate::bootstrap`]) and
+    /// reload ([`ChannelPolicyRegistry::replace_from_configs`]) — both pass
+    /// through this function and nothing else derives the maps. F24-C3-H5 was
+    /// exactly the shape of a guard placed at startup that a reload walked
+    /// around; a guard on the derivation cannot be walked around, because a
+    /// caller that skipped it would have no maps to install.
+    pub fn from_configs(
+        configs: Vec<ChannelConfig>,
+        default_workspace_root: &Path,
+    ) -> Result<Self, OpenAdmissionRefusal> {
+        refuse_open_admission(configs.iter().map(|c| (c.name.as_str(), &c.inbound)))?;
+
         let postures: HashMap<String, ChannelToolScope> = configs
             .iter()
             .map(|c| {
@@ -122,11 +143,11 @@ impl ChannelPolicySnapshot {
             "the two maps are derived from one config list and must cover the same channels"
         );
 
-        Self {
+        Ok(Self {
             policies,
             postures,
             generation: 0,
-        }
+        })
     }
 
     /// Channel names covered by this snapshot, sorted. Used by callers that
@@ -181,11 +202,17 @@ impl ChannelPolicyRegistry {
     }
 
     /// Build from configs (see [`ChannelPolicySnapshot::from_configs`]).
-    pub fn from_configs(configs: Vec<ChannelConfig>, default_workspace_root: &Path) -> Self {
-        Self::new(ChannelPolicySnapshot::from_configs(
+    ///
+    /// `Err` when a channel admits an unbounded set of senders — the caller
+    /// must refuse to start rather than construct a registry over it.
+    pub fn from_configs(
+        configs: Vec<ChannelConfig>,
+        default_workspace_root: &Path,
+    ) -> Result<Self, OpenAdmissionRefusal> {
+        Ok(Self::new(ChannelPolicySnapshot::from_configs(
             configs,
             default_workspace_root,
-        ))
+        )?))
     }
 
     /// Read guard, recovering from poisoning (see the module docs).
@@ -230,15 +257,20 @@ impl ChannelPolicyRegistry {
 
     /// Re-derive both maps from `configs` and swap them in. Returns the new
     /// channel count.
+    ///
+    /// P2: on an admits-everyone config this returns `Err` and swaps NOTHING —
+    /// the derivation refuses before a snapshot exists, so the live registry
+    /// keeps the bounded policies it already had. A reload cannot be the way
+    /// an open channel gets installed.
     pub fn replace_from_configs(
         &self,
         configs: Vec<ChannelConfig>,
         default_workspace_root: &Path,
-    ) -> usize {
-        self.replace(ChannelPolicySnapshot::from_configs(
+    ) -> Result<usize, OpenAdmissionRefusal> {
+        Ok(self.replace(ChannelPolicySnapshot::from_configs(
             configs,
             default_workspace_root,
-        ))
+        )?))
     }
 
     /// Number of channels covered by the current snapshot.
@@ -297,7 +329,7 @@ mod tests {
 
     #[test]
     fn an_absent_channel_still_fails_closed() {
-        let reg = ChannelPolicyRegistry::from_configs(vec![], Path::new("/w"));
+        let reg = ChannelPolicyRegistry::from_configs(vec![], Path::new("/w")).expect("bounded");
         let policy = reg.policy_for("never-configured");
         assert_eq!(
             policy,
@@ -314,20 +346,23 @@ mod tests {
         let reg = ChannelPolicyRegistry::from_configs(
             vec![config("known", ChannelToolPosture::Conversational, None)],
             Path::new("/w"),
-        );
+        )
+        .expect("bounded");
         assert_eq!(reg.generation(), 0);
         assert!(
             reg.scope_for("added-later").is_none(),
             "precondition: the new channel is absent before the reload"
         );
 
-        let n = reg.replace_from_configs(
-            vec![
-                config("known", ChannelToolPosture::Conversational, None),
-                config("added-later", ChannelToolPosture::Workspace, Some("/jail")),
-            ],
-            Path::new("/w"),
-        );
+        let n = reg
+            .replace_from_configs(
+                vec![
+                    config("known", ChannelToolPosture::Conversational, None),
+                    config("added-later", ChannelToolPosture::Workspace, Some("/jail")),
+                ],
+                Path::new("/w"),
+            )
+            .expect("bounded");
 
         assert_eq!(n, 2);
         assert_eq!(reg.generation(), 1, "a swap must be observable as a bump");
@@ -362,9 +397,13 @@ mod tests {
     fn a_reloaded_channel_gets_the_same_posture_as_one_present_at_startup() {
         let cfg = || config("c", ChannelToolPosture::Workspace, Some("/jail"));
 
-        let at_startup = ChannelPolicyRegistry::from_configs(vec![cfg()], Path::new("/w"));
-        let via_reload = ChannelPolicyRegistry::from_configs(vec![], Path::new("/w"));
-        via_reload.replace_from_configs(vec![cfg()], Path::new("/w"));
+        let at_startup =
+            ChannelPolicyRegistry::from_configs(vec![cfg()], Path::new("/w")).expect("bounded");
+        let via_reload =
+            ChannelPolicyRegistry::from_configs(vec![], Path::new("/w")).expect("bounded");
+        via_reload
+            .replace_from_configs(vec![cfg()], Path::new("/w"))
+            .expect("bounded");
 
         assert_eq!(
             at_startup
@@ -394,10 +433,12 @@ mod tests {
                 Some("/j"),
             )],
             Path::new("/w"),
-        );
+        )
+        .expect("bounded");
         assert!(reg.scope_for("going-away").is_some());
 
-        reg.replace_from_configs(vec![], Path::new("/w"));
+        reg.replace_from_configs(vec![], Path::new("/w"))
+            .expect("bounded");
 
         assert_eq!(reg.policy_for("going-away"), InboundPolicy::default());
         assert!(reg.scope_for("going-away").is_none());
@@ -412,7 +453,8 @@ mod tests {
                 config("jailed", ChannelToolPosture::Workspace, Some("/elsewhere")),
             ],
             Path::new("/default-root"),
-        );
+        )
+        .expect("bounded");
         assert_eq!(
             reg.scope_for("inherits").unwrap().workspace_root,
             PathBuf::from("/default-root")
