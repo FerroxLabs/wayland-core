@@ -255,11 +255,55 @@ def verdict_controls() -> None:
           v["state"] == "UNPROVEN" and len(v["leaks"]) == 1, v["state"])
 
 
+# --------------------------------------------------------------------------
+# 5. Relay mode must forward and record, not just record
+# --------------------------------------------------------------------------
+
+
+def relay_controls() -> None:
+    """Rows that need a real model use ``relay_to``.
+
+    An untested relay is a silent way to lose a whole row's evidence: it could
+    record but not forward (the job never runs), or forward but not record
+    (the job runs unobserved). Both are proven against a second recorder
+    standing in for the upstream, so no real provider is called.
+    """
+    up_dir = Path(tempfile.mkdtemp(prefix="inv1-relay-up-"))
+    down_dir = Path(tempfile.mkdtemp(prefix="inv1-relay-down-"))
+    payload = json.dumps({"model": "m", "messages": [{"content": TOKEN}]}).encode()
+
+    with recorder.RecordingServer(up_dir, scenario=recorder.inert_scenario()) as upstream:
+        with recorder.RecordingServer(down_dir, relay_to=upstream.base_url) as relay:
+            conn = http.client.HTTPConnection(f"127.0.0.1:{relay.port}", timeout=15)
+            conn.request("POST", "/v1/chat/completions", body=payload,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            answer = resp.read()
+            status = resp.status
+            conn.close()
+            downstream_bodies = relay.bodies()
+        upstream_bodies = upstream.bodies()
+
+    check("relay / recorded the request", len(downstream_bodies) == 1,
+          str(len(downstream_bodies)))
+    check("relay / recorded body is byte-exact",
+          bool(downstream_bodies) and downstream_bodies[0]["body"] == payload)
+    check("relay / upstream actually received it", len(upstream_bodies) == 1,
+          str(len(upstream_bodies)))
+    check("relay / upstream body is byte-exact",
+          bool(upstream_bodies) and upstream_bodies[0]["body"] == payload)
+    check("relay / upstream answer reaches the caller",
+          status == 200 and b"[DONE]" in answer, f"status={status}")
+    rep = detector.scan_bodies(downstream_bodies, [PROBE])
+    check("relay / detector sees the canary through the relay", bool(rep.hits))
+
+
 def main() -> int:
     print("INV-1 detector self-test\n" + "-" * 40)
     encoding_controls()
     negative_controls()
     recorder_fidelity()
+    relay_controls()
     verdict_controls()
     print("-" * 40)
     if FAILURES:
