@@ -67,6 +67,41 @@ pub const ENV_EPOCH: &str = "WAYLAND_GOAL_EPOCH";
 pub const ENV_ATTEMPT: &str = "WAYLAND_GOAL_ATTEMPT";
 pub const ENV_WORKER: &str = "WAYLAND_GOAL_WORKER";
 
+/// Directory the worker command deposits ONE record per real execution in.
+///
+/// ## Why this exists — the instrument was measuring itself
+///
+/// Before this, the only thing `goal effects` counted was the idempotency
+/// MARKER: one `create_new` file per key, written by the product, about the
+/// product. That count is structurally incapable of observing a duplicate,
+/// because `create_new` makes a second marker impossible no matter how many
+/// times the operator's command actually ran. A worker executed twice and a
+/// worker executed once produce byte-identical marker directories.
+///
+/// So the gate that was supposed to detect double execution could only ever
+/// report the number of distinct keys. It had never caught a duplicate, and it
+/// could not: an instrument that cannot go red for the failure it names is a
+/// decoration.
+///
+/// This is the other half. The sink is written by the WORKER — the process that
+/// performs the real external effect — with one uniquely-named file per
+/// invocation. The product never writes into it. Two executions therefore leave
+/// two files, and [`count_effects`] can say so.
+///
+/// The worker's contract is three lines of shell:
+///
+/// ```sh
+/// mkdir -p "$WAYLAND_GOAL_EFFECT_SINK"
+/// printf '%s\n' "$WAYLAND_GOAL_TASK" \
+///   > "$WAYLAND_GOAL_EFFECT_SINK/$WAYLAND_GOAL_TASK.$$.$(date +%s%N)"
+/// ```
+///
+/// The file name must be unique per invocation (pid plus nanoseconds is enough);
+/// the CONTENT is the task label, which is what makes "twelve executions of
+/// twelve distinct tasks" distinguishable from "thirteen executions of twelve
+/// distinct tasks".
+pub const ENV_EFFECT_SINK: &str = "WAYLAND_GOAL_EFFECT_SINK";
+
 /// Journal a Goal-attached engine reads its durable Goal from.
 ///
 /// The Goal id already reaches child processes through [`ENV_GOAL`] — that is
@@ -362,19 +397,32 @@ pub enum GoalCommand {
         #[arg(last = true)]
         argv: Vec<String>,
     },
-    /// Count the effects on disk: total, and how many carry distinct labels.
+    /// Count what is on disk: the worker's REAL effects, and the product's
+    /// idempotency markers, reported separately.
     ///
-    /// A verb rather than a shell one-liner so a kill/restart proof counts what
-    /// the PRODUCT wrote, using the product, on both platforms — and so the
-    /// count cannot quietly differ between a Linux `wc -l` and a PowerShell
-    /// `Measure-Object`.
+    /// A verb rather than a shell one-liner so a kill/restart proof counts using
+    /// the product on every platform, and so the count cannot quietly differ
+    /// between a Linux `wc -l` and a PowerShell `Measure-Object`.
+    ///
+    /// `--expect` gates on the REAL effect count. It used to gate on the marker
+    /// count, which cannot exceed the number of distinct keys and therefore
+    /// cannot report a duplicate execution at all.
     Effects {
         #[arg(long)]
         effects_dir: PathBuf,
-        /// How many distinct effects the caller expects. Exit 1 on a mismatch,
-        /// so this is a gate that can actually go red rather than a print.
+        /// How many real effects the caller expects — one per task, exactly
+        /// once. Exit 1 on a mismatch, so this is a gate that can actually go
+        /// red rather than a print.
         #[arg(long)]
         expect: Option<usize>,
+        /// Gate on the idempotency markers instead of the real effects.
+        ///
+        /// Kept reachable because the marker count is a genuine second signal —
+        /// markers agreeing while real effects disagree is the fingerprint of
+        /// the duplicate. It is NOT the default because on its own it is a
+        /// count that cannot go red.
+        #[arg(long)]
+        markers_only: bool,
     },
 }
 
@@ -449,13 +497,56 @@ pub async fn run(args: GoalArgs) -> anyhow::Result<()> {
         GoalCommand::Effects {
             effects_dir,
             expect,
+            markers_only,
         } => {
-            let (total, distinct) = count_effects(&effects_dir)?;
-            println!("GOAL-EFFECTS: total={total} distinct={distinct}");
-            if let Some(expect) = expect
-                && (total != expect || distinct != expect)
-            {
-                anyhow::bail!("expected {expect} effects, found total={total} distinct={distinct}");
+            let census = count_effects(&effects_dir)?;
+            // Both currencies, always, so a reader can see the marker count
+            // agreeing while the real count disagrees — which is precisely what
+            // a duplicate execution looks like.
+            println!(
+                "GOAL-EFFECTS: observed_total={} observed_distinct={} duplicates={} markers_total={} markers_distinct={} observed_present={}",
+                census.observed_total,
+                census.observed_distinct,
+                census.duplicates(),
+                census.markers_total,
+                census.markers_distinct,
+                census.observed_present,
+            );
+            let Some(expect) = expect else { return Ok(()) };
+
+            if markers_only {
+                // The old behaviour, reachable only by asking for it by name.
+                if census.markers_total != expect || census.markers_distinct != expect {
+                    anyhow::bail!(
+                        "expected {expect} markers, found total={} distinct={}",
+                        census.markers_total,
+                        census.markers_distinct
+                    );
+                }
+                return Ok(());
+            }
+
+            // VACUITY GUARD. A gate with nothing real to count must refuse
+            // rather than pass. Before this, a worker that produced no
+            // observable effect at all scored a clean exactly-once.
+            if !census.observed_present || census.observed_total == 0 {
+                anyhow::bail!(
+                    "no observed effects under {}: the worker wrote nothing to {ENV_EFFECT_SINK}, \
+                     so this gate cannot certify exactly-once (pass --markers-only to count \
+                     idempotency markers instead, and understand that count is blind to duplicates)",
+                    effects_dir.join("observed").display()
+                );
+            }
+            if census.observed_total != expect || census.observed_distinct != expect {
+                anyhow::bail!(
+                    "expected {expect} real effects, found observed_total={} observed_distinct={} \
+                     duplicates={} (markers_total={} — the marker count agrees with {expect} even \
+                     when the real count does not, which is why it is not the gate)",
+                    census.observed_total,
+                    census.observed_distinct,
+                    census.duplicates(),
+                    census.markers_total
+                );
             }
             Ok(())
         }
@@ -936,6 +1027,13 @@ async fn exec_task(
         return Ok(());
     }
 
+    // The worker's sink for REAL effects. Created here rather than left to the
+    // worker so an absent sink means "the worker wrote nothing", never "the
+    // worker could not create the directory" — the gate treats those two very
+    // differently and must not confuse them.
+    let observed = effects_dir.join("observed");
+    std::fs::create_dir_all(&observed)?;
+
     if !argv.is_empty() {
         // Argv mode, never a shell string: the operator's command and every
         // argument reach the OS as separate argv entries, so a metacharacter in
@@ -943,6 +1041,7 @@ async fn exec_task(
         let rest: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
         let mut command = wcore_config::shell::shell_command_argv(&argv[0], &rest);
         command.current_dir(effects_dir);
+        command.env(ENV_EFFECT_SINK, &observed);
         let status = command
             .status()
             .await
@@ -972,29 +1071,85 @@ async fn exec_task(
     Ok(())
 }
 
-/// Count the effects on disk: total files, and how many carry distinct labels.
+/// What is actually on disk after a run, counted in two independent currencies.
+///
+/// The two halves are kept apart because conflating them is the defect this
+/// type exists to stop. `markers_*` describes what the PRODUCT recorded about
+/// itself. `observed_*` describes what the WORKER really did. Only the second
+/// can go red for a duplicate execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectCensus {
+    /// Idempotency marker files. Bounded above by the number of distinct keys,
+    /// so this can never exceed the task count however many times work ran.
+    pub markers_total: usize,
+    /// Distinct task labels across the markers.
+    pub markers_distinct: usize,
+    /// Whether the worker-written sink exists at all. `false` means the run
+    /// produced no observable external effect, and no exactly-once claim can be
+    /// made from it.
+    pub observed_present: bool,
+    /// Real executions: one record per invocation of the operator's command.
+    pub observed_total: usize,
+    /// Distinct task labels across those executions.
+    pub observed_distinct: usize,
+}
+
+impl EffectCensus {
+    /// The duplicate count the whole defect is about: real executions beyond one
+    /// per task.
+    #[must_use]
+    pub fn duplicates(&self) -> usize {
+        self.observed_total.saturating_sub(self.observed_distinct)
+    }
+}
+
+/// Count what is on disk: the product's markers, and the worker's real effects.
 ///
 /// Exposed so the live proof counts what the PRODUCT wrote rather than what a
-/// harness believes it wrote.
-pub fn count_effects(effects_dir: &std::path::Path) -> anyhow::Result<(usize, usize)> {
-    let effects = effects_dir.join("effects");
+/// harness believes it wrote — and, since the marker count is blind to
+/// duplicates by construction, so it also counts what the WORKER wrote.
+pub fn count_effects(effects_dir: &std::path::Path) -> anyhow::Result<EffectCensus> {
+    let (markers_total, markers_distinct, _) = tally(&effects_dir.join("effects"))?;
+    let observed = effects_dir.join("observed");
+    let (observed_total, observed_distinct, observed_present) = tally(&observed)?;
+    Ok(EffectCensus {
+        markers_total,
+        markers_distinct,
+        observed_present,
+        observed_total,
+        observed_distinct,
+    })
+}
+
+/// `(files, distinct trimmed contents, directory existed)`.
+fn tally(dir: &std::path::Path) -> anyhow::Result<(usize, usize, bool)> {
+    if !dir.is_dir() {
+        return Ok((0, 0, false));
+    }
     let mut total = 0_usize;
     let mut labels = BTreeSet::new();
-    if effects.is_dir() {
-        for entry in std::fs::read_dir(&effects)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                total += 1;
-                labels.insert(std::fs::read_to_string(entry.path())?.trim().to_owned());
-            }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            total += 1;
+            labels.insert(std::fs::read_to_string(entry.path())?.trim().to_owned());
         }
     }
-    Ok((total, labels.len()))
+    Ok((total, labels.len(), true))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The MARKER half of the census, which is what these unit tests are about:
+    /// they exercise the idempotency gate directly, with no worker writing to
+    /// the real-effect sink. The distinction is load-bearing — see
+    /// [`ENV_EFFECT_SINK`] — so the tests name which half they mean.
+    fn markers(dir: &std::path::Path) -> (usize, usize) {
+        let census = count_effects(dir).unwrap();
+        (census.markers_total, census.markers_distinct)
+    }
 
     /// The operator's argv for a worker that exits with `code`.
     fn worker(code: i32) -> Vec<String> {
@@ -1013,7 +1168,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains(ENV_KEY), "got: {error}");
-        assert_eq!(count_effects(dir.path()).unwrap(), (0, 0));
+        assert_eq!(markers(dir.path()), (0, 0));
     }
 
     #[tokio::test]
@@ -1025,11 +1180,7 @@ mod tests {
         exec_task(dir.path(), &[], "t-once", "idem-t-once")
             .await
             .unwrap();
-        assert_eq!(
-            count_effects(dir.path()).unwrap(),
-            (1, 1),
-            "the effect landed twice"
-        );
+        assert_eq!(markers(dir.path()), (1, 1), "the effect landed twice");
     }
 
     #[tokio::test]
@@ -1041,7 +1192,7 @@ mod tests {
             .to_string();
         assert!(error.contains("exited"), "got: {error}");
         assert_eq!(
-            count_effects(dir.path()).unwrap(),
+            markers(dir.path()),
             (0, 0),
             "a failed worker still produced an effect"
         );
@@ -1057,7 +1208,7 @@ mod tests {
         exec_task(dir.path(), &worker(3), "t-retry", "idem-t-retry")
             .await
             .expect_err("the failing worker should surface its failure");
-        assert_eq!(count_effects(dir.path()).unwrap(), (0, 0));
+        assert_eq!(markers(dir.path()), (0, 0));
 
         // The retry must be able to produce. Before the fix this returned
         // `produced=no reason=idempotency-key-present` and the effect was lost
@@ -1066,7 +1217,7 @@ mod tests {
             .await
             .expect("the retry must be able to produce the effect");
         assert_eq!(
-            count_effects(dir.path()).unwrap(),
+            markers(dir.path()),
             (1, 1),
             "the retry after a failed worker produced nothing"
         );
@@ -1085,7 +1236,7 @@ mod tests {
             .await
             .unwrap();
         // Two effects, both labelled the same: total 2, distinct labels 1.
-        assert_eq!(count_effects(dir.path()).unwrap(), (2, 1));
+        assert_eq!(markers(dir.path()), (2, 1));
     }
 
     #[test]
