@@ -46,7 +46,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
-import shutil
+import platform
 import subprocess
 import sys
 import tempfile
@@ -96,6 +96,17 @@ def grep_call(pattern: str):
     )
 
 
+def _console_safe(s: str) -> str:
+    """Make text printable on any console encoding.
+
+    The product's diagnostics contain box-drawing characters and a Windows
+    console defaults to cp1252, which raises UnicodeEncodeError on them. The
+    harness must never die while reporting the thing it observed.
+    """
+    enc = (sys.stdout.encoding or "utf-8")
+    return s.encode(enc, errors="replace").decode(enc, errors="replace")
+
+
 def _refusal_lines(stderr: bytes) -> list[str]:
     """The product's own words for why it would not comply, for the record."""
     out = []
@@ -136,8 +147,7 @@ def run_case(
     *, name: str, surface: str, binary: Path, outdir: Path, make_turn, timeout: int
 ) -> dict:
     case_dir = outdir / name
-    if case_dir.exists():
-        shutil.rmtree(case_dir)
+    canary_mod.rmtree_force(case_dir)
     ws = canary_mod.build_workspace(case_dir / "workspace")
     run_id = canary_mod.new_run_id()
     canaries = canary_mod.plant_all(ws, run_id)
@@ -252,10 +262,18 @@ def main() -> int:
         ]
         print(f"[{mark}] {r['surface']:<9} via {r['case']:<17} {r['outcome']}  ({r['note']}, {r['requests']} req)")
         for line in r["product_refusal"]:
-            print(f"          product refused: {line[:110]}")
+            print(_console_safe(f"          product refused: {line[:110]}"))
 
     (outdir / "surface_controls.json").write_text(
-        json.dumps(results, indent=2), encoding="utf-8"
+        json.dumps(
+            {
+                "platform": platform.platform(),
+                "binary": str(args.binary),
+                "results": results,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
 
     blind = [r for r in results if r["outcome"] == DETECTOR_BLIND]

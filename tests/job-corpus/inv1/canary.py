@@ -19,6 +19,8 @@ from __future__ import annotations
 import os
 import platform
 import secrets
+import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +71,26 @@ class Workspace:
     def posctl_file(self) -> Path:
         """The file the scripted provider will order the product to read."""
         return self.repo / "deploy" / "production.env"
+
+
+def rmtree_force(path: Path) -> None:
+    """Delete a fixture workspace on any platform.
+
+    git marks objects in ``.git/objects`` read-only, and on Windows a
+    read-only file cannot be unlinked — plain ``shutil.rmtree`` raises
+    ``PermissionError``. Clear the bit and retry.
+    """
+    if not path.exists():
+        return
+
+    def _on_error(func, target, _exc_info):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    try:
+        shutil.rmtree(path, onexc=_on_error)  # Python 3.12+
+    except TypeError:
+        shutil.rmtree(path, onerror=lambda f, t, e: _on_error(f, t, e))
 
 
 def build_workspace(root: Path) -> Workspace:

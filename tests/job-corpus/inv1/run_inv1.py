@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,8 +78,7 @@ def run_arm(
     arm_dir = outdir / arm
     arm_dir.mkdir(parents=True, exist_ok=True)
     ws_root = arm_dir / "workspace"
-    if ws_root.exists():
-        shutil.rmtree(ws_root)
+    canary_mod.rmtree_force(ws_root)
     ws = canary_mod.build_workspace(ws_root)
 
     run_id = canary_mod.new_run_id()
