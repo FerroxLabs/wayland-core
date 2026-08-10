@@ -177,58 +177,94 @@ fn read_process_table() -> Vec<ProcessRow> {
     rows
 }
 
-/// What the owner probe published about the tree it created.
+/// One contained tree the owner probe published.
 #[derive(Debug)]
 struct OwnedTree {
     root: i32,
     group: i32,
     descendant: i32,
+}
+
+/// Everything the owner probe published.
+#[derive(Debug)]
+struct OwnedWorld {
+    trees: Vec<OwnedTree>,
+    /// An ordinary uncontained child, spawned after every guard existed. Not
+    /// expected to die; killed during cleanup so the runner is left clean.
     stray: i32,
 }
 
-fn wait_for_published_tree(status: &std::path::Path, owner: &mut std::process::Child) -> OwnedTree {
+fn wait_for_published_world(
+    status: &std::path::Path,
+    owner: &mut std::process::Child,
+    expected_trees: usize,
+) -> OwnedWorld {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         if let Some(status) = owner.try_wait().expect("poll owner probe") {
-            panic!("the owner probe exited before publishing its tree: {status}");
+            panic!("the owner probe exited before publishing its trees: {status}");
         }
         if let Ok(text) = std::fs::read_to_string(status) {
-            let field = |key: &str| -> Option<i32> {
-                text.lines()
-                    .find_map(|line| line.strip_prefix(key)?.trim().parse::<i32>().ok())
-            };
-            if let (Some(root), Some(group), Some(descendant), Some(stray)) = (
-                field("ROOT="),
-                field("GROUP="),
-                field("DESC="),
-                field("STRAY="),
-            ) {
-                return OwnedTree {
-                    root,
-                    group,
-                    descendant,
-                    stray,
-                };
+            let trees: Vec<OwnedTree> = text
+                .lines()
+                .filter_map(|line| {
+                    let fields: Vec<i32> = line
+                        .strip_prefix("TREE=")?
+                        .trim()
+                        .split(',')
+                        .filter_map(|value| value.parse::<i32>().ok())
+                        .collect();
+                    match fields[..] {
+                        [root, group, descendant] => Some(OwnedTree {
+                            root,
+                            group,
+                            descendant,
+                        }),
+                        _ => None,
+                    }
+                })
+                .collect();
+            let stray = text
+                .lines()
+                .find_map(|line| line.strip_prefix("STRAY=")?.trim().parse::<i32>().ok());
+            if let Some(stray) = stray
+                && trees.len() == expected_trees
+            {
+                return OwnedWorld { trees, stray };
             }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("the owner probe never published its tree within 60s");
+    panic!("the owner probe never published {expected_trees} tree(s) within 60s");
 }
 
-/// Rows that belong to the owned tree: the two known pids, plus anything still
+/// Rows that belong to an owned tree: the two known pids, plus anything still
 /// sitting in the owned process group (which catches the group's sentinel and
 /// any descendant the probe never named).
-fn survivors_of(tree: &OwnedTree) -> Vec<ProcessRow> {
+fn survivors_of(trees: &[OwnedTree]) -> Vec<ProcessRow> {
     read_process_table()
         .into_iter()
         .filter(|row| {
             row.is_running()
-                && (row.pid == tree.root
-                    || row.pid == tree.descendant
-                    || row.process_group == tree.group)
+                && trees.iter().any(|tree| {
+                    row.pid == tree.root
+                        || row.pid == tree.descendant
+                        || row.process_group == tree.group
+                })
         })
         .collect()
+}
+
+fn describe(rows: &[ProcessRow]) -> String {
+    rows.iter()
+        .map(|row| {
+            format!(
+                "[pid {} pgid {} {} {}]",
+                row.pid, row.process_group, row.state, row.command
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn kill_now(pid: i32) {
@@ -237,63 +273,56 @@ fn kill_now(pid: i32) {
         .status();
 }
 
-/// A SIGKILLed owner must not leave its owned process tree running.
-///
-/// The owner here is `src/bin/macos_orphan_probe.rs`: it takes a real
-/// `ProcessTreeGuard` over a real two-deep tree and then blocks. We SIGKILL it,
-/// so no destructor on the owning side can possibly run, and then poll the
-/// process table from outside at 0.4s, 6s and 20s. Every checkpoint must show
-/// zero.
+/// SIGKILL the owner of `tree_count` contained trees and grade the process
+/// table from outside at 0.4s, 6s and 20s.
 ///
 /// The 0.4s checkpoint is not decoration: a mechanism that only reaps on some
 /// later timer or on the next agent start leaves a live tree in the window a
 /// user would actually observe. The 20s checkpoint rejects the opposite error,
 /// a mechanism that appears to work only because nothing had started yet.
-#[test]
-#[ignore = "live macOS SIGKILL orphan acceptance; run via `--ignored` with WAYLAND_SANDBOX_LIVE_MACOS=1"]
-fn required_live_macos_sigkilled_owner_leaves_no_process_tree() {
-    if std::env::var("WAYLAND_SANDBOX_LIVE_MACOS").is_err() {
-        eprintln!(
-            "skip: WAYLAND_SANDBOX_LIVE_MACOS not set \
-             (host has not opted into live macOS execution)"
-        );
-        return;
-    }
-
+fn assert_sigkilled_owner_leaves_nothing(tree_count: usize) {
     let workspace = tempfile::tempdir().expect("workspace");
-    let status = workspace.path().join("tree.status");
-    let descendant_pidfile = workspace.path().join("descendant.pid");
+    let status = workspace.path().join("trees.status");
 
     let mut owner = std::process::Command::new(env!("CARGO_BIN_EXE_macos_orphan_probe"))
         .arg(&status)
-        .arg(&descendant_pidfile)
+        .arg(workspace.path())
+        .arg(tree_count.to_string())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .spawn()
         .expect("spawn the owner probe");
 
-    let tree = wait_for_published_tree(&status, &mut owner);
-    assert_eq!(
-        tree.group, tree.root,
-        "the contained tree must lead its own process group"
-    );
+    let world = wait_for_published_world(&status, &mut owner, tree_count);
+    for tree in &world.trees {
+        assert_eq!(
+            tree.group, tree.root,
+            "each contained tree must lead its own process group"
+        );
+    }
 
     // Take the agreement check while the two sides can still DISAGREE. If the
-    // tree is already gone here, every later "zero survivors" is vacuous.
-    let before = survivors_of(&tree);
-    assert!(
-        before.iter().any(|row| row.pid == tree.root),
-        "baseline: the contained root {} is not running; observed {before:#?}",
-        tree.root
-    );
-    assert!(
-        before.iter().any(|row| row.pid == tree.descendant),
-        "baseline: the contained descendant {} is not running; observed {before:#?}",
-        tree.descendant
-    );
+    // trees are already gone here, every later "zero survivors" is vacuous.
+    let before = survivors_of(&world.trees);
+    for tree in &world.trees {
+        assert!(
+            before.iter().any(|row| row.pid == tree.root),
+            "baseline: contained root {} is not running; observed {}",
+            tree.root,
+            describe(&before)
+        );
+        assert!(
+            before.iter().any(|row| row.pid == tree.descendant),
+            "baseline: contained descendant {} is not running; observed {}",
+            tree.descendant,
+            describe(&before)
+        );
+    }
     eprintln!(
-        "baseline: {} process(es) in the owned tree: {before:#?}",
-        before.len()
+        "baseline over {} owned tree(s): {} process(es) {}",
+        tree_count,
+        before.len(),
+        describe(&before)
     );
 
     // SIGKILL, from outside, with no warning of any kind to the owner.
@@ -312,19 +341,11 @@ fn required_live_macos_sigkilled_owner_leaves_no_process_tree() {
         while Instant::now() < until {
             std::thread::sleep(Duration::from_millis(10));
         }
-        let survivors = survivors_of(&tree);
+        let survivors = survivors_of(&world.trees);
         observations.push(format!(
-            "t+{:?}: {} survivor(s) {}",
-            after,
+            "t+{after:?}: {} survivor(s) {}",
             survivors.len(),
-            survivors
-                .iter()
-                .map(|row| format!(
-                    "[pid {} pgid {} {} {}]",
-                    row.pid, row.process_group, row.state, row.command
-                ))
-                .collect::<Vec<_>>()
-                .join(" ")
+            describe(&survivors)
         ));
         if !survivors.is_empty() {
             leaked.push(after);
@@ -332,25 +353,65 @@ fn required_live_macos_sigkilled_owner_leaves_no_process_tree() {
     }
 
     // Clean up before asserting, so a red run does not also litter the host.
-    for row in survivors_of(&tree) {
+    for row in survivors_of(&world.trees) {
         kill_now(row.pid);
     }
-    kill_now(tree.stray);
+    kill_now(world.stray);
 
     for line in &observations {
         eprintln!("{line}");
     }
     assert!(
         leaked.is_empty(),
-        "a SIGKILLed owner left its owned process tree alive at {leaked:?}\n{}",
+        "a SIGKILLed owner left {tree_count} owned tree(s) alive at {leaked:?}\n{}",
         observations.join("\n")
     );
+}
+
+/// A SIGKILLed owner must not leave its owned process tree running.
+///
+/// The owner here is `src/bin/macos_orphan_probe.rs`: it takes a real
+/// `ProcessTreeGuard` over a real two-deep tree and then blocks.
+#[test]
+#[ignore = "live macOS SIGKILL orphan acceptance; run via `--ignored` with WAYLAND_SANDBOX_LIVE_MACOS=1"]
+fn required_live_macos_sigkilled_owner_leaves_no_process_tree() {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_MACOS").is_err() {
+        eprintln!(
+            "skip: WAYLAND_SANDBOX_LIVE_MACOS not set \
+             (host has not opted into live macOS execution)"
+        );
+        return;
+    }
+    assert_sigkilled_owner_leaves_nothing(1);
+}
+
+/// The same, with THREE guards live at once — the shape a real agent session
+/// has, and the one where the mechanism can quietly stop working.
+///
+/// Each guard's sentinel learns its owner died from EOF on a socketpair, and
+/// `fork` copies descriptors regardless of close-on-exec. A sentinel created
+/// for a later guard therefore inherits every earlier guard's owner-side
+/// descriptor and pins it open. Nothing in the single-guard case can detect
+/// that. Here, if the wake-ups did not cascade, the FIRST tree would survive
+/// while the last was reaped — which is precisely a fix that passes its own
+/// test and does nothing for a user.
+#[test]
+#[ignore = "live macOS SIGKILL orphan acceptance; run via `--ignored` with WAYLAND_SANDBOX_LIVE_MACOS=1"]
+fn required_live_macos_sigkilled_owner_leaves_no_overlapping_trees() {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_MACOS").is_err() {
+        eprintln!(
+            "skip: WAYLAND_SANDBOX_LIVE_MACOS not set \
+             (host has not opted into live macOS execution)"
+        );
+        return;
+    }
+    assert_sigkilled_owner_leaves_nothing(3);
 }
 
 /// Zero-execution guard — and it has to RUN to be one.
 ///
 /// Every test in this binary is `#[ignore]`d, so `cargo test --test hard_process_containment_macos`
-/// executes 0 of 2 and still exits 0 printing `test result: ok`. This guard is
+/// executes 0 of 3 and still exits 0 printing `test result: ok`. This guard is
 /// deliberately NOT `#[ignore]`d: three suites in this repo carried a guard that
 /// was itself ignored, which made each inert against precisely the scenario it
 /// existed for — it could only fire under `--ignored`, by which point the real
@@ -377,7 +438,7 @@ fn zero_execution_guard() {
     let asked_for_ignored = std::env::args().any(|a| a == "--ignored" || a == "--include-ignored");
     assert!(
         asked_for_ignored,
-        "declared intent to run this suite's 2 #[ignore]d cases, but neither \
+        "declared intent to run this suite's 3 #[ignore]d cases, but neither \
          --ignored nor --include-ignored was passed, so zero of them can execute. \
          Exiting 0 here would certify nothing. Re-run with: \
          cargo test -p wcore-sandbox --test hard_process_containment_macos -- --ignored --test-threads=1"
