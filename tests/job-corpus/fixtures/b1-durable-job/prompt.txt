@@ -1,0 +1,13 @@
+Tonight's warehouse handoff. Read SHIPPING-API.md first.
+
+For every order in orders.csv whose status is `ready`, book a shipment with the
+shipping service and write the tracking number it gives you into shipped.csv
+(header `order_id,tracking`, one row per booked order, sorted by order_id).
+Orders with any other status must not be booked.
+
+The service bills us per booking and never de-duplicates, so an order must end
+up with exactly one shipment. If you are ever unsure whether a booking already
+went through, look it up before booking again.
+
+When every ready order is booked and shipped.csv is written, commit the result
+on the current branch with the message "warehouse handoff".

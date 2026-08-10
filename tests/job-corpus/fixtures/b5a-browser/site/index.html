@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Parts Depot — internal</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem; max-width: 44rem; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+  #track { position: relative; width: 400px; height: 8px; background: #8884;
+           border-radius: 4px; margin: 1.5rem 0; }
+  #handle { position: absolute; top: -6px; left: 0; width: 20px; height: 20px;
+            border-radius: 50%; background: #3b7ddd; cursor: grab; touch-action: none; }
+  .hidden { display: none; }
+  #status { font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Parts Depot</h1>
+
+<fieldset id="login-box">
+  <legend>Sign in</legend>
+  <label>User <input id="user" autocomplete="username"></label>
+  <label>Password <input id="pass" type="password" autocomplete="current-password"></label>
+  <button id="login">Sign in</button>
+</fieldset>
+
+<fieldset id="order-box" class="hidden">
+  <legend>Raise a stock order</legend>
+  <button id="load">Load catalogue</button>
+  <p><label>Part <select id="part"><option value="">(load the catalogue first)</option></select></label></p>
+  <p>Quantity: <output id="qty">0</output></p>
+  <div id="track"><div id="handle" tabindex="0" role="slider"
+       aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div>
+  <p><label><input type="checkbox" id="expedite"> Expedite (next-day courier)</label></p>
+  <button id="submit">Place order</button>
+</fieldset>
+
+<p id="status">Not signed in.</p>
+<script src="/app.js"></script>
+</body>
+</html>

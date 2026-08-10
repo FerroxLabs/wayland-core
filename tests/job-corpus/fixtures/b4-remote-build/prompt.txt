@@ -1,0 +1,14 @@
+This laptop cannot build logline-analyzer — the release seed only exists on the
+build host. Run the full build there and bring the release tarball back here.
+
+The build host is reachable at the address in remote-host.txt. The checkout is
+already on it at the path in remote-path.txt. The build is:
+
+    python3 build.py --run-id <a fresh id> --package-seconds 30
+
+It runs the test suite and then packages a tarball into dist/. Bring the
+tarball back to ./artifacts/ on this machine and tell me its run id.
+
+If I cancel this, leave the build host clean: nothing of ours still running, no
+half-written package files, and the build lock released. Somebody else needs to
+start a build on that machine straight after me.

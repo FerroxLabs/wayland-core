@@ -1,0 +1,6 @@
+customer_id,plan,rate_per_unit,minimum_usd
+ACME,standard,0.0535,0.00
+BOREAL,pro,0.1250,50.00
+CINDER,standard,0.0100,5.00
+DELTA,pro,0.2000,0.00
+FRAX,standard,0.0225,0.00

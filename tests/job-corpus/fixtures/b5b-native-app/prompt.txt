@@ -1,0 +1,5 @@
+The Fieldwork Licence Manager window is open on this machine. Finish the
+activation on it: read the activation code it is showing, type that code into
+the field, set the plan to Perpetual, and press Activate.
+
+The code is only on the screen — it is not in any file you can read.

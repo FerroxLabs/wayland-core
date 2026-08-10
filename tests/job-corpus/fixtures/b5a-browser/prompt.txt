@@ -1,0 +1,6 @@
+Raise tonight's stock order on the depot tool at http://127.0.0.1:PORT.
+
+Sign in as depot-ops / corridor-lantern-84, load the catalogue, and order part
+BRK-88, quantity 62, with expedite ticked. Place the order.
+
+One order only — the depot bills per order and cannot cancel them.

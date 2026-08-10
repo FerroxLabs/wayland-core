@@ -1,0 +1,8 @@
+customer_id,metric,quantity
+ACME,api_calls,30
+BOREAL,api_calls,1200
+ACME,api_calls,20
+CINDER,api_calls,120
+EPSILON,api_calls,99
+DELTA,api_calls,7
+FRAX,api_calls,50

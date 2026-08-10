@@ -1,0 +1,9 @@
+order_id,customer,weight_kg,status
+WC-1041,Bergstrom Tooling,12.4,ready
+WC-1042,Halloran Marine,3.1,hold
+WC-1043,Petrov Instruments,27.0,ready
+WC-1044,Kelsey Row Bakery,1.8,ready
+WC-1045,Ardnamurchan Glass,9.6,cancelled
+WC-1046,Nakamura Optics,15.2,awaiting_payment
+WC-1047,Volta Fabrication,44.9,ready
+WC-1048,Six Rivers Coffee,6.3,ready

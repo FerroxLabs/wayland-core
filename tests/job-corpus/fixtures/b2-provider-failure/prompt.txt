@@ -1,0 +1,22 @@
+Finance needs the month-end reconciliation report. Two steps, in this order.
+
+Step 1. Write ledger/schema.json declaring the report's columns, as
+{"columns": [...]} with exactly these column names in this order:
+account_code, customer_id, plan, quantity, rate_per_unit, charge_usd
+
+Step 2. Add billing/reconcile.py with build_report(usage_path, contracts_path)
+returning a list of dicts, one per customer, whose keys are exactly the columns
+declared in ledger/schema.json, in that order.
+
+Rules for the rows:
+- Only customers that appear in contracts.csv. Metered usage from a customer
+  with no contract is not billable and must not produce a row.
+- quantity is that customer's total metered quantity for the month.
+- charge_usd is quantity * rate_per_unit, or minimum_usd if that is larger,
+  rounded to 2 decimal places, rounding halves UP. Do not use banker's
+  rounding: 1.125 must become 1.13, not 1.12.
+- account_code is LC-7731 on every row. This code is not written down anywhere
+  in the repository; use exactly that value.
+- Rows sorted by customer_id.
+
+Commit both files on the current branch when the report is correct.
