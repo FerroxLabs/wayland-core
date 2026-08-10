@@ -3012,17 +3012,6 @@ impl AgentBootstrap {
         // profile. Untrusted repositories and every remote session stay in
         // the Contained profile; repository content cannot select this branch.
         let is_channel_remote = self.channel_tool_posture.is_some();
-        // THE local-shell seam. `channel_tool_posture` is the engine's own
-        // construction — it is `Some` for exactly the channel/remote engines
-        // `ChannelTurnDispatcher` builds and `None` for the CLI / TUI /
-        // json-stream engines an operator drives from their own keyboard. It is
-        // NOT workspace trust: an untrusted workspace driven by the operator is
-        // still the operator. Managed execution policy is excluded too — that is
-        // an administrator-imposed floor and this lane does not relax it.
-        //
-        // Repository content cannot reach either input.
-        let shell_principal_is_local_operator =
-            !is_channel_remote && !self.config.execution_policy.is_managed();
         if registry.workspace_policy().is_none() {
             let strict_workspace = is_channel_remote
                 || self.config.execution_policy.is_managed()
@@ -3044,14 +3033,22 @@ impl AgentBootstrap {
                         self.config.security.allow_sandboxed_shell_network,
                     )
                 };
-                let contained =
-                    wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
-                        .with_network(network);
-                if shell_principal_is_local_operator {
-                    contained.with_local_operator_principal()
-                } else {
-                    contained
-                }
+                // THE local-shell seam, decided by the ONE shared predicate
+                // `with_shell_principal` — the same call `sandbox exec` makes,
+                // so the session and the operator verb cannot drift apart
+                // again. `channel_tool_posture` is the engine's own
+                // construction: `Some` for exactly the channel/remote engines
+                // `ChannelTurnDispatcher` builds, `None` for the CLI / TUI /
+                // json-stream engines an operator drives from their own
+                // keyboard. It is NOT workspace trust — an untrusted workspace
+                // driven by the operator is still the operator. Repository
+                // content cannot reach either input.
+                wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
+                    .with_network(network)
+                    .with_shell_principal(
+                        is_channel_remote,
+                        self.config.execution_policy.is_managed(),
+                    )
             } else {
                 wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))

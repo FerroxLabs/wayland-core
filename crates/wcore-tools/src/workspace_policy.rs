@@ -162,9 +162,9 @@ pub struct WorkspacePolicy {
     ///
     /// FAIL-SAFE DEFAULT: `false` in every constructor. A policy only becomes a
     /// local-operator policy by an explicit
-    /// [`with_local_operator_principal`](Self::with_local_operator_principal) at
-    /// the one bootstrap seam that can see the channel scope, so a new
-    /// construction path cannot acquire the relaxation by omission.
+    /// [`with_shell_principal`](Self::with_shell_principal) at a seam that can
+    /// see the channel scope and the execution floor, so a new construction path
+    /// cannot acquire the relaxation by omission.
     local_operator_principal: bool,
     developer_capabilities: Arc<RwLock<Vec<DeveloperCapability>>>,
     /// Read-only roots approved by the local desktop host for this process
@@ -531,15 +531,34 @@ impl WorkspacePolicy {
         self
     }
 
-    /// Declare that the only principal who can drive this session's shell is
-    /// the local operator at their own keyboard.
+    /// THE ONE ANSWER to "may this policy's shell be relaxed onto a backend
+    /// that cannot enforce OS secret-read-deny?" — i.e. is the only principal
+    /// who can drive it the local operator at their own keyboard?
     ///
-    /// Set at exactly one seam — `AgentBootstrap::build`, where
-    /// `channel_tool_posture` is known — and only when that scope is absent and
-    /// the execution policy is not Managed. Repository content cannot select it:
-    /// the input is the engine's own construction, never anything read off disk.
+    /// EVERY production path that builds a shell-bearing `WorkspacePolicy` must
+    /// call this rather than deciding for itself. There are two such paths —
+    /// `AgentBootstrap::build` (the session) and `wcore_cli::sandbox_cmd`
+    /// (`wayland-core sandbox exec`) — and they used to disagree, because only
+    /// the first one had the carve-out at all: `sandbox exec` refused every
+    /// shell on the Windows relaxed default while the session beside it worked.
+    /// Two independent answers to one question is how they drifted, so there is
+    /// now one answer. `sandbox_exec_principal_parity` fails if they diverge.
     ///
-    /// Effect: [`shell_requires_os_read_deny`](Self::shell_requires_os_read_deny)
+    /// The two facts stay the CALLER's to supply, because they come from
+    /// different places and only the caller can know them:
+    ///
+    /// * `channel_posture_present` — is a channel/remote sender able to reach
+    ///   this shell? `Some(ChannelToolScope)` on the engine for a session;
+    ///   structurally `false` for `sandbox exec`, which is reachable only from
+    ///   this host's argv (`TopCmd::Sandbox`) and has no channel, protocol or
+    ///   slash route.
+    /// * `managed_execution_floor` — is an administrator-imposed Managed policy
+    ///   installed? That floor is not this relaxation's to lift, on either path.
+    ///
+    /// Neither input can be selected by repository content.
+    ///
+    /// Effect when the answer is "the local operator":
+    /// [`shell_requires_os_read_deny`](Self::shell_requires_os_read_deny)
     /// goes false, so `bash.rs` stops refusing the shell on a backend that
     /// cannot enforce OS-level secret-read-deny. Nothing else moves —
     /// `secret_read_deny_required` is untouched, so the OS deny LIST
@@ -547,6 +566,25 @@ impl WorkspacePolicy {
     /// computed and still handed to the backend, and a backend that CAN enforce
     /// it still does. The tool-layer `SecretDenyFs` on Read/Write/Edit is a
     /// different guard entirely and is unaffected.
+    #[must_use]
+    pub fn with_shell_principal(
+        self,
+        channel_posture_present: bool,
+        managed_execution_floor: bool,
+    ) -> Self {
+        if channel_posture_present || managed_execution_floor {
+            self
+        } else {
+            self.with_local_operator_principal()
+        }
+    }
+
+    /// Unconditionally mark this policy's shell principal as the local operator.
+    ///
+    /// Production code must NOT call this — call
+    /// [`with_shell_principal`](Self::with_shell_principal), which is the one
+    /// place the decision is made. This exists so tests can construct a
+    /// local-operator policy directly without reconstructing a whole engine.
     #[must_use]
     pub fn with_local_operator_principal(mut self) -> Self {
         self.local_operator_principal = true;
