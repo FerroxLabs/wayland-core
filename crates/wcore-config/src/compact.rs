@@ -72,6 +72,20 @@ pub struct CompactConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// How many pre-compaction conversation windows to keep on disk (B8).
+    ///
+    /// Autocompact replaces the whole message buffer with one synthetic
+    /// summary message and the session mirror is then overwritten with that
+    /// collapsed buffer, so without an archive the pre-compaction
+    /// conversation has no copy `--resume` can reach. Each window is one
+    /// JSON Lines record beside the session file; the newest `N` are kept, so
+    /// the cost is bounded at roughly `N` copies of a full context window
+    /// rather than growing with session length.
+    ///
+    /// `0` disables archiving (compaction becomes destructive again).
+    #[serde(default = "default_precompact_archive_windows")]
+    pub precompact_archive_windows: usize,
+
     /// Enable prompt cache diagnostics output to user.
     /// When true, cache hit/miss info is shown via OutputSink.
     /// Default: false.
@@ -255,6 +269,7 @@ impl Default for CompactConfig {
             micro_gap_seconds: default_micro_gap_seconds(),
             compactable_tools: default_compactable_tools(),
             enabled: default_true(),
+            precompact_archive_windows: default_precompact_archive_windows(),
             cache_diagnostics: false,
             compaction: wcore_compact::CompactionLevel::default(),
             toon: false,
@@ -302,6 +317,9 @@ fn default_compactable_tools() -> Vec<String> {
 }
 fn default_true() -> bool {
     true
+}
+fn default_precompact_archive_windows() -> usize {
+    3
 }
 fn default_smart_trigger_fraction() -> f64 {
     0.65

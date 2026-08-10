@@ -855,6 +855,110 @@ impl SessionManager {
         self.directory.join(format!("{session_id}.journal"))
     }
 
+    /// The pre-compaction archive backing one session id (B8).
+    #[must_use]
+    pub fn precompaction_path(&self, id: &str) -> PathBuf {
+        self.directory.join(format!("{id}.precompact.jsonl"))
+    }
+
+    /// Archive the conversation exactly as it stood immediately BEFORE a
+    /// compaction replaced it, and return the window number written.
+    ///
+    /// Autocompact collapses the whole buffer into one synthetic message and
+    /// `save_session_mirror` then overwrites the session file with that
+    /// collapsed buffer, so without this the pre-compaction conversation has
+    /// no surviving copy `--resume` can reach: the journal reducer *replaces*
+    /// `state.conversation` on `ConversationStateCommitted`, and
+    /// `SessionJournal::compact` rewrites the log file down to its anchor.
+    ///
+    /// One JSON Lines record per compaction window, oldest first. Retention is
+    /// bounded by `keep_windows`: a session that compacts twenty times keeps
+    /// only the newest few, so the archive cannot grow without limit on a very
+    /// long session. `keep_windows == 0` disables archiving entirely.
+    pub fn archive_precompaction(
+        &self,
+        id: &str,
+        messages: &[Message],
+        keep_windows: usize,
+    ) -> anyhow::Result<u32> {
+        if keep_windows == 0 {
+            anyhow::bail!("pre-compaction archiving is disabled (keep_windows = 0)");
+        }
+        std::fs::create_dir_all(&self.directory)?;
+        let path = self.precompaction_path(id);
+        let existing = self.load_precompaction_windows(id)?;
+        let window = existing.last().map_or(1, |w| w.window.saturating_add(1));
+        let record = PrecompactionWindow {
+            window,
+            recorded_at: Utc::now(),
+            messages: messages.to_vec(),
+        };
+
+        // Retention is enforced by rewriting rather than appending whenever the
+        // append would exceed the bound. Rewriting goes through `atomic_write`
+        // so a crash mid-trim leaves either the old file or the new one.
+        let mut kept: Vec<PrecompactionWindow> = existing;
+        kept.push(record);
+        if kept.len() > keep_windows {
+            let drop_count = kept.len() - keep_windows;
+            kept.drain(..drop_count);
+            let mut encoded = Vec::new();
+            for entry in &kept {
+                serde_json::to_writer(&mut encoded, entry)?;
+                encoded.push(b'\n');
+            }
+            wcore_config::atomic_write(&path, &encoded)?;
+        } else {
+            let last = kept.last().expect("just pushed one record");
+            let mut encoded = serde_json::to_vec(last)?;
+            encoded.push(b'\n');
+            let mut file = open_secure_append(&path)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+        }
+        Ok(window)
+    }
+
+    /// Every archived pre-compaction window for this session, oldest first.
+    ///
+    /// A durable record always ends in `\n`, so bytes after the final newline
+    /// are an incomplete crash-time append and are not part of the committed
+    /// prefix (the same rule `merge_wal` applies). A parse failure INSIDE the
+    /// committed prefix is real corruption and is reported, not hidden.
+    pub fn load_precompaction_windows(&self, id: &str) -> anyhow::Result<Vec<PrecompactionWindow>> {
+        let path = self.precompaction_path(id);
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Ok(Vec::new());
+        };
+        let committed = match bytes.iter().rposition(|b| *b == b'\n') {
+            Some(last) => &bytes[..=last],
+            None => return Ok(Vec::new()),
+        };
+        let mut out = Vec::new();
+        for line in committed.split(|b| *b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let window: PrecompactionWindow = serde_json::from_slice(line).map_err(|error| {
+                anyhow::anyhow!("corrupt pre-compaction archive {}: {error}", path.display())
+            })?;
+            out.push(window);
+        }
+        Ok(out)
+    }
+}
+
+/// One archived pre-compaction conversation window (B8).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrecompactionWindow {
+    /// 1-based compaction ordinal within the session.
+    pub window: u32,
+    pub recorded_at: DateTime<Utc>,
+    /// The conversation exactly as it stood before the fold replaced it.
+    pub messages: Vec<Message>,
+}
+
+impl SessionManager {
     /// The directory this manager reads and writes.
     ///
     /// Exposed so an operator verb can name the store in a structured error

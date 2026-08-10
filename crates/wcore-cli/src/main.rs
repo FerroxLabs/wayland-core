@@ -401,6 +401,16 @@ struct Cli {
     #[arg(short = 'c', long = "continue", conflicts_with_all = ["resume", "session_id"])]
     continue_latest: bool,
 
+    /// Resume from BEFORE a compaction, restoring the archived pre-compaction
+    /// conversation instead of the collapsed summary. Pass `latest` for the
+    /// most recent window, or an explicit window number. Requires `--resume`
+    /// or `--continue`.
+    ///
+    /// The value is mandatory on purpose: an optional-value flag would eat the
+    /// positional prompt in `--restore-compaction "do the thing"`.
+    #[arg(long, value_name = "WINDOW|latest")]
+    restore_compaction: Option<String>,
+
     /// Use a specific session ID (instead of auto-generating one)
     #[arg(long)]
     session_id: Option<String>,
@@ -1557,7 +1567,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     DEFAULT_DANGEROUS_SESSION_TTL_SECS,
                     false,
                 )?;
-                run_tui_mode(config, &cwd, None, None, None, true, execution, false).await?;
+                run_tui_mode(config, &cwd, None, None, None, None, true, execution, false).await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1665,6 +1675,13 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     if cli.resume.is_some() && cli.session_id.is_some() {
         anyhow::bail!("Cannot use --resume and --session-id together");
+    }
+
+    // B8 — `--restore-compaction` only means anything against an existing
+    // session. Refusing here is the difference between a flag that does
+    // nothing and a flag that says why.
+    if cli.restore_compaction.is_some() && cli.resume.is_none() && !cli.continue_latest {
+        anyhow::bail!("--restore-compaction requires --resume <id> or --continue");
     }
 
     // W5 (A.5): doctor is the only path that returns a non-zero exit
@@ -1981,6 +1998,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     onboarding_config,
                     &cwd,
                     None,
+                    None,
                     cli.session_id.clone(),
                     cli.assistant.clone(),
                     true,
@@ -2068,6 +2086,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             config_provenance,
             &cwd,
             resume,
+            cli.restore_compaction.clone(),
             cli.session_id,
             execution,
             cli.assistant.clone(),
@@ -2100,6 +2119,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             config,
             &cwd,
             resume,
+            cli.restore_compaction.clone(),
             cli.session_id,
             cli.assistant,
             false,
@@ -2150,7 +2170,14 @@ async fn run() -> anyhow::Result<ExitCode> {
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load_for_run(resume_id)?;
+        let mut session = session_mgr.load_for_run(resume_id)?;
+        if let Some(spec) = &cli.restore_compaction {
+            restore_precompaction(&session_mgr, &mut session.session, spec)?;
+            terminal.formatter().session_info(&format!(
+                "Restored the pre-compaction conversation ({} messages)",
+                session.session.messages.len()
+            ));
+        }
         terminal.formatter().session_info(&format!(
             "Resumed session {} ({} messages, {} model)",
             session.session.id,
@@ -2401,6 +2428,47 @@ fn resolve_resume(
     Ok(Some(latest.id))
 }
 
+/// B8 — swap a resumed session's conversation for an archived PRE-compaction
+/// window, so a bad summary is recoverable instead of terminal.
+///
+/// `spec` is the raw `--restore-compaction` value: `latest` (the bare flag) or
+/// an explicit window number. Failures are hard errors — a user who asked to
+/// recover their history must never be silently dropped into the collapsed
+/// summary instead.
+fn restore_precompaction(
+    manager: &session::SessionManager,
+    session: &mut session::Session,
+    spec: &str,
+) -> anyhow::Result<()> {
+    let windows = manager.load_precompaction_windows(&session.id)?;
+    if windows.is_empty() {
+        anyhow::bail!(
+            "--restore-compaction: session {} has no archived pre-compaction windows \
+             (none were written, or `compact.precompact_archive_windows` is 0). \
+             Expected file: {}",
+            session.id,
+            manager.precompaction_path(&session.id).display()
+        );
+    }
+    let chosen = if spec == "latest" {
+        windows.last().expect("checked non-empty")
+    } else {
+        let wanted: u32 = spec.parse().map_err(|_| {
+            anyhow::anyhow!(
+                "--restore-compaction: expected a window number or `latest`, got {spec}"
+            )
+        })?;
+        windows.iter().find(|w| w.window == wanted).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--restore-compaction: window {wanted} is not archived. Available: {:?}",
+                windows.iter().map(|w| w.window).collect::<Vec<_>>()
+            )
+        })?
+    };
+    session.messages = chosen.messages.clone();
+    Ok(())
+}
+
 /// T2.3 — default-mode dispatch: run the ratatui TUI against a live
 /// `AgentEngine`.
 ///
@@ -2478,6 +2546,7 @@ async fn run_tui_mode(
     config: Config,
     cwd: &str,
     resume: Option<String>,
+    restore_compaction: Option<String>,
     session_id: Option<String>,
     active_assistant: Option<String>,
     force_onboarding: bool,
@@ -2588,7 +2657,10 @@ async fn run_tui_mode(
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load_for_run(resume_id)?;
+        let mut session = session_mgr.load_for_run(resume_id)?;
+        if let Some(spec) = &restore_compaction {
+            restore_precompaction(&session_mgr, &mut session.session, spec)?;
+        }
         bootstrap = bootstrap.resume(session);
     }
 
@@ -4456,6 +4528,7 @@ async fn run_json_stream_mode(
     config_provenance: wcore_config::resolution_provenance::ConfigResolutionProvenance,
     cwd: &str,
     resume: Option<String>,
+    restore_compaction: Option<String>,
     session_id: Option<String>,
     execution: LocalExecutionSelection,
     assistant: Option<String>,
@@ -4578,7 +4651,10 @@ async fn run_json_stream_mode(
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load_for_run(resume_id)?;
+        let mut session = session_mgr.load_for_run(resume_id)?;
+        if let Some(spec) = &restore_compaction {
+            restore_precompaction(&session_mgr, &mut session.session, spec)?;
+        }
         bootstrap = bootstrap.resume(session);
     }
 

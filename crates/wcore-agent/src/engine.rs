@@ -13849,6 +13849,11 @@ impl AgentEngine {
                         .into_iter()
                         .flat_map(|m| m.content)
                         .collect();
+                    // B8 — the fold below moves `live_user_turn` into
+                    // `folded`, but the pre-compaction archive has to record
+                    // the buffer as the user actually had it, live turn
+                    // included. One message clone, taken before the move.
+                    let live_turn_archive = live_user_turn.clone();
                     if let Some(turn) = live_user_turn {
                         // #285 (defense-in-depth) — the live turn that
                         // triggered compaction may carry `tool_result`
@@ -13908,6 +13913,13 @@ impl AgentEngine {
                     // index any more. Advance the floor by that count (the
                     // `+=` accumulates across repeated autocompacts, since the
                     // synthetic message itself becomes part of the next prefix).
+                    // B8 — compaction must not be the only copy. `self.messages`
+                    // is still the pre-compaction prefix on this line; the very
+                    // next statement destroys it and `save_session_mirror` then
+                    // overwrites the session file with the collapsed buffer, so
+                    // this is the last point at which the conversation the user
+                    // had can be written down.
+                    self.archive_precompaction_window(live_turn_archive.as_ref());
                     let collapsed = self.messages.len();
                     self.compaction_floor += collapsed;
                     self.messages = vec![Message::now(Role::User, folded)];
@@ -15699,6 +15711,48 @@ impl AgentEngine {
     async fn prepare_durable_conversation(&mut self) -> Result<(), AgentError> {
         self.repair_orphaned_tool_use();
         self.sync_active_journal_conversation().await
+    }
+
+    /// B8 — write the pre-compaction conversation to its durable sidecar
+    /// before the fold replaces it.
+    ///
+    /// Called with `self.messages` still holding the pre-compaction prefix;
+    /// `live_turn` is the trailing user message `run_compaction` popped out
+    /// and is appended so the archive is the buffer the user actually had.
+    ///
+    /// A failure here is reported and does NOT abort the compaction: the
+    /// window is already over budget, and refusing to compact because the
+    /// archive could not be written would turn a recoverability regression
+    /// into a hard stop.
+    fn archive_precompaction_window(&mut self, live_turn: Option<&Message>) {
+        let keep = self.compact_config.precompact_archive_windows;
+        if keep == 0 {
+            return;
+        }
+        let (Some(mgr), Some(session)) = (&self.session_manager, &self.current_session) else {
+            return;
+        };
+        let mut snapshot = self.messages.clone();
+        if let Some(turn) = live_turn {
+            snapshot.push(turn.clone());
+        }
+        let count = snapshot.len();
+        let id = session.id.clone();
+        match mgr.archive_precompaction(&id, &snapshot, keep) {
+            Ok(window) => {
+                self.output.emit_info(&format!(
+                    "Archived the pre-compaction conversation ({count} messages) as window \
+                     {window}. Recover it with: \
+                     wayland-core --resume {id} --restore-compaction latest"
+                ));
+            }
+            Err(error) => {
+                self.output.emit_error(
+                    &format!("Failed to archive the pre-compaction conversation: {error}"),
+                    false,
+                );
+            }
+        }
     }
 
     /// Write the compatibility snapshot without mutating conversation state.
