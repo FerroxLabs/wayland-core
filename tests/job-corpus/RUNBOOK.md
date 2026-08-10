@@ -76,7 +76,10 @@ the tree.
 | 5 | **The corpus run** | Linux | `python3 -m harness.cli run --binary <BIN> --out <RUNDIR>` | reads §1 |
 | 6 | Re-aggregate / read the verdict | any | `python3 -m harness.cli summarise --out <RUNDIR>` | same exit codes |
 | 7 | Windows leg | `SeanD@seandesktop` (D: only) | **steps 7a–7c first**, then the same run with the Windows binary | |
-| 8 | macOS leg | the local Mac | same, with the macOS binary | |
+
+There is **no macOS leg tonight** — this tree has no macOS binary to run, so no
+row is measured on macOS at all. It is listed in §7 with everything else that is
+out, so its absence cannot be read as coverage.
 
 ### Step 7 has three prerequisites, and none of them are automatic
 
@@ -258,6 +261,12 @@ A row whose prerequisite is absent must be marked N/A **before** the run with
 a stated reason, not discovered mid-run. N/A leaves the denominator; a row
 quietly skipped does not, and that is the failure this runbook exists to stop.
 
+**A-7, A-8, A-9, A-11 and A-12 have no row driver in `rows/`.** Their keys,
+graders and controls exist and are exercised by step 3 of §2, but nothing in
+the corpus run drives the product through them, so this table describes what
+they *would* need, not what tonight measures. They are listed in §7 as OUT. The
+rows the corpus run actually drives are A-1 … A-6, B-1 … B-5 and INV-1.
+
 | row | needs |
 |---|---|
 | A-1 | a machine with the product NOT already installed or authenticated, and a credential to authenticate with |
@@ -321,7 +330,14 @@ a reason, and they leave the denominator:
 
 * **A-10 sub-cases** text_pdf, scanned_pdf, spreadsheet, audio, video — keys
   exist, no grader does.
-* **A-12** — no grader for either part.
+* **A-7, A-8, A-9, A-11** — the keys, graders and controls exist and are run as
+  step 3 of §2, but there is **no row driver** in `rows/`, so the corpus run
+  never puts the product through them. §5 lists what they would need; it is not
+  a claim that they run.
+* **A-12** — no grader for either part, and no row driver.
+* **The macOS leg of the whole corpus** — there is no macOS binary for this
+  tree, so no row was measured on macOS. Not a PASS, not an N/A per row: the
+  platform was not exercised at all.
 * **The 36-cell TUI attachment matrix** (`keys/a10_tui.key.json`) — needs a
   real terminal and is not automated.
 * **macOS INV-1** — `inv1/README.md` records it as NOT MEASURED, and that is
@@ -358,7 +374,7 @@ Stated plainly so nobody infers it from B-3 passing:
 |---|---|---|
 | `hetzner-dsm` | `ssh hetzner-dsm`, `export PATH="$HOME/.cargo/bin:$PATH"` | all Linux builds and the Linux corpus run |
 | `SeanDesktop` | `ssh SeanD@seandesktop` (PowerShell, **D: only**) | Windows builds and the Windows leg |
-| the Mac | local | macOS leg only; **never** run cargo here |
+| the Mac | local | **not used tonight** — there is no macOS binary for this tree (see §7); **never** run cargo here |
 
 Reuse the warm target directories that already exist on hetzner. Never create
 new ones and never delete a sibling lane's directory. If disk tightens, run
