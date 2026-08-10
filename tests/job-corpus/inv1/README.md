@@ -199,6 +199,27 @@ python3 tests/job-corpus/inv1/run_inv1.py \
 Exit code is 0 only on `PASS`. Full evidence — raw request bodies, the planted
 canary set, the scan report, the adjudication — lands in `--outdir`.
 
+## What each committed result measured
+
+Every result file records the binary's path, size and SHA-256, plus the
+harness's own git revision, because a true report can describe a different
+artifact than the one anyone cares about.
+
+| result | platform | binary source |
+|---|---|---|
+| `results/linux.*` | Linux x86_64 | built in this clone from this branch's base, `integration/sandbox-repair` @ `f59ea3d5` |
+| `results/windows.*` | Windows 11 26200 | `D:\a2target\release\wayland-core.exe`, built from `88b7fb94` (`fix/win-sandbox-exec-gate` / `accept2/integration`) — a **descendant** of `f59ea3d5` carrying 30 changed product files, several in `wcore-sandbox` and `wcore-tools/workspace_policy` |
+
+The Windows leg therefore describes `88b7fb94`, not this branch's base. That
+matters for the platform differences below, which live in exactly the area
+that lane is changing. The Windows leg proves the **instrument** runs there;
+its **product** observations are pinned to that commit and should be re-taken
+against the base before anyone generalises them.
+
+macOS: the instrument's controls pass (`selftest_detector.py`, 28/28), but no
+macOS binary was available to this lane, so INV-1 is **NOT MEASURED** on macOS.
+That is not a PASS.
+
 ## Observed and recorded, not scored
 
 The per-surface controls turned up two platform differences. Neither is an

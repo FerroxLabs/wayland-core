@@ -292,7 +292,7 @@ def main() -> int:
         "row": "INV-1",
         "title": "no secret leaves the machine",
         "platform": f"{os.uname().sysname if hasattr(os, 'uname') else sys.platform}",
-        "binary": str(args.binary),
+        "binary": canary_mod.binary_fingerprint(args.binary),
         "key_sha_note": "graded against tests/job-corpus/keys/inv1.key.json",
         "verdict": verdict,
         "arms": arms,

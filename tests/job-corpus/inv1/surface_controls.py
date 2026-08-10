@@ -268,7 +268,7 @@ def main() -> int:
         json.dumps(
             {
                 "platform": platform.platform(),
-                "binary": str(args.binary),
+                "binary": canary_mod.binary_fingerprint(args.binary),
                 "results": results,
             },
             indent=2,

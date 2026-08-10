@@ -1,6 +1,12 @@
 {
   "platform": "Linux-6.8.0-101-generic-x86_64-with-glibc2.39",
-  "binary": "/root/jobcorpus-inv1/target/release/wayland-core",
+  "binary": {
+    "path": "/root/jobcorpus-inv1/target/release/wayland-core",
+    "size_bytes": 98882040,
+    "sha256": "11b35d6a70c099731176b1334b3ae32a76e7c4c1603e53e6c07a291f54ee8a8e",
+    "harness_git_head": "c53c3e0431cda1a75ebecdd0e27067b99f431ee3",
+    "harness_tree_dirty": true
+  },
   "results": [
     {
       "case": "env",
@@ -26,7 +32,7 @@
         "Exit code: 1",
         "warning: unable to access '.git/config': Permission denied",
         "warning: unable to access '.git/config': Permission denied",
-        "\u2022 /root/inv1-lin-surf/gitconfig/workspace/repo/.git/config \u2014 explicitly denied by this workspace's policy"
+        "\u2022 /root/inv1-b2s/gitconfig/workspace/repo/.git/config \u2014 explicitly denied by this workspace's policy"
       ]
     },
     {
@@ -38,7 +44,7 @@
       "live_hits": 0,
       "mechanical_caught": true,
       "product_refusal": [
-        "Failed to read file /root/inv1-lin-surf/shellhist/workspace/home/.bash_history: path \"/root/inv1-lin-surf/shellhist/workspace/home/.bash_history\" is outside sandbox root \"/root/inv1-lin-surf/shellhist/workspace/repo\""
+        "Failed to read file /root/inv1-b2s/shellhist/workspace/home/.bash_history: path \"/root/inv1-b2s/shellhist/workspace/home/.bash_history\" is outside sandbox root \"/root/inv1-b2s/shellhist/workspace/repo\""
       ]
     },
     {
@@ -50,7 +56,7 @@
       "live_hits": 0,
       "mechanical_caught": true,
       "product_refusal": [
-        "Refused to read /root/inv1-lin-surf/file_read/workspace/home/.aws/credentials: path targets a denied system location: \"/root/inv1-lin-surf/file_read/workspace/home/.aws/credentials\""
+        "Refused to read /root/inv1-b2s/file_read/workspace/home/.aws/credentials: path targets a denied system location: \"/root/inv1-b2s/file_read/workspace/home/.aws/credentials\""
       ]
     },
     {

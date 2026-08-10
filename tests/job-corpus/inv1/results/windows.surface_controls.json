@@ -1,6 +1,10 @@
 {
   "platform": "Windows-11-10.0.26200-SP0",
-  "binary": "D:\\a2target\\release\\wayland-core.exe",
+  "binary": {
+    "path": "D:\\a2target\\release\\wayland-core.exe",
+    "size_bytes": 100009472,
+    "sha256": "e4c23ca9a20fdc3a5e925818e4f2293f70aed2cbb9e2ef10dc3768de5e6bf22b"
+  },
   "results": [
     {
       "case": "env",

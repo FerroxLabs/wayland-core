@@ -73,6 +73,52 @@ class Workspace:
         return self.repo / "deploy" / "production.env"
 
 
+def binary_fingerprint(binary: Path) -> dict:
+    """Identify the artifact that was actually measured.
+
+    A run that does not say which binary it exercised can be silently
+    attributed to the wrong tree — a true report describing a different
+    artifact than the one anyone cares about. Path, size and content digest
+    are checkable after the fact by anyone; the harness's own git revision is
+    recorded alongside so the two can be told apart.
+    """
+    import hashlib
+    import subprocess as sp
+
+    info: dict = {"path": str(binary)}
+    try:
+        info["size_bytes"] = binary.stat().st_size
+        h = hashlib.sha256()
+        with binary.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        info["sha256"] = h.hexdigest()
+    except OSError as exc:
+        info["error"] = repr(exc)
+
+    try:
+        here = Path(__file__).resolve().parent
+        rev = sp.run(
+            ["git", "-C", str(here), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if rev.returncode == 0:
+            info["harness_git_head"] = rev.stdout.strip()
+        dirty = sp.run(
+            ["git", "-C", str(here), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if dirty.returncode == 0:
+            info["harness_tree_dirty"] = bool(dirty.stdout.strip())
+    except (OSError, sp.SubprocessError):
+        pass
+    return info
+
+
 def rmtree_force(path: Path) -> None:
     """Delete a fixture workspace on any platform.
 
