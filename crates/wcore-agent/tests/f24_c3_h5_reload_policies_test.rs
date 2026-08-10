@@ -181,7 +181,7 @@ async fn a_reloaded_channel_carries_its_policy_and_its_posture() {
     // it — the live control the finding lane ran against a real gateway,
     // reproduced here without one.
     let as_if_at_startup = ChannelPolicyRegistry::from_configs(
-        wcore_agent::bootstrap::load_channel_policy_configs(),
+        wcore_agent::bootstrap::load_channel_policy_configs().expect("the channel dir parses"),
         Path::new(&workspace),
     )
     .expect("these fixtures are bounded (dm = allowlist over a named sender)");

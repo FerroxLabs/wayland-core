@@ -1528,7 +1528,7 @@ mod tests {
         }
 
         // The swap. Both facets move; there is no API to move only one.
-        let n_channels = registry.replace(crate::channel_policy::ChannelPolicySnapshot {
+        let n_channels = registry.replace_unchecked(crate::channel_policy::ChannelPolicySnapshot {
             policies: HashMap::from([
                 ("known".to_string(), allowlist_policy("u-known")),
                 ("added".to_string(), allowlist_policy("u-added")),
@@ -1628,7 +1628,7 @@ mod tests {
             "positive control: the channel must be admitted before it is revoked"
         );
 
-        registry.replace(crate::channel_policy::ChannelPolicySnapshot::default());
+        registry.replace_unchecked(crate::channel_policy::ChannelPolicySnapshot::default());
 
         q.lock().await.push_back(dm_from("r2", "cr", "u1"));
         tokio::time::sleep(Duration::from_millis(600)).await;

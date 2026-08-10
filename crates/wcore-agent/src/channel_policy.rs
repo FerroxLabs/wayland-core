@@ -113,7 +113,11 @@ impl ChannelPolicySnapshot {
         configs: Vec<ChannelConfig>,
         default_workspace_root: &Path,
     ) -> Result<Self, OpenAdmissionRefusal> {
-        refuse_open_admission(configs.iter().map(|c| (c.name.as_str(), &c.inbound)))?;
+        refuse_open_admission(
+            configs
+                .iter()
+                .map(|c| (c.name.as_str(), c.enabled, &c.inbound)),
+        )?;
 
         let postures: HashMap<String, ChannelToolScope> = configs
             .iter()
@@ -177,7 +181,15 @@ pub struct ChannelPolicyRegistry {
 
 impl ChannelPolicyRegistry {
     /// Install `snapshot` as generation 0.
-    pub fn new(snapshot: ChannelPolicySnapshot) -> Self {
+    ///
+    /// PRIVATE, and the seal on the P2 gate. `ChannelPolicySnapshot` has public
+    /// fields, so a public constructor taking one would be a route into the
+    /// registry that never passed [`ChannelPolicySnapshot::from_configs`] — the
+    /// single function the admits-everyone refusal lives in. The only public
+    /// ways in are `from_configs` and `Default` (an EMPTY registry, which is
+    /// fail-closed: every unknown channel resolves to
+    /// [`InboundPolicy::default`]).
+    fn new(snapshot: ChannelPolicySnapshot) -> Self {
         Self {
             inner: RwLock::new(snapshot),
         }
@@ -190,7 +202,12 @@ impl ChannelPolicyRegistry {
     /// fallback scope") but it has to be written down, so a production call
     /// site that dropped the postures is visible in the diff rather than
     /// implied by an absent argument.
-    pub fn from_parts(
+    /// TEST-ONLY, and `#[cfg(test)]` rather than merely documented as such:
+    /// this bypasses the P2 refusal, so its absence from a production build has
+    /// to be a compile-time fact and not a convention a future call site can
+    /// quietly break.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
         policies: HashMap<String, InboundPolicy>,
         postures: HashMap<String, ChannelToolScope>,
     ) -> Self {
@@ -245,7 +262,11 @@ impl ChannelPolicyRegistry {
     /// of channels now covered.
     ///
     /// There is no single-facet variant, by design: see the module docs.
-    pub fn replace(&self, snapshot: ChannelPolicySnapshot) -> usize {
+    ///
+    /// PRIVATE for the same reason [`Self::new`] is: a snapshot handed in from
+    /// outside has not been through the admits-everyone refusal.
+    /// [`Self::replace_from_configs`] is the public swap.
+    fn replace(&self, snapshot: ChannelPolicySnapshot) -> usize {
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let generation = guard.generation + 1;
         *guard = ChannelPolicySnapshot {
@@ -271,6 +292,15 @@ impl ChannelPolicyRegistry {
             configs,
             default_workspace_root,
         )?))
+    }
+
+    /// TEST-ONLY swap of a hand-built snapshot, for the unit tests that
+    /// exercise the SUBSCRIBER and the DISPATCHER reading a refreshed registry
+    /// rather than the gate that produced it. `#[cfg(test)]` so it cannot exist
+    /// in a production build — see [`Self::from_parts`].
+    #[cfg(test)]
+    pub(crate) fn replace_unchecked(&self, snapshot: ChannelPolicySnapshot) -> usize {
+        self.replace(snapshot)
     }
 
     /// Number of channels covered by the current snapshot.

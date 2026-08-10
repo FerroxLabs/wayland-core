@@ -1327,7 +1327,16 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 // is safe; this one's consequence is "anyone can drive the
                 // agent", which is not, and degrading it would leave the
                 // dangerous configuration merely discouraged.
-                Err(e @ wcore_agent::channel_inbound_host::InboundHostError::OpenAdmission(_)) => {
+                //
+                // `PolicyLoad` is fatal in the SAME arm, and that is the point:
+                // an unreadable channel directory means the gate does not know
+                // what it is being asked to approve. Degrading it would restore
+                // the bypass by another route — carry on with zero policies,
+                // and the refusal above has nothing to fire on.
+                Err(
+                    e @ (wcore_agent::channel_inbound_host::InboundHostError::OpenAdmission(_)
+                    | wcore_agent::channel_inbound_host::InboundHostError::PolicyLoad(_)),
+                ) => {
                     return Err(anyhow::anyhow!("gateway refusing to start. {e}"));
                 }
                 Err(e) if config.inbound_webhook.enabled => {
