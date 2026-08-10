@@ -650,26 +650,6 @@ pub struct AdmissionShape<'a> {
     pub inbound: &'a InboundPolicy,
 }
 
-impl<'a> AdmissionShape<'a> {
-    /// Build a shape from its parts. Prefer [`ChannelConfig::admission_shape`]
-    /// — it cannot omit one.
-    pub fn new(
-        name: &'a str,
-        platform: &'a str,
-        enabled: bool,
-        options: &'a toml::Table,
-        inbound: &'a InboundPolicy,
-    ) -> Self {
-        Self {
-            name,
-            platform,
-            enabled,
-            options,
-            inbound,
-        }
-    }
-}
-
 impl ChannelConfig {
     /// This channel's admission shape — every setting a consent is bound to.
     ///
@@ -895,6 +875,26 @@ fn render_options(options: &toml::Table) -> Vec<(String, String)> {
 /// `(field, canonical value)` for the whole shape: every field in
 /// [`SHAPE_FIELDS`] in order, then every `[options]` leaf, sorted.
 fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
+    // EXHAUSTIVE destructuring of the shape itself, deliberately WITHOUT a
+    // `..` rest pattern — for the same reason as the `InboundPolicy`
+    // destructure below, one hop earlier.
+    //
+    // `AdmissionShape` is the struct this whole token is rendered from, and
+    // reading it by field access (`shape.name`, `shape.options`, …) left it as
+    // the one struct on the path with no compile-time guard at all: a sixth
+    // shape field would compile, every test would stay green, and the token
+    // would simply not mention it. `ChannelConfig::admission_shape` refuses to
+    // CARRY a field silently; this refuses to RENDER one silently. Both halves
+    // are needed — a field carried into the shape and then never read is the
+    // same widening as a field never carried.
+    let &AdmissionShape {
+        name,
+        platform,
+        enabled,
+        options,
+        inbound,
+    } = shape;
+
     // EXHAUSTIVE destructuring, deliberately WITHOUT a `..` rest pattern.
     //
     // This is the compile-time half of the gate, and it is the reason there is
@@ -935,12 +935,12 @@ fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
         // HOLDS the token being built; rendering it would require the token to
         // contain itself.
         acknowledge_open_admission: _,
-    } = shape.inbound;
+    } = inbound;
 
     let mut fields: Vec<(String, String)> = vec![
-        ("name".into(), escape_entry(shape.name)),
-        ("platform".into(), escape_entry(shape.platform)),
-        ("enabled".into(), shape.enabled.to_string()),
+        ("name".into(), escape_entry(name)),
+        ("platform".into(), escape_entry(platform)),
+        ("enabled".into(), enabled.to_string()),
         ("dm".into(), dm_policy_name(dm).to_string()),
         ("dm_allowlist".into(), canonical_list(dm_allowlist)),
         ("group".into(), group_policy_name(group).to_string()),
@@ -965,7 +965,7 @@ fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
         fields.iter().map(|(k, _)| k.as_str()).eq(SHAPE_FIELDS),
         "the rendered fields and SHAPE_FIELDS must not drift: the parser trusts the order"
     );
-    fields.extend(render_options(shape.options));
+    fields.extend(render_options(options));
     fields
 }
 
@@ -2455,27 +2455,122 @@ mod tests {
         );
     }
 
-    /// The field names serde sees on `value`.
+    /// Every field `T` DECLARES, read off the type rather than off a value.
     ///
-    /// This is the only reflection Rust offers, and the only view of a struct
-    /// that CANNOT fall behind its definition: both structs that feed the
-    /// admission shape derive `Serialize`, so a field added tomorrow appears
-    /// here with nobody having to remember to add it. A hand-written list is
-    /// the failure mode these tests exist to catch, so they must not be built
-    /// on one.
+    /// The first cut of this helper serialized a fixture and read the keys
+    /// back, which is reflection over a VALUE and is defeated by serde's own
+    /// omission attributes: a field carrying `#[serde(default,
+    /// skip_serializing_if = "Vec::is_empty")]` is simply absent from the JSON
+    /// whenever the fixture leaves it empty, so it was invisible to BOTH `..`
+    /// guards below and a widening through it was unseeable — measured, not
+    /// theorised. Populating the fixture harder is not a fix either: the next
+    /// author adding the field writes `Vec::new()` to make it compile and the
+    /// hole is back.
     ///
-    /// JSON rather than TOML because `Option::None` has no TOML rendering and
-    /// the fixtures must be able to exercise an absent `tool_workspace_root`.
-    fn serialized_field_names<T: Serialize>(value: &T) -> Vec<String> {
-        let mut names: Vec<String> = serde_json::to_value(value)
+    /// So this asks the TYPE. Both structs are `#[serde(deny_unknown_fields)]`,
+    /// which makes serde's derived `Deserialize` reject an unknown key with an
+    /// error that enumerates the accepted ones — an enumeration generated from
+    /// the definition, at the definition, with no value involved and therefore
+    /// nothing an attribute on a field can hide. Delete `deny_unknown_fields`
+    /// and the probe stops erroring: the `expect` below fails and the guards
+    /// go red rather than quiet.
+    fn declared_field_names<T: serde::de::DeserializeOwned>() -> Vec<String> {
+        // A key no struct can plausibly declare, so the error is always the
+        // unknown-field one and never a collision.
+        const PROBE: &str = "__not_a_declared_field__";
+
+        let err = serde_json::from_value::<T>(serde_json::json!({ PROBE: null }))
+            .err()
+            .map(|e| e.to_string())
+            .expect(
+                "the probe key must be REJECTED — if it deserialized, the struct lost its \
+                 `#[serde(deny_unknown_fields)]` and this guard can no longer see its fields",
+            );
+        let tail = err
+            .split_once("expected one of ")
+            .or_else(|| err.split_once("expected "))
+            .map(|(_, tail)| tail)
+            .unwrap_or_else(|| {
+                panic!("serde must enumerate the accepted fields; got: {err}");
+            });
+        // `` `a`, `b`, `c` `` -> the odd segments of a split on the backtick.
+        let mut names: Vec<String> = tail
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        assert!(
+            names.len() > 1,
+            "the field enumeration parsed out of serde's error is empty or degenerate, so the \
+             guards below would pass vacuously; serde's message was: {err}"
+        );
+        names
+    }
+
+    /// POSITIVE CONTROL for [`declared_field_names`].
+    ///
+    /// The guards below compare a hand-maintained list against whatever this
+    /// returns, so a parse that silently produced the WRONG list — or a list
+    /// that happened to match — would make both of them decorative. This pins
+    /// the mechanism against two structs whose fields are known here, and
+    /// pins the negative direction too: a field that is NOT declared must not
+    /// appear.
+    #[test]
+    fn the_field_enumeration_reads_the_type_not_a_value() {
+        let inbound = declared_field_names::<InboundPolicy>();
+        assert!(
+            inbound.contains(&"acknowledge_open_admission".to_string())
+                && inbound.contains(&"dm".to_string())
+                && inbound.contains(&"ack".to_string()),
+            "the enumeration must name InboundPolicy's own fields; got {inbound:?}"
+        );
+        assert!(
+            !inbound.contains(&"__not_a_declared_field__".to_string()),
+            "the probe key must not be reported as a declared field; got {inbound:?}"
+        );
+
+        let config = declared_field_names::<ChannelConfig>();
+        assert!(
+            config.contains(&"name".to_string()) && config.contains(&"inbound".to_string()),
+            "the enumeration must name ChannelConfig's own fields; got {config:?}"
+        );
+
+        // The defeat this helper exists to close: a field whose VALUE serde
+        // omits is still DECLARED, so it must still be enumerated. `ack`
+        // serializes unconditionally today, so the control is built instead
+        // from a local struct carrying the exact attribute that hid a field
+        // from the previous, value-based helper.
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Omitted {
+            kept: bool,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            hidden_when_empty: Vec<String>,
+        }
+        let fixture = Omitted {
+            kept: true,
+            hidden_when_empty: Vec::new(),
+        };
+        let serialized: Vec<String> = serde_json::to_value(&fixture)
             .expect("fixture must serialize")
             .as_object()
             .expect("a struct serializes to an object")
             .keys()
             .cloned()
             .collect();
-        names.sort();
-        names
+        assert_eq!(
+            serialized,
+            vec!["kept".to_string()],
+            "control is wrong: this field is supposed to be INVISIBLE to value reflection"
+        );
+        assert_eq!(
+            declared_field_names::<Omitted>(),
+            vec!["hidden_when_empty".to_string(), "kept".to_string()],
+            "reading the TYPE must see the field that reading the value cannot"
+        );
     }
 
     fn sorted(values: impl IntoIterator<Item = impl Into<String>>) -> Vec<String> {
@@ -2560,7 +2655,7 @@ mod tests {
                     .map(|(field, _)| *field)
                     .chain(OUTSIDE_THE_SHAPE)
             ),
-            serialized_field_names(&base),
+            declared_field_names::<ChannelConfig>(),
             "a field was added to or removed from ChannelConfig. Decide whether a consent is \
              bound to it: give it a mutation above if it is, or add it to OUTSIDE_THE_SHAPE and \
              write WHY it cannot widen reach or confidentiality at its binding in \
@@ -2603,7 +2698,7 @@ mod tests {
 
         assert_eq!(
             sorted(rendered_inbound.iter().copied().chain(OUTSIDE_THE_SHAPE)),
-            serialized_field_names(&base),
+            declared_field_names::<InboundPolicy>(),
             "a field was added to or removed from InboundPolicy. Decide whether a consent is \
              bound to it: render it in `shape_fields` and add it to SHAPE_FIELDS if it is, or \
              discard it there with a written reason and add it to OUTSIDE_THE_SHAPE. Do not \
@@ -2767,6 +2862,137 @@ mod tests {
                 "two different shapes produced the same token at {field}: {token}"
             );
             seen.push(token);
+        }
+    }
+
+    /// EVERY FIELD RENDERS UNDER ITS OWN KEY.
+    ///
+    /// `every_field_in_the_shape_is_load_bearing` proves each field moves the
+    /// token, and `token_field_order_is_pinned` proves the key list and its
+    /// order. Neither one binds a key to the field it is supposed to carry:
+    /// swap the two rendered values in `shape_fields`
+    ///
+    /// ```ignore
+    /// ("name".into(), escape_entry(platform)),
+    /// ("platform".into(), escape_entry(name)),
+    /// ```
+    ///
+    /// and the key list, the arity and the order are all untouched, every
+    /// field still moves the token, and the whole module stays green — an
+    /// adversarial seat did exactly this and scored 39 passed / 0 failed. That
+    /// is a live hole and not a cosmetic one: the refusal diff prints
+    /// `platform: acknowledged <x>, now <y>` for a change to `name`, so the
+    /// operator re-consents to the wrong sentence.
+    ///
+    /// This closes it by mutating ONE field at a time and demanding that the
+    /// set of token entries that changed is EXACTLY the one key that field is
+    /// declared to render. A swap fails immediately: mutating `name` changes
+    /// the entry under `platform`.
+    #[test]
+    fn every_field_renders_under_its_own_key() {
+        let base = config("t", true, &open_over_one_group());
+
+        /// The entries of a token, by key. The token is produced by
+        /// `admission_shape_token`, so it must parse.
+        fn entries(cfg: &ChannelConfig) -> std::collections::BTreeMap<String, String> {
+            parse_shape_token(&admission_shape_token(&cfg.admission_shape()))
+                .expect("a token this crate just wrote must parse")
+                .into_iter()
+                .collect()
+        }
+
+        let inbound = |f: fn(&mut InboundPolicy)| {
+            let mut policy = base.inbound.clone();
+            f(&mut policy);
+            ChannelConfig {
+                inbound: policy,
+                ..base.clone()
+            }
+        };
+
+        // One mutation per SHAPE_FIELDS key, each touching ONLY the field that
+        // key is supposed to carry.
+        let cases: Vec<(&str, ChannelConfig)> = vec![
+            (
+                "name",
+                ChannelConfig {
+                    name: "renamed".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "platform",
+                ChannelConfig {
+                    platform: "discord".into(),
+                    ..base.clone()
+                },
+            ),
+            (
+                "enabled",
+                ChannelConfig {
+                    enabled: false,
+                    ..base.clone()
+                },
+            ),
+            ("dm", inbound(|p| p.dm = DmPolicy::Disabled)),
+            (
+                "dm_allowlist",
+                inbound(|p| p.dm_allowlist = vec!["U2".into()]),
+            ),
+            ("group", inbound(|p| p.group = GroupPolicy::Open)),
+            (
+                "group_allowlist",
+                inbound(|p| p.group_allowlist = vec!["G2".into()]),
+            ),
+            (
+                "sender_allowlist",
+                inbound(|p| p.sender_allowlist = vec!["U9".into()]),
+            ),
+            (
+                "require_mention",
+                inbound(|p| p.require_mention = !p.require_mention),
+            ),
+            ("tools", inbound(|p| p.tools = ChannelToolPosture::Full)),
+            (
+                "tool_workspace_root",
+                inbound(|p| p.tool_workspace_root = Some("/jail".into())),
+            ),
+            (
+                "group_sessions_per_user",
+                inbound(|p| p.group_sessions_per_user = !p.group_sessions_per_user),
+            ),
+            (
+                "thread_sessions_per_user",
+                inbound(|p| p.thread_sessions_per_user = !p.thread_sessions_per_user),
+            ),
+        ];
+        assert!(
+            cases.iter().map(|(key, _)| *key).eq(SHAPE_FIELDS),
+            "every SHAPE_FIELDS key needs a case here, in order, or a key could be bound to the \
+             wrong field with nothing to catch it"
+        );
+
+        let base_entries = entries(&base);
+        for (key, mutated) in &cases {
+            let mutated_entries = entries(mutated);
+            // The union, so a mutation that ADDS or REMOVES a key counts as a
+            // change to it rather than disappearing from the comparison.
+            let changed: Vec<&str> = base_entries
+                .keys()
+                .chain(mutated_entries.keys())
+                .map(String::as_str)
+                .filter(|k| base_entries.get(*k) != mutated_entries.get(*k))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            assert_eq!(
+                changed,
+                vec![*key],
+                "mutating the field behind `{key}` must change the `{key}` entry and nothing \
+                 else. It changed {changed:?} instead, so at least one key renders another \
+                 field's value — the refusal diff then names the wrong setting and the operator \
+                 re-consents to the wrong sentence"
+            );
         }
     }
 
