@@ -9655,6 +9655,7 @@ dependencies = [
  "wcore-agent",
  "wcore-agents-pack",
  "wcore-budget",
+ "wcore-channels",
  "wcore-channels-registry",
  "wcore-compact",
  "wcore-config",

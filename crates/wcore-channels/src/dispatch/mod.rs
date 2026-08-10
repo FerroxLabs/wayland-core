@@ -25,8 +25,11 @@ pub mod rate_limit;
 pub mod session_key;
 
 pub use access::{
-    AccessDecision, AckMode, ChannelToolPosture, DmPolicy, GroupPolicy, InboundPolicy,
-    decide_access,
+    ABSENT_FIELD, ADMISSION_SHAPE_VERSION, AccessDecision, AckMode, AdmissionFieldChange,
+    AdmissionShape, ChannelOpenAdmission, ChannelToolPosture, DmPolicy, GroupPolicy, InboundPolicy,
+    LegacyToken, OPTION_FIELD_PREFIX, OpenAdmission, OpenAdmissionFault, OpenAdmissionRefusal,
+    SHAPE_FIELDS, admission_shape_token, decide_access, open_admission_faults, open_admissions,
+    refuse_open_admission, required_acknowledgement,
 };
 pub use admission::{TurnAdmission, classify};
 pub use dedupe::{DedupeCache, DedupeKey};

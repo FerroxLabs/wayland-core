@@ -174,14 +174,140 @@ group = "disabled"               # open | allowlist | disabled
 require_mention = true           # in groups, only act when addressed
 ```
 
+### The product REFUSES to start on an admits-everyone config
+
+Four shapes admit senders nobody named, and each of them means *whoever
+finds the bot* can drive an agent holding this host's tool posture:
+
+| Shape | What it admits |
+|---|---|
+| `dm = "open"` | every DM from every account |
+| `dm = "allowlist"` with `"*"` in `dm_allowlist` | every DM from every account |
+| `group = "open"` | every group and channel message |
+| `group = "allowlist"` with `"*"` in `sender_allowlist` and a non-empty `group_allowlist` | every sender in an allowlisted conversation |
+
+Any of them, unacknowledged, is a refusal to start — on `wayland-core`
+(interactive, `--no-tui`, and the headless one-shot), on `--json-stream`
+(where the host receives one `error` frame instead of `ready`), on
+`gateway run`, and on `channel reload` (which refuses the swap and keeps the
+bounded policies already in effect). Channels are checked even when
+`enabled = false`.
+
+If a channel is genuinely meant to be open, acknowledge it **in that
+channel's own file** under `<profile home>/channels/<name>.toml` — a
+project-local `.wayland-core.toml` cannot set this key. The
+acknowledgement is ONE token, and the refusal prints it for you to paste:
+
+```toml
+[inbound]
+dm = "open"
+acknowledge_open_admission = ["admission-v2 name=acme platform=telegram enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0 group_sessions_per_user=true thread_sessions_per_user=false options.allowed_chat_ids=a:1:s:123456789 options.credential_handle=s:telegram%2Eacme%2Ebot_token"]
+```
+
+Don't type it: run the product, read the refusal, paste the line it prints.
+
+#### The token is the channel's whole admission shape
+
+It renders every setting that decides who is admitted, what they can
+trigger without addressing the bot, and what the resulting turn may read or
+do to this host: `name`, `platform`, `enabled`, `dm`, `dm_allowlist`,
+`group`, `group_allowlist`, `sender_allowlist`, `require_mention`, `tools`,
+`tool_workspace_root`, `group_sessions_per_user`, `thread_sessions_per_user`,
+**and every key in `[options]`**. The two session flags are in the token
+because turning `group_sessions_per_user` off collapses every sender in a
+group into ONE agent session, so each turn runs with every other sender's
+history — including yours — in context. Only `ack` is left out, and it is
+outbound presentation. Change any of them
+and the token changes, so the old consent stops applying and the process
+refuses until you look at the new shape.
+
+`tools` is in there because "anyone may DM this bot" is a materially
+different decision at the safe `conversational` floor than at `full` host
+access, and moving between them is one word. `name` is in there for the
+same read-what-someone-else-said reason as the session flags: the channel
+name is the first component of every session key its turns run under, so
+renaming a channel (file and `name` together) re-points them at whatever
+history is already stored under the new name — which, if that name belonged
+to another channel, is that channel's conversations. Renaming an open
+channel therefore asks you to acknowledge again.
+
+#### Why `[options]` is in the token, all of it
+
+`[inbound]` is not the only place a channel decides who is admitted. Four
+adapters carry a SECOND admission filter in their own `[options]` table,
+and for every one of them an **absent or empty list admits everyone**:
+
+| Adapter | Key | Empty or absent means |
+|---|---|---|
+| email | `[options.imap] allowed_senders` | every `From:` is admitted |
+| discord | `[options] allowed_channel_ids` | every channel is admitted |
+| telegram | `[options] allowed_chat_ids` | every chat is admitted |
+| imessage | `[options] allowed_handles` | every handle is admitted |
+
+So deleting one line used to widen the admitted set from a named list to
+everyone while producing a byte-identical token, and the widened config
+started on the narrow config's consent.
+
+The token renders the **whole** table rather than those four keys, and that
+is deliberate: the enumeration is the failure mode. This gate has been
+bypassed three times by a category nobody listed. A declared key list fails
+the same way again the day an eleventh adapter ships a filter nobody
+registered. Rendering everything means there is nothing to register and
+nothing to forget — a new key is inside the consent the day it is written.
+
+The price is that editing a reach-irrelevant option (`poll_interval_secs`,
+`max_retry_attempts`) on an **already-open** channel costs you one
+re-acknowledgement. The refusal names the key and prints `acknowledged
+<was>, now <is>`, including `(absent)` when a key was deleted or added, so
+that is a few seconds. Reordering or repeating a list entry admits exactly
+the same principals and is **not** a change.
+
+An `admission-v1` token — the previous encoding, which named neither
+`platform` nor `[options]` — is refused with a message that says so, not
+silently honoured.
+
+That is not pedantry — it is the hole an earlier, per-field token list had.
+With `group_allowlist = ["G1"]` and `sender_allowlist = ["*"]` you have
+consented to "anyone who can reach G1". Widening `group_allowlist` to
+`["*"]` makes that "anyone, anywhere" while touching no field the old
+tokens named, so nothing refused. The same went for `enabled`: a
+switched-off channel admits nobody, so a consent written against it was
+never contemporaneous with anything, and one later word admitted everyone.
+
+Reordering or repeating an allowlist entry is **not** a change — the lists
+are sorted and de-duplicated before rendering, and a list holding `"*"` is
+rendered as `*` because the wildcard already admits everyone in it. So
+`["G1","G2"]` and `["G2","G1","G1"]` share a token; `["G1"]` and `["*"]` do
+not.
+
+The key must hold **exactly one** entry when something is open, and **no**
+entry otherwise:
+
+- open and unacknowledged → refusal;
+- acknowledged but nothing open → refusal, telling you to remove the key;
+- acknowledged, but the shape has changed → refusal, printing the changed
+  fields as `field: acknowledged <was>, now <is>`;
+- more than one entry → refusal.
+
+The gate always fails closed and always prints the token to write.
+
+#### An unreadable channel directory is an error, not an empty one
+
+If any `.toml` under `<profile home>/channels/` cannot be parsed, every
+start path above refuses and names the file. It is deliberately not treated
+as "no channels configured": a security gate must not be satisfiable by
+making its input disappear, and silently loading zero policies would also
+turn a working gateway into universal denial after one typo.
+
 Defaults (used for any unset field) are the fail-closed posture:
 `dm = "allowlist"` with an **empty** `dm_allowlist` (so no one is
 permitted), `group = "disabled"`, `require_mention = true`.
 
 **Lock `dm_allowlist` to specific sender ids.** `dm_allowlist = ["*"]`
-opens DMs to *anyone who can find the bot* — only use it for a throwaway
-test bot, never a deployment. To allow a specific person, add their stable
-platform `sender_id` (e.g. their Telegram numeric user id):
+opens DMs to *anyone who can find the bot*, so the product refuses to start
+over it unless the channel's own file carries the admission-shape token
+(see above). To allow a specific person, add their stable platform `sender_id` (e.g. their Telegram
+numeric user id):
 
 ```toml
 dm = "allowlist"
