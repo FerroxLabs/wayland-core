@@ -15,6 +15,25 @@ use crate::attempt_lifecycle::{
 pub const DEFAULT_MAX_RETRIES: u32 = 2; // 1 initial + 2 retries = 3 total attempts
 pub const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Retry ceiling for a connection that was established and then destroyed
+/// before any response head arrived (peer reset / abort / broken pipe).
+///
+/// Deliberately larger than [`DEFAULT_MAX_RETRIES`]. Nothing was served and
+/// nothing was billed, a fresh connection routinely succeeds, and the cost of
+/// giving up is an unattended job abandoned mid-task. Job corpus row B-2
+/// (`fault-reset`) breaks the connection for six consecutive requests before
+/// healing, so a ceiling of six retries rides out that whole window.
+///
+/// A host that could not be reached at all (`is_connect()`) and a request that
+/// WAS answered (5xx) both keep [`DEFAULT_MAX_RETRIES`]: for those, failing
+/// over to the next provider quickly beats waiting.
+pub const BROKEN_CONNECTION_MAX_RETRIES: u32 = 6;
+
+/// Wall-clock ceiling on [`BROKEN_CONNECTION_MAX_RETRIES`]. The backoff
+/// schedule spends ~17 s across seven attempts; this bounds pathological cases
+/// where each attempt itself stalls before the peer resets.
+pub const BROKEN_CONNECTION_RETRY_WINDOW: Duration = Duration::from_secs(30);
+
 /// One physical provider HTTP attempt observed by the retry ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAttemptEvidence {
@@ -402,15 +421,64 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
     // `is_body()`/`is_decode()` cover "error decoding response body" — almost
     // always a half-closed pooled connection dropped mid-body under bursty
     // load, which is transient and succeeds on a fresh connection. Treat them
-    // as retryable alongside timeout/connect. `is_request()` stays excluded
-    // (invalid URL/header — permanent, must not retry).
-    let is_transient = e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode();
+    // as retryable alongside timeout/connect. A bare `is_request()` stays
+    // excluded (invalid URL/header — permanent, must not retry); only the
+    // request-phase errors that carry a transport I/O cause are admitted, via
+    // `is_broken_established_connection`.
+    let is_transient = e.is_timeout()
+        || e.is_connect()
+        || e.is_body()
+        || e.is_decode()
+        || is_broken_established_connection(&e);
     let e = e.without_url();
     if is_transient {
         ProviderError::Connection(e.to_string())
     } else {
         ProviderError::Http(e)
     }
+}
+
+/// True when a reqwest error means the socket was open and then destroyed
+/// before a response head arrived.
+///
+/// `reqwest::Error::is_connect()` covers only a failure to establish the
+/// connection; a peer that accepts the request and then answers with a TCP RST
+/// produces `kind: Request` with an `io::ErrorKind::ConnectionReset` cause,
+/// which `is_timeout()`, `is_connect()`, `is_body()` and `is_decode()` all
+/// miss. Job corpus row B-2 measured the consequence: the provider proxy reset
+/// one request mid-task, the reset was classified `ProviderError::Http`
+/// (terminal), zero retries were attempted, and the job exited 1 with the
+/// month-end report unwritten.
+///
+/// The `is_request()` guard keeps builder-side failures (invalid URL, invalid
+/// header value) out — those are permanent and must never be retried.
+fn is_broken_established_connection(e: &reqwest::Error) -> bool {
+    use std::io::ErrorKind;
+    if !e.is_request() {
+        return false;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_error.kind(),
+                ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::NotConnected
+                    | ErrorKind::UnexpectedEof
+                    | ErrorKind::TimedOut
+            );
+        }
+        source = current.source();
+    }
+    false
+}
+
+/// True when an [`EgressError`] is a destroyed-mid-request transport failure.
+/// Read before the error is consumed by [`provider_error_from_egress`].
+fn egress_is_broken_established_connection(e: &EgressError) -> bool {
+    matches!(e, EgressError::Transport(inner) if is_broken_established_connection(inner))
 }
 
 /// Map an [`EgressError`] from the chokepoint to a `ProviderError`.
@@ -505,9 +573,13 @@ pub async fn builder_send_with_retry(
     builder: EgressRequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
     let max_retries = effective_max_retries(DEFAULT_MAX_RETRIES);
+    // A destroyed-mid-request connection gets its own, larger ceiling; every
+    // other outcome is still bounded by `max_retries` inside the loop.
+    let broken_connection_max_retries = effective_max_retries(BROKEN_CONNECTION_MAX_RETRIES);
+    let broken_connection_deadline = std::time::Instant::now() + BROKEN_CONNECTION_RETRY_WINDOW;
     let mut backoff = INITIAL_BACKOFF;
     let mut last_err: Option<ProviderError> = None;
-    for attempt in 0..=max_retries {
+    for attempt in 0..=broken_connection_max_retries.max(max_retries) {
         // M2: a non-cloneable body cannot be retried — send the original
         // builder exactly once instead of failing with a misleading
         // "Connection" error. `try_clone()` is deterministic, so it fails
@@ -631,6 +703,9 @@ pub async fn builder_send_with_retry(
                 return Err(provider_error_from_egress(e));
             }
             Err(e) => {
+                // Classify before `provider_error_from_egress` consumes it: a
+                // socket destroyed mid-request earns the longer ceiling.
+                let broken_connection = egress_is_broken_established_connection(&e);
                 let failure_code = egress_failure_code(&e).to_string();
                 finish_physical_attempt(
                     lifecycle_attempt.as_ref(),
@@ -648,22 +723,30 @@ pub async fn builder_send_with_retry(
                     // exactly as before — only now URL-stripped.
                     other => return Err(other),
                 };
-                if attempt < max_retries {
+                let ceiling = if broken_connection {
+                    broken_connection_max_retries
+                } else {
+                    max_retries
+                };
+                let retrying = attempt < ceiling
+                    && (!broken_connection
+                        || std::time::Instant::now() < broken_connection_deadline);
+                if retrying {
                     record_attempt(Some(failure_code.clone()), true);
                     // M3 fix: 1-based attempt over total attempts.
                     tracing::warn!(
                         attempt = attempt + 1,
-                        total = max_retries + 1,
+                        total = ceiling + 1,
                         error = %provider_err,
                         "connection error; retrying"
                     );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 4).min(Duration::from_secs(4));
+                    last_err = Some(provider_err);
+                    continue;
                 }
-                if attempt == max_retries {
-                    record_attempt(Some(failure_code), false);
-                }
-                last_err = Some(provider_err);
+                record_attempt(Some(failure_code), false);
+                return Err(provider_err);
             }
         }
     }
