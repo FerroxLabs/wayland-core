@@ -1,0 +1,215 @@
+
+=== BINARY ===
+wayland-core 0.12.26
+980d5cb872cc5aae798b480ff2321877fe1233f8d1450a7eed59479a612247ac  /root/b1/target/release/wayland-core
+
+=== W1  killed BEFORE the effect (intent recorded, worker running) ===
+    KILL -9 on process group 2585386 (3 members)
+    on-disk: intents=[idem-w1 ] commits=[] observed=0
+GOAL-EFFECTS: observed_total=0 observed_distinct=0 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  -- the honest retry:
+GOAL-EXEC: goal=g-b1-bnd task=t-w1 key=idem-w1 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t-w1 pid=2585386]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t-w1 pid=2585386); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+    RETRY_EXIT=90  (90 = parked)
+GOAL-EFFECTS: observed_total=0 observed_distinct=0 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  -- operator checks the sink, finds nothing, resolves as retry:
+GOAL-EXEC: goal=g-b1-bnd task=t-w1 key=idem-w1 note=operator-resolved-as-not-produced-retrying
+GOAL-EXEC: goal=g-b1-bnd task=t-w1 key=idem-w1 produced=yes
+    EXIT=0
+    on-disk: intents=[] commits=[idem-w1 ] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=1 markers_distinct=1 observed_present=true
+  W1_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== W2  killed AFTER the effect, worker still running ===
+    KILL -9 on process group 2589028 (3 members)
+    on-disk: intents=[idem-w2 ] commits=[] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  -- the honest retry (this is where it used to duplicate):
+GOAL-EXEC: goal=g-b1-bnd task=t-w2 key=idem-w2 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t-w2 pid=2589028]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t-w2 pid=2589028); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+    RETRY_EXIT=90  (90 = parked)
+    on-disk: intents=[idem-w2 ] commits=[] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  -- operator checks the sink, finds the effect, resolves as produced:
+GOAL-EXEC: goal=g-b1-bnd task=t-w2 key=idem-w2 produced=no reason=operator-resolved-as-already-produced
+    EXIT=0
+    on-disk: intents=[] commits=[idem-w2 ] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=1 markers_distinct=1 observed_present=true
+  W2_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== W3  killed AFTER the worker exited, BEFORE the commit ===
+    FIRST_EXIT=137 (killed)
+    on-disk: intents=[idem-w3 ] commits=[] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  -- the honest retry:
+GOAL-EXEC: goal=g-b1-bnd task=t-w3 key=idem-w3 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t-w3 pid=2591953]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t-w3 pid=2591953); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+    RETRY_EXIT=90  (90 = parked)
+    on-disk: intents=[idem-w3 ] commits=[] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+    RESOLVE_EXIT=0
+  W3_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== W3b  worker died AFTER its effect with an UNDECLARED nonzero exit ===
+  What a killed worker looks like from outside. The first version of this
+  fix read nonzero as 'no effect landed', withdrew the intent, and let the
+  retry duplicate. Windows caught it; it was equally wrong here.
+GOAL-EXEC: goal=g-b1-bnd task=t-w3b key=idem-w3b produced=unknown reason=worker-exited-exit status: 1-without-declaring-no-effect receipt=false
+GOAL-EXEC-INDETERMINATE: worker command '/root/b1-green/w-killed.sh' exited exit status: 1 and left receipt=false at WAYLAND_GOAL_NO_EFFECT_RECEIPT. A withdrawal needs BOTH the receipt file and exit 91, so whether the effect landed is unknown and this attempt decides neither
+    FIRST_EXIT=90  (90 = parked, NOT retried)
+    on-disk: intents=[idem-w3b ] commits=[] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+GOAL-EXEC: goal=g-b1-bnd task=t-w3b key=idem-w3b produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t-w3b pid=2597703]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t-w3b pid=2597703); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+    RETRY_EXIT=90  (90 = parked)
+    on-disk: intents=[idem-w3b ] commits=[] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  W3b_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== W3c  worker DECLARED no effect (receipt + exit 91): plainly retryable, not parked ===
+wayland-core goal: worker command '/root/b1-green/w-noeffect.sh' exited 91 with a WAYLAND_GOAL_NO_EFFECT_RECEIPT receipt (declared: no effect landed)
+    FIRST_EXIT=1  (1 = a plain failure)
+    on-disk: intents=[] commits=[] observed=0
+GOAL-EXEC: goal=g-b1-bnd task=t-w3c key=idem-w3c produced=yes
+    RETRY_EXIT=0  (0 = it ran, as it must)
+    on-disk: intents=[] commits=[idem-w3c ] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=1 markers_distinct=1 observed_present=true
+  W3c_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== W4  commit written, intent NOT yet withdrawn  [RECONSTRUCTED STATE] ===
+  A kill in the two-syscall gap between the commit's fsync and the
+  intent's unlink cannot be aimed at from outside the process, so this
+  leg RE-CREATES that on-disk state rather than racing for it. The
+  decision under test is 'commit beats leftover intent'.
+    on-disk: intents=[idem-w4 ] commits=[idem-w4 ] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=1 markers_distinct=1 observed_present=true
+GOAL-EXEC: goal=g-b1-bnd task=t-w4 key=idem-w4 produced=no reason=effect-already-committed
+    RETRY_EXIT=0
+    on-disk: intents=[idem-w4 ] commits=[idem-w4 ] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=1 markers_distinct=1 observed_present=true
+  W4_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== W5  the clean path: commit written, intent withdrawn ===
+GOAL-EXEC: goal=g-b1-bnd task=t-w5 key=idem-w5 produced=yes
+GOAL-EXEC: goal=g-b1-bnd task=t-w5 key=idem-w5 produced=no reason=effect-already-committed
+    on-disk: intents=[] commits=[idem-w5 ] observed=1
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=1 markers_distinct=1 observed_present=true
+  W5_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== P  INSTRUMENT POSITIVE CONTROL ON THIS BUILD ===
+  A fixed product must not make the instrument unfalsifiable. An operator
+  who resolves as 'retry' when the effect DID land produces a real second
+  execution; the counter must report it.
+GOAL-EFFECTS: observed_total=2 observed_distinct=1 duplicates=1 markers_total=1 markers_distinct=1 observed_present=true
+  P_GATE_EXIT=1 (NONZERO is the PASS: the instrument still catches a duplicate)
+
+=== C  FULL FLEET REPRODUCTION: process-tree kill mid-wave, then restart ===
+PRE-KILL observed=6 commits=0 intents=6 sleep40=2
+KILL_AT_UTC=2026-08-10T17:15:20Z
+/root/b1-boundaries.sh: line 245: 2610333 Killed                  setsid env -u API_KEY -u FLUX_API_KEY "$BIN" goal run --journal "$J" --goal "$G" --effects-dir "$C" --worker-command "$ROOT/worker.sh" --width 6 --shard-size 2 --lease 5s > "$ROOT/run1.log" 2>&1
+POST-KILL pgid_procs=0
+POST-KILL GOAL-EFFECTS: observed_total=6 observed_distinct=6 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+RUN2_EXIT=0
+--- run2.log ---
+GOAL: run pid=2617972 goal=g-b1
+GOAL: recovery=resumed iterations=1 resume_count=2 resumable=true revoked=6 drained=0 needs_resolution=0
+GOAL: revoked task=t00 reason=lease-expired
+GOAL: revoked task=t01 reason=lease-expired
+GOAL: revoked task=t02 reason=lease-expired
+GOAL: revoked task=t03 reason=lease-expired
+GOAL: revoked task=t04 reason=lease-expired
+GOAL: revoked task=t05 reason=lease-expired
+GOAL-EXEC: goal=g-b1 task=t04 key=idem-g-b1-t04 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t04 pid=2610858]
+GOAL-EXEC: goal=g-b1 task=t05 key=idem-g-b1-t05 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t05 pid=2610852]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t04 pid=2610858); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+GOAL-EXEC: goal=g-b1 task=t01 key=idem-g-b1-t01 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t01 pid=2610854]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t05 pid=2610852); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+GOAL-EXEC: goal=g-b1 task=t03 key=idem-g-b1-t03 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t03 pid=2610855]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t01 pid=2610854); re-running would duplicate the effect and skipping would lose it, so this attempt decides neitherGOAL-EXEC-INDETERMINATE: 
+a prior attempt died between starting the worker and committing its effect (task=t03 pid=2610855); re-running would duplicate the effect and skipping would lose it, so this attempt decides neitherGOAL-EXEC: goal=g-b1 task=t00 key=idem-g-b1-t00 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t00 pid=2610853]
+
+GOAL-EXEC-INDETERMINATE: GOAL-EXEC: goal=g-b1 task=t02 key=idem-g-b1-t02 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t02 pid=2610857]
+a prior attempt died between starting the worker and committing its effect (task=t00 pid=2610853); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t02 pid=2610857); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+GOAL: wave=0 shards=3 claimed=6 lost=0 completed=0 failed=0 indeterminate=6 abandoned=0 delivered=0 dispatch_error=-
+GOAL: run_complete waves=1 iterations=1 completed=0 delivered=0 stopped_because=no claimable task remains
+
+=== C  RESULT ===
+GOAL-EFFECTS: observed_total=6 observed_distinct=6 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+per-task execution counts (one directory per task, one file per invocation):
+  1  t05-5638091943c11934
+  1  t04-56380a1943c11ae7
+  1  t03-5638071943c115ce
+  1  t02-5638081943c11781
+  1  t01-5638051943c11268
+  1  t00-5638061943c1141b
+C_DUPLICATES=0   (0 is the PASS; it was 4 before the fix)
+LEDGER completed=0 unresolved=6 ['t00', 't01', 't02', 't03', 't04', 't05']
+RESIDUAL: those 6 tasks are parked. The ledger has no transition that
+un-parks them, so they and their dependents cannot be driven to completion
+through the product today. That is the named open half of this defect.
+
+=== X1  FINDING 3: the SAME exit code with NO receipt must park, not withdraw ===
+  91 is this product's 'no effect landed' code. A worker that emits it by
+  accident -- which is what any sysexits-speaking tool in the pipeline does
+  -- must NOT have its intent withdrawn, or the retry duplicates the effect.
+  That is exactly what 76 (=EX_PROTOCOL) did before this fix.
+GOAL-EXEC: goal=g-b1-bnd task=t-x1 key=idem-x1 produced=unknown reason=worker-exited-exit status: 91-without-declaring-no-effect receipt=false
+GOAL-EXEC-INDETERMINATE: worker command '/root/b1-green/w-collide.sh' exited exit status: 91 and left receipt=false at WAYLAND_GOAL_NO_EFFECT_RECEIPT. A withdrawal needs BOTH the receipt file and exit 91, so whether the effect landed is unknown and this attempt decides neither
+    FIRST_EXIT=90  (90 = parked)
+    on-disk: intents=[idem-x1 ] commits=[] observed=1
+  X1_INTENT_HELD=1  (1 = the intent survived a bare exit code)
+GOAL-EXEC: goal=g-b1-bnd task=t-x1 key=idem-x1 produced=unknown reason=prior-attempt-died-inside-the-effect-window intent=[task=t-x1 pid=2620316]
+GOAL-EXEC-INDETERMINATE: a prior attempt died between starting the worker and committing its effect (task=t-x1 pid=2620316); re-running would duplicate the effect and skipping would lose it, so this attempt decides neither
+    RETRY_EXIT=90  (90 = parked, NOT re-run)
+GOAL-EFFECTS: observed_total=1 observed_distinct=1 duplicates=0 markers_total=0 markers_distinct=0 observed_present=true
+  X1_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== X1b  and the DECLARED case still withdraws: receipt AND code together ===
+wayland-core goal: worker command '/root/b1-green/w-noeffect.sh' exited 91 with a WAYLAND_GOAL_NO_EFFECT_RECEIPT receipt (declared: no effect landed)
+    FIRST_EXIT=1  (1 = a plain, retryable failure)
+  X1b_INTENT_HELD=0  (0 = withdrawn, as declared)
+GOAL-EXEC: goal=g-b1-bnd task=t-x1b key=idem-x1b produced=yes
+    RETRY_EXIT=0  (0 = it ran, as it must)
+  X1b_GATE_EXIT=0 (0 = exactly one real effect)
+
+=== X2  FINDING 1+2: two Goals, ONE --effects-dir, the same task names ===
+  Before the scoping: goal B declined every task as already-committed and
+  reported success having executed nothing, and a stale intent left by a
+  killed goal A permanently parked a brand-new goal B.
+GOAL-EXEC: goal=goal-a task=deploy key=idem-deploy produced=yes
+    GOAL_A_EXIT=0
+GOAL-EXEC: goal=goal-b task=deploy key=idem-deploy produced=yes
+    GOAL_B_EXIT=0  (0 with produced=yes = B did its own work)
+GOAL-EFFECTS: observed_total=2 observed_distinct=2 duplicates=0 markers_total=2 markers_distinct=1 observed_present=true
+  X2_GATE_EXIT=0 (0 = TWO real effects, one per goal, no duplicate)
+  -- and the intent half, the denial of service the fix itself opened:
+    goal A killed mid-window; intents on disk: 1
+GOAL-EXEC: goal=goal-b task=deploy key=idem-deploy produced=yes
+    GOAL_B_EXIT=0  (0 = B is not parked by A's corpse)
+
+=== X3  FINDING 4: the instrument counts INVOCATIONS, not record contents ===
+  A worker whose record carries an invocation identity -- task=... msg_id=...
+  as any real effect log does -- used to make two executions of ONE task
+  read as two DISTINCT effects and zero duplicates. The instrument went
+  green on the very failure it exists to catch.
+  the two records, byte-different by construction:
+    task=t-p msg_id=2628352-1786382145812382715
+    task=t-p msg_id=2625786-1786382140726359649
+  distinct CONTENTS = 2  (2 -- which is why content cannot be the identity)
+GOAL-EFFECTS: observed_total=2 observed_distinct=1 duplicates=1 markers_total=1 markers_distinct=1 observed_present=true
+  X3_DUPLICATES=1  (1 is the PASS: the instrument saw the duplicate)
+  X3_GATE_EXIT=1 (NONZERO is the PASS: the gate went red on a real duplicate)
+
+=== X4  FINDING 5: goal run --terminate over PARKED tasks ===
+  The canonical terminal transition used to report
+  PartiallyCompleted { completed: 0, failed: 0 } over four parked tasks --
+  a terminal that structurally could not see the one state needing a human.
+GOAL: wave=0 shards=2 claimed=4 lost=0 completed=0 failed=0 indeterminate=4 abandoned=0 delivered=0 dispatch_error=-
+GOAL: run_complete waves=1 iterations=1 completed=0 delivered=0 stopped_because=no claimable task remains
+GOAL: unresolved indeterminate=4 abandoned=0
+GOAL: canonical_transition strategy=fleet terminal=Terminated { terminal: Blocked { reason: "4 task(s) unresolved (indeterminate=4 abandoned=0); the effect boundary parked them and only an operator can settle them with `goal exec-task --resolve produced|retry`" } } cursor_seq=Some(24)
+  X4_TERMINAL: the line above must NOT be PartiallyCompleted { completed: 0, failed: 0 }
+  X4_LIFECYCLE: {"state": "terminated", "terminal": {"state": "blocked", "reason": "4 task(s) unresolved (indeterminate=4 abandoned=0); the effect boundary parked them and only an operator can settle them with `goal exec-task --resolve produced|retry`"}}
+
+=== DONE ===

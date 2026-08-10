@@ -11,7 +11,9 @@ $ROOT = 'D:\b1-live'
 # Every effect namespace is GOAL-scoped now -- effects/<goal>/<key>,
 # intents/<goal>/<key>, observed/<goal>/<task>/<invocation> -- so the counts
 # below recurse and every exec-task names the Goal it runs under.
-$GOAL = 'g-b1-bnd'
+# NOT $GOAL: PowerShell variable names are case-insensitive, so a $goal
+# parameter on ExecTask silently IS this variable and shadows it to $null.
+$DEFGOAL = 'g-b1-bnd'
 if (Test-Path $ROOT) { Remove-Item -Recurse -Force $ROOT }
 New-Item -ItemType Directory -Force -Path $ROOT | Out-Null
 
@@ -78,9 +80,9 @@ if not exist "%WAYLAND_GOAL_EFFECT_SINK%" mkdir "%WAYLAND_GOAL_EFFECT_SINK%"
 (echo task=%WAYLAND_GOAL_TASK% msg_id=%RANDOM%%RANDOM%%TIME:~6,5%)>"%WAYLAND_GOAL_EFFECT_SINK%\r.%RANDOM%.%RANDOM%.%TIME:~6,5%"
 '@ | Set-Content -Encoding ASCII "$ROOT\w-ident.cmd"
 
-function ExecTask($d, $t, $k, $worker, $extra, $goal) {
-  if (-not $goal) { $goal = $GOAL }
-  $env:WAYLAND_GOAL_ID = $goal
+function ExecTask($d, $t, $k, $worker, $extra, $g) {
+  if (-not $g) { $g = $DEFGOAL }
+  $env:WAYLAND_GOAL_ID = $g
   $env:WAYLAND_GOAL_TASK = $t
   $env:WAYLAND_GOAL_IDEMPOTENCY_KEY = $k
   $env:API_KEY = ''; $env:FLUX_API_KEY = ''
@@ -99,7 +101,7 @@ Write-Output ("other wayland-core processes running: " + @(Get-Process wayland-c
 # ------------------------------------------------------------------ W2 -------
 Say 'W2  taskkill /T /F AFTER the effect, worker still running'
 $D = "$ROOT\w2"; New-Item -ItemType Directory -Force -Path $D | Out-Null
-$env:WAYLAND_GOAL_ID = $GOAL; $env:WAYLAND_GOAL_TASK = 't-w2'; $env:WAYLAND_GOAL_IDEMPOTENCY_KEY = 'idem-w2'
+$env:WAYLAND_GOAL_ID = $DEFGOAL; $env:WAYLAND_GOAL_TASK = 't-w2'; $env:WAYLAND_GOAL_IDEMPOTENCY_KEY = 'idem-w2'
 $p = Start-Process -FilePath $BIN -PassThru -WindowStyle Hidden `
      -ArgumentList @('goal','exec-task','--effects-dir',$D,'--','cmd','/c',"$ROOT\w-early.cmd")
 Start-Sleep -Seconds 3
@@ -181,10 +183,18 @@ foreach ($i in 0..5) { & $BIN goal task --journal $J --goal $G --task ("t0" + ($
 # Launched through cmd.exe so the whitespace-bearing --worker-command survives
 # as ONE argument; Start-Process -ArgumentList joins an array unquoted, which
 # silently split it last time and made this leg vacuous.
-$cmdline = '"' + $BIN + '" goal run --journal "' + $J + '" --goal ' + $G +
-           ' --effects-dir "' + $C + '" --worker-command "cmd /c ' + $ROOT + '\worker.cmd"' +
-           ' --width 6 --shard-size 2 --lease 5s > "' + $ROOT + '\run1.log" 2>&1'
-$run1 = Start-Process -FilePath 'cmd.exe' -PassThru -WindowStyle Hidden -ArgumentList @('/c', $cmdline)
+# cmd.exe strips the outer quote pair off a /c string that begins and ends
+# with one, which silently produced an EMPTY run1.log and a vacuous kill leg:
+# the wait loop timed out at zero observed and the taskkill hit a process that
+# had never started. A .cmd FILE has nothing to survive two levels of quoting.
+$runner = @(
+  '@echo off',
+  ('"' + $BIN + '" goal run --journal "' + $J + '" --goal ' + $G +
+   ' --effects-dir "' + $C + '" --worker-command "cmd /c ' + $ROOT + '\worker.cmd"' +
+   ' --width 6 --shard-size 2 --lease 5s > "' + $ROOT + '\run1.log" 2>&1')
+)
+Set-Content -Encoding ASCII "$ROOT\run1.cmd" $runner
+$run1 = Start-Process -FilePath 'cmd.exe' -PassThru -WindowStyle Hidden -ArgumentList @('/c', "$ROOT\run1.cmd")
 for ($n=0; $n -lt 240; $n++) {
   if ((ObservedCount $C) -ge 6) { break }
   Start-Sleep -Milliseconds 250
@@ -193,6 +203,7 @@ Write-Output ("PRE-KILL observed=" + (ObservedCount $C) +
               " commits=" + @(Get-ChildItem "$C\effects" -Recurse -File -ErrorAction SilentlyContinue).Count +
               " intents=" + (IntentCount $C) +
               " engines=" + @(Get-Process wayland-core -ErrorAction SilentlyContinue).Count)
+if ((ObservedCount $C) -eq 0) { Write-Output '  C_VACUOUS=TRUE  (nothing ran before the kill; this leg certifies NOTHING)' }
 Write-Output ("KILL_AT_UTC=" + (Get-Date).ToUniversalTime().ToString('s') + 'Z')
 taskkill /T /F /PID $run1.Id 2>&1 | Out-Null
 Start-Sleep -Seconds 4
@@ -270,20 +281,16 @@ Say 'X3  FINDING 4: the instrument counts INVOCATIONS, not record contents'
 Write-Output '  A worker whose record carries an invocation identity used to make two'
 Write-Output '  executions of ONE task read as two DISTINCT effects and zero duplicates.'
 $D = "$ROOT\x3"; New-Item -ItemType Directory -Force -Path $D | Out-Null
-$env:WAYLAND_GOAL_ID = $GOAL; $env:WAYLAND_GOAL_TASK = 't-p'; $env:WAYLAND_GOAL_IDEMPOTENCY_KEY = 'idem-p'
-$pk = Start-Process -FilePath $BIN -PassThru -WindowStyle Hidden `
-      -ArgumentList @('goal','exec-task','--effects-dir',$D,'--','cmd','/c',"$ROOT\w-ident.cmd")
-Start-Sleep -Seconds 2
-taskkill /T /F /PID $pk.Id 2>&1 | Out-Null
-Start-Sleep -Seconds 1
-if ((IntentCount $D) -eq 0) {
-  # The worker finished before the kill landed; reconstruct the interrupted
-  # state so the leg still measures the DUPLICATE, not the kill.
-  $scope = @(Get-ChildItem "$D\effects" -Directory)[0].Name
-  New-Item -ItemType Directory -Force -Path "$D\intents\$scope" | Out-Null
-  Set-Content -Encoding ASCII "$D\intents\$scope\idem-p" 'task=t-p pid=1'
-  Remove-Item "$D\effects\$scope\idem-p" -ErrorAction SilentlyContinue
-}
+# One real execution, then the on-disk state a death inside the window leaves
+# -- reconstructed, not raced, because a worker that finishes in milliseconds
+# wins every race against a taskkill and the leg would measure the race.
+ExecTask $D 't-p' 'idem-p' "$ROOT\w-ident.cmd" $null $null | Out-Null
+$scope = @(Get-ChildItem "$D\effects" -Directory)[0].Name
+New-Item -ItemType Directory -Force -Path "$D\intents\$scope" | Out-Null
+Set-Content -Encoding ASCII "$D\intents\$scope\idem-p" 'task=t-p pid=1'
+Remove-Item "$D\effects\$scope\idem-p" -ErrorAction SilentlyContinue
+# The operator resolves as retry when the effect DID land: a second real
+# execution, which the census must report as a duplicate.
 ExecTask $D 't-p' 'idem-p' "$ROOT\w-ident.cmd" @('--resolve','retry') $null | Out-Null
 Write-Output '  the two records, byte-different by construction:'
 Get-ChildItem "$D\observed" -Recurse -File | ForEach-Object { "    " + (Get-Content $_.FullName).Trim() }
