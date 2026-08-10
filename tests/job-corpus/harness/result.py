@@ -413,6 +413,13 @@ def summarise(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
                 "row_id": r.get("row_id"),
                 "tier": r.get("tier"),
                 "verdict": r.get("verdict"),
+                # A row whose own work passed but whose Tier-0 invariants failed
+                # reads FAIL, and a reader of the tally alone cannot tell that
+                # apart from a row that did the job wrong.  Both halves are in
+                # the record; carry them into the summary so nobody has to open
+                # 17 files to find out which half went red.
+                "row_verdict": r.get("row_verdict"),
+                "invariant_verdict": r.get("invariant_verdict"),
                 "artifact_sha256": (r.get("artifact") or {}).get("sha256"),
                 "key_sha256": (r.get("key") or {}).get("sha256"),
                 "host": (r.get("host") or {}).get("hostname"),

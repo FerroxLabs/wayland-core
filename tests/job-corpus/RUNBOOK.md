@@ -110,7 +110,8 @@ PASS.
 | rows | Windows disposition | reason measured on the host |
 |---|---|---|
 | A-1 … A-6, INV-1 … INV-5 | can run | `git 2.54.0.windows.1` and `Python 3.12.10` are on PATH; harness selftest, the A-1…A-6 key selftest, all five per-key controls and the INV-1 detector selftest all behaved correctly there |
-| A-7 … A-12 | cannot run **anywhere** | no row driver exists yet. Their per-key controls (A-7, A-8, A-9, A-10-degraded, A-11) *do* pass on Windows, so this is a missing driver, not a missing host |
+| A-7, A-8, A-9, A-11 | drivers exist and ran on Linux; **never yet run on Windows** | `D:\jcwin` was measured at `fb5d203` on 2026-08-11 — eleven commits behind the branch tip, with neither these drivers nor the credential fix.  Fetch it to the tip before step 7b or the Windows leg grades a harness nobody reviewed |
+| A-10, A-12 | cannot run **anywhere** | no row driver exists.  The A-10-degraded per-key control *does* pass on Windows, so this is a missing driver, not a missing host |
 | B-3 | can run | it is the one B row needing no provider; its mail host is hermetic |
 | B-1, B-2, B-5 | UNPROVEN | `JOBCORPUS_PROVIDER_TOML` is unset and no provider fragment exists on the box. Windows has no tmpfs, so a credential cannot be staged there the way `/dev/shm` allows on Linux — placing one needs an explicit decision, not a lane's initiative |
 | B-4 | UNPROVEN | the box cannot resolve or key-auth to a second machine (`ssh hetzner-dsm` → `Name or service not known`), and the driver correctly refuses to grade a "remote" that is this machine |
@@ -178,8 +179,17 @@ where it used to be invisible. A row that owns a lockfile puts it in
 
 ## 4. Tier 0 — applied to every row whether the row asked or not
 
-`RowContext` seeds these on entry and grades them on exit. A row cannot turn
-one off.
+`RowContext` seeds these on entry and grades them on exit. A row that runs
+inside `RowContext` cannot turn one off.
+
+**Five rows do not run inside `RowContext` at all.**  B-1 ... B-5 export
+`main(binary, artifact_dir)` because their topology -- a killed process, a
+second machine, an inbound mail conversation, a browser -- is not something
+`RowContext` models.  Measured on 2026-08-11: every one of their records
+carries **zero** Tier-0 checks.  The five INV gates are still REACHED, because
+the A rows reach them, so the roster cannot show this.  Read INV-1 ... INV-5 as
+a statement about the A rows only; nothing in the hard-edge tier is measured
+for leaks, unsaved work, test weakening, scope or honesty.
 
 | gate | what the user gets | how it FAILS |
 |---|---|---|
@@ -261,11 +271,17 @@ A row whose prerequisite is absent must be marked N/A **before** the run with
 a stated reason, not discovered mid-run. N/A leaves the denominator; a row
 quietly skipped does not, and that is the failure this runbook exists to stop.
 
-**A-7, A-8, A-9, A-11 and A-12 have no row driver in `rows/`.** Their keys,
-graders and controls exist and are exercised by step 3 of §2, but nothing in
-the corpus run drives the product through them, so this table describes what
-they *would* need, not what tonight measures. They are listed in §7 as OUT. The
-rows the corpus run actually drives are A-1 … A-6, B-1 … B-5 and INV-1.
+**A-10 and A-12 have no row driver in `rows/`.**  Their keys, graders and
+controls exist and are exercised by step 3 of §2, but nothing in the corpus run
+drives the product through them, so this table describes what they *would*
+need, not what tonight measures.  They are listed in §7 as OUT.  The rows the
+corpus run actually drives are A-1 … A-9, A-11, B-1 … B-5 and INV-1 — sixteen
+drivers, reaching 20 of the 22 gates.
+
+A-7, A-8, A-9 and A-11 DO have drivers as of 26851a3d and all four were run end
+to end on `hetzner-dsm` on 2026-08-11 against sha256 `11b35d6a…8a8e`.  Earlier
+revisions of this section listed them as OUT.  That is no longer true, and the
+matching §7 entry was removed with it.
 
 | row | needs |
 |---|---|
@@ -372,10 +388,21 @@ a reason, and they leave the denominator:
 
 * **A-10 sub-cases** text_pdf, scanned_pdf, spreadsheet, audio, video — keys
   exist, no grader does.
-* **A-7, A-8, A-9, A-11** — the keys, graders and controls exist and are run as
-  step 3 of §2, but there is **no row driver** in `rows/`, so the corpus run
-  never puts the product through them. §5 lists what they would need; it is not
-  a claim that they run.
+* **A-10, the whole gate** — there is **no row driver** in `rows/`, so A-10 is
+  NEVER REACHED by the corpus run.  Its `a10_degraded` grader and its media keys
+  exist and are exercised by step 3 of §2; nothing drives the product through
+  them.  This is the gate, not only the sub-cases listed above.
+* **Tier 0 over the B rows** — see §4.  B-1 ... B-5 carry no INV-1 ... INV-5
+  checks at all, so 5 of the 16 driven rows contribute nothing to the trust
+  tier.  The roster cannot surface this, because the A rows reach the same five
+  gates.
+* **INV-5.cost ever PASSING tonight** — `keys/model_prices.json` prices exactly
+  one model: the harness's own free scripted endpoint.  Tonight's live model is
+  `claude-sonnet-4-6`, which is unpriced, and the product shows `$0.00`, so
+  INV-5.cost FAILS on every row for one single cause and cannot PASS anywhere in
+  this run.  It is a real finding, but it is a constant, and it dominates every
+  row verdict — including A-9, whose own work passed every check it was given.
+  Read `row_verdict` per record, not the run-level tally.
 * **A-12** — no grader for either part, and no row driver.
 * **The macOS leg of the whole corpus** — there is no macOS binary for this
   tree, so no row was measured on macOS. Not a PASS, not an N/A per row: the
