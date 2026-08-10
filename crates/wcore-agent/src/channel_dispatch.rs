@@ -398,7 +398,7 @@ mod tests {
             "pre-swap the dispatcher must fall back to its own cwd"
         );
 
-        registry.replace(crate::channel_policy::ChannelPolicySnapshot {
+        registry.replace_unchecked(crate::channel_policy::ChannelPolicySnapshot {
             policies: HashMap::new(),
             postures: HashMap::from([(
                 "added".to_string(),
@@ -433,7 +433,7 @@ mod tests {
             "positive control: the elevated posture is in effect before the swap"
         );
 
-        registry.replace(crate::channel_policy::ChannelPolicySnapshot::default());
+        registry.replace_unchecked(crate::channel_policy::ChannelPolicySnapshot::default());
 
         assert_eq!(
             dispatcher.scope_for("elevated").posture,

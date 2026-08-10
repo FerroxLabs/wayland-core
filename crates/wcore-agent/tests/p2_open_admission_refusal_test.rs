@@ -25,10 +25,17 @@
 //! the `allow_open = true` boolean the design set out to avoid: an operator
 //! writes all four names into a channel that is bounded today, nothing refuses,
 //! and that one edit consents in advance to every way the channel might be
-//! opened afterwards. So the acknowledgement is a list of TOKENS naming the
-//! field AND the value that opens it, and the list must match the open set
-//! exactly — a token for a shape that is not open is itself a refusal. LEG 7b
-//! is that case, driven through the production `spawn`.
+//! opened afterwards. LEG 7b is that case, driven through the production
+//! `spawn`.
+//!
+//! The SECOND cut took one token per open shape — and was bypassed the same
+//! way one level down, by widening a field no token named (`group_allowlist`
+//! from `["G1"]` to `["*"]`). So the acknowledgement is now ONE token rendering
+//! the channel's whole admission shape, and every leg here scrapes the token
+//! out of the refusal the product printed rather than hard-coding a spelling.
+//! `p2_whole_shape_consent_test` is the companion file that drives the
+//! widening, the `enabled` pre-arm, the duplicate entry and the unparseable
+//! sibling.
 //!
 //! ## Shape of this test
 //!
@@ -96,6 +103,30 @@ fn manager() -> std::sync::Arc<tokio::sync::RwLock<ChannelManager>> {
     std::sync::Arc::new(tokio::sync::RwLock::new(ChannelManager::new()))
 }
 
+/// The `acknowledge_open_admission = [...]` list the refusal tells the operator
+/// to write, brackets stripped, quotes kept — ready to paste back into a file.
+///
+/// Scraped rather than hard-coded so every leg tests the RULE and, at the same
+/// time, that the refusal's own instructions are the ones the gate accepts. A
+/// refusal that prints a spelling the gate rejects is a dead end dressed up as
+/// instructions.
+fn advertised_ack(msg: &str) -> String {
+    const KEY: &str = "acknowledge_open_admission = [";
+    let at = msg.find(KEY).unwrap_or_else(|| {
+        panic!("the refusal must print the acknowledgement to write; got: {msg}")
+    });
+    let rest = &msg[at + KEY.len()..];
+    let end = rest
+        .find(']')
+        .unwrap_or_else(|| panic!("unterminated acknowledgement list: {msg}"));
+    let list = rest[..end].trim().to_string();
+    assert!(
+        !list.is_empty(),
+        "the advertised list must not be empty: {msg}"
+    );
+    list
+}
+
 #[tokio::test]
 async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     let profile = tempfile::tempdir().expect("profile home");
@@ -148,7 +179,8 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     // the field half of the check would prove nothing.
     let open_shapes: &[(&str, &str, &str, &str, &str)] = &[
         // (channel name, [inbound] body, the field at fault, the setting the
-        //  refusal must quote back, the token that would acknowledge it)
+        //  refusal must quote back, the `field=value` the shape token must
+        //  carry for that field)
         (
             "shapeone",
             "dm = \"open\"\ngroup = \"disabled\"",
@@ -179,7 +211,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
             "sender_allowlist=*",
         ),
     ];
-    for (leg, inbound, field, found, token) in open_shapes {
+    for (leg, inbound, field, found, fragment) in open_shapes {
         only_channel(&channels, leg, inbound);
         // `match` rather than `expect_err`: `InboundHost` is not `Debug`.
         let err = match spawn(manager(), &test_config(), workspace.clone()).await {
@@ -197,15 +229,11 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
             msg.contains(found),
             "{leg}: the refusal must quote the offending setting {found:?}; got: {msg}"
         );
+        let token = advertised_ack(&msg);
         assert!(
-            msg.contains(&format!("acknowledge_open_admission = [{token:?}]")),
-            "{leg}: the refusal must name the opt-out AND the exact token that would cover THIS \
-             configuration, or an operator who genuinely wants an open channel has no way \
-             forward; got: {msg}"
-        );
-        assert!(
-            token.starts_with(field) && token.contains('='),
-            "{leg}: the token must name the field and the value that opens it"
+            token.contains(fragment),
+            "{leg}: the token must carry {field}'s open value ({fragment}), so a later edit to \
+             that field cannot be covered by this consent; got: {token}"
         );
         // The remedy must be a NARROWER configuration, not just prose.
         assert!(
@@ -219,12 +247,12 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
         only_channel(
             &channels,
             leg,
-            &format!("{inbound}\nacknowledge_open_admission = [{token:?}]"),
+            &format!("{inbound}\nacknowledge_open_admission = [{token}]"),
         );
         let host = spawn(manager(), &test_config(), workspace.clone())
             .await
             .unwrap_or_else(|e| {
-                panic!("{leg}: the refusal advertises {token:?}; that token must work. got: {e}")
+                panic!("{leg}: the refusal advertises {token}; that token must work. got: {e}")
             });
         host.shutdown();
     }
@@ -265,10 +293,17 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     // The assertion is not merely "spawn succeeded": it also checks the open
     // policy was actually INSTALLED. Without that, a build in which the new key
     // simply failed to parse — leaving zero policies loaded — would also pass.
+    let open_body = "dm = \"open\"\ngroup = \"disabled\"";
+    only_channel(&channels, "deliberately-open", open_body);
+    let err = match spawn(manager(), &test_config(), workspace.clone()).await {
+        Ok(_) => panic!("precondition: the unacknowledged open channel must refuse"),
+        Err(e) => e,
+    };
+    let open_token = advertised_ack(&err.to_string());
     only_channel(
         &channels,
         "deliberately-open",
-        "dm = \"open\"\ngroup = \"disabled\"\nacknowledge_open_admission = [\"dm=open\"]",
+        &format!("{open_body}\nacknowledge_open_admission = [{open_token}]"),
     );
     let host = spawn(manager(), &test_config(), workspace.clone())
         .await
@@ -290,7 +325,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     only_channel(
         &channels,
         "half-acknowledged",
-        "dm = \"open\"\ngroup = \"open\"\nacknowledge_open_admission = [\"dm=open\"]",
+        &format!("dm = \"open\"\ngroup = \"open\"\nacknowledge_open_admission = [{open_token}]"),
     );
     let err = match spawn(manager(), &test_config(), workspace.clone()).await {
         Ok(_) => panic!("a newly opened field must refuse even though another was acknowledged"),
@@ -298,18 +333,27 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("group = \"open\"") && msg.contains("nothing acknowledges it"),
-        "the refusal must name the field that was NOT acknowledged; got: {msg}"
+        msg.contains("group = \"open\"") && msg.contains("every group and channel message"),
+        "the refusal must name the field that is now open, and what it means; got: {msg}"
     );
     assert!(
-        !msg.contains("[inbound] dm = \"open\""),
-        "and must not re-litigate the field that WAS acknowledged as a fault; got: {msg}"
+        msg.contains("group: acknowledged disabled, now open"),
+        "and must show the CHANGE, field by field, rather than an opaque mismatch; got: {msg}"
     );
-    assert!(
-        msg.contains("acknowledge_open_admission = [\"dm=open\", \"group=open\"]"),
-        "and must print the list that matches the configuration AS IT NOW STANDS, so the \
-         operator's next edit is a single deliberate act; got: {msg}"
+    let widened_token = advertised_ack(&msg);
+    assert_ne!(
+        widened_token, open_token,
+        "a second open field is a different shape and must need a different consent"
     );
+    only_channel(
+        &channels,
+        "half-acknowledged",
+        &format!("dm = \"open\"\ngroup = \"open\"\nacknowledge_open_admission = [{widened_token}]"),
+    );
+    spawn(manager(), &test_config(), workspace.clone())
+        .await
+        .map(|h| h.shutdown())
+        .expect("the token the refusal printed must be the token that lets it start");
 
     // ---- LEG 7b. THE ROOT CAUSE. A blanket pre-acknowledgement written on a
     // channel that is BOUNDED today must be refused at the moment it is
@@ -340,7 +384,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("not open that way any more"),
+        msg.contains("nothing in this channel admits an unbounded set of senders"),
         "the refusal must say the consent names something this channel does not have; got: {msg}"
     );
     assert!(
@@ -355,15 +399,17 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     only_channel(
         &channels,
         "narrowed",
-        "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]\ngroup = \"disabled\"\n\
-         acknowledge_open_admission = [\"dm=open\"]",
+        &format!(
+            "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]\ngroup = \"disabled\"\n\
+             acknowledge_open_admission = [{open_token}]"
+        ),
     );
     let err = match spawn(manager(), &test_config(), workspace.clone()).await {
         Ok(_) => panic!("a consent that names nothing open must not be honoured silently"),
         Err(e) => e,
     };
     assert!(
-        err.to_string().contains("\"dm=open\""),
+        err.to_string().contains(open_token.trim_matches('"')),
         "the refusal must quote the stale token verbatim; got: {err}"
     );
 
@@ -374,8 +420,10 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     only_channel(
         &channels,
         "swapped",
-        "dm = \"allowlist\"\ndm_allowlist = [\"*\"]\ngroup = \"disabled\"\n\
-         acknowledge_open_admission = [\"dm=open\"]",
+        &format!(
+            "dm = \"allowlist\"\ndm_allowlist = [\"*\"]\ngroup = \"disabled\"\n\
+             acknowledge_open_admission = [{open_token}]"
+        ),
     );
     let err = match spawn(manager(), &test_config(), workspace.clone()).await {
         Ok(_) => panic!("a different open shape is a different decision and must refuse"),
@@ -383,8 +431,14 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("acknowledge_open_admission = [\"dm_allowlist=*\"]"),
-        "the refusal must print the list matching the NEW shape; got: {msg}"
+        msg.contains("dm: acknowledged open, now allowlist")
+            && msg.contains("dm_allowlist: acknowledged 0, now *"),
+        "the refusal must show BOTH fields that moved; got: {msg}"
+    );
+    let swapped_token = advertised_ack(&msg);
+    assert!(
+        swapped_token.contains("dm=allowlist") && swapped_token.contains("dm_allowlist=*"),
+        "the refusal must print the token matching the NEW shape; got: {swapped_token}"
     );
 
     // ---- LEG 8. THE RELOAD PATH. This is the leg F24-C3-H5 proves is not
@@ -447,14 +501,15 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
                 "dm = \"open\"",
                 "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]",
             )
-            + "acknowledge_open_admission = [\"dm=open\", \"group=open\"]\n",
+            + &format!("acknowledge_open_admission = [{open_token}]\n"),
     )
     .expect("rewrite as bounded-but-pre-acknowledged");
     let err = host
         .reload_policies()
         .expect_err("a reload that would install a pre-armed acknowledgement must REFUSE");
     assert!(
-        err.to_string().contains("not open that way any more"),
+        err.to_string()
+            .contains("nothing in this channel admits an unbounded set of senders"),
         "the reload refusal must catch the stale consent too; got: {err}"
     );
     assert_eq!(host.policies.generation(), 0, "and must still swap nothing");
@@ -529,6 +584,7 @@ acknowledge_open_admission = ["dm=open"]
         channels_root.display()
     );
     let loaded = wcore_agent::bootstrap::load_channel_policy_configs()
+        .expect("the channel dir parses")
         .into_iter()
         .find(|c| c.name == "hostile")
         .expect("the hostile channel must be on disk for this leg to mean anything");

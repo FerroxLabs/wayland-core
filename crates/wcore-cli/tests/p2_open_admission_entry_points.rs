@@ -9,13 +9,26 @@
 //! "the gateway". `enable_inbound_dispatch(true)` is set at three places in
 //! `wcore-cli/src/main.rs` and once more inside `gateway run`:
 //!
-//! | Entry point | Site | Covered by |
-//! |---|---|---|
-//! | headless one-shot / line-REPL (`wayland-core "<prompt>"`, `--no-tui`) | `main.rs` `.enable_inbound_dispatch(true)` on the REPL bootstrap | [`headless_one_shot_refuses_before_it_runs_a_turn`] |
-//! | interactive TUI | the TUI bootstrap, same builder | shares `AgentBootstrap::build` with the row above; needs a TTY, see the residual note below |
-//! | `--json-stream` host (the Wayland desktop app) | the json-stream bootstrap | [`json_stream_host_receives_one_clean_error_frame`] |
-//! | `gateway run` | `channel_inbound_host::spawn` | [`gateway_run_refuses_even_with_the_webhook_disabled`] |
-//! | `channel reload` on a running host | `InboundHost::reload_policies` | `wcore-agent`'s `p2_open_admission_refusal_test` LEG 8 |
+//! | Entry point | Site | Open-admission refusal | Unreadable config is fatal |
+//! |---|---|---|---|
+//! | headless one-shot / line-REPL (`wayland-core "<prompt>"`, `--no-tui`) | `main.rs` `.enable_inbound_dispatch(true)` on the REPL bootstrap | [`headless_one_shot_refuses_before_it_runs_a_turn`] | [`headless_one_shot_refuses_an_unparseable_channel_file`] |
+//! | interactive TUI | the TUI bootstrap, same builder | shares `AgentBootstrap::build` with the row above; needs a TTY, see the residual note below | same |
+//! | `--json-stream` host (the Wayland desktop app) | the json-stream bootstrap | [`json_stream_host_receives_one_clean_error_frame`] | [`json_stream_host_receives_an_error_frame_for_an_unparseable_channel_file`] |
+//! | `gateway run` | `channel_inbound_host::spawn` | [`gateway_run_refuses_even_with_the_webhook_disabled`] | [`gateway_run_refuses_an_unparseable_channel_file`] |
+//! | `channel reload` on a running host | `InboundHost::reload_policies` | `wcore-agent`'s `p2_open_admission_refusal_test` LEG 8 | already strict before this change |
+//!
+//! # The second column exists because the gate could be switched off by
+//! # deleting its input
+//!
+//! Every cold-start row used to load its channel configs through
+//! `try_load_channel_policy_configs().unwrap_or_default()`, over a loader that
+//! stops at the FIRST unparseable file. One junk `.toml` therefore emptied the
+//! list, `refuse_open_admission([])` returned `Ok`, and an adjacent
+//! `dm = "open"` channel started with no refusal and no warning. The admission
+//! consequence was fail-CLOSED, so it was never an admits-everyone hole — but a
+//! security gate that any stray file can silently satisfy is not a gate, and
+//! the same typo silently converted a working gateway into universal denial at
+//! the next restart.
 //!
 //! The json-stream row is the one with a protocol contract attached: a refusal
 //! there must be a single, parseable `error` frame on STDOUT, arriving instead
@@ -38,6 +51,24 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// How long a run gets before the harness calls it a failure.
+///
+/// A BOUND, not a convenience. Without one, [`Case::run`] was
+/// `child.wait_with_output()` with no deadline, so a build in which the fatal
+/// `OpenAdmission` arm had been removed did not fail — the mutated gateway kept
+/// running and the test hung. Under nextest that eventually surfaced as a
+/// 567-second red; under plain `cargo test` it hung forever, which is a gate
+/// that cannot fail.
+///
+/// Set deliberately BELOW nextest's own kill for this binary (the default
+/// profile's `slow-timeout = { period = "30s", terminate-after = 2 }`), so the
+/// failure an engineer reads is this harness naming the invocation that never
+/// returned rather than an anonymous "timed out" — and so the bound holds under
+/// plain `cargo test`, which has no timeout at all. Measured basis: the slowest
+/// real `run` in this file is the headless positive control at ~4s, including a
+/// full agent turn against a local mock.
+const RUN_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[path = "support/mod.rs"]
 mod support;
@@ -143,6 +174,11 @@ impl Case {
     }
 
     /// Run to completion with stdin closed, and capture both streams.
+    ///
+    /// Bounded by [`RUN_TIMEOUT`]: a process that does not exit is a FAILURE of
+    /// this test, not a reason for it to wait. Both pipes are drained on their
+    /// own threads so a child that fills one cannot deadlock against a harness
+    /// that is waiting on the other.
     fn run(&self, args: &[&str]) -> Capture {
         let mut child = self
             .command()
@@ -150,14 +186,62 @@ impl Case {
             .spawn()
             .expect("spawn wayland-core");
         drop(child.stdin.take());
-        let out = child.wait_with_output().expect("wait for wayland-core");
-        Capture {
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            status: out.status.code(),
+        let mut out_pipe = child.stdout.take().expect("stdout is piped");
+        let mut err_pipe = child.stderr.take().expect("stderr is piped");
+        let out_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out_pipe.read_to_end(&mut buf);
+            buf
+        });
+        let err_reader = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = err_pipe.read_to_end(&mut buf);
+            buf
+        });
+
+        let deadline = Instant::now() + RUN_TIMEOUT;
+        let mut status = None;
+        loop {
+            match child.try_wait().expect("try_wait") {
+                Some(s) => {
+                    status = Some(s);
+                    break;
+                }
+                None if Instant::now() >= deadline => break,
+                None => std::thread::sleep(Duration::from_millis(100)),
+            }
         }
+        let timed_out = status.is_none();
+        if timed_out {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let cap = Capture {
+            stdout: String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).into_owned(),
+            stderr: String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).into_owned(),
+            status: status.and_then(|s| s.code()),
+        };
+        assert!(
+            !timed_out,
+            "wayland-core {args:?} did not exit within {RUN_TIMEOUT:?}. A refusal that never \
+             returns is a gate that cannot fail. {}",
+            cap.either()
+        );
+        cap
     }
 }
+
+/// Drop an unparseable `.toml` into the profile's channel directory.
+fn write_junk(home: &Path) {
+    std::fs::write(
+        home.join("channels").join("junk.toml"),
+        "this is not = valid toml [[[\n",
+    )
+    .expect("write unparseable channel file");
+}
+
+/// The first line of the unreadable-config refusal, as the product emits it.
+const UNREADABLE: &str = "inbound channel configuration could not be loaded";
 
 fn write_channel(dir: &Path, name: &str, inbound: &str) {
     std::fs::write(
@@ -255,8 +339,39 @@ fn json_stream_host_receives_one_clean_error_frame() {
         "the host must learn WHICH channel is at fault; got: {message}"
     );
     assert!(
-        message.contains("acknowledge_open_admission = [\"dm=open\"]"),
-        "and must carry the exact remedy, or the desktop user has no way forward; got: {message}"
+        message.contains("acknowledge_open_admission = [\"admission-v1 ")
+            && message.contains("dm=open"),
+        "and must carry the exact remedy — the whole-shape token, not prose — or the desktop \
+         user has no way forward; got: {message}"
+    );
+}
+
+/// V-C on the desktop host. An unparseable channel file is a refusal the host
+/// can render, not an empty policy set the gate silently approves of.
+#[test]
+fn json_stream_host_receives_an_error_frame_for_an_unparseable_channel_file() {
+    let case = Case::new(BOUNDED_INBOUND, None);
+    write_junk(&case.home);
+    let cap = case.run(&[
+        "--json-stream",
+        "--project-dir",
+        &case.project.display().to_string(),
+    ]);
+
+    assert_ne!(cap.status, Some(0), "the run must fail. {}", cap.either());
+    assert!(
+        cap.frames_of_type("ready").is_empty(),
+        "a refused start must never claim ready. {}",
+        cap.either()
+    );
+    let errors = cap.frames_of_type("error");
+    assert_eq!(errors.len(), 1, "exactly one error frame. {}", cap.either());
+    let message = errors[0]["error"]["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        message.contains(UNREADABLE) && message.contains("junk.toml"),
+        "the host must learn the config could not be read, and WHICH file; got: {message}"
     );
 }
 
@@ -352,6 +467,36 @@ fn headless_one_shot_runs_a_real_turn_on_a_bounded_channel() {
     );
 }
 
+/// V-C on the headless/REPL/TUI bootstrap. The junk file sits next to a BOUNDED
+/// channel, so nothing here is open — the point is that an unreadable config
+/// directory is never silently treated as an empty one.
+#[test]
+fn headless_one_shot_refuses_an_unparseable_channel_file() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let server = rt.block_on(support::mock_llm::MockLlm::new().text(MOCK_MARKER).start());
+
+    let case = Case::new(BOUNDED_INBOUND, Some(&server.uri()));
+    write_junk(&case.home);
+    let cap = case.run(&[
+        "--no-tui",
+        "--project-dir",
+        &case.project.display().to_string(),
+        "say hello",
+    ]);
+
+    assert_ne!(cap.status, Some(0), "the run must fail. {}", cap.either());
+    assert!(
+        cap.stderr.contains(UNREADABLE) && cap.stderr.contains("junk.toml"),
+        "and must name the file it could not parse. {}",
+        cap.either()
+    );
+    assert!(
+        !cap.stdout.contains(MOCK_MARKER),
+        "no turn may run. {}",
+        cap.either()
+    );
+}
+
 // -------------------------------------------------------------------- gateway
 
 /// `gateway run` — the systemd/launchd surface. Its other inbound failures
@@ -381,6 +526,39 @@ fn gateway_run_refuses_even_with_the_webhook_disabled() {
          merely discouraged. {}",
         cap.either()
     );
+}
+
+/// V-C on the gateway, in BOTH directions.
+///
+/// First half: an unparseable sibling next to an OPEN channel must not switch
+/// the open-admission gate off. Second half: the same sibling next to a BOUNDED
+/// channel must still be fatal, because the alternative is a working gateway
+/// that silently starts denying everyone after one typo.
+#[test]
+fn gateway_run_refuses_an_unparseable_channel_file() {
+    for (label, inbound) in [("open", OPEN_INBOUND), ("bounded", BOUNDED_INBOUND)] {
+        let case = Case::new(inbound, None);
+        write_junk(&case.home);
+        let cap = case.run(&["gateway", "run"]);
+
+        assert_ne!(
+            cap.status,
+            Some(0),
+            "{label}: the gateway must refuse to start. {}",
+            cap.either()
+        );
+        assert!(
+            cap.stderr.contains(UNREADABLE) && cap.stderr.contains("junk.toml"),
+            "{label}: and must name the file it could not parse. {}",
+            cap.either()
+        );
+        assert!(
+            !cap.stderr.contains("inbound dispatch unavailable"),
+            "{label}: it must NOT degrade — degrading here is what let one junk file switch the \
+             open-admission gate off. {}",
+            cap.either()
+        );
+    }
 }
 
 /// POSITIVE CONTROL for the row above: on a bounded channel the same gateway
