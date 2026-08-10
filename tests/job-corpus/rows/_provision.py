@@ -286,8 +286,40 @@ def drive(
     return ctx.run(args, cwd=cwd, timeout=timeout, extra_env=dict(prov.extra_env))
 
 
+#: Lines the product prints about its own environment before it answers.
+#: They are not the reply, and they are long enough to contain phrases a
+#: content grader looks for -- "REFUSED", "not writable", "cannot", figures.
+#: Grading them would be grading the harness's host, so they are dropped and
+#: the raw output is kept alongside as evidence.
+_NOTICE_PREFIXES = ("warning:", "notice:", "note:", "error:", "⚠")
+_NOTICE_FRAGMENTS = (
+    "crash replay protection is OFF",
+    "no secure credential backend",
+    "WAYLAND_VAULT_PASSPHRASE",
+    "Mid-flight monitor:",
+    "[turns:",
+)
+
+
+def strip_product_notices(text: str) -> str:
+    kept = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_NOTICE_PREFIXES):
+            continue
+        if any(fragment in line for fragment in _NOTICE_FRAGMENTS):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def reply_text(ctx: Any, rec: Any) -> str:
-    """Everything the user would have seen from one session."""
+    """What the user would have read, with the product's own startup notices
+    about this host removed."""
+    return strip_product_notices(ctx.runner.text(rec))
+
+
+def raw_output(ctx: Any, rec: Any) -> str:
     return ctx.runner.text(rec)
 
 
