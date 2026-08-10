@@ -95,7 +95,7 @@ fn inbound_policy_is_read_from_the_profile_home_not_the_host_home() {
         std::env::set_var("WAYLAND_HOME", profile.path());
     }
 
-    let configs = load_channel_policy_configs();
+    let configs = load_channel_policy_configs().expect("the channel dir parses");
 
     unsafe {
         match prev_home {

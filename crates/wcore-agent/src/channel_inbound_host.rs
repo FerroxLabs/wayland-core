@@ -113,9 +113,9 @@ impl InboundHost {
     /// one [`ChannelPolicyRegistry`](crate::channel_policy::ChannelPolicyRegistry)
     /// and move in a single swap; there is no API here that can refresh one.
     ///
-    /// Reads through [`crate::bootstrap::try_load_channel_policy_configs`],
-    /// the same named seam `spawn` uses, so the reloaded policies come from
-    /// the same directory the adapters were re-registered from (F24-C3-H1).
+    /// Reads through [`crate::bootstrap::load_channel_policy_configs`], the
+    /// same named seam `spawn` uses, so the reloaded policies come from the
+    /// same directory the adapters were re-registered from (F24-C3-H1).
     ///
     /// # It refuses rather than revoking
     ///
@@ -137,7 +137,7 @@ impl InboundHost {
     /// nothing is swapped and the bounded policies already in effect stay in
     /// effect.
     pub fn reload_policies(&self) -> Result<usize, wcore_channels::ChannelError> {
-        let configs = crate::bootstrap::try_load_channel_policy_configs()?;
+        let configs = crate::bootstrap::load_channel_policy_configs()?;
         self.policies
             .replace_from_configs(configs, std::path::Path::new(&self.workspace))
             .map_err(|refusal| wcore_channels::ChannelError::Config(refusal.to_string()))
@@ -191,6 +191,23 @@ pub enum InboundHostError {
     /// instead of making it unreachable.
     #[error("{0}")]
     OpenAdmission(#[from] wcore_channels::OpenAdmissionRefusal),
+
+    /// P2 root cause 2. A file under `<profile home>/channels` could not be
+    /// read or parsed, so the set of inbound policies is UNKNOWN.
+    ///
+    /// Fatal for the same reason [`Self::OpenAdmission`] is, and this is the
+    /// arm that stops it being fatal-in-name-only. Treating the failure as an
+    /// empty list is what let one junk `.toml` switch the open-admission gate
+    /// off for every sibling channel — `refuse_open_admission([])` is `Ok` —
+    /// and, on a deployment that was working, silently converted the next
+    /// restart into universal denial. A security gate must not be satisfiable
+    /// by making its input disappear.
+    ///
+    /// The explanation is on the error itself (see
+    /// [`crate::bootstrap::UNREADABLE_CHANNEL_DIR`]) rather than here, so the
+    /// gateway, the desktop host and a headless run all print the same words.
+    #[error("{0}")]
+    PolicyLoad(#[from] wcore_channels::ChannelError),
 }
 
 /// Assemble and spawn the inbound stack over `manager`.
@@ -230,7 +247,11 @@ pub async fn spawn(
     // P2: `from_configs` REFUSES an admits-everyone channel. It is checked here
     // — before the provider is built and before anything is spawned — so the
     // failure costs nothing and cannot leave a half-armed stack behind.
-    let channel_configs = crate::bootstrap::load_channel_policy_configs();
+    //
+    // P2 root cause 2: the load is FALLIBLE here. It used to be
+    // `unwrap_or_default()`, so one unparseable sibling `.toml` emptied the
+    // list and the gate below had nothing to refuse.
+    let channel_configs = crate::bootstrap::load_channel_policy_configs()?;
     let policies_loaded = channel_configs.len();
     let policies = Arc::new(crate::channel_policy::ChannelPolicyRegistry::from_configs(
         channel_configs,

@@ -179,12 +179,12 @@ require_mention = true           # in groups, only act when addressed
 Four shapes admit senders nobody named, and each of them means *whoever
 finds the bot* can drive an agent holding this host's tool posture:
 
-| Shape | Acknowledgement token |
+| Shape | What it admits |
 |---|---|
-| `dm = "open"` | `dm=open` |
-| `dm = "allowlist"` with `"*"` in `dm_allowlist` | `dm_allowlist=*` |
-| `group = "open"` | `group=open` |
-| `group = "allowlist"` with `"*"` in `sender_allowlist` and a non-empty `group_allowlist` | `sender_allowlist=*` |
+| `dm = "open"` | every DM from every account |
+| `dm = "allowlist"` with `"*"` in `dm_allowlist` | every DM from every account |
+| `group = "open"` | every group and channel message |
+| `group = "allowlist"` with `"*"` in `sender_allowlist` and a non-empty `group_allowlist` | every sender in an allowlisted conversation |
 
 Any of them, unacknowledged, is a refusal to start — on `wayland-core`
 (interactive, `--no-tui`, and the headless one-shot), on `--json-stream`
@@ -195,25 +195,55 @@ bounded policies already in effect). Channels are checked even when
 
 If a channel is genuinely meant to be open, acknowledge it **in that
 channel's own file** under `<profile home>/channels/<name>.toml` — a
-project-local `.wayland-core.toml` cannot set this key:
+project-local `.wayland-core.toml` cannot set this key. The
+acknowledgement is ONE token, and the refusal prints it for you to paste:
 
 ```toml
 [inbound]
 dm = "open"
-acknowledge_open_admission = ["dm=open"]
+acknowledge_open_admission = ["admission-v1 enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true"]
 ```
 
-The list must name **exactly** what is open, no more and no less:
+#### The token is the channel's whole admission shape
+
+It renders every setting that decides who is admitted and what they can
+trigger without addressing the bot: `enabled`, `dm`, `dm_allowlist`,
+`group`, `group_allowlist`, `sender_allowlist`, `require_mention`. Change
+any of them and the token changes, so the old consent stops applying and
+the process refuses until you look at the new shape.
+
+That is not pedantry — it is the hole an earlier, per-field token list had.
+With `group_allowlist = ["G1"]` and `sender_allowlist = ["*"]` you have
+consented to "anyone who can reach G1". Widening `group_allowlist` to
+`["*"]` makes that "anyone, anywhere" while touching no field the old
+tokens named, so nothing refused. The same went for `enabled`: a
+switched-off channel admits nobody, so a consent written against it was
+never contemporaneous with anything, and one later word admitted everyone.
+
+Reordering or repeating an allowlist entry is **not** a change — the lists
+are sorted and de-duplicated before rendering, and a list holding `"*"` is
+rendered as `*` because the wildcard already admits everyone in it. So
+`["G1","G2"]` and `["G2","G1","G1"]` share a token; `["G1"]` and `["*"]` do
+not.
+
+The key must hold **exactly one** entry when something is open, and **no**
+entry otherwise:
 
 - open and unacknowledged → refusal;
-- acknowledged but not open → refusal, with the correct list printed.
+- acknowledged but nothing open → refusal, telling you to remove the key;
+- acknowledged, but the shape has changed → refusal, printing the changed
+  fields as `field: acknowledged <was>, now <is>`;
+- more than one entry → refusal.
 
-That second rule is what stops the key becoming an `allow_open = true`
-switch. A token can only be written while the configuration it names is
-already live, so opening a second field — or swapping one open shape for
-another — refuses again instead of being covered by the old consent.
-Narrowing a channel also refuses until you delete the leftover token; the
-gate always fails closed and always tells you the list to write.
+The gate always fails closed and always prints the token to write.
+
+#### An unreadable channel directory is an error, not an empty one
+
+If any `.toml` under `<profile home>/channels/` cannot be parsed, every
+start path above refuses and names the file. It is deliberately not treated
+as "no channels configured": a security gate must not be satisfiable by
+making its input disappear, and silently loading zero policies would also
+turn a working gateway into universal denial after one typo.
 
 Defaults (used for any unset field) are the fail-closed posture:
 `dm = "allowlist"` with an **empty** `dm_allowlist` (so no one is
@@ -221,9 +251,8 @@ permitted), `group = "disabled"`, `require_mention = true`.
 
 **Lock `dm_allowlist` to specific sender ids.** `dm_allowlist = ["*"]`
 opens DMs to *anyone who can find the bot*, so the product refuses to start
-over it unless the channel's own file carries
-`acknowledge_open_admission = ["dm_allowlist=*"]` (see above). To allow a
-specific person, add their stable platform `sender_id` (e.g. their Telegram
+over it unless the channel's own file carries the admission-shape token
+(see above). To allow a specific person, add their stable platform `sender_id` (e.g. their Telegram
 numeric user id):
 
 ```toml

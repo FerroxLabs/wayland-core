@@ -341,39 +341,45 @@ pub fn govern_standalone_spawner(
 /// It previously used `ChannelConfigLoader::default_root()`, which joins
 /// `$HOME/.wayland/channels` unconditionally — see F24-C3-H1 at the call site
 /// for what that broke, in both directions.
-pub fn load_channel_policy_configs() -> Vec<wcore_channels::config::ChannelConfig> {
-    try_load_channel_policy_configs().unwrap_or_default()
-}
-
-/// The same load, with the error kept.
 ///
-/// F24-C3-H5. The two loaders over `<home>/channels` disagree about a
-/// malformed file, and the disagreement is dangerous once a reload can
-/// re-install policies at runtime:
+/// # Why this is fallible, and why there is only ONE of it
 ///
-/// - [`wcore_channels_registry::auto_register_from_dir`] SKIPS an unparseable
-///   file with a warning and returns `Ok`, so the other adapters still
-///   register;
-/// - [`wcore_channels::config::ChannelConfigLoader::load_all`] stops at the
-///   first failure and returns `Err`, which
-///   [`load_channel_policy_configs`]'s `unwrap_or_default` turns into an
-///   EMPTY policy set.
+/// There used to be two: this one, and a `load_channel_policy_configs` that was
+/// `try_load_channel_policy_configs().unwrap_or_default()`. The two loaders over
+/// `<home>/channels` disagree about a malformed file —
+/// [`wcore_channels_registry::auto_register_from_dir`] SKIPS it with a warning
+/// and registers the rest, while
+/// [`wcore_channels::config::ChannelConfigLoader::load_all`] stops at the first
+/// failure and returns `Err` — and the `unwrap_or_default` turned that `Err`
+/// into an EMPTY policy set.
 ///
-/// At startup that combination is merely visible (`policies=0` in the gateway's
-/// own log). At RELOAD it would be destructive: one newly-typo'd file would
-/// swap every running channel's policy out for the fail-closed default and
-/// convert a working gateway into universal denial — reintroducing the exact
-/// defect this lane is repairing, by a different route.
+/// Every cold-start entry point used the lossy one, so ONE unparseable `.toml`
+/// in the directory switched the whole P2 gate off: `refuse_open_admission([])`
+/// is `Ok`, and a `dm = "open"` channel sitting next to the junk file started
+/// with no refusal and no warning. The admission consequence was fail-CLOSED
+/// (an empty registry denies everyone), so it was never an admits-everyone
+/// hole — but a security gate that any stray file in the directory can silently
+/// satisfy is not a gate. The second consequence was worse for the operator: a
+/// single typo converted a working gateway into universal denial at the next
+/// restart, silently.
 ///
-/// So the reload path uses this function and **refuses to swap** on `Err`,
-/// keeping the policies it already has. The startup path keeps its historical
-/// lossy behaviour via [`load_channel_policy_configs`] so this change cannot
-/// alter how an existing deployment boots.
-pub fn try_load_channel_policy_configs()
+/// So a config that cannot be parsed is now an error the operator sees, on
+/// every path. Nothing calls `unwrap_or_default` on this any more, and there is
+/// no lossy sibling for a future call site to reach for.
+pub fn load_channel_policy_configs()
 -> Result<Vec<wcore_channels::config::ChannelConfig>, wcore_channels::ChannelError> {
     wcore_channels::config::ChannelConfigLoader::new(wcore_channels_registry::channels_dir())
         .load_all()
+        .map_err(|e| wcore_channels::ChannelError::Config(format!("{UNREADABLE_CHANNEL_DIR}: {e}")))
 }
+
+/// Framing for the error above. Lives here, once, so every surface that can hit
+/// it — headless, TUI, `--json-stream`, `gateway run`, `channel reload` — says
+/// the same thing. An operator who meets this on the desktop host and on the
+/// gateway must not have to work out that they are the same failure.
+pub const UNREADABLE_CHANNEL_DIR: &str = "inbound channel configuration could not be loaded, so the set of inbound access policies \
+     is unknown and the open-admission gate has nothing to check. Fix or remove the file named \
+     below; a channel directory that cannot be read is never treated as an empty one";
 
 /// Builder for creating a fully-initialized `AgentEngine`.
 ///
@@ -3526,7 +3532,13 @@ impl AgentBootstrap {
                 // is the same cross-profile leak F-019 closed for
                 // registration; `channels_dir`'s own doc comment already
                 // asserts the two loaders "never diverge", and they did.
-                let channel_configs = load_channel_policy_configs();
+                //
+                // P2 root cause 2: `?`, not `unwrap_or_default()`. An
+                // unparseable file in that directory used to empty the list,
+                // which silently switched the open-admission gate off for every
+                // sibling channel — and, on a working deployment, silently
+                // turned the next restart into universal denial.
+                let channel_configs = load_channel_policy_configs()?;
 
                 // Resolve each channel's access policy AND tool posture into
                 // one shared registry. `Workspace` jails to the channel's
