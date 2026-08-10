@@ -75,8 +75,43 @@ the tree.
 | 4b | capture a real product stream | Linux | `python3 gen/gen_real_stream.py --binary <BIN> --out <D>/real-stream.jsonl` | writes a real `session_cost` frame plus the wire record beside it, so step 1 can be re-run with `--binary <BIN> --real-stream <D>/real-stream.jsonl` and ground the claim parser and the cost reconciliation on real bytes |
 | 5 | **The corpus run** | Linux | `python3 -m harness.cli run --binary <BIN> --out <RUNDIR>` | reads §1 |
 | 6 | Re-aggregate / read the verdict | any | `python3 -m harness.cli summarise --out <RUNDIR>` | same exit codes |
-| 7 | Windows leg | `SeanD@seandesktop` (D: only) | same, with the Windows binary | |
+| 7 | Windows leg | `SeanD@seandesktop` (D: only) | **steps 7a–7c first**, then the same run with the Windows binary | |
 | 8 | macOS leg | the local Mac | same, with the macOS binary | |
+
+### Step 7 has three prerequisites, and none of them are automatic
+
+The Windows box does not carry a checkout of this branch. Before 2026-08-11
+`D:\jobcorpus` was **not a git repository** and `D:\jobcorpus\tests\job-corpus\rows`
+did not exist, so step 7 could not start at all. Do these in order:
+
+| # | on `SeanD@seandesktop` | why |
+|---|---|---|
+| 7a | `git clone --depth 1 --single-branch --branch test/job-corpus-harness https://github.com/FerroxLabs/wayland-core D:\jcwin` | there is no checkout otherwise. **D: only** — never `C:`, and never anywhere near `C:\actions-runner-*` |
+| 7b | from `D:\jcwin\tests\job-corpus`: `python -m harness.cli selftest`, `python keys/selftest.py`, the five per-key controls in `keys/README.md` §2, and `python inv1/selftest_detector.py` | a green from a host whose own controls were never run there is not evidence. The controls must produce a red AND a green **on this host** before any Windows verdict counts |
+| 7c | name the artifact: `(Get-FileHash <BIN> -Algorithm SHA256).Hash`, and record the tree it was built from | a result that cannot name its artifact is void. Prefer the newest binary built from the sealed/merged tree; confirm the linkage by grepping the `.exe` for the commit sha with a positive control, not by trusting the directory name |
+
+PowerShell over `ssh` mangles inline quoting. Write a `.ps1`, `scp` it to `D:\`,
+and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File`.
+Quiet-check `Get-Process wayland-core` first and VOID anything measured beside
+a second engine.
+
+**Windows has no filesystem containment by design.** That is expected and is
+not a defect the leg should report.
+
+#### What the Windows leg can and cannot reach
+
+Measured on the box on 2026-08-11, not assumed. A row blocked by host
+provisioning rather than by the product is **UNPROVEN**, never N/A and never
+PASS.
+
+| rows | Windows disposition | reason measured on the host |
+|---|---|---|
+| A-1 … A-6, INV-1 … INV-5 | can run | `git 2.54.0.windows.1` and `Python 3.12.10` are on PATH; harness selftest, the A-1…A-6 key selftest, all five per-key controls and the INV-1 detector selftest all behaved correctly there |
+| A-7 … A-12 | cannot run **anywhere** | no row driver exists yet. Their per-key controls (A-7, A-8, A-9, A-10-degraded, A-11) *do* pass on Windows, so this is a missing driver, not a missing host |
+| B-3 | can run | it is the one B row needing no provider; its mail host is hermetic |
+| B-1, B-2, B-5 | UNPROVEN | `JOBCORPUS_PROVIDER_TOML` is unset and no provider fragment exists on the box. Windows has no tmpfs, so a credential cannot be staged there the way `/dev/shm` allows on Linux — placing one needs an explicit decision, not a lane's initiative |
+| B-4 | UNPROVEN | the box cannot resolve or key-auth to a second machine (`ssh hetzner-dsm` → `Name or service not known`), and the driver correctly refuses to grade a "remote" that is this machine |
+| B-5b (native licence window) | reachable here, unlike Linux | an interactive desktop session exists on this box, so the native half is not excluded for want of a display — only for want of a provider |
 
 Always run the product with `env -u API_KEY -u FLUX_API_KEY`. A bare
 `API_KEY` in the environment is honoured as a provider credential and is a
