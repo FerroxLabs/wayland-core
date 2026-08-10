@@ -176,7 +176,11 @@ jobs:
             echo "--- ${name} verdict lines ---"
             grep -E "running [0-9]+ test|test result|skip:" "${log}" || true
           }
-          check_suite hard_process_containment_macos /tmp/containment.log 1
+          # 2, not 1: `hard_process_containment_macos` gained a second
+          # `#[ignore]`d case — the SIGKILL orphan acceptance test. The count is
+          # pinned deliberately, so adding a case without updating this line
+          # fails the gate rather than silently narrowing what it certifies.
+          check_suite hard_process_containment_macos /tmp/containment.log 2
           check_suite live_integrity_macos /tmp/integrity.log 1
           echo "=== recorded cargo exit codes ==="
           cat /tmp/containment.rc /tmp/integrity.rc 2>/dev/null || echo "(none recorded)"
