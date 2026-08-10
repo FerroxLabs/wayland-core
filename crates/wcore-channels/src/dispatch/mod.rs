@@ -25,8 +25,9 @@ pub mod rate_limit;
 pub mod session_key;
 
 pub use access::{
-    AccessDecision, AckMode, ChannelToolPosture, DmPolicy, GroupPolicy, InboundPolicy,
-    OpenAdmission, OpenAdmissionRefusal, decide_access, open_admissions, refuse_open_admission,
+    AccessDecision, AckMode, ChannelOpenAdmission, ChannelToolPosture, DmPolicy, GroupPolicy,
+    InboundPolicy, OpenAdmission, OpenAdmissionFault, OpenAdmissionRefusal, decide_access,
+    open_admission_faults, open_admissions, refuse_open_admission, required_acknowledgement,
     unacknowledged_open_admissions,
 };
 pub use admission::{TurnAdmission, classify};

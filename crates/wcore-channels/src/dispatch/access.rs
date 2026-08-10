@@ -110,8 +110,14 @@ pub enum GroupPolicy {
 /// until the operator opts in: `dm: Allowlist` with an EMPTY allowlist
 /// (so no one is permitted), `group: Disabled`, and `require_mention:
 /// true`. An unconfigured channel therefore rejects every message. To
-/// open DMs to everyone, set `dm_allowlist = ["*"]`; to allow a specific
-/// person, add their stable `sender_id`.
+/// allow a specific person, add their stable `sender_id` to
+/// `dm_allowlist`.
+///
+/// **`dm_allowlist = ["*"]` is refused at startup.** So are `dm = "open"`,
+/// `group = "open"` and a `"*"` `sender_allowlist` over a non-empty
+/// `group_allowlist`: each of them admits senders nobody named. See
+/// [`refuse_open_admission`] for the gate and
+/// [`InboundPolicy::acknowledge_open_admission`] for the deliberate opt-out.
 ///
 /// Allowlist semantics: a list permits an id iff it contains the literal
 /// `"*"` (wildcard) OR the exact id. An EMPTY list permits NOTHING.
@@ -159,18 +165,34 @@ pub struct InboundPolicy {
     /// (reactions / typing). Defaults to [`AckMode::Off`].
     #[serde(default)]
     pub ack: AckMode,
-    /// Per-field opt-out from the admits-everyone startup refusal.
+    /// Opt-out from the admits-everyone startup refusal, bound to the exact
+    /// configuration it consents to.
     ///
-    /// Each entry is the NAME of an `[inbound]` key this channel is
-    /// deliberately leaving open — one of `"dm"`, `"dm_allowlist"`,
-    /// `"group"`, `"sender_allowlist"`. See [`open_admissions`] and
-    /// [`refuse_open_admission`].
+    /// Each entry is a TOKEN naming both the `[inbound]` key that is open and
+    /// the value that opens it — `"dm=open"`, `"dm_allowlist=*"`,
+    /// `"group=open"`, `"sender_allowlist=*"`. See [`open_admissions`],
+    /// [`required_acknowledgement`] and [`refuse_open_admission`].
     ///
-    /// It is a list of field names rather than a boolean on purpose: a
-    /// blanket `allow_open = true` written once keeps silently covering
-    /// every field the operator opens afterwards. Naming each field means
-    /// opening a SECOND one refuses again, so the acknowledgement cannot
-    /// outlive the decision it recorded.
+    /// # The list must match the open configuration EXACTLY
+    ///
+    /// Not "cover" it — match it. Both directions are refusals:
+    ///
+    /// - an open shape with no token is unacknowledged, and
+    /// - a token naming a shape that is NOT open right now is stale.
+    ///
+    /// The second direction is the load-bearing one. Without it a bare
+    /// field-name list is just `allow_open = true` spelled at length: an
+    /// operator could write every field name into a channel that is currently
+    /// bounded, and that one edit would silently consent to every way the
+    /// channel might be opened afterwards, forever. Refusing a stale token
+    /// means a token can only be written while the shape it names is already
+    /// live — so the acknowledgement is contemporaneous with the decision by
+    /// construction, and consenting to "open to my team's group" cannot
+    /// quietly become consent to "and to DMs from anyone".
+    ///
+    /// A configuration change therefore always fails CLOSED: the process
+    /// refuses to start and the refusal prints the token list that matches
+    /// the new configuration, for the operator to accept deliberately.
     ///
     /// **Where it can be set.** This key lives in the channel's own file
     /// under `<profile home>/channels/<name>.toml` — the only source
@@ -249,14 +271,33 @@ fn permits_anyone(list: &[String]) -> bool {
 /// drive the agent, and the answer is "whoever finds the bot".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAdmission {
-    /// The `[inbound]` key at fault, spelled as it appears in the TOML. This
-    /// is also the token an operator lists in
-    /// [`InboundPolicy::acknowledge_open_admission`] to accept it.
+    /// The `[inbound]` key at fault, spelled as it appears in the TOML.
     pub field: &'static str,
     /// What that key is set to, as the operator wrote it.
     pub found: String,
+    /// The token that acknowledges THIS shape and no other, for
+    /// [`InboundPolicy::acknowledge_open_admission`]: `<field>=<the value
+    /// that opens it>`.
+    ///
+    /// The value is part of the token on purpose. A token naming only the
+    /// field would still be true of that field's NEXT open value, so an
+    /// acknowledgement would outlive the configuration it was written for.
+    pub token: &'static str,
     /// The exact narrower configuration to use instead.
     pub remedy: String,
+}
+
+impl OpenAdmission {
+    /// What this shape means for the operator, in one clause. Written for the
+    /// refusal message, where "your config is open" is not actionable but
+    /// "every DM from every account is admitted" is.
+    pub fn consequence(&self) -> &'static str {
+        match self.field {
+            "dm" | "dm_allowlist" => "every DM from every account is admitted",
+            "group" => "every group and channel message is admitted",
+            _ => "every sender in an allowlisted conversation is admitted",
+        }
+    }
 }
 
 /// Every admits-everyone shape in `policy`, ignoring any acknowledgement.
@@ -285,6 +326,7 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
         DmPolicy::Open => out.push(OpenAdmission {
             field: "dm",
             found: "dm = \"open\"".into(),
+            token: "dm=open",
             remedy: "dm = \"allowlist\" with dm_allowlist = [\"<sender id>\", ...] naming each \
                      person permitted to DM this bot"
                 .into(),
@@ -292,6 +334,7 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
         DmPolicy::Allowlist if permits_anyone(&policy.dm_allowlist) => out.push(OpenAdmission {
             field: "dm_allowlist",
             found: "dm_allowlist = [\"*\"]".into(),
+            token: "dm_allowlist=*",
             remedy: "dm_allowlist = [\"<sender id>\", ...] naming each permitted sender id \
                      instead of the \"*\" wildcard"
                 .into(),
@@ -303,6 +346,7 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
         GroupPolicy::Open => out.push(OpenAdmission {
             field: "group",
             found: "group = \"open\"".into(),
+            token: "group=open",
             remedy: "group = \"allowlist\" with group_allowlist = [\"<conversation id>\", ...] \
                      and sender_allowlist = [\"<sender id>\", ...]"
                 .into(),
@@ -313,6 +357,7 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
             out.push(OpenAdmission {
                 field: "sender_allowlist",
                 found: "sender_allowlist = [\"*\"]".into(),
+                token: "sender_allowlist=*",
                 remedy: "sender_allowlist = [\"<sender id>\", ...] naming each permitted sender \
                          instead of the \"*\" wildcard"
                     .into(),
@@ -324,8 +369,25 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
     out
 }
 
+/// The `acknowledge_open_admission` value that matches `policy` EXACTLY as it
+/// stands: one [`OpenAdmission::token`] per open shape, in [`open_admissions`]
+/// order.
+///
+/// Empty when nothing is open — in which case the correct file has no
+/// `acknowledge_open_admission` key at all, because a token that names
+/// nothing open is a stale consent, not a harmless leftover.
+pub fn required_acknowledgement(policy: &InboundPolicy) -> Vec<&'static str> {
+    open_admissions(policy)
+        .into_iter()
+        .map(|f| f.token)
+        .collect()
+}
+
 /// [`open_admissions`] minus the shapes this channel's
 /// [`InboundPolicy::acknowledge_open_admission`] names.
+///
+/// One half of [`open_admission_faults`]; on its own it cannot see a stale
+/// acknowledgement, which is why the gate uses the other function.
 pub fn unacknowledged_open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
     open_admissions(policy)
         .into_iter()
@@ -333,63 +395,146 @@ pub fn unacknowledged_open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmissi
             !policy
                 .acknowledge_open_admission
                 .iter()
-                .any(|a| a == f.field)
+                .any(|a| a == f.token)
         })
         .collect()
 }
 
-/// Refusal to start over one or more channels that admit everyone.
+/// Why the startup gate refuses one channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenAdmissionFault {
+    /// The channel admits everyone through this shape, and nothing in
+    /// [`InboundPolicy::acknowledge_open_admission`] names it.
+    Unacknowledged(OpenAdmission),
+    /// [`InboundPolicy::acknowledge_open_admission`] carries a token that
+    /// names no shape this channel currently has open.
+    ///
+    /// This is the arm that bounds an acknowledgement in TIME. Without it the
+    /// key degenerates into the `allow_open = true` boolean the design
+    /// rejects: an operator could pre-arm a currently-bounded channel with
+    /// every token, and that single edit would consent in advance to every
+    /// way the channel might later be opened. Because a stale token refuses,
+    /// a token can only be written while the shape it names is already live.
+    ///
+    /// It fails CLOSED: the refusal reports what no longer matches and prints
+    /// the list that does, so the operator re-acknowledges deliberately.
+    Stale {
+        /// The token as the operator wrote it.
+        token: String,
+    },
+}
+
+/// Everything wrong with `policy`'s acknowledgement: every open shape that is
+/// unacknowledged, then every acknowledgement that names nothing open.
 ///
-/// Carries every offending `(channel, finding)` pair rather than the first,
-/// so an operator fixes the whole configuration in one pass instead of
-/// discovering the next one on the next failed start.
+/// Empty iff `acknowledge_open_admission` names EXACTLY the open
+/// configuration — the only state the gate accepts. "Covers" is not enough,
+/// because a list that covers more than is open is a consent to
+/// configurations nobody has looked at yet.
+pub fn open_admission_faults(policy: &InboundPolicy) -> Vec<OpenAdmissionFault> {
+    let open = open_admissions(policy);
+    let mut faults: Vec<OpenAdmissionFault> = unacknowledged_open_admissions(policy)
+        .into_iter()
+        .map(OpenAdmissionFault::Unacknowledged)
+        .collect();
+    for ack in &policy.acknowledge_open_admission {
+        if !open.iter().any(|f| f.token == ack) {
+            faults.push(OpenAdmissionFault::Stale { token: ack.clone() });
+        }
+    }
+    faults
+}
+
+/// One refused channel: why, and the acknowledgement that would match it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelOpenAdmission {
+    /// The channel whose file is at fault.
+    pub channel: String,
+    /// Why, in [`open_admission_faults`] order.
+    pub faults: Vec<OpenAdmissionFault>,
+    /// [`required_acknowledgement`] for this channel — what the operator must
+    /// write to consent to the configuration as it stands. Empty means the
+    /// key must be removed.
+    pub required_acknowledgement: Vec<&'static str>,
+}
+
+/// Refusal to start over one or more channels.
+///
+/// Carries every offending channel rather than the first, so an operator
+/// fixes the whole configuration in one pass instead of discovering the next
+/// one on the next failed start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAdmissionRefusal {
-    /// `(channel name, finding)`, in channel order.
-    pub findings: Vec<(String, OpenAdmission)>,
+    /// Every refused channel, in channel order.
+    pub channels: Vec<ChannelOpenAdmission>,
 }
 
 impl std::fmt::Display for OpenAdmissionRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(
             f,
-            "refusing to start: {} inbound channel configuration(s) admit an unbounded set of \
-             senders — anyone who can reach the platform could drive this agent.",
-            self.findings.len()
+            "refusing to start: {} inbound channel configuration(s) do not match their \
+             acknowledgement of open admission.",
+            self.channels.len()
         )?;
-        for (channel, finding) in &self.findings {
-            writeln!(
-                f,
-                "  channel {channel:?}: [inbound] {} — {}. Use instead: {}",
-                finding.found,
-                match finding.field {
-                    "dm" | "dm_allowlist" => "every DM from every account is admitted",
-                    "group" => "every group and channel message is admitted",
-                    _ => "every sender in an allowlisted conversation is admitted",
-                },
-                finding.remedy
-            )?;
+        for refused in &self.channels {
+            let channel = &refused.channel;
+            for fault in &refused.faults {
+                match fault {
+                    OpenAdmissionFault::Unacknowledged(finding) => writeln!(
+                        f,
+                        "  channel {channel:?}: [inbound] {} — {}, and nothing acknowledges it. \
+                         Use instead: {}",
+                        finding.found,
+                        finding.consequence(),
+                        finding.remedy
+                    )?,
+                    OpenAdmissionFault::Stale { token } => writeln!(
+                        f,
+                        "  channel {channel:?}: acknowledge_open_admission names {token:?}, but \
+                         this channel is not open that way any more. An acknowledgement consents \
+                         to ONE configuration; when that configuration changes it stops applying \
+                         rather than silently covering whatever replaced it.",
+                    )?,
+                }
+            }
+            if refused.required_acknowledgement.is_empty() {
+                writeln!(
+                    f,
+                    "  channel {channel:?}: nothing in this channel is open, so remove the \
+                     acknowledge_open_admission key from <profile home>/channels/{channel}.toml \
+                     entirely."
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "  channel {channel:?}: to keep this configuration, acknowledge exactly what \
+                     is open in <profile home>/channels/{channel}.toml:\n      [inbound]\n      \
+                     acknowledge_open_admission = [{}]",
+                    refused
+                        .required_acknowledgement
+                        .iter()
+                        .map(|t| format!("{t:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )?;
+            }
         }
         write!(
             f,
-            "If a channel is genuinely meant to be open, acknowledge each open field BY NAME in \
-             that channel's own file (<profile home>/channels/<name>.toml):\n    [inbound]\n    \
-             acknowledge_open_admission = [{}]\nThat key is read only from the profile-scoped \
-             channel file — a project-local .wayland-core.toml cannot set it — and it must name \
-             every open field, so opening another one refuses again.",
-            self.findings
-                .iter()
-                .map(|(_, finding)| format!("{:?}", finding.field))
-                .collect::<Vec<_>>()
-                .join(", ")
+            "Each token names the open field AND the value that opens it, so it can only be \
+             written while that exact configuration is live — opening another field, or changing \
+             one, refuses again instead of being covered by the old consent. This key is read \
+             only from the profile-scoped channel file; a project-local .wayland-core.toml \
+             cannot set it."
         )
     }
 }
 
 impl std::error::Error for OpenAdmissionRefusal {}
 
-/// THE STARTUP GATE. `Err` iff any channel admits an unbounded set of senders
-/// without acknowledging it.
+/// THE STARTUP GATE. `Err` iff any channel's acknowledgement does not name
+/// exactly the set of admits-everyone shapes that channel currently has.
 ///
 /// Callers must refuse to start (or, on a reload, refuse to swap) rather than
 /// warn: a warning leaves the dangerous configuration reachable, which is the
@@ -402,18 +547,24 @@ impl std::error::Error for OpenAdmissionRefusal {}
 pub fn refuse_open_admission<'a>(
     channels: impl IntoIterator<Item = (&'a str, &'a InboundPolicy)>,
 ) -> Result<(), OpenAdmissionRefusal> {
-    let findings: Vec<(String, OpenAdmission)> = channels
+    let refused: Vec<ChannelOpenAdmission> = channels
         .into_iter()
-        .flat_map(|(name, policy)| {
-            unacknowledged_open_admissions(policy)
-                .into_iter()
-                .map(move |f| (name.to_string(), f))
+        .filter_map(|(name, policy)| {
+            let faults = open_admission_faults(policy);
+            if faults.is_empty() {
+                return None;
+            }
+            Some(ChannelOpenAdmission {
+                channel: name.to_string(),
+                faults,
+                required_acknowledgement: required_acknowledgement(policy),
+            })
         })
         .collect();
-    if findings.is_empty() {
+    if refused.is_empty() {
         Ok(())
     } else {
-        Err(OpenAdmissionRefusal { findings })
+        Err(OpenAdmissionRefusal { channels: refused })
     }
 }
 
@@ -693,5 +844,322 @@ mod tests {
         assert!(permits(&["*".into()], "x"), "wildcard permits any");
         assert!(permits(&["x".into()], "x"), "exact match permits");
         assert!(!permits(&["y".into()], "x"), "non-match denies");
+    }
+
+    // ---- The acknowledgement is bound to the configuration it names ----
+
+    /// A channel that is bounded today, with every token pre-written.
+    fn preacked_but_bounded() -> InboundPolicy {
+        InboundPolicy {
+            dm: DmPolicy::Allowlist,
+            dm_allowlist: vec!["U-NAMED".into()],
+            group: GroupPolicy::Disabled,
+            acknowledge_open_admission: vec![
+                "dm=open".into(),
+                "group=open".into(),
+                "dm_allowlist=*".into(),
+                "sender_allowlist=*".into(),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_blanket_pre_acknowledgement_cannot_be_written_in_the_first_place() {
+        // This is the whole defect, at the level of the pure gate: if a bounded
+        // channel accepts tokens for shapes it does not have, that file is a
+        // standing consent to every future opening, and the field-name list is
+        // just `allow_open = true` spelled out.
+        let refusal = refuse_open_admission([("preacked", &preacked_but_bounded())])
+            .expect_err("pre-arming a bounded channel must refuse, not be silently accepted");
+        let refused = &refusal.channels[0];
+        assert_eq!(refused.channel, "preacked");
+        assert_eq!(
+            refused.faults.len(),
+            4,
+            "each token names a shape this channel does not have; every one is stale: {:?}",
+            refused.faults
+        );
+        assert!(
+            refused
+                .faults
+                .iter()
+                .all(|f| matches!(f, OpenAdmissionFault::Stale { .. })),
+            "nothing here is OPEN — the faults are all stale consents: {:?}",
+            refused.faults
+        );
+        assert!(
+            refused.required_acknowledgement.is_empty(),
+            "the channel is bounded, so the correct file has no acknowledgement at all"
+        );
+        let msg = refusal.to_string();
+        assert!(
+            msg.contains("remove the acknowledge_open_admission key"),
+            "the operator must be told what to do; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_matching_acknowledgement_is_accepted_and_a_superset_is_not() {
+        // POSITIVE CONTROL first, or the test above is satisfied by a gate that
+        // refuses every acknowledgement.
+        let exact = InboundPolicy {
+            dm: DmPolicy::Open,
+            acknowledge_open_admission: vec!["dm=open".into()],
+            ..Default::default()
+        };
+        assert_eq!(required_acknowledgement(&exact), vec!["dm=open"]);
+        refuse_open_admission([("exact", &exact)])
+            .expect("an acknowledgement that names exactly what is open must be accepted");
+
+        // One extra token — the smallest possible pre-arm — must refuse.
+        let superset = InboundPolicy {
+            acknowledge_open_admission: vec!["dm=open".into(), "group=open".into()],
+            ..exact.clone()
+        };
+        let refusal = refuse_open_admission([("superset", &superset)])
+            .expect_err("a token for a shape that is not open must refuse");
+        assert_eq!(
+            refusal.channels[0].faults,
+            vec![OpenAdmissionFault::Stale {
+                token: "group=open".into()
+            }],
+            "and only the extra token is at fault"
+        );
+    }
+
+    #[test]
+    fn changing_which_shape_is_open_invalidates_the_old_acknowledgement() {
+        // The consent said "dm = open". The operator swaps that for a different
+        // open shape ON THE SAME FIELD FAMILY. The old consent must not carry
+        // over: it named a configuration this file no longer has.
+        let changed = InboundPolicy {
+            dm: DmPolicy::Allowlist,
+            dm_allowlist: vec![WILDCARD.into()],
+            acknowledge_open_admission: vec!["dm=open".into()],
+            ..Default::default()
+        };
+        let refusal = refuse_open_admission([("changed", &changed)])
+            .expect_err("a different open shape is a different decision");
+        let faults = &refusal.channels[0].faults;
+        assert!(
+            faults.iter().any(|f| matches!(
+                f,
+                OpenAdmissionFault::Unacknowledged(a) if a.token == "dm_allowlist=*"
+            )),
+            "the new shape is unacknowledged: {faults:?}"
+        );
+        assert!(
+            faults.contains(&OpenAdmissionFault::Stale {
+                token: "dm=open".into()
+            }),
+            "and the old consent is stale: {faults:?}"
+        );
+        assert_eq!(
+            refusal.channels[0].required_acknowledgement,
+            vec!["dm_allowlist=*"],
+            "the refusal must print the list that matches the NEW configuration"
+        );
+    }
+
+    #[test]
+    fn narrowing_a_channel_refuses_until_the_stale_consent_is_removed() {
+        // Fails CLOSED, deliberately, even though the new configuration is
+        // SAFER. Accepting a leftover consent silently is exactly how a token
+        // written for a bounded moment ends up covering an open one.
+        let narrowed = InboundPolicy {
+            dm: DmPolicy::Allowlist,
+            dm_allowlist: vec!["U-NAMED".into()],
+            acknowledge_open_admission: vec!["dm=open".into()],
+            ..Default::default()
+        };
+        let refusal = refuse_open_admission([("narrowed", &narrowed)])
+            .expect_err("a leftover consent must be cleared deliberately, not honoured silently");
+        let msg = refusal.to_string();
+        assert!(
+            msg.contains("\"dm=open\"") && msg.contains("not open that way any more"),
+            "the refusal must say WHICH consent no longer matches; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_near_miss_spelling_of_a_token_acknowledges_anything() {
+        // ATTACK VARIANT. If the match were fuzzy — trimmed, case-folded, or
+        // prefix-based — an operator (or a config generator) could write a
+        // token that covers more than one shape, and the binding would leak
+        // back to a field-name list. Every one of these must leave the channel
+        // BOTH unacknowledged and carrying a stale token: fail-closed in both
+        // directions at once.
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            ..Default::default()
+        };
+        for spelling in [
+            "dm",                 // the old field-name form
+            "dm=Open",            // case
+            "DM=OPEN",            //
+            "dm = open",          // spaces
+            " dm=open",           // leading space
+            "dm=open ",           // trailing space
+            "dm=\"open\"",        // TOML-ish quoting
+            "dm=open,group=open", // two in one entry
+            "dm=*",               // wrong value
+            "*",                  // a wildcard acknowledgement
+            "",                   // empty
+        ] {
+            let policy = InboundPolicy {
+                acknowledge_open_admission: vec![spelling.to_string()],
+                ..open.clone()
+            };
+            let faults = open_admission_faults(&policy);
+            assert!(
+                faults.iter().any(|f| matches!(
+                    f,
+                    OpenAdmissionFault::Unacknowledged(a) if a.token == "dm=open"
+                )),
+                "{spelling:?} must NOT acknowledge dm = \"open\"; faults were {faults:?}"
+            );
+            assert!(
+                faults.contains(&OpenAdmissionFault::Stale {
+                    token: spelling.to_string()
+                }),
+                "{spelling:?} names no open shape, so it must also be reported stale; faults \
+                 were {faults:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gate_flags_every_config_that_admits_an_unnamed_sender() {
+        // ATTACK VARIANT, and the one that could not be found by re-reading
+        // the gate: enumerate the whole small configuration space and ask
+        // `decide_access` itself — the function that actually admits people —
+        // whether a sender NOBODY named gets in. Anything it admits and
+        // `open_admissions` does not flag is a shape the acknowledgement can
+        // never be bound to, i.e. an unbounded channel that starts silently.
+        //
+        // This is deliberately not seeded from the implementation's own list
+        // of open shapes; that is how a self-certifying test gets written.
+        const DMS: [DmPolicy; 4] = [
+            DmPolicy::Open,
+            DmPolicy::Allowlist,
+            DmPolicy::Disabled,
+            DmPolicy::Pairing,
+        ];
+        const GROUPS: [GroupPolicy; 3] = [
+            GroupPolicy::Open,
+            GroupPolicy::Allowlist,
+            GroupPolicy::Disabled,
+        ];
+        let lists: [Vec<String>; 3] = [vec![], vec!["*".into()], vec!["U1".into()]];
+        let convs: [Vec<String>; 3] = [vec![], vec!["*".into()], vec!["G1".into()]];
+
+        // A sender and a conversation that appear in NO list above.
+        let stranger = "U-STRANGER-NEVER-NAMED";
+        let mut checked = 0usize;
+        let mut flagged = 0usize;
+        for dm in &DMS {
+            for group in &GROUPS {
+                for dm_allowlist in &lists {
+                    for group_allowlist in &convs {
+                        for sender_allowlist in &lists {
+                            let policy = InboundPolicy {
+                                dm: dm.clone(),
+                                group: group.clone(),
+                                dm_allowlist: dm_allowlist.clone(),
+                                group_allowlist: group_allowlist.clone(),
+                                sender_allowlist: sender_allowlist.clone(),
+                                ..Default::default()
+                            };
+                            let admits_stranger = [
+                                dm_from(stranger),
+                                group_from("G1", stranger),
+                                group_from("G-STRANGER-NEVER-NAMED", stranger),
+                            ]
+                            .iter()
+                            .any(|m| decide_access(m, &policy) == AccessDecision::Allow);
+
+                            let open = open_admissions(&policy);
+                            checked += 1;
+                            if admits_stranger {
+                                flagged += 1;
+                                assert!(
+                                    !open.is_empty(),
+                                    "this config admits {stranger}, whom it never names, and the \
+                                     gate does not flag it: {policy:?}"
+                                );
+                            } else {
+                                assert!(
+                                    open.is_empty(),
+                                    "this config admits NOBODY unnamed, so flagging it would be \
+                                     an over-refusal an operator cannot satisfy: {policy:?} -> \
+                                     {open:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 4 * 3 * 3 * 3 * 3, "the whole space was walked");
+        assert!(
+            flagged > 0 && flagged < checked,
+            "control: the corpus must contain BOTH open and bounded configurations, or the \
+             assertions above are vacuous; got {flagged} open of {checked}"
+        );
+    }
+
+    #[test]
+    fn every_open_shape_has_a_token_and_the_tokens_are_distinct() {
+        // If two shapes shared a token, acknowledging one would acknowledge the
+        // other — the binding would be back to a field-name list. Drive every
+        // shape through `open_admissions` rather than listing the constants, so
+        // a new shape added without a token cannot slip past.
+        let shapes = [
+            InboundPolicy {
+                dm: DmPolicy::Open,
+                ..Default::default()
+            },
+            InboundPolicy {
+                dm: DmPolicy::Allowlist,
+                dm_allowlist: vec![WILDCARD.into()],
+                ..Default::default()
+            },
+            InboundPolicy {
+                group: GroupPolicy::Open,
+                ..Default::default()
+            },
+            InboundPolicy {
+                group: GroupPolicy::Allowlist,
+                group_allowlist: vec!["G1".into()],
+                sender_allowlist: vec![WILDCARD.into()],
+                ..Default::default()
+            },
+        ];
+        let mut tokens: Vec<&str> = Vec::new();
+        for policy in &shapes {
+            let found = open_admissions(policy);
+            assert_eq!(found.len(), 1, "each fixture is exactly one open shape");
+            let token = found[0].token;
+            assert!(
+                token.contains('=') && token.starts_with(found[0].field),
+                "a token must name the field AND the value that opens it; got {token:?}"
+            );
+            assert!(
+                !tokens.contains(&token),
+                "tokens must be distinct: {token:?}"
+            );
+            tokens.push(token);
+            // And the token it advertises must be the token that satisfies it.
+            let acknowledged = InboundPolicy {
+                acknowledge_open_admission: vec![token.to_string()],
+                ..policy.clone()
+            };
+            assert!(
+                open_admission_faults(&acknowledged).is_empty(),
+                "the advertised token must be the one the gate accepts: {token:?}"
+            );
+        }
+        assert_eq!(tokens.len(), 4);
     }
 }

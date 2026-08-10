@@ -174,14 +174,57 @@ group = "disabled"               # open | allowlist | disabled
 require_mention = true           # in groups, only act when addressed
 ```
 
+### The product REFUSES to start on an admits-everyone config
+
+Four shapes admit senders nobody named, and each of them means *whoever
+finds the bot* can drive an agent holding this host's tool posture:
+
+| Shape | Acknowledgement token |
+|---|---|
+| `dm = "open"` | `dm=open` |
+| `dm = "allowlist"` with `"*"` in `dm_allowlist` | `dm_allowlist=*` |
+| `group = "open"` | `group=open` |
+| `group = "allowlist"` with `"*"` in `sender_allowlist` and a non-empty `group_allowlist` | `sender_allowlist=*` |
+
+Any of them, unacknowledged, is a refusal to start — on `wayland-core`
+(interactive, `--no-tui`, and the headless one-shot), on `--json-stream`
+(where the host receives one `error` frame instead of `ready`), on
+`gateway run`, and on `channel reload` (which refuses the swap and keeps the
+bounded policies already in effect). Channels are checked even when
+`enabled = false`.
+
+If a channel is genuinely meant to be open, acknowledge it **in that
+channel's own file** under `<profile home>/channels/<name>.toml` — a
+project-local `.wayland-core.toml` cannot set this key:
+
+```toml
+[inbound]
+dm = "open"
+acknowledge_open_admission = ["dm=open"]
+```
+
+The list must name **exactly** what is open, no more and no less:
+
+- open and unacknowledged → refusal;
+- acknowledged but not open → refusal, with the correct list printed.
+
+That second rule is what stops the key becoming an `allow_open = true`
+switch. A token can only be written while the configuration it names is
+already live, so opening a second field — or swapping one open shape for
+another — refuses again instead of being covered by the old consent.
+Narrowing a channel also refuses until you delete the leftover token; the
+gate always fails closed and always tells you the list to write.
+
 Defaults (used for any unset field) are the fail-closed posture:
 `dm = "allowlist"` with an **empty** `dm_allowlist` (so no one is
 permitted), `group = "disabled"`, `require_mention = true`.
 
 **Lock `dm_allowlist` to specific sender ids.** `dm_allowlist = ["*"]`
-opens DMs to *anyone who can find the bot* — only use it for a throwaway
-test bot, never a deployment. To allow a specific person, add their stable
-platform `sender_id` (e.g. their Telegram numeric user id):
+opens DMs to *anyone who can find the bot*, so the product refuses to start
+over it unless the channel's own file carries
+`acknowledge_open_admission = ["dm_allowlist=*"]` (see above). To allow a
+specific person, add their stable platform `sender_id` (e.g. their Telegram
+numeric user id):
 
 ```toml
 dm = "allowlist"

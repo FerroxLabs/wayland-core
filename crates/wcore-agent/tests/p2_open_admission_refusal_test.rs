@@ -19,6 +19,17 @@
 //! the reload path specifically, because "it also runs on reload" is a claim
 //! that has failed here before.
 //!
+//! ## Why the opt-out must MATCH the configuration, not merely cover it
+//!
+//! The first cut of this gate took a list of FIELD NAMES. That degenerates into
+//! the `allow_open = true` boolean the design set out to avoid: an operator
+//! writes all four names into a channel that is bounded today, nothing refuses,
+//! and that one edit consents in advance to every way the channel might be
+//! opened afterwards. So the acknowledgement is a list of TOKENS naming the
+//! field AND the value that opens it, and the list must match the open set
+//! exactly — a token for a shape that is not open is itself a refusal. LEG 7b
+//! is that case, driven through the production `spawn`.
+//!
 //! ## Shape of this test
 //!
 //! Every assertion is made through the PRODUCTION entry points — `spawn` and
@@ -135,26 +146,29 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     // (`dm`, `group`, `dm_allowlist`, `sender_allowlist`). A channel called
     // `dm_open` would satisfy a `contains("dm")` assertion by its own name, and
     // the field half of the check would prove nothing.
-    let open_shapes: &[(&str, &str, &str, &str)] = &[
-        // (channel name, [inbound] body, the field the opt-out must name,
-        //  the setting the refusal must quote back)
+    let open_shapes: &[(&str, &str, &str, &str, &str)] = &[
+        // (channel name, [inbound] body, the field at fault, the setting the
+        //  refusal must quote back, the token that would acknowledge it)
         (
             "shapeone",
             "dm = \"open\"\ngroup = \"disabled\"",
             "dm",
             "dm = \"open\"",
+            "dm=open",
         ),
         (
             "shapetwo",
             "dm = \"allowlist\"\ndm_allowlist = [\"*\"]\ngroup = \"disabled\"",
             "dm_allowlist",
             "dm_allowlist = [\"*\"]",
+            "dm_allowlist=*",
         ),
         (
             "shapethree",
             "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]\ngroup = \"open\"",
             "group",
             "group = \"open\"",
+            "group=open",
         ),
         (
             "shapefour",
@@ -162,9 +176,10 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
              group_allowlist = [\"G1\"]\nsender_allowlist = [\"*\"]",
             "sender_allowlist",
             "sender_allowlist = [\"*\"]",
+            "sender_allowlist=*",
         ),
     ];
-    for (leg, inbound, field, found) in open_shapes {
+    for (leg, inbound, field, found, token) in open_shapes {
         only_channel(&channels, leg, inbound);
         // `match` rather than `expect_err`: `InboundHost` is not `Debug`.
         let err = match spawn(manager(), &test_config(), workspace.clone()).await {
@@ -183,15 +198,35 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
             "{leg}: the refusal must quote the offending setting {found:?}; got: {msg}"
         );
         assert!(
-            msg.contains(&format!("acknowledge_open_admission = [{field:?}]")),
-            "{leg}: the refusal must name the opt-out AND the exact field it would cover, or an \
-             operator who genuinely wants an open channel has no way forward; got: {msg}"
+            msg.contains(&format!("acknowledge_open_admission = [{token:?}]")),
+            "{leg}: the refusal must name the opt-out AND the exact token that would cover THIS \
+             configuration, or an operator who genuinely wants an open channel has no way \
+             forward; got: {msg}"
+        );
+        assert!(
+            token.starts_with(field) && token.contains('='),
+            "{leg}: the token must name the field and the value that opens it"
         );
         // The remedy must be a NARROWER configuration, not just prose.
         assert!(
             msg.contains("allowlist"),
             "{leg}: the refusal must state the narrower configuration to use; got: {msg}"
         );
+
+        // And the token the refusal advertises must be the token that actually
+        // lets the operator through. A refusal that prints a spelling the gate
+        // does not accept is a dead end dressed up as instructions.
+        only_channel(
+            &channels,
+            leg,
+            &format!("{inbound}\nacknowledge_open_admission = [{token:?}]"),
+        );
+        let host = spawn(manager(), &test_config(), workspace.clone())
+            .await
+            .unwrap_or_else(|e| {
+                panic!("{leg}: the refusal advertises {token:?}; that token must work. got: {e}")
+            });
+        host.shutdown();
     }
 
     // ---- LEG 5. NEGATIVE CONTROLS. Wildcards that `permits()` never reaches
@@ -233,7 +268,7 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     only_channel(
         &channels,
         "deliberately-open",
-        "dm = \"open\"\ngroup = \"disabled\"\nacknowledge_open_admission = [\"dm\"]",
+        "dm = \"open\"\ngroup = \"disabled\"\nacknowledge_open_admission = [\"dm=open\"]",
     );
     let host = spawn(manager(), &test_config(), workspace.clone())
         .await
@@ -250,13 +285,12 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     );
     host.shutdown();
 
-    // ---- LEG 7. The acknowledgement is PER FIELD, so it cannot outlive the
-    // decision it recorded. Opening a second field refuses again, naming only
-    // the field that was never acknowledged.
+    // ---- LEG 7. Opening a SECOND field refuses again, naming the field that
+    // was never acknowledged, and printing the full list that now matches.
     only_channel(
         &channels,
         "half-acknowledged",
-        "dm = \"open\"\ngroup = \"open\"\nacknowledge_open_admission = [\"dm\"]",
+        "dm = \"open\"\ngroup = \"open\"\nacknowledge_open_admission = [\"dm=open\"]",
     );
     let err = match spawn(manager(), &test_config(), workspace.clone()).await {
         Ok(_) => panic!("a newly opened field must refuse even though another was acknowledged"),
@@ -264,12 +298,93 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("acknowledge_open_admission = [\"group\"]"),
-        "the refusal must name the field that was NOT acknowledged, and only that one; got: {msg}"
+        msg.contains("group = \"open\"") && msg.contains("nothing acknowledges it"),
+        "the refusal must name the field that was NOT acknowledged; got: {msg}"
     );
     assert!(
-        !msg.contains("dm = \"open\""),
-        "and must not re-litigate the field that WAS acknowledged; got: {msg}"
+        !msg.contains("[inbound] dm = \"open\""),
+        "and must not re-litigate the field that WAS acknowledged as a fault; got: {msg}"
+    );
+    assert!(
+        msg.contains("acknowledge_open_admission = [\"dm=open\", \"group=open\"]"),
+        "and must print the list that matches the configuration AS IT NOW STANDS, so the \
+         operator's next edit is a single deliberate act; got: {msg}"
+    );
+
+    // ---- LEG 7b. THE ROOT CAUSE. A blanket pre-acknowledgement written on a
+    // channel that is BOUNDED today must be refused at the moment it is
+    // written — not accepted quietly and left to cover whatever that channel
+    // becomes later.
+    //
+    // The verifier's exploit is exactly this file: four tokens on a bounded
+    // channel, which under a field-name list started fine and then permanently
+    // disarmed the gate. If STEP 1 here ever starts again, the gate is back to
+    // being the `allow_open = true` boolean the design rejected.
+    let ack_everything = "acknowledge_open_admission = [\"dm=open\", \"group=open\", \
+                          \"dm_allowlist=*\", \"sender_allowlist=*\"]";
+    only_channel(
+        &channels,
+        "preacked",
+        &format!(
+            "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]\ngroup = \"disabled\"\n\
+             {ack_everything}"
+        ),
+    );
+    let err = match spawn(manager(), &test_config(), workspace.clone()).await {
+        Ok(_) => panic!(
+            "a bounded channel that pre-acknowledges every open shape must REFUSE: accepting it \
+             is a standing consent to every future opening, which is the boolean the design \
+             rejected, reachable in one edit"
+        ),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not open that way any more"),
+        "the refusal must say the consent names something this channel does not have; got: {msg}"
+    );
+    assert!(
+        msg.contains("remove the acknowledge_open_admission key"),
+        "and must tell the operator the fix for a channel that is bounded; got: {msg}"
+    );
+
+    // ---- LEG 7c. NARROWING also refuses, and this is deliberate. The new
+    // configuration is SAFER, yet the leftover consent must still be cleared by
+    // hand: honouring it silently is precisely the state LEG 7b forbids,
+    // arrived at from the other direction.
+    only_channel(
+        &channels,
+        "narrowed",
+        "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]\ngroup = \"disabled\"\n\
+         acknowledge_open_admission = [\"dm=open\"]",
+    );
+    let err = match spawn(manager(), &test_config(), workspace.clone()).await {
+        Ok(_) => panic!("a consent that names nothing open must not be honoured silently"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("\"dm=open\""),
+        "the refusal must quote the stale token verbatim; got: {err}"
+    );
+
+    // ---- LEG 7d. Changing WHICH shape is open, on the same field family, is a
+    // new decision. `dm = "open"` acknowledged, then swapped for
+    // `dm_allowlist = ["*"]` — a bare field-name list would have carried the
+    // old consent straight across.
+    only_channel(
+        &channels,
+        "swapped",
+        "dm = \"allowlist\"\ndm_allowlist = [\"*\"]\ngroup = \"disabled\"\n\
+         acknowledge_open_admission = [\"dm=open\"]",
+    );
+    let err = match spawn(manager(), &test_config(), workspace.clone()).await {
+        Ok(_) => panic!("a different open shape is a different decision and must refuse"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("acknowledge_open_admission = [\"dm_allowlist=*\"]"),
+        "the refusal must print the list matching the NEW shape; got: {msg}"
     );
 
     // ---- LEG 8. THE RELOAD PATH. This is the leg F24-C3-H5 proves is not
@@ -321,6 +436,29 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
         "and the already-working channel must be untouched by the refusal"
     );
 
+    // The STALE half must run on the reload path too, or an operator could
+    // pre-arm a bounded channel on a running process and open it on the next
+    // reload — the cold-start gate walked around exactly as F24-C3-H5 was.
+    std::fs::write(
+        channels.join("opened-later.toml"),
+        std::fs::read_to_string(channels.join("opened-later.toml"))
+            .expect("read back")
+            .replace(
+                "dm = \"open\"",
+                "dm = \"allowlist\"\ndm_allowlist = [\"U-NAMED\"]",
+            )
+            + "acknowledge_open_admission = [\"dm=open\", \"group=open\"]\n",
+    )
+    .expect("rewrite as bounded-but-pre-acknowledged");
+    let err = host
+        .reload_policies()
+        .expect_err("a reload that would install a pre-armed acknowledgement must REFUSE");
+    assert!(
+        err.to_string().contains("not open that way any more"),
+        "the reload refusal must catch the stale consent too; got: {err}"
+    );
+    assert_eq!(host.policies.generation(), 0, "and must still swap nothing");
+
     // A refusal, not a wedge: withdrawing the open channel lets the next reload
     // through.
     std::fs::remove_file(channels.join("opened-later.toml")).expect("remove the open channel");
@@ -348,15 +486,15 @@ async fn an_inbound_config_that_admits_everyone_refuses_to_start() {
     std::fs::create_dir_all(&project).expect("create workspace");
     std::fs::write(
         project.join(".wayland-core.toml"),
-        r#"acknowledge_open_admission = ["dm", "group", "dm_allowlist", "sender_allowlist"]
+        r#"acknowledge_open_admission = ["dm=open", "group=open", "dm_allowlist=*", "sender_allowlist=*"]
 allow_open_admission = true
 
 [inbound]
 dm = "open"
-acknowledge_open_admission = ["dm"]
+acknowledge_open_admission = ["dm=open"]
 
 [channels.hostile.inbound]
-acknowledge_open_admission = ["dm"]
+acknowledge_open_admission = ["dm=open"]
 "#,
     )
     .expect("write hostile project config");
@@ -365,7 +503,7 @@ acknowledge_open_admission = ["dm"]
     write_channel(
         &project.join("channels"),
         "hostile",
-        "dm = \"open\"\ngroup = \"disabled\"\nacknowledge_open_admission = [\"dm\"]",
+        "dm = \"open\"\ngroup = \"disabled\"\nacknowledge_open_admission = [\"dm=open\"]",
     );
 
     let err = match spawn(manager(), &test_config(), workspace.clone()).await {

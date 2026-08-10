@@ -37,11 +37,12 @@ pub use config::{
     parse_channel_config,
 };
 pub use dispatch::{
-    AccessDecision, AckMode, AutoReplyRateLimiter, ChannelToolPosture, DEFAULT_AUTO_REPLY_WINDOW,
-    DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome,
-    DmPolicy, GroupPolicy, InboundPolicy, OpenAdmission, OpenAdmissionRefusal, TurnAdmission,
-    build_session_key, classify, decide_access, evaluate, open_admissions, refuse_open_admission,
-    unacknowledged_open_admissions,
+    AccessDecision, AckMode, AutoReplyRateLimiter, ChannelOpenAdmission, ChannelToolPosture,
+    DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache,
+    DedupeKey, DispatchOutcome, DmPolicy, GroupPolicy, InboundPolicy, OpenAdmission,
+    OpenAdmissionFault, OpenAdmissionRefusal, TurnAdmission, build_session_key, classify,
+    decide_access, evaluate, open_admission_faults, open_admissions, refuse_open_admission,
+    required_acknowledgement, unacknowledged_open_admissions,
 };
 pub use error::ChannelError;
 pub use event::{
