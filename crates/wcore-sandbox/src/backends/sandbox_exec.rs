@@ -134,7 +134,10 @@ fn reject_unsafe_path(path: &std::path::Path) -> Result<()> {
 ///
 /// Returns `None` when `confstr` reports nothing or the directory does not
 /// resolve — the profile then simply omits the grant, which is the status quo
-/// ante rather than a widened one.
+/// ante rather than a widened one. Off macOS it is always `None`: this module
+/// compiles everywhere so the profile generator stays unit-testable, but
+/// `_CS_DARWIN_USER_TEMP_DIR` exists only in Darwin's libc.
+#[cfg(target_os = "macos")]
 fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
     // SAFETY: `confstr` writes at most `buf.len()` bytes (including the NUL)
@@ -153,6 +156,59 @@ fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
     buf.truncate(len - 1); // drop the trailing NUL confstr counts
     let raw = String::from_utf8(buf).ok()?;
     std::fs::canonicalize(raw).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// SBPL `regex` grant covering the entries Darwin's own temp-using tools create
+/// at the top of [`darwin_user_temp_dir`], and NOTHING else in that directory.
+///
+/// A plain `(subpath …)` grant over the whole per-user temp directory was the
+/// obvious fix and it is wrong. `crates/wcore-sandbox/tests/live_integrity_macos.rs`
+/// proves why: its "outside the retained root" directory — the location a write
+/// must never reach — is a `tempfile::tempdir()`, which on macOS lives inside
+/// that very directory. A subpath grant turned that suite's escape attempt into
+/// a success. The containment property is real and the subpath grant broke it.
+///
+/// So the grant is written as the naming those tools actually use:
+///   * `<T>/<prefix>.XXXXXXXXXX` and anything beneath it — `mktemp(1)`'s
+///     template is a prefix, a dot and exactly ten random alphanumerics, and
+///     `mktemp -d` needs its contents too.
+///   * `<T>/xcrun_db-XXXXXXXX` — the xcrun shim's cache file, which `git`,
+///     `python3` and `clang` each try to create twice per invocation.
+///
+/// The first component may not start with a dot, which is what keeps the
+/// `tempfile` crate's `.tmpXXXXXX` scratch directories — and therefore that
+/// acceptance suite's escape target — outside the grant.
+///
+/// Residual exposure: a sandboxed command can create junk at those names, and
+/// can read another process's `mktemp` file IF it guesses the name. It cannot
+/// enumerate: listing the directory needs `file-read-data` on the directory
+/// node, which is not granted (only `file-read-metadata`, for path resolution).
+///
+/// Returns `None` if the directory cannot be represented in an SBPL regex
+/// literal — a `"` would close the literal and a `\` would start an escape.
+/// Failing closed there costs `mktemp`; failing open would be an injection.
+fn darwin_temp_regex(dir: &std::path::Path) -> Option<String> {
+    let text = dir.to_string_lossy();
+    if text.contains('"') || text.contains('\\') {
+        return None;
+    }
+    let mut prefix = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        // Everything outside the portable-filename set is escaped, so a path
+        // component can never be read as a regex operator.
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-')) {
+            prefix.push('\\');
+        }
+        prefix.push(ch);
+    }
+    Some(format!(
+        "^{prefix}/([A-Za-z0-9_][A-Za-z0-9_.-]*\\.[A-Za-z0-9]{{10}}(/.*)?|xcrun_db-[A-Za-z0-9]{{8}})$"
+    ))
 }
 
 impl SandboxExecBackend {
@@ -278,26 +334,28 @@ impl SandboxExecBackend {
             p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
         // The Darwin per-user temp directory — see [`darwin_user_temp_dir`] for
-        // why `$TMPDIR` cannot stand in for it. Without this grant `mktemp(1)`
-        // is simply broken on macOS under BOTH the contained and the
-        // trusted_local profile, and `git`, `python3` and `clang` each emit two
-        // `couldn't create cache file` lines per invocation.
+        // why `$TMPDIR` cannot stand in for it, and [`darwin_temp_regex`] for
+        // why this is a `regex` and deliberately NOT a `subpath`. Without it
+        // `mktemp(1)` is simply broken on macOS under BOTH the contained and
+        // the trusted_local profile, and `git`, `python3` and `clang` each emit
+        // two `couldn't create cache file` lines per invocation.
         //
-        // EXPOSURE, stated plainly: this is read+write over the directory the
-        // user's other applications also use for transient files, so a
-        // sandboxed command can read and overwrite their temp state. It is
-        // per-uid — `confstr` returns a directory owned by, and reachable only
-        // by, the invoking user — so it grants no cross-user reach, and the
-        // session's own scratch grant (`$TMPDIR`, from `scratch_dirs`) already
-        // sits INSIDE this same tree, so the change widens an existing foothold
-        // from one subdirectory to its parent rather than opening a new region
-        // of the filesystem. `fs_read_deny` still wins over it: the deny block
-        // is emitted after this, and SBPL is last-match-wins.
+        // Read as well as write: `mkstemp` opens O_RDWR, so a write-only grant
+        // still returns EPERM. `fs_read_deny` outranks both — the deny block is
+        // emitted after this and SBPL is last-match-wins. The directory node
+        // itself gets metadata only, so `realpath` resolves through it while
+        // `readdir` (which needs `file-read-data`) stays denied and the grant
+        // cannot be used to enumerate what else is in there.
         if let Some(dir) = darwin_temp {
             reject_unsafe_path(dir)?;
-            let escaped = escape_sbpl_string(&dir.to_string_lossy());
-            p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
-            p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
+            if let Some(rx) = darwin_temp_regex(dir) {
+                p.push_str(&format!(
+                    "(allow file-read-metadata (literal \"{}\"))\n",
+                    escape_sbpl_string(&dir.to_string_lossy())
+                ));
+                p.push_str(&format!("(allow file-read* (regex #\"{rx}\"))\n"));
+                p.push_str(&format!("(allow file-write* (regex #\"{rx}\"))\n"));
+            }
         }
         // Path-resolution ancestors. `file-read-metadata` is the narrowest
         // seatbelt operation that satisfies `stat`/`lstat`/`realpath`: it does
@@ -1008,11 +1066,11 @@ mod tests {
         assert!(p.contains("(allow file-write* (subpath \"/var/tmp/scratch\"))"));
     }
 
-    /// The Darwin per-user temp directory must be granted read AND write, and
-    /// its ancestors must get the metadata grants `realpath(3)` needs — a
-    /// `subpath` grant on `/private/var/folders/a/b/T` alone leaves
-    /// `/private/var/folders` denied and the resolve fails before the grant is
-    /// ever consulted.
+    /// The Darwin per-user temp grant must be read AND write (mkstemp opens
+    /// O_RDWR), must be a `regex` and never a `subpath`, and its ancestors must
+    /// get the metadata grants `realpath(3)` needs — a grant on
+    /// `/private/var/folders/a/b/T` alone leaves `/private/var/folders` denied
+    /// and the resolve fails before the grant is ever consulted.
     ///
     /// A fixed path is injected rather than read from `confstr`, because a test
     /// that called the same `confstr` the code calls would agree with the code
@@ -1024,13 +1082,18 @@ mod tests {
 
         let p = SandboxExecBackend::build_profile_with_darwin_temp(&m, Some(t))
             .expect("profile builds");
+        let rx = darwin_temp_regex(t).expect("regex builds for an ordinary path");
         assert!(
-            p.contains("(allow file-read* (subpath \"/private/var/folders/8h/probe/T\"))"),
+            p.contains(&format!("(allow file-read* (regex #\"{rx}\"))")),
             "mkstemp opens O_RDWR, so a write-only grant is not enough: {p}"
         );
         assert!(
-            p.contains("(allow file-write* (subpath \"/private/var/folders/8h/probe/T\"))"),
+            p.contains(&format!("(allow file-write* (regex #\"{rx}\"))")),
             "profile must let Darwin's confstr temp dir be written: {p}"
+        );
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/private/var/folders/8h/probe/T\"))"),
+            "the directory node needs metadata so realpath resolves through it: {p}"
         );
         for ancestor in [
             "/private",
@@ -1047,6 +1110,22 @@ mod tests {
             );
         }
 
+        // THE CONTAINMENT LINE. A `subpath` grant here is what
+        // tests/live_integrity_macos.rs caught: its "must never be reachable"
+        // directory is a `tempfile::tempdir()`, which on macOS lives inside
+        // this very directory, and a subpath grant turned that suite's escape
+        // attempt into a success. Nothing may re-introduce that shape.
+        assert!(
+            !p.contains("(subpath \"/private/var/folders/8h/probe/T\")"),
+            "the temp grant must never widen to a subpath over the whole \
+             per-user temp directory: {p}"
+        );
+        assert!(
+            !rx.contains(".tmp"),
+            "the pattern must not reach tempfile-style dot-prefixed scratch \
+             directories, which is where an escape target lands: {rx}"
+        );
+
         // And the grant must be absent when the host reports no such directory,
         // so the `None` arm cannot silently widen anything.
         let none =
@@ -1055,6 +1134,18 @@ mod tests {
             !none.contains("/private/var/folders"),
             "no confstr temp dir means no grant: {none}"
         );
+    }
+
+    /// A path that cannot be represented in an SBPL regex literal must fail
+    /// CLOSED — no grant — rather than emit a literal a `"` could break out of.
+    #[test]
+    fn darwin_temp_regex_refuses_a_quote_or_backslash() {
+        assert!(darwin_temp_regex(std::path::Path::new("/private/var/x\"y/T")).is_none());
+        assert!(darwin_temp_regex(std::path::Path::new("/private/var/x\\y/T")).is_none());
+        // A dot in a real component must be escaped, not left as "any char".
+        let rx = darwin_temp_regex(std::path::Path::new("/private/var/a.b/T"))
+            .expect("an ordinary dotted component is representable");
+        assert!(rx.contains("a\\.b"), "unescaped regex metacharacter: {rx}");
     }
 
     /// The new grant must not outrank a secret deny. SBPL is last-match-wins
@@ -1069,8 +1160,9 @@ mod tests {
         };
         let p = SandboxExecBackend::build_profile_with_darwin_temp(&m, Some(t))
             .expect("profile builds");
+        let rx = darwin_temp_regex(t).expect("regex builds");
         let allow = p
-            .find("(allow file-write* (subpath \"/private/var/folders/8h/probe/T\"))")
+            .find(&format!("(allow file-write* (regex #\"{rx}\"))"))
             .expect("temp grant present");
         let deny = p
             .find("(deny file-read* (subpath \"/private/var/folders/8h/probe/T/secret\"))")
@@ -1169,6 +1261,72 @@ mod tests {
             "the host must see the file the sandboxed mktemp created, got {printed:?}"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    /// The other half of the same change, and the one that matters more.
+    ///
+    /// `tests/live_integrity_macos.rs` builds its "a write here must never
+    /// reach the host" directory with `tempfile::tempdir()`, which on macOS
+    /// lands INSIDE the Darwin per-user temp directory. The first version of
+    /// this fix granted that directory as a `subpath` and turned that suite
+    /// from green to red — the escape succeeded. This test pins the property
+    /// locally so the next person to widen the grant sees it here first, in
+    /// the module they are editing, not in a separate acceptance binary.
+    ///
+    /// The mktemp test above is the positive control for this one: together
+    /// they say "the tool works AND the neighbourhood is still confined",
+    /// which neither says alone.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn the_darwin_temp_grant_does_not_open_the_whole_temp_directory() {
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+        let work = tempfile::tempdir().expect("workspace");
+        let canon_work = std::fs::canonicalize(work.path()).expect("canonicalize workspace");
+
+        // An ungranted directory that lives inside the Darwin temp tree, which
+        // is exactly what `tempfile::tempdir()` gives us on macOS.
+        let outside = tempfile::tempdir().expect("outside dir");
+        let canon_outside = std::fs::canonicalize(outside.path()).expect("canonicalize outside");
+        assert!(
+            canon_outside
+                .starts_with(darwin_user_temp_dir().expect("confstr reports a per-user temp dir")),
+            "fixture is dead: the escape target must sit inside the Darwin temp \
+             directory or this test cannot detect the widening it exists for"
+        );
+
+        let m = SandboxManifest {
+            fs_write_allow: vec![canon_work.clone()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+        let escapee = canon_outside.join("escapee");
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/tee".into(),
+                        escapee.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("backend runs even though the confined child fails");
+        assert_ne!(
+            out.exit_code,
+            0,
+            "a write into the Darwin temp tree outside the workspace must stay denied; \
+             stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !escapee.exists(),
+            "an escaping write must never reach the host filesystem"
+        );
     }
 
     #[test]
