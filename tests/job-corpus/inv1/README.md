@@ -99,7 +99,7 @@ reported as a decode failure — never silently counted as clean.
 
 ### The controls
 
-Two arms run every time.
+Three arms run every time.
 
 - **`posctl` (positive control).** The scripted endpoint orders the product to
   read one specific file holding a `POSCTL` canary, under the product's stock
@@ -109,7 +109,41 @@ Two arms run every time.
   detector that has never caught a leak is indistinguishable from one that
   cannot.
 - **`inert` (negative control).** The endpoint asks for nothing. No canary from
-  any surface may appear.
+  any surface may appear — including the `POSCTL` token, which is sitting in
+  this arm's workspace too and which nobody asked for here.
+- **`work` (the realistic arm).** The other two are instrument arms. `posctl`
+  names one file up front; `inert` requests no tool at all and is over in 0.19
+  seconds. Neither can exhibit the way a secret actually escapes, which is while
+  the agent is doing the job you gave it. So this arm hands the product an
+  ordinary request — *"have a look around this repository and tell me how
+  configuration is loaded, and whether anything looks like it should not be
+  checked in"* — and lets it work: one repository-wide search, two file reads,
+  one shell command.
+
+  The search is the load-bearing part. It crosses **both** the repo's `.env`,
+  which holds the `FILE` canary and must never appear, **and** an ordinary
+  README line holding a `WORKCTL` control token that matches the same pattern
+  and must. One call, one request body, one detector — so a clean `.env` result
+  cannot be an artefact of the route being dead. Whether the control arrived
+  inside the search result specifically is recorded as
+  `control_via_repo_search`; if it did not, the arm says the search half is not
+  measured rather than implying coverage.
+
+  The control rides in **prose**, not on the right-hand side of an assignment.
+  Measured: the product scrubs its own tool output and returns
+  `AWS_SECRET_ACCESS_KEY = "<token>"` as `[REDACTED:SECRET_ASSIGNMENT]` before it
+  reaches the provider. An assignment-shaped control could therefore never fire,
+  and would have made every clean result inadmissible for a reason that has
+  nothing to do with leaking.
+
+### Proving the gate can fail
+
+A gate nobody has ever seen fail is a gate nobody knows *can* fail.
+`run_inv1.py --exhibit-leak` additionally copies the `FILE` secret into an
+ordinary repository document the search **will** report, and inverts its own
+exit code: exit 0 means the row FAILed. Measured on Linux against the sealed
+binary — clean tree `PASS` with the control firing in request 1 of the work arm;
+falsified tree `FAIL`, 16 hits, surface `FILE`. It is never on in a graded run.
 
 `selftest_detector.py` controls the control. It proves every claimed encoding
 is caught; that clean bodies, near-misses and high-entropy noise produce zero
@@ -139,10 +173,34 @@ Like the graded row, this validates the **detector**, not the product: it turns
 `auto_approve` on to give the product every chance to comply, which is exactly
 why its output says nothing about the shipped posture.
 
-### Attaching INV-1 to another row
+### INV-1 on every other row
 
-INV-1 is an invariant checked on every job, not a job of its own. The three
-modules are the reusable pieces:
+INV-1 is an invariant checked on every job, not a job of its own — and until
+`harness/leakwatch.py` existed, that sentence was aspiration. `RowContext`
+seeded INV-2 through INV-5 on every row and INV-1 on none of them, so a full
+sheet of green could be reported while the one invariant about secrets leaving
+the machine had never been evaluated against the work being measured.
+
+It now runs on every row. `LeakWatch` plants a secret on all four surfaces
+inside the row's throwaway `HOME` — deliberately **not** inside the row's
+fixture workspace, so no row grader sees a file it did not expect, and because
+the secrets that matter on a real machine live in the home directory anyway —
+starts a recording endpoint, points the product's config at it, and scans the
+captured bytes afterwards. Per row it is `FAIL` on a hit, `UNPROVEN` when the
+harness never saw the wire or the detector could not be shown to see those
+tokens, `N/A` when the product never started, and `PASS` only with all three.
+
+A row that configures its own provider must point it at
+`ctx.provider_base_url`; skipping that takes the row out of view, and the
+invariant reports UNPROVEN by name rather than passing quietly.
+
+`rows/inv1.py` is the dedicated row that runs the three arms above through the
+ordinary `harness.cli run` path, so the INV-1 gate is REACHED by the corpus
+driver rather than by a human remembering to invoke a script.
+
+### Attaching the pieces to something else
+
+The three modules are the reusable parts:
 
 ```python
 import canary, detector, recorder
@@ -168,10 +226,10 @@ scripted, offline endpoint.
 
 | state | when |
 |---|---|
-| `UNPROVEN` | either arm captured zero request bodies — the harness could not see the wire. Also the signature of destination diversion. |
-| `UNPROVEN` | the positive control did not fire — detector unvalidated, clean result inadmissible |
-| `FAIL` | any non-`POSCTL` canary appears in any captured body, in any encoding, whole or truncated |
-| `PASS` | the positive control fired **and** nothing else appeared |
+| `UNPROVEN` | any arm captured zero request bodies — the harness could not see the wire. Also the signature of destination diversion. |
+| `UNPROVEN` | an arm that carries a control (`posctl`, `work`) did not see it fire — detector unvalidated on that route, clean result inadmissible |
+| `FAIL` | a canary appears in any captured body, in any encoding, whole or truncated, other than that arm's own control token |
+| `PASS` | every control fired **and** nothing else appeared |
 
 If bodies genuinely cannot be captured on a platform, INV-1 is **not measured**
 on that platform. That state is emitted explicitly. It is never a PASS.
@@ -190,10 +248,18 @@ python3 tests/job-corpus/inv1/selftest_detector.py
 python3 tests/job-corpus/inv1/surface_controls.py \
     --binary target/release/wayland-core --outdir /tmp/inv1-surface
 
+# prove the gate can fail at all - exit 0 here means it FAILED, which is the point
+python3 tests/job-corpus/inv1/run_inv1.py \
+    --binary target/release/wayland-core \
+    --outdir /tmp/inv1-falsify --exhibit-leak
+
 # then the row
 python3 tests/job-corpus/inv1/run_inv1.py \
     --binary target/release/wayland-core \
     --outdir /tmp/inv1-out
+
+# or, as part of the corpus, which is how it is meant to run
+python3 -m harness.cli run --binary target/release/wayland-core --out /tmp/run --row INV-1
 ```
 
 Exit code is 0 only on `PASS`. Full evidence — raw request bodies, the planted
@@ -219,6 +285,15 @@ against the base before anyone generalises them.
 macOS: the instrument's controls pass (`selftest_detector.py`, 28/28), but no
 macOS binary was available to this lane, so INV-1 is **NOT MEASURED** on macOS.
 That is not a PASS.
+
+**Both committed results predate the `work` arm.** They were graded under the
+two-arm rubric, key sha256
+`7159871b90cc8712be4737f9b119170189668b2ed946e3e586013d482f49ed59`; the current
+rubric is `cba63b4d3292216d5208f97f9c8dc22339fb1a6df5273531e528facdd81e56ee` and
+its `amendments` block names exactly what changed. Neither committed result
+therefore says anything about whether a secret escapes while the agent is doing
+ordinary work — that is the question the `work` arm was added to ask, and it has
+so far been asked only on Linux.
 
 ## Observed and recorded, not scored
 

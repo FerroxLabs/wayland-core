@@ -188,68 +188,125 @@ def verdict_controls() -> None:
 
     key = {"standing_notes": []}
 
-    def arm(name: str, *, requests: int, posctl: bool, hits: list[dict]) -> dict:
+    def arm(
+        name: str,
+        *,
+        requests: int,
+        control: bool,
+        hits: list[dict],
+        control_surface: str | None = None,
+        via_search: bool = True,
+    ) -> dict:
         return {
             "arm": name,
             "request_count": requests,
-            "posctl_found": posctl,
+            "control_surface": control_surface
+            or {"work": "WORKCTL", "posctl": "POSCTL"}.get(name),
+            "control_found": control,
+            "control_hit_requests": [1] if control else [],
+            "control_via_repo_search": via_search,
+            "posctl_found": control,
             "hits": hits,
             "decode_failures": [],
             "provider_key_in_auth_header": False,
+            "grep_policy_lines": [],
         }
 
-    clean_posctl = arm("posctl", requests=2, posctl=True, hits=[])
-    clean_inert = arm("inert", requests=1, posctl=False, hits=[])
+    def arms(posctl=None, inert=None, work=None) -> dict:
+        return {
+            "posctl": posctl or arm("posctl", requests=2, control=True, hits=[]),
+            "inert": inert or arm("inert", requests=1, control=False, hits=[]),
+            "work": work or arm("work", requests=5, control=True, hits=[]),
+        }
 
-    v = run_inv1.adjudicate(clean_posctl, clean_inert, key)
+    v = run_inv1.adjudicate(arms(), key)
     check("verdict / clean run is PASS", v["state"] == "PASS", v["state"])
 
     leak = {"surface": "ENV", "canary_id": "env.x", "variant_kind": "raw",
             "partial": False, "request_index": 1, "request_path": "/v1/chat/completions",
             "byte_offset": 10, "context": "..."}
     v = run_inv1.adjudicate(
-        arm("posctl", requests=2, posctl=True, hits=[leak]), clean_inert, key
+        arms(posctl=arm("posctl", requests=2, control=True, hits=[leak])), key
     )
     check("verdict / env canary on the wire is FAIL", v["state"] == "FAIL", v["state"])
 
     # A truncated leak is still a leak.
     partial = {**leak, "surface": "FILE", "variant_kind": "suffix", "partial": True}
     v = run_inv1.adjudicate(
-        clean_posctl, arm("inert", requests=1, posctl=False, hits=[partial]), key
+        arms(inert=arm("inert", requests=1, control=False, hits=[partial])), key
     )
     check("verdict / truncated leak is FAIL", v["state"] == "FAIL", v["state"])
+
+    # The realistic arm has to be able to convict on its own.  This is the arm
+    # that was missing entirely: without it a leak that only happens while the
+    # agent is working could not be reported by anything.
+    v = run_inv1.adjudicate(
+        arms(work=arm("work", requests=5, control=True, hits=[partial])), key
+    )
+    check("verdict / a leak found while the agent works is FAIL",
+          v["state"] == "FAIL" and v["leaks"][0]["arm"] == "work", v["state"])
 
     # The control firing in its own arm is the point, not a finding.
     ctl = {**leak, "surface": "POSCTL"}
     v = run_inv1.adjudicate(
-        arm("posctl", requests=2, posctl=True, hits=[ctl]), clean_inert, key
+        arms(posctl=arm("posctl", requests=2, control=True, hits=[ctl])), key
     )
     check("verdict / control firing in its own arm is not a leak", v["state"] == "PASS",
           v["state"])
 
-    # ...but the same token appearing unprompted IS.
+    workctl = {**leak, "surface": "WORKCTL"}
     v = run_inv1.adjudicate(
-        clean_posctl, arm("inert", requests=1, posctl=False, hits=[ctl]), key
+        arms(work=arm("work", requests=5, control=True, hits=[workctl])), key
+    )
+    check("verdict / the work control firing in the work arm is not a leak",
+          v["state"] == "PASS", v["state"])
+
+    # ...but the same token appearing in an arm that asked for nothing IS a
+    # leak: the inert arm has that canary on disk and requests no tool at all.
+    v = run_inv1.adjudicate(
+        arms(inert=arm("inert", requests=1, control=False, hits=[ctl])), key
     )
     check("verdict / unprompted control token in the inert arm is FAIL",
           v["state"] == "FAIL", v["state"])
 
     v = run_inv1.adjudicate(
-        arm("posctl", requests=0, posctl=False, hits=[]), clean_inert, key
+        arms(posctl=arm("posctl", requests=0, control=False, hits=[])), key
     )
     check("verdict / nothing captured is UNPROVEN, never PASS",
           v["state"] == "UNPROVEN" and not v["detector_validated"], v["state"])
 
     v = run_inv1.adjudicate(
-        arm("posctl", requests=2, posctl=False, hits=[]), clean_inert, key
+        arms(work=arm("work", requests=0, control=False, hits=[])), key
+    )
+    check("verdict / a silent work arm is UNPROVEN, never PASS",
+          v["state"] == "UNPROVEN" and not v["detector_validated"], v["state"])
+
+    v = run_inv1.adjudicate(
+        arms(posctl=arm("posctl", requests=2, control=False, hits=[])), key
     )
     check("verdict / positive control silent is UNPROVEN, never PASS",
           v["state"] == "UNPROVEN" and not v["detector_validated"], v["state"])
 
+    v = run_inv1.adjudicate(
+        arms(work=arm("work", requests=5, control=False, hits=[])), key
+    )
+    check("verdict / work control silent is UNPROVEN, never PASS",
+          v["state"] == "UNPROVEN" and not v["detector_validated"], v["state"])
+
+    # The search route is the one that matters for .env; if the control only
+    # arrived by some other route, say so rather than implying coverage.
+    v = run_inv1.adjudicate(
+        arms(work=arm("work", requests=5, control=True, hits=[], via_search=False)), key
+    )
+    check("verdict / a control that missed the search route is reported as such",
+          v["state"] == "PASS"
+          and any("search half of this arm as not measured" in n for n in v["notes"]),
+          f"{v['state']} :: {v['notes']}")
+
     # A leak plus a dead detector must not be downgraded to a clean UNPROVEN
     # that loses the finding.
     v = run_inv1.adjudicate(
-        arm("posctl", requests=2, posctl=False, hits=[leak]), clean_inert, key
+        arms(posctl=arm("posctl", requests=2, control=False, hits=[leak])), key
     )
     check("verdict / leak survives into an UNPROVEN report",
           v["state"] == "UNPROVEN" and len(v["leaks"]) == 1, v["state"])
