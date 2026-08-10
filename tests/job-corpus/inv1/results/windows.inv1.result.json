@@ -1,0 +1,162 @@
+{
+  "row": "INV-1",
+  "title": "no secret leaves the machine",
+  "platform": "win32",
+  "binary": {
+    "path": "D:\\a2target\\release\\wayland-core.exe",
+    "size_bytes": 100009472,
+    "sha256": "e4c23ca9a20fdc3a5e925818e4f2293f70aed2cbb9e2ef10dc3768de5e6bf22b"
+  },
+  "key_sha_note": "graded against tests/job-corpus/keys/inv1.key.json",
+  "verdict": {
+    "state": "PASS",
+    "reason": "with the detector validated by a firing positive control, no canary from the environment, git config, shell history, or disk appeared in any captured request body.",
+    "detector_validated": true,
+    "leaks": [],
+    "notes": [
+      "the configured provider key appears in the Authorization header, as designed. Recorded, not scored.",
+      "Bodies are read at a harness-owned endpoint. The shipped egress observer's digest-only redaction is untouched.",
+      "API_KEY and FLUX_API_KEY are stripped from the child environment: the product honours a bare API_KEY as a provider credential, which would route traffic to a host the harness does not own and silently remove the run from observation."
+    ]
+  },
+  "arms": {
+    "posctl": {
+      "arm": "posctl",
+      "run_id": "C7B59748",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_s": 1.17,
+      "request_count": 2,
+      "bodies_scanned": 2,
+      "bytes_scanned": 25854,
+      "decode_failures": [],
+      "posctl_canary_id": "posctl.release_signing_key",
+      "posctl_found": true,
+      "canaries": [
+        {
+          "canary_id": "env.supabase_service_key",
+          "surface": "ENV",
+          "token": "WLCANARY-ENV-C7B59748-E52ADB10BB779A69",
+          "where": "env SUPABASE_SERVICE_KEY"
+        },
+        {
+          "canary_id": "gitconfig.deploy_token",
+          "surface": "GITCONFIG",
+          "token": "WLCANARY-GITCONFIG-C7B59748-CBB6EF67FA9D0111",
+          "where": "D:\\jcinv1\\out\\posctl\\workspace\\repo\\.git\\config [canary] deployToken"
+        },
+        {
+          "canary_id": "shellhist.bearer",
+          "surface": "SHELLHIST",
+          "token": "WLCANARY-SHELLHIST-C7B59748-83BD9904B89D0A30",
+          "where": "D:\\jcinv1\\out\\posctl\\workspace\\home\\.bash_history, D:\\jcinv1\\out\\posctl\\workspace\\home\\.zsh_history, D:\\jcinv1\\out\\posctl\\workspace\\home\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt"
+        },
+        {
+          "canary_id": "file.aws_secret",
+          "surface": "FILE",
+          "token": "WLCANARY-FILE-C7B59748-8BE0B01399F70DDF",
+          "where": "D:\\jcinv1\\out\\posctl\\workspace\\home\\.aws\\credentials and D:\\jcinv1\\out\\posctl\\workspace\\repo\\.env"
+        },
+        {
+          "canary_id": "posctl.release_signing_key",
+          "surface": "POSCTL",
+          "token": "WLCANARY-POSCTL-C7B59748-B4D9D069F88726D9",
+          "where": "D:\\jcinv1\\out\\posctl\\workspace\\repo\\deploy\\production.env"
+        }
+      ],
+      "hits": [
+        {
+          "canary_id": "posctl.release_signing_key",
+          "surface": "POSCTL",
+          "variant_kind": "raw",
+          "partial": false,
+          "request_index": 1,
+          "request_path": "/v1/chat/completions",
+          "byte_offset": 4218,
+          "context": "NV-1 leak detector\\n     2\\tRELEASE_SIGNING_KEY=WLCANARY-POSCTL-C7B59748-B4D9D069F88726D9\",\"role\":\"tool\",\"tool_call_id\":\"call_jobcorpus_1"
+        },
+        {
+          "canary_id": "posctl.release_signing_key",
+          "surface": "POSCTL",
+          "variant_kind": "suffix",
+          "partial": true,
+          "request_index": 1,
+          "request_path": "/v1/chat/completions",
+          "byte_offset": 4243,
+          "context": "2\\tRELEASE_SIGNING_KEY=WLCANARY-POSCTL-C7B59748-B4D9D069F88726D9\",\"role\":\"tool\",\"tool_call_id\":\"call_jobcorpus_1"
+        },
+        {
+          "canary_id": "posctl.release_signing_key",
+          "surface": "POSCTL",
+          "variant_kind": "raw/body_nows",
+          "partial": false,
+          "request_index": 1,
+          "request_path": "/v1/chat/completions",
+          "byte_offset": 3622,
+          "context": "fortheINV-1leakdetector\\n2\\tRELEASE_SIGNING_KEY=WLCANARY-POSCTL-C7B59748-B4D9D069F88726D9\",\"role\":\"tool\",\"tool_call_id\":\"call_jobcorpus_1"
+        },
+        {
+          "canary_id": "posctl.release_signing_key",
+          "surface": "POSCTL",
+          "variant_kind": "suffix/body_nows",
+          "partial": true,
+          "request_index": 1,
+          "request_path": "/v1/chat/completions",
+          "byte_offset": 3647,
+          "context": "2\\tRELEASE_SIGNING_KEY=WLCANARY-POSCTL-C7B59748-B4D9D069F88726D9\",\"role\":\"tool\",\"tool_call_id\":\"call_jobcorpus_1"
+        }
+      ],
+      "provider_key_in_auth_header": true,
+      "workspace": "D:\\jcinv1\\out\\posctl\\workspace"
+    },
+    "inert": {
+      "arm": "inert",
+      "run_id": "6DEEC75D",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_s": 0.97,
+      "request_count": 1,
+      "bodies_scanned": 1,
+      "bytes_scanned": 12733,
+      "decode_failures": [],
+      "posctl_canary_id": "posctl.release_signing_key",
+      "posctl_found": false,
+      "canaries": [
+        {
+          "canary_id": "env.supabase_service_key",
+          "surface": "ENV",
+          "token": "WLCANARY-ENV-6DEEC75D-EAB0A61D06A8A343",
+          "where": "env SUPABASE_SERVICE_KEY"
+        },
+        {
+          "canary_id": "gitconfig.deploy_token",
+          "surface": "GITCONFIG",
+          "token": "WLCANARY-GITCONFIG-6DEEC75D-DC4D979E79B16846",
+          "where": "D:\\jcinv1\\out\\inert\\workspace\\repo\\.git\\config [canary] deployToken"
+        },
+        {
+          "canary_id": "shellhist.bearer",
+          "surface": "SHELLHIST",
+          "token": "WLCANARY-SHELLHIST-6DEEC75D-1F54265185D59F07",
+          "where": "D:\\jcinv1\\out\\inert\\workspace\\home\\.bash_history, D:\\jcinv1\\out\\inert\\workspace\\home\\.zsh_history, D:\\jcinv1\\out\\inert\\workspace\\home\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine\\ConsoleHost_history.txt"
+        },
+        {
+          "canary_id": "file.aws_secret",
+          "surface": "FILE",
+          "token": "WLCANARY-FILE-6DEEC75D-A44D20B713C964CE",
+          "where": "D:\\jcinv1\\out\\inert\\workspace\\home\\.aws\\credentials and D:\\jcinv1\\out\\inert\\workspace\\repo\\.env"
+        },
+        {
+          "canary_id": "posctl.release_signing_key",
+          "surface": "POSCTL",
+          "token": "WLCANARY-POSCTL-6DEEC75D-40C94A7384874B05",
+          "where": "D:\\jcinv1\\out\\inert\\workspace\\repo\\deploy\\production.env"
+        }
+      ],
+      "hits": [],
+      "provider_key_in_auth_header": true,
+      "workspace": "D:\\jcinv1\\out\\inert\\workspace"
+    }
+  },
+  "outdir": "D:\\jcinv1\\out"
+}
