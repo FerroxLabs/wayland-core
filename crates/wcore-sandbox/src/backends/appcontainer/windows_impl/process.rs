@@ -730,6 +730,13 @@ pub(super) fn execute_blocking(
     if cmd.argv.is_empty() {
         return Err(SandboxError::ExecFailed("empty argv".into()));
     }
+    // A `cmd /c` payload with a line break is undeliverable through ANY
+    // Windows command line, so refuse it here for the same reason the relaxed
+    // Job Object path does: cmd would run only the prefix and hand back its
+    // exit status, reporting success for work that never happened.
+    if let Some(idx) = crate::backends::windows_cmdline::cmd_payload_index(&cmd.argv) {
+        crate::backends::windows_cmdline::reject_undeliverable_cmd_payload(&cmd.argv[idx])?;
+    }
 
     let cwd_w: Option<Vec<u16>> = resolve_cwd(cmd.cwd.as_deref())?;
 
