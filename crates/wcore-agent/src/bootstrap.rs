@@ -2959,6 +2959,17 @@ impl AgentBootstrap {
         // profile. Untrusted repositories and every remote session stay in
         // the Contained profile; repository content cannot select this branch.
         let is_channel_remote = self.channel_tool_posture.is_some();
+        // THE local-shell seam. `channel_tool_posture` is the engine's own
+        // construction — it is `Some` for exactly the channel/remote engines
+        // `ChannelTurnDispatcher` builds and `None` for the CLI / TUI /
+        // json-stream engines an operator drives from their own keyboard. It is
+        // NOT workspace trust: an untrusted workspace driven by the operator is
+        // still the operator. Managed execution policy is excluded too — that is
+        // an administrator-imposed floor and this lane does not relax it.
+        //
+        // Repository content cannot reach either input.
+        let shell_principal_is_local_operator =
+            !is_channel_remote && !self.config.execution_policy.is_managed();
         if registry.workspace_policy().is_none() {
             let strict_workspace = is_channel_remote
                 || self.config.execution_policy.is_managed()
@@ -2980,8 +2991,14 @@ impl AgentBootstrap {
                         self.config.security.allow_sandboxed_shell_network,
                     )
                 };
-                wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
-                    .with_network(network)
+                let contained =
+                    wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
+                        .with_network(network);
+                if shell_principal_is_local_operator {
+                    contained.with_local_operator_principal()
+                } else {
+                    contained
+                }
             } else {
                 wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))
@@ -2998,6 +3015,47 @@ impl AgentBootstrap {
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
             }
             registry.set_workspace_policy(policy);
+        }
+
+        // The local-shell activation notice. It fires exactly when this session
+        // KEPT a shell that the exec gate would otherwise have refused: a
+        // local-operator policy that still wants OS secret-read-deny, running on
+        // a backend that cannot provide it (today: the Windows relaxed
+        // `windows_job_object` default). On Linux (bwrap) and macOS
+        // (sandbox_exec) `enforces_read_deny()` is true at the shipping default,
+        // so this condition is unreachable there and the operator sees nothing
+        // new — that is what keeps those two platforms byte-for-byte unchanged.
+        //
+        // Graded off the policy the registry ACTUALLY holds, not off the branch
+        // above, so a policy installed by `apply_posture` can never be described
+        // by a notice that did not apply to it.
+        if let Some(installed) = registry.workspace_policy() {
+            let runtime = registry.sandbox_runtime();
+            if installed.local_operator_principal()
+                && installed.secret_read_deny_required()
+                && !runtime.enforces_read_deny()
+                && !runtime.bypasses_containment()
+            {
+                let notice = format!(
+                    "Local shell enabled WITHOUT OS secret containment: the active sandbox \
+                     backend ({}) cannot enforce filesystem read-deny, so a Bash command in \
+                     this session can read this workspace's secrets and your credential \
+                     stores — the OS will not stop it. Still in force: kill-on-close \
+                     process-tree ownership, per-command approval for Bash (unless you \
+                     disabled approvals), the channel tool posture, and the Read/Write/Edit \
+                     secret guard. This applies to your local keyboard session only; a \
+                     channel or remote session on this backend still gets no shell.",
+                    runtime.backend_name(),
+                );
+                self.output.emit_info(&notice);
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    backend = runtime.backend_name(),
+                    shell_principal = "local_operator",
+                    secret_read_deny_enforced = false,
+                    "{notice}"
+                );
+            }
         }
 
         let effective_workspace_trust = if is_channel_remote {
