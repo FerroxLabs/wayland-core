@@ -59,6 +59,17 @@ const BASE_SANDBOX_ENV_ALLOWLIST: &[&str] = &[
     "SSL_CERT_DIR",
     "CURL_CA_BUNDLE",
     "SYSTEMROOT", // Windows: required for most native binaries to start.
+    // Windows: the constant `C:` that `SYSTEMROOT` is rooted in. Measured on
+    // Windows 11 26200: `python3 -c "open('p.txt','w').write('ok')"` run under
+    // this scrub writes `p.txt` correctly AND creates a junk directory named
+    // literally `%SystemDrive%` in the user's workspace, because CPython
+    // expands a path template against a variable we removed. `node`, `echo`
+    // and `findstr` in the same harness leave nothing. Forwarding it costs
+    // nothing (it is a fixed drive letter, not a secret) and stops the shell
+    // littering the directory the operator is working in. (Windows' own
+    // casing, for the same cross-platform-testability reason as
+    // `ProgramData` below.)
+    "SystemDrive",
     // ---- Windows MSVC toolchain discovery ----
     //
     // Without these, `cargo build` reaches the linker and dies, on a host
@@ -403,6 +414,34 @@ mod tests {
             std::env::remove_var("LIB");
             std::env::remove_var("INCLUDE");
             std::env::remove_var("MSVC_SIGNING_TOKEN");
+        }
+    }
+
+    /// `SystemDrive` is forwarded for a reason unrelated to the linker: a
+    /// child that expands a path template against it writes the UNEXPANDED
+    /// name into the workspace when it is missing. Measured on Windows 11
+    /// 26200 under this scrub, in four isolated directories: `python3 -c
+    /// "open('p.txt','w').write('ok')"` left `[%SystemDrive%, p.txt]`, while
+    /// `node -e ...`, `echo hi` and `echo hello | findstr hello` each left
+    /// nothing but their own output. The shell must not litter the directory
+    /// the operator is working in.
+    #[test]
+    #[serial]
+    fn system_drive_is_forwarded_so_children_do_not_litter_the_workspace() {
+        let _g = guard();
+        // SAFETY: test-only env mutation, serialized by `guard()` + `serial`.
+        unsafe {
+            std::env::set_var("SystemDrive", "C:");
+        }
+        let env = build_sandboxed_env(&[]);
+        assert!(
+            env.iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("SystemDrive")),
+            "SystemDrive must pass through; kept={:?}",
+            env.iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
+        unsafe {
+            std::env::remove_var("SystemDrive");
         }
     }
 
