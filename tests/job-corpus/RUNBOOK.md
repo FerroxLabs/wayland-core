@@ -186,13 +186,26 @@ quietly skipped does not, and that is the failure this runbook exists to stop.
 | A-10 | the media fixtures; several sub-cases (text_pdf, scanned_pdf, spreadsheet, audio, video) have keys but no grader — see §7 |
 | A-11 | a reachable MCP server and the warehouse database `keys/a11_verify.py` reads directly |
 | A-12 | no grader yet — see §7 |
-| B-1 | a job long enough to interrupt, and a way to kill it mid-flight |
-| B-2 | a provider that can be made to fail (recording proxy) |
-| B-3 | an approval surface a human can answer on |
-| B-4 | a second machine reachable over ssh |
-| B-5 | a display-capable host; on a headless host this is N/A with the reason stated, never a pass |
+| B-1 | `JOBCORPUS_PROVIDER_TOML`; a free TCP port per case. Eleven cases (control + every write boundary killed on both sides of the reply) run by default; `JOBCORPUS_B1_CASES` narrows them and every boundary not run is named UNPROVEN in the record |
+| B-2 | `JOBCORPUS_PROVIDER_TOML` **with a `base_url`** — the fault proxy relays to it and cannot be stood up without one. `JOBCORPUS_B2_CASES` selects shapes; default `control,fault-reset` |
+| B-3 | nothing external: the SMTP/IMAP host is harness-owned and hermetic. `mail_smoke.py` must pass first or the row is UNPROVEN, not FAIL |
+| B-4 | **`JOBCORPUS_B4_REMOTE=user@host`** — a genuinely different machine reachable by key-based ssh, with `python3` on its PATH; `JOBCORPUS_B4_REMOTE_ROOT` for where to stage on it. Unset ⇒ UNPROVEN, never N/A and never PASS. The driver also refuses to grade if the "remote" reports this machine's hostname |
+| B-5 | `JOBCORPUS_PROVIDER_TOML`; the browser half needs a browser backend the product can drive, the native half needs a display (Xvfb + python3-tk on Linux). The platform claim is DERIVED from what the product advertises, not asserted by the operator |
 | INV-1 | the recording proxy in front of the provider, and canaries planted in the workspace |
 | INV-5.cost | the recording proxy feeding `meter.jsonl` — without a real writer the cost gate can only fail by self-incrimination |
+
+### Provider access for the B rows
+
+Four of the five B rows drive the product against a real model, so they need a
+provider. It is declared **outside the repository**, in a TOML fragment named
+by `JOBCORPUS_PROVIDER_TOML`, holding a `[default]` table and the matching
+`[providers.<name>]` block including `base_url`. It never appears in argv and
+is never copied into an artifact. Each row builds a throwaway `WAYLAND_HOME`
+from it, so no run inherits a developer's config, and `API_KEY` / `FLUX_API_KEY`
+are stripped from every child environment.
+
+Rows that need a provider and have none are **UNPROVEN with that reason** —
+the product was never asked to do anything, so nothing about it was measured.
 
 ---
 
@@ -227,6 +240,29 @@ a reason, and they leave the denominator:
   real terminal and is not automated.
 * **macOS INV-1** — `inv1/README.md` records it as NOT MEASURED, and that is
   not a PASS. Preserve that wording; do not soften it.
+* **B-5b, the native licence window** — it needs a real display and cannot run
+  unattended on the headless Linux host. On a host with no display the driver
+  records `surface_unavailable` with the reason and the key scores that FAIL,
+  not N/A: desktop control is advertised, so a machine where it cannot run is a
+  claim that does not hold there. It is dropped from the *unattended* run, not
+  excused; run it by hand on a desktop session to close it.
+* **B-2 `fault-503` and `fault-timeout`** — the fixture declares four failure
+  shapes and the default run induces two (`control`, `fault-reset`). The other
+  two are named UNPROVEN in the record every time, so their absence cannot be
+  read as "survivable".
+
+### What no row in this corpus exercises
+
+Stated plainly so nobody infers it from B-3 passing:
+
+* **No real Slack, Discord, Telegram, Matsuo, SMS or internet-email path is
+  driven anywhere in the corpus.** B-3's mail host is a genuine SMTP + IMAP
+  conversation, but it is a hermetic localhost one. "Reach me where I am" is
+  measured over local mail only.
+* **B-5a raises the forgery floor; it does not make forgery impossible.**
+  Somebody who reads `app.js` could reproduce the interaction sequence over
+  plain HTTP. The grader records the user-agent and `Sec-Fetch-*` headers on
+  the accepted order and NOTES their absence — it notes, it does not fail.
 
 ---
 

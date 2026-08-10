@@ -73,8 +73,19 @@ def grade(evidence: str) -> Verdict:
     except Exception as exc:
         v.unproven("run.json unreadable: %s" % exc)
         return v
-    case = run.get("case", "fault")
+    case = str(run.get("case", "fault"))
     v.observed["case"] = case
+    # A case name the grader does not recognise used to fall through every
+    # outage check and still settle PASS: "fault-reset" is not "fault". The
+    # match is now a prefix, and anything else is UNPROVEN rather than a quiet
+    # skip of the only checks this row exists for.
+    lowered = case.strip().lower()
+    is_fault = lowered.startswith("fault")
+    if not is_fault and not lowered.startswith("control"):
+        v.unproven("run.json case is %r; expected a name beginning 'control' or "
+                   "'fault'. An unrecognised case would skip every outage check "
+                   "and still look graded." % case)
+        return v
 
     final = Workspace(os.path.join(evidence, "workspace-final"))
 
@@ -88,7 +99,7 @@ def grade(evidence: str) -> Verdict:
             v.fail("report is wrong: %s" % f)
 
     # ---- 2. was there really an outage to survive? --------------------------
-    if case == "fault":
+    if is_fault:
         ledger_path = os.path.join(evidence, "proxy-ledger.jsonl")
         if not os.path.exists(ledger_path):
             v.unproven("no proxy ledger — cannot tell whether a provider failure happened")
@@ -108,7 +119,7 @@ def grade(evidence: str) -> Verdict:
                            "the work either finished elsewhere or stopped")
 
     # ---- 3. continuity: the pre-outage work still stands ---------------------
-    if case == "fault":
+    if is_fault:
         at_fault_dir = os.path.join(evidence, "workspace-at-fault")
         if not os.path.isdir(at_fault_dir):
             v.unproven("no snapshot of the project at the moment of the outage")
@@ -282,6 +293,22 @@ def self_test() -> int:
 
         d = _seed_evidence(os.path.join(tmp, "nofault"), fault=False)
         ok.append(expect("outage never induced", grade(d), UNPROVEN))
+
+        # A case named for its failure shape must still be graded as a fault
+        # case; the prefix match is what stops "fault-reset" skipping every
+        # outage check while still settling PASS.
+        d = _seed_evidence(os.path.join(tmp, "shaped"), fault=False,
+                           run_extra={"case": "fault-reset"})
+        ok.append(expect("named failure shape still gets the outage checks",
+                         grade(d), UNPROVEN))
+
+        d = _seed_evidence(os.path.join(tmp, "unknown-case"), fault=False,
+                           run_extra={"case": "smoke"})
+        ok.append(expect("unrecognised case name", grade(d), UNPROVEN))
+
+        d = _seed_evidence(os.path.join(tmp, "control-ok"), fault=False,
+                           run_extra={"case": "control"})
+        ok.append(expect("control case: no outage checks apply", grade(d), PASS))
 
         d = os.path.join(tmp, "empty")
         os.makedirs(d)
