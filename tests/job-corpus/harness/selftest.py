@@ -14,6 +14,7 @@ Run:  python3 -m harness.selftest        (or  python3 -m harness.cli selftest)
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -1154,6 +1155,124 @@ def control_meter(c: Controls, tmp: str) -> None:
     )
 
 
+    # (5) A NON-ZERO figure over PRICED traffic still adjudicates in BOTH
+    #     directions.  The price book prices jobcorpus-model at $0/Mtok, so the
+    #     metered total is a real $0.000000 and the $0.005 floor tolerance is
+    #     what a small honest figure has to fit inside.
+    near = (
+        '{"type":"session_cost","session_id":"s1","total_cost_usd":0.004,'
+        '"per_turn":[{"turn":1,"model":"jobcorpus-model","cost_usd":0.004,'
+        '"priced":true}]}'
+    )
+    with _leak_ctx(tmp, "meter-priced-ok") as ctx6:
+        ctx6.run(["fake_product.py"], extra_env={"JC_SAY": near})
+    states6 = {ch.check_id: ch.state for ch in ctx6.record.checks}
+    c.check(
+        "INV-5.cost still PASSES a non-zero figure the harness can price and check",
+        states6.get("INV-5.cost") == PASS,
+        str([ch.why for ch in ctx6.record.checks if ch.check_id == "INV-5.cost"])[:220],
+    )
+
+    wrong = (
+        '{"type":"session_cost","session_id":"s1","total_cost_usd":0.25,'
+        '"per_turn":[{"turn":1,"model":"jobcorpus-model","cost_usd":0.25,'
+        '"priced":true}]}'
+    )
+    with _leak_ctx(tmp, "meter-priced-wrong") as ctx7:
+        ctx7.run(["fake_product.py"], extra_env={"JC_SAY": wrong})
+    states7 = {ch.check_id: ch.state for ch in ctx7.record.checks}
+    c.check(
+        "INV-5.cost still FAILS a wrong figure over priced traffic",
+        states7.get("INV-5.cost") == FAIL,
+        str([ch.why for ch in ctx7.record.checks if ch.check_id == "INV-5.cost"])[:220],
+    )
+
+    # (6) THE MIRROR-IMAGE DEFECT: the same non-zero figure over traffic the
+    #     harness holds no rate for.  priced_cost_usd silently excludes that
+    #     traffic, so comparing against it adjudicated the claim against ZERO
+    #     and returned FAIL — a verdict the harness had no basis for.  A gate
+    #     that cannot pass on real traffic is as worthless as one that cannot
+    #     fail, so it must say UNPROVEN and name the model.
+    with _leak_ctx(tmp, "meter-unpriced-nonzero") as ctx8:
+        ctx8.run(
+            ["fake_product.py"],
+            extra_env={"JC_SAY": wrong, "JC_MODEL": "some-frontier-model-v9"},
+        )
+    meter8 = ctx8.record.world["meter"]
+    c.check(
+        "the harness metered the non-zero-claim run and could not price it",
+        meter8["request_count"] == 1 and meter8["unpriced_request_count"] == 1,
+        str(meter8),
+    )
+    why8 = [ch.why for ch in ctx8.record.checks if ch.check_id == "INV-5.cost"]
+    states8 = {ch.check_id: ch.state for ch in ctx8.record.checks}
+    c.check(
+        "INV-5.cost returns UNPROVEN, not a verdict it cannot support, on unpriced "
+        "traffic",
+        states8.get("INV-5.cost") == UNPROVEN,
+        str(why8)[:220],
+    )
+    c.check(
+        "and it names the model it has no rate for",
+        any("some-frontier-model-v9" in (w or "") for w in why8),
+        str(why8)[:220],
+    )
+
+
+def control_bailout_record(c: Controls, tmp: str) -> None:
+    print("every row that runs leaves a record on disk, including the ones that bail")
+
+    # run_row() returns a dict; only RowContext wrote record.json.  Every
+    # bail-out path -- a hand-rolled main() that raises, a crash before the
+    # context opens -- therefore wrote NOTHING, and a post-hoc reader of the
+    # run directory reported those rows' gates as never reached when they had
+    # in fact run and bailed.
+    from . import cli as _cli
+
+    rows_dir = os.path.join(tmp, "bail-rows")
+    os.makedirs(rows_dir, exist_ok=True)
+    key = _stub_key(tmp)
+    with open(os.path.join(rows_dir, "bailer.py"), "w", encoding="utf-8") as fh:
+        fh.write(
+            "ROW_ID = 'A-1'\n"
+            "TIER = 'A'\n"
+            "TITLE = 'a row that bails after pre-flight'\n"
+            "KEY = %r\n"
+            "DECLARED_SCOPE = ['calc.py']\n"
+            "def main(binary, artifact_dir):\n"
+            "    raise RuntimeError('the row bailed out before it could grade anything')\n"
+            % key
+        )
+
+    out_dir = os.path.join(tmp, "bail-out")
+    args = argparse.Namespace(
+        binary=sys.executable, out=out_dir, rows_dir=rows_dir, row=None
+    )
+    code = _cli.cmd_run(args)
+    c.check(
+        "a run whose only row bailed is not reported as a clean run",
+        code != 0,
+        "exit %s" % code,
+    )
+
+    rec_path = os.path.join(out_dir, "A-1", "record.json")
+    c.check("the bailed row left a record.json on disk", os.path.exists(rec_path), rec_path)
+    if not os.path.exists(rec_path):
+        return
+    with open(rec_path, "r", encoding="utf-8") as fh:
+        rec = json.load(fh)
+    c.check(
+        "the record says the row ran and bailed, not that it never ran",
+        rec.get("row_id") == "A-1" and rec.get("verdict") == UNPROVEN,
+        str({k: rec.get(k) for k in ("row_id", "verdict")}),
+    )
+    c.check(
+        "and it carries the reason it bailed",
+        any("the row bailed out" in str(n) for n in rec.get("notes") or []),
+        str(rec.get("notes"))[:200],
+    )
+
+
 def control_attribution_ledger(c: Controls, tmp: str) -> None:
     print("INV-5  the user's edits are in the ledger, so over-claiming is catchable")
 
@@ -1681,6 +1800,7 @@ def main(
         control_leakwatch(c, tmp)
         control_meter(c, tmp)
         control_attribution_ledger(c, tmp)
+        control_bailout_record(c, tmp)
         if binary:
             control_live(c, tmp, os.path.abspath(binary), real_stream)
     finally:

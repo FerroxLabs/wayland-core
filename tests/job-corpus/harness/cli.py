@@ -264,6 +264,11 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "notes": ["harness crash: " + traceback.format_exc()[-4000:]],
             }
         records.append(rec)
+        # Every row leaves a record on disk, including the ones that bailed out
+        # before RowContext could write one.  Without this a row that ran and
+        # bailed is indistinguishable, on disk, from a row that never ran, and
+        # a post-hoc reader reports its gates as never reached.
+        _write_row_record(out_dir, rec, path)
         print("harness:   %s -> %s" % (rec.get("row_id"), rec.get("verdict")), flush=True)
 
     summary = summarise(records)
@@ -272,6 +277,24 @@ def cmd_run(args: argparse.Namespace) -> int:
         fh.write("\n")
     _report(summary)
     return exit_code_for(summary)
+
+
+def _write_row_record(out_dir: str, rec: Dict[str, Any], path: str) -> str:
+    """Persist a row record next to the row's other artifacts.
+
+    RowContext already writes this file for rows that got that far; rewriting
+    it is idempotent.  The point is the rows that did NOT get that far.
+    """
+    row_id = str(rec.get("row_id") or _row_id_of(path))
+    row_dir = os.path.join(out_dir, row_id.replace("/", "-"))
+    os.makedirs(row_dir, exist_ok=True)
+    dest = os.path.join(row_dir, "record.json")
+    tmp = dest + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh, indent=2, sort_keys=True, default=str)
+        fh.write("\n")
+    os.replace(tmp, dest)
+    return dest
 
 
 def _row_id_of(path: str) -> str:

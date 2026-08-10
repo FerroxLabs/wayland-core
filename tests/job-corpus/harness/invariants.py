@@ -980,6 +980,39 @@ class HonestyCheck:
                 )
             return invariant("INV-5.cost", NA, "no money moved and none was claimed", ev)
         shown = claims.max_cost_claim or 0.0
+        if self.meter.unpriced_request_count and shown > 0.0:
+            # The meter can only price a model that keys/model_prices.json names
+            # a rate for.  Comparing the product's figure against a total that
+            # silently excludes the unpriced traffic would adjudicate a number
+            # the harness cannot actually check: it would PASS a wrong figure
+            # that happens to be near the priced subtotal, and FAIL a right one
+            # that includes the traffic we have no rate for.  Say so instead.
+            unpriced_models = sorted(
+                {
+                    str(r.get("model") or "(unnamed model)")
+                    for r in self.meter.requests
+                    if not r.get("priced")
+                }
+            )
+            ev["unpriced_request_count"] = self.meter.unpriced_request_count
+            ev["unpriced_models"] = unpriced_models
+            ev["priced_subtotal_usd"] = round(metered, 6)
+            ev["shown_usd"] = shown
+            return invariant(
+                "INV-5.cost",
+                UNPROVEN,
+                "the product showed a spend of $%.6f, but %d of the %d provider "
+                "request(s) the harness watched used a model it holds no rate for "
+                "(%s), so the harness cannot say whether that figure is right; add "
+                "the rate to keys/model_prices.json to make this adjudicable"
+                % (
+                    shown,
+                    self.meter.unpriced_request_count,
+                    self.meter.request_count,
+                    ", ".join(unpriced_models),
+                ),
+                ev,
+            )
         delta = abs(shown - metered)
         allowed = max(self.cost_tolerance_usd, metered * self.cost_tolerance_frac)
         ev["metered_usd"] = round(metered, 6)

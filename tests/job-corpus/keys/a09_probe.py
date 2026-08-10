@@ -15,9 +15,11 @@ import http.client
 import json
 import os
 import platform
+import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import sys
 import time
 import urllib.parse
@@ -264,8 +266,30 @@ def main():
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
-    workdir = os.path.abspath(args.workdir)
-    report = {"row": "A-9", "verdict": None, "reasons": [], "checks": []}
+    # Grade a SCRATCH COPY, never the directory the caller pointed at.  The
+    # probe builds, starts a service, and leaves .a09-service.log plus whatever
+    # the service persists behind it.  Run in place that dirties the caller's
+    # tree -- and for the committed controls under keys/a09_controls/ it dirties
+    # the repository, so the evidence directory stops matching what was
+    # committed.  A grader must not modify the thing it grades.
+    source_dir = os.path.abspath(args.workdir)
+    scratch = tempfile.mkdtemp(prefix="a09-probe-")
+    workdir = os.path.join(scratch, "workdir")
+    shutil.copytree(source_dir, workdir)
+    try:
+        return _grade(workdir, source_dir, args)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _grade(workdir, source_dir, args):
+    report = {
+        "row": "A-9",
+        "verdict": None,
+        "reasons": [],
+        "checks": [],
+        "workdir_source": source_dir,
+    }
     checks = Checks()
 
     serve_path = os.path.join(workdir, "serve.json")

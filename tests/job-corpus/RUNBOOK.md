@@ -75,8 +75,46 @@ the tree.
 | 4b | capture a real product stream | Linux | `python3 gen/gen_real_stream.py --binary <BIN> --out <D>/real-stream.jsonl` | writes a real `session_cost` frame plus the wire record beside it, so step 1 can be re-run with `--binary <BIN> --real-stream <D>/real-stream.jsonl` and ground the claim parser and the cost reconciliation on real bytes |
 | 5 | **The corpus run** | Linux | `python3 -m harness.cli run --binary <BIN> --out <RUNDIR>` | reads §1 |
 | 6 | Re-aggregate / read the verdict | any | `python3 -m harness.cli summarise --out <RUNDIR>` | same exit codes |
-| 7 | Windows leg | `SeanD@seandesktop` (D: only) | same, with the Windows binary | |
-| 8 | macOS leg | the local Mac | same, with the macOS binary | |
+| 7 | Windows leg | `SeanD@seandesktop` (D: only) | **steps 7a–7c first**, then the same run with the Windows binary | |
+
+There is **no macOS leg tonight** — this tree has no macOS binary to run, so no
+row is measured on macOS at all. It is listed in §7 with everything else that is
+out, so its absence cannot be read as coverage.
+
+### Step 7 has three prerequisites, and none of them are automatic
+
+The Windows box does not carry a checkout of this branch. Before 2026-08-11
+`D:\jobcorpus` was **not a git repository** and `D:\jobcorpus\tests\job-corpus\rows`
+did not exist, so step 7 could not start at all. Do these in order:
+
+| # | on `SeanD@seandesktop` | why |
+|---|---|---|
+| 7a | `git clone --depth 1 --single-branch --branch test/job-corpus-harness https://github.com/FerroxLabs/wayland-core D:\jcwin` | there is no checkout otherwise. **D: only** — never `C:`, and never anywhere near `C:\actions-runner-*` |
+| 7b | from `D:\jcwin\tests\job-corpus`: `python -m harness.cli selftest`, `python keys/selftest.py`, the five per-key controls in `keys/README.md` §2, and `python inv1/selftest_detector.py` | a green from a host whose own controls were never run there is not evidence. The controls must produce a red AND a green **on this host** before any Windows verdict counts |
+| 7c | name the artifact: `(Get-FileHash <BIN> -Algorithm SHA256).Hash`, and record the tree it was built from | a result that cannot name its artifact is void. Prefer the newest binary built from the sealed/merged tree; confirm the linkage by grepping the `.exe` for the commit sha with a positive control, not by trusting the directory name |
+
+PowerShell over `ssh` mangles inline quoting. Write a `.ps1`, `scp` it to `D:\`,
+and run it with `powershell -NoProfile -ExecutionPolicy Bypass -File`.
+Quiet-check `Get-Process wayland-core` first and VOID anything measured beside
+a second engine.
+
+**Windows has no filesystem containment by design.** That is expected and is
+not a defect the leg should report.
+
+#### What the Windows leg can and cannot reach
+
+Measured on the box on 2026-08-11, not assumed. A row blocked by host
+provisioning rather than by the product is **UNPROVEN**, never N/A and never
+PASS.
+
+| rows | Windows disposition | reason measured on the host |
+|---|---|---|
+| A-1 … A-6, INV-1 … INV-5 | can run | `git 2.54.0.windows.1` and `Python 3.12.10` are on PATH; harness selftest, the A-1…A-6 key selftest, all five per-key controls and the INV-1 detector selftest all behaved correctly there |
+| A-7 … A-12 | cannot run **anywhere** | no row driver exists yet. Their per-key controls (A-7, A-8, A-9, A-10-degraded, A-11) *do* pass on Windows, so this is a missing driver, not a missing host |
+| B-3 | can run | it is the one B row needing no provider; its mail host is hermetic |
+| B-1, B-2, B-5 | UNPROVEN | `JOBCORPUS_PROVIDER_TOML` is unset and no provider fragment exists on the box. Windows has no tmpfs, so a credential cannot be staged there the way `/dev/shm` allows on Linux — placing one needs an explicit decision, not a lane's initiative |
+| B-4 | UNPROVEN | the box cannot resolve or key-auth to a second machine (`ssh hetzner-dsm` → `Name or service not known`), and the driver correctly refuses to grade a "remote" that is this machine |
+| B-5b (native licence window) | reachable here, unlike Linux | an interactive desktop session exists on this box, so the native half is not excluded for want of a display — only for want of a provider |
 
 Always run the product with `env -u API_KEY -u FLUX_API_KEY`. A bare
 `API_KEY` in the environment is honoured as a provider credential and is a
@@ -223,6 +261,12 @@ A row whose prerequisite is absent must be marked N/A **before** the run with
 a stated reason, not discovered mid-run. N/A leaves the denominator; a row
 quietly skipped does not, and that is the failure this runbook exists to stop.
 
+**A-7, A-8, A-9, A-11 and A-12 have no row driver in `rows/`.** Their keys,
+graders and controls exist and are exercised by step 3 of §2, but nothing in
+the corpus run drives the product through them, so this table describes what
+they *would* need, not what tonight measures. They are listed in §7 as OUT. The
+rows the corpus run actually drives are A-1 … A-6, B-1 … B-5 and INV-1.
+
 | row | needs |
 |---|---|
 | A-1 | a machine with the product NOT already installed or authenticated, and a credential to authenticate with |
@@ -258,6 +302,48 @@ are stripped from every child environment.
 Rows that need a provider and have none are **UNPROVEN with that reason** —
 the product was never asked to do anything, so nothing about it was measured.
 
+### Provisioning the credential (A rows AND B rows)
+
+Without it, A-1..A-6 return before entering `RowContext`, so INV-2, INV-3,
+INV-4 and INV-5 are never *constructed* and INV-1 never sees a wire — four of
+the five trust invariants measure nothing while the sheet still looks full.
+
+On `hetzner-dsm`, provisioned into **tmpfs**, never onto a normal filesystem
+and never onto argv:
+
+```
+/dev/shm/jobcorpus/api.key        mode 600, the key and nothing else
+/dev/shm/jobcorpus/provider.toml  mode 600, [default] + [providers.jobcorpus]
+/dev/shm/jobcorpus/env.sh         mode 600, the five variables below
+```
+
+```sh
+export JOBCORPUS_API_KEY_FILE=/dev/shm/jobcorpus/api.key
+export JOBCORPUS_PROVIDER=openai
+export JOBCORPUS_MODEL=claude-sonnet-4-6
+export JOBCORPUS_BASE_URL=https://api.fluxrouter.ai
+export JOBCORPUS_PROVIDER_TOML=/dev/shm/jobcorpus/provider.toml
+```
+
+Deliver the key over ssh **stdin** into a script already on the remote. Never
+`ssh host "... $KEY ..."`: argv is visible in `ps` to every user on the box.
+
+**Teardown, at the end of the run:** `rm -rf /dev/shm/jobcorpus`. It is tmpfs,
+so it never reached a disk and a reboot clears it regardless.
+
+`JOBCORPUS_BASE_URL` is the **bare host**, with no `/v1`. The product appends
+`/v1/chat/completions` to whatever base URL it is given, and the recording
+endpoint relays `<upstream path> + <captured path>`; a `/v1` on both sides
+produces `/v1/v1/chat/completions` and the whole run dies on `404 Not Found`
+having proved nothing. The same applies to `base_url` inside the provider
+fragment.
+
+**Spend ceiling.** The gateway exposes no budget API — `/v1/key`, `/v1/usage`,
+`/v1/credits`, `/v1/limits` and `/v1/account` all answer 404 — so there is no
+provider-side cap to set and none was set. What bounds the run is entirely
+harness-side: `--max-turns 40` per job (`_common.product_argv`) and each row's
+`TIMEOUT`. State it that way; do not describe the run as capped.
+
 ---
 
 ## 6. Reading the output
@@ -286,7 +372,14 @@ a reason, and they leave the denominator:
 
 * **A-10 sub-cases** text_pdf, scanned_pdf, spreadsheet, audio, video — keys
   exist, no grader does.
-* **A-12** — no grader for either part.
+* **A-7, A-8, A-9, A-11** — the keys, graders and controls exist and are run as
+  step 3 of §2, but there is **no row driver** in `rows/`, so the corpus run
+  never puts the product through them. §5 lists what they would need; it is not
+  a claim that they run.
+* **A-12** — no grader for either part, and no row driver.
+* **The macOS leg of the whole corpus** — there is no macOS binary for this
+  tree, so no row was measured on macOS. Not a PASS, not an N/A per row: the
+  platform was not exercised at all.
 * **The 36-cell TUI attachment matrix** (`keys/a10_tui.key.json`) — needs a
   real terminal and is not automated.
 * **macOS INV-1** — `inv1/README.md` records it as NOT MEASURED, and that is
@@ -323,7 +416,7 @@ Stated plainly so nobody infers it from B-3 passing:
 |---|---|---|
 | `hetzner-dsm` | `ssh hetzner-dsm`, `export PATH="$HOME/.cargo/bin:$PATH"` | all Linux builds and the Linux corpus run |
 | `SeanDesktop` | `ssh SeanD@seandesktop` (PowerShell, **D: only**) | Windows builds and the Windows leg |
-| the Mac | local | macOS leg only; **never** run cargo here |
+| the Mac | local | **not used tonight** — there is no macOS binary for this tree (see §7); **never** run cargo here |
 
 Reuse the warm target directories that already exist on hetzner. Never create
 new ones and never delete a sibling lane's directory. If disk tightens, run
