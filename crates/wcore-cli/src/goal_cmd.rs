@@ -1093,6 +1093,22 @@ pub enum ExecOutcome {
 /// value as `EX_TEMPFAIL`, which is the closest existing convention.
 pub const EXIT_INDETERMINATE: i32 = 75;
 
+/// The exit code a WORKER uses to declare that its effect did not land.
+///
+/// ## Why the worker has to say it, rather than the product inferring it
+///
+/// The product cannot tell a worker that chose to fail from a worker that was
+/// killed. On Unix it looks like it can — signal death has no exit code — but
+/// on Windows `taskkill /F` and `exit 1` are the same integer, and the first
+/// version of this fix assumed nonzero meant "nothing landed". A Windows run
+/// caught it: a worker killed AFTER doing its work had its intent withdrawn and
+/// was retried, duplicating the effect the fix exists to prevent.
+///
+/// So there is one rule on every platform. Zero means the effect landed. This
+/// code means it certainly did not, and the task is plainly retryable. Anything
+/// else means nobody knows, and the task is parked.
+pub const EXIT_NO_EFFECT: i32 = 76;
+
 async fn exec_task(
     effects_dir: &std::path::Path,
     argv: &[String],
@@ -1187,11 +1203,39 @@ async fn exec_task(
             .await
             .map_err(|e| anyhow::anyhow!("worker command '{}' failed to start: {e}", argv[0]))?;
         if !status.success() {
-            // A worker that exited nonzero of its own accord reported that its
-            // effect did not land. That is a FAILURE, not an unknown, so the
-            // intent is withdrawn and the task stays plainly retryable.
+            // ONLY the worker knows whether its effect landed, and only one exit
+            // code says so. This was wrong once and Windows caught it: the first
+            // version treated every nonzero exit as "the effect did not land"
+            // and withdrew the intent — so a worker that was KILLED after doing
+            // its work was retried and duplicated it. On Unix that could be
+            // narrowed by testing for signal death; on Windows a `taskkill /F`
+            // and a deliberate `exit 1` are the same integer, so no amount of
+            // exit-code archaeology can separate them.
+            //
+            // So the rule is one rule on every platform: nonzero means UNKNOWN
+            // unless the worker used the code that means "nothing landed".
+            if status.code() != Some(EXIT_NO_EFFECT) {
+                println!(
+                    "GOAL-EXEC: task={task} key={key} produced=unknown \
+                     reason=worker-exited-{status}-without-declaring-no-effect"
+                );
+                return Ok(ExecOutcome::Indeterminate {
+                    detail: format!(
+                        "worker command '{}' exited {status}. That is not \
+                         {EXIT_NO_EFFECT}, the only code that declares no effect landed, so \
+                         whether it landed is unknown and this attempt decides neither",
+                        argv[0]
+                    ),
+                });
+            }
+            // The worker declared that nothing landed. Withdraw the intent so
+            // the task stays plainly retryable — a lost completion fails
+            // exactly as loudly as a duplicate.
             std::fs::remove_file(&intent).ok();
-            anyhow::bail!("worker command '{}' exited {status}", argv[0]);
+            anyhow::bail!(
+                "worker command '{}' exited {EXIT_NO_EFFECT} (declared: no effect landed)",
+                argv[0]
+            );
         }
     }
 
@@ -1367,13 +1411,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_task_does_not_produce_an_effect_when_the_worker_command_fails() {
+    async fn exec_task_does_not_produce_an_effect_when_the_worker_declares_no_effect() {
         let dir = tempfile::tempdir().unwrap();
-        let error = exec_task(dir.path(), &worker(3), "t-fail", "idem-t-fail", None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("exited"), "got: {error}");
+        let error = exec_task(
+            dir.path(),
+            &worker(EXIT_NO_EFFECT),
+            "t-fail",
+            "idem-t-fail",
+            None,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no effect landed"), "got: {error}");
         assert_eq!(
             markers(dir.path()),
             (0, 0),
@@ -1388,9 +1438,15 @@ mod tests {
     #[tokio::test]
     async fn a_failed_worker_leaves_the_task_runnable_rather_than_permanently_blocked() {
         let dir = tempfile::tempdir().unwrap();
-        exec_task(dir.path(), &worker(3), "t-retry", "idem-t-retry", None)
-            .await
-            .expect_err("the failing worker should surface its failure");
+        exec_task(
+            dir.path(),
+            &worker(EXIT_NO_EFFECT),
+            "t-retry",
+            "idem-t-retry",
+            None,
+        )
+        .await
+        .expect_err("the failing worker should surface its failure");
         assert_eq!(markers(dir.path()), (0, 0));
 
         // The retry must be able to produce. Before the fix this returned
@@ -1577,9 +1633,15 @@ mod tests {
     #[tokio::test]
     async fn a_failed_worker_withdraws_its_intent_and_stays_retryable() {
         let dir = tempfile::tempdir().unwrap();
-        exec_task(dir.path(), &worker(3), "t-wf", "idem-t-wf", None)
-            .await
-            .expect_err("the failing worker should surface its failure");
+        exec_task(
+            dir.path(),
+            &worker(EXIT_NO_EFFECT),
+            "t-wf",
+            "idem-t-wf",
+            None,
+        )
+        .await
+        .expect_err("the failing worker should surface its failure");
         assert!(!dir.path().join("intents").join("idem-t-wf").exists());
 
         let outcome = exec_task(dir.path(), &effecting_worker(), "t-wf", "idem-t-wf", None)
@@ -1587,6 +1649,54 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, ExecOutcome::Produced);
         assert_eq!(observed(dir.path()), (1, 1));
+    }
+
+    /// The Windows-found hole. A worker that exits nonzero WITHOUT declaring
+    /// "no effect" — which is what a killed worker looks like on Windows, where
+    /// `taskkill /F` and `exit 1` are the same integer — must park, not retry.
+    /// The first version of this fix withdrew the intent here and duplicated the
+    /// effect on the next attempt.
+    #[tokio::test]
+    async fn an_undeclared_nonzero_exit_parks_instead_of_re_running() {
+        let dir = tempfile::tempdir().unwrap();
+        // A worker that performs its effect and THEN exits 1, the way a killed
+        // worker looks from outside.
+        let killed = vec![
+            if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
+            if cfg!(windows) { "/c" } else { "-c" }.to_owned(),
+            if cfg!(windows) {
+                "echo %WAYLAND_GOAL_TASK% > \"%WAYLAND_GOAL_EFFECT_SINK%\\k.%RANDOM%\" & exit 1"
+                    .to_owned()
+            } else {
+                "printf '%s\\n' \"$WAYLAND_GOAL_TASK\" > \"$WAYLAND_GOAL_EFFECT_SINK/k.$$\"; exit 1"
+                    .to_owned()
+            },
+        ];
+        let outcome = exec_task(dir.path(), &killed, "t-kill", "idem-t-kill", None)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, ExecOutcome::Indeterminate { .. }),
+            "got: {outcome:?}"
+        );
+        assert!(
+            dir.path().join("intents").join("idem-t-kill").exists(),
+            "the intent was withdrawn, so a retry would re-run the effect"
+        );
+        assert_eq!(observed(dir.path()), (1, 1));
+
+        // THE PROPERTY: the retry must not run the worker again.
+        let retry = exec_task(
+            dir.path(),
+            &effecting_worker(),
+            "t-kill",
+            "idem-t-kill",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(retry, ExecOutcome::Indeterminate { .. }));
+        assert_eq!(observed(dir.path()), (1, 1), "the effect landed twice");
     }
 
     /// The instrument's own guard: a census over a worker that produced nothing
