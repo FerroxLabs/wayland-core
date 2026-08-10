@@ -1490,3 +1490,207 @@ fn sandbox_denial_does_not_call_a_granted_path_ungranted_through_a_symlink() {
         result.content
     );
 }
+
+// ── P4: the advisory must not invent denials ────────────────────────────────
+//
+// Two independent fabrications, one test each.
+//
+// (A) A Windows command line is mostly SWITCHES, and they begin with `/`:
+//     `/NOLOGO`, `/c`, `/t:Build`. The tokenizer's `starts_with('/')` arm made
+//     every one of them a path candidate, `classify` joined it onto the child's
+//     cwd (on Windows `\\?\D:\` + `/NOLOGO` = `\\?\D:\NOLOGO`) and the advisory
+//     reported a sandbox denial for a path nothing ever touched. The same
+//     fabrication reproduces on POSIX, where `/NOLOGO` parses as an absolute
+//     path outside every granted root — so this test is skipped nowhere.
+//
+// (B) A path every backend grants unconditionally (`C:\Windows\System32\…`)
+//     was reported as denied too, because the `ALWAYS_GRANTED_PREFIXES`
+//     comparison could not match a Windows spelling. Reproduced here with the
+//     forward-slash spelling Windows tools actually emit (`C:/Windows/…`),
+//     which is a plain string on every host and so runs everywhere.
+
+/// The advisory this module APPENDS, separated from the command output it was
+/// appended to. The output half legitimately quotes whatever the command
+/// printed, so only the advisory's own text can be graded for fabrication.
+/// Empty when no advisory was appended — which the positive control in each
+/// test below is what rules out.
+fn advisory_of(content: &str) -> &str {
+    content
+        .split_once("out of reach of this command:")
+        .map_or("", |(_, tail)| tail)
+}
+
+#[test]
+fn sandbox_denial_does_not_fabricate_a_path_from_a_command_line_switch() {
+    let result = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                      MSBUILD : error MSB1009: Project file does not exist.\n\
+                      Switch: /NOLOGO\n\
+                      fatal: unable to access '.git/config': Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    let advisory = advisory_of(&result.content);
+    assert!(
+        !advisory.contains("NOLOGO"),
+        "a command-line switch is not a path and must never be reported as a \
+         denied one; got advisory:\n{advisory}"
+    );
+    // Positive control: the fix must not work by silencing the advisory. The
+    // genuine denial in the same output is still named…
+    assert!(
+        advisory.contains(".git/config"),
+        "the real denial in the same output must still be reported; got:\n{}",
+        result.content
+    );
+    // …and the remediation the advisory offers is still reachable, so the
+    // sandbox-off suggestion is now only ever shown for a real denial.
+    assert!(
+        advisory.contains("--dangerously-skip-permissions-and-sandbox"),
+        "the remediation must still be reachable for a genuine denial; got:\n{}",
+        result.content
+    );
+}
+
+#[test]
+fn sandbox_denial_does_not_report_an_always_granted_system_path_as_denied() {
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        // Narrower than the cwd, so anything resolved outside `src` is a
+        // candidate denial and the system path cannot be excused by the
+        // workspace grant.
+        fs_read_allow: vec![PathBuf::from("/w/repo/src")],
+        fs_write_allow: vec![PathBuf::from("/w/repo/src")],
+        fs_read_deny: vec![PathBuf::from("/w/repo/.git/objects")],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(Path::new("/w/repo")));
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                      LoadLibrary failed for C:/Windows/System32/kernel32.dll\n\
+                      open /w/other/secret.txt: Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    let advisory = advisory_of(&result.content);
+    assert!(
+        !advisory.contains("System32"),
+        "a system path every backend grants unconditionally is not evidence of \
+         a policy denial and must not be reported as one; got advisory:\n{advisory}"
+    );
+    // Positive control: a path that really is outside every granted root is
+    // still named, so this cannot be passed by silencing the advisory.
+    assert!(
+        advisory.contains("/w/other/secret.txt"),
+        "a genuinely ungranted path must still be reported; got:\n{}",
+        result.content
+    );
+}
+
+// ── The always-granted check is graded in BOTH spellings, and the RESOLVED
+//    spelling is the one doing work the token cannot ─────────────────────────
+//
+// The two tests above both hand `classify` a token that is already recognisable
+// as always-granted before it is joined or resolved (`C:/Windows/System32/…`),
+// so the token half of the check answers them and the resolved half is never
+// the deciding evaluation. The two tests below are the ones that go red if the
+// resolved half is dropped: in each, the token as the child wrote it says
+// nothing, and only its resolution names a root every backend grants. Dropping
+// it re-opens the exact defect this module exists to close — the advisory
+// blaming the sandbox, and recommending the user turn it off, for a path the
+// sandbox never denied.
+
+#[test]
+fn sandbox_denial_does_not_fabricate_a_denial_for_a_relative_system_path() {
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![PathBuf::from("/w/repo")],
+        fs_write_allow: vec![PathBuf::from("/w/repo")],
+        fs_read_deny: vec![PathBuf::from("/w/repo/.env")],
+        ..Default::default()
+    };
+    // A child launched inside the system tree names the DLL the way a loader
+    // does: relative to its own cwd. `System32/kernel32.dll` matches no granted
+    // prefix as written — it only becomes recognisable once joined onto that
+    // cwd. On Windows the join is then resolved to the VERBATIM spelling
+    // `\\?\C:\Windows\System32\kernel32.dll`, which is precisely what the
+    // normalising comparison in `windows_path_is_under` was written for; on a
+    // POSIX host `canonicalize` fails and the literal join is graded instead.
+    // Either way the answer must be silence.
+    let scope = super::policy::SandboxScope::new(&manifest, Some(Path::new(r"C:\Windows")));
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                      LoadLibrary failed for System32/kernel32.dll\n\
+                      open /w/other/secret.txt: Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    let advisory = advisory_of(&result.content);
+    assert!(
+        !advisory.contains("kernel32"),
+        "a system path is still a system path when the child names it relative \
+         to its cwd; got advisory:\n{advisory}"
+    );
+    // Positive control: this cannot be passed by silencing the advisory.
+    assert!(
+        advisory.contains("secret.txt"),
+        "a genuinely ungranted path must still be reported; got:\n{}",
+        result.content
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sandbox_denial_does_not_fabricate_a_denial_for_a_symlink_into_a_system_root() {
+    // The same arm, reached the way a POSIX host reaches it. Vendoring a system
+    // tree into the workspace by symlink is ordinary (`result -> /nix/store/…`,
+    // `node_modules/.bin -> /usr/lib/node_modules/…`), and the child reports the
+    // link path it was handed, not the target. `vendor/bin` is inside the
+    // granted root as written and outside it once resolved, so neither the
+    // grant check nor the token spelling can excuse it — only the resolved
+    // spelling shows that the target is a root every backend ro-binds.
+    let ws = tempfile::tempdir().unwrap();
+    let granted = std::fs::canonicalize(ws.path()).unwrap();
+    std::os::unix::fs::symlink("/usr", granted.join("vendor")).unwrap();
+    assert!(
+        std::fs::canonicalize(granted.join("vendor/bin")).is_ok(),
+        "test precondition: /usr/bin must exist for the vendored link to resolve"
+    );
+
+    let manifest = wcore_sandbox::manifest::SandboxManifest {
+        fs_read_allow: vec![granted.clone()],
+        fs_write_allow: vec![granted.clone()],
+        fs_read_deny: vec![granted.join(".env")],
+        ..Default::default()
+    };
+    let scope = super::policy::SandboxScope::new(&manifest, Some(&granted));
+    let result = super::policy::annotate_sandbox_denial(
+        &scope,
+        ToolResult {
+            content: "Exit code: 1\nSTDOUT:\n\nSTDERR:\n\
+                      ld: cannot open vendor/bin: Operation not permitted\n\
+                      open /w/other/secret.txt: Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    let advisory = advisory_of(&result.content);
+    assert!(
+        !advisory.contains("/usr/bin"),
+        "a system root reached through a workspace symlink is granted by every \
+         backend and must not be reported as denied; got advisory:\n{advisory}"
+    );
+    // Positive control: this cannot be passed by silencing the advisory.
+    assert!(
+        advisory.contains("secret.txt"),
+        "a genuinely ungranted path must still be reported; got:\n{}",
+        result.content
+    );
+}
