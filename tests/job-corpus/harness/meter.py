@@ -28,6 +28,68 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 
+#: Where the operator pins per-model prices.  Deliberately a FILE, not a table
+#: baked into this module: a price nobody can point at the source of is a made-up
+#: number, and a made-up number in the one place the corpus checks money would be
+#: worse than no check at all.  A model absent from the file is UNPRICED, which is
+#: a state the harness can act on — it is exactly the condition under which a
+#: product showing "$0.00" is making a claim nobody can support.
+DEFAULT_PRICE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "keys", "model_prices.json"
+)
+
+
+class PriceBook:
+    """Per-model prices, in USD per million tokens, loaded from disk."""
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        self.path = os.path.abspath(path or DEFAULT_PRICE_FILE)
+        self.models: Dict[str, Dict[str, Any]] = {}
+        self.loaded = False
+        self.error: Optional[str] = None
+        self.load()
+
+    def load(self) -> "PriceBook":
+        if not os.path.isfile(self.path):
+            self.error = "no price file at %s" % self.path
+            return self
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            self.error = "price file unreadable: %r" % (exc,)
+            return self
+        models = data.get("models") if isinstance(data, dict) else None
+        if isinstance(models, dict):
+            self.models = {str(k): v for k, v in models.items() if isinstance(v, dict)}
+            self.loaded = True
+        else:
+            self.error = "price file has no 'models' object"
+        return self
+
+    def price(self, model: Optional[str], input_tokens, output_tokens):
+        """(cost_usd, priced, why).
+
+        `priced` is False whenever ANY input to the arithmetic is missing: an
+        unknown model, or a request whose token counts the provider never
+        reported.  Half a price is not a price.
+        """
+        if not model:
+            return 0.0, False, "the request named no model on the wire"
+        entry = self.models.get(model)
+        if entry is None:
+            return 0.0, False, "no pinned price for model %r in %s" % (model, self.path)
+        if input_tokens is None and output_tokens is None:
+            return 0.0, False, "the provider reported no token usage for this request"
+        try:
+            per_in = float(entry.get("input_usd_per_mtok", 0.0))
+            per_out = float(entry.get("output_usd_per_mtok", 0.0))
+        except (TypeError, ValueError):
+            return 0.0, False, "the pinned price for %r is not a number" % model
+        cost = (int(input_tokens or 0) * per_in + int(output_tokens or 0) * per_out) / 1_000_000.0
+        return cost, True, "priced from %s" % self.path
+
+
 class Meter:
     """Provider traffic the harness itself observed, one JSON object per line.
 
@@ -92,6 +154,43 @@ class Meter:
     def unpriced_request_count(self) -> int:
         return sum(1 for r in self.requests if not r.get("priced"))
 
+    @property
+    def models(self) -> List[str]:
+        seen: List[str] = []
+        for r in self.requests:
+            m = r.get("model")
+            if isinstance(m, str) and m and m not in seen:
+                seen.append(m)
+        return seen
+
+    @property
+    def input_tokens(self) -> int:
+        return sum(int(r.get("input_tokens") or 0) for r in self.requests)
+
+    @property
+    def output_tokens(self) -> int:
+        return sum(int(r.get("output_tokens") or 0) for r in self.requests)
+
+    def record_traffic(self, traffic: Iterable[Dict[str, Any]], prices: "PriceBook") -> int:
+        """Append what a recording proxy saw, priced by the pinned price book.
+
+        This is the meter's only real input.  Before it existed the meter was
+        fed by the selftest and by nothing else, so INV-5.cost could only fail
+        when the product volunteered `priced: false` about itself — a check
+        that can only fire on self-incrimination is not a check.
+        """
+        n = 0
+        for rec in traffic:
+            if rec.get("kind") != "provider_request":
+                self.append(**{k: v for k, v in rec.items()})
+                continue
+            cost, priced, why = prices.price(
+                rec.get("model"), rec.get("input_tokens"), rec.get("output_tokens")
+            )
+            self.append(cost_usd=round(cost, 8), priced=priced, pricing_note=why, **rec)
+            n += 1
+        return n
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "path": self.path,
@@ -99,6 +198,9 @@ class Meter:
             "request_count": self.request_count,
             "unpriced_request_count": self.unpriced_request_count,
             "priced_cost_usd": round(self.priced_cost_usd, 6),
+            "models": self.models,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
         }
 
 
@@ -185,6 +287,10 @@ class Claims:
         self.edited_named: List[str] = []
         self.completion_hits: List[str] = []
         self.json_lines = 0
+        #: Model identities the product named to the user, and how many turns
+        #: it accounted for.  Reconciled against the wire by INV-5.traffic.
+        self.claimed_models: List[str] = []
+        self.claimed_turns: Optional[int] = None
 
     # -- parsing ---------------------------------------------------------
     @classmethod
@@ -226,14 +332,22 @@ class Claims:
                 self.cost_values.append(total)
                 self.cost_sources.append("json:total_cost_usd")
                 per_turn = obj.get("per_turn")
+                per_turn = per_turn if isinstance(per_turn, list) else []
                 self.session_cost_events.append(
-                    {
-                        "total_cost_usd": total,
-                        "per_turn": per_turn if isinstance(per_turn, list) else [],
-                    }
+                    {"total_cost_usd": total, "per_turn": per_turn}
                 )
+                if per_turn:
+                    self.claimed_turns = max(self.claimed_turns or 0, len(per_turn))
+                for turn in per_turn:
+                    if isinstance(turn, dict):
+                        self._note_model(turn.get("model"))
+        self._note_model(obj.get("model"))
         for value in obj.values():
             self._walk(value, depth + 1)
+
+    def _note_model(self, value: Any) -> None:
+        if isinstance(value, str) and value and value not in self.claimed_models:
+            self.claimed_models.append(value)
 
     def _parse_text(self, text: str) -> None:
         for pat in _COST_TEXT_PATTERNS:
@@ -296,4 +410,6 @@ class Claims:
             "claimed_user_edit_count": self.claimed_user_edit_count,
             "edited_named": self.edited_named[:20],
             "completion_hits": sorted(set(self.completion_hits))[:20],
+            "claimed_models": self.claimed_models[:20],
+            "claimed_turns": self.claimed_turns,
         }

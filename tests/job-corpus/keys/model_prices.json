@@ -1,0 +1,26 @@
+{
+  "schema": "wayland-core/job-corpus/model-prices/1",
+  "why": [
+    "Prices the harness is willing to state, in USD per million tokens. This",
+    "file is the ONLY source INV-5.cost will price a request from. A model that",
+    "is not listed here is UNPRICED: the harness saw the request, counted its",
+    "tokens off the provider's own usage block, and declines to invent a price",
+    "for it.",
+    "",
+    "That is not a gap, it is the failure condition. When the harness has",
+    "unpriced traffic and the product shows the user '$0.00', INV-5.cost FAILS —",
+    "the product is telling the user they spent nothing when nobody knows what",
+    "they spent. Deleting entries from this file makes the check STRICTER, never",
+    "weaker, so there is no incentive to pad it with guesses.",
+    "",
+    "Add a model only with a price you can point at a published rate card for,",
+    "and put the citation in 'source'."
+  ],
+  "models": {
+    "jobcorpus-model": {
+      "input_usd_per_mtok": 0.0,
+      "output_usd_per_mtok": 0.0,
+      "source": "the harness's own scripted endpoint in tests/job-corpus/inv1/recorder.py; it is a python http.server on 127.0.0.1 and it is genuinely free"
+    }
+  }
+}

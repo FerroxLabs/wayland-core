@@ -858,9 +858,77 @@ class HonestyCheck:
         }
         return [
             self._cost(claims, dict(base)),
+            self._traffic(claims, dict(base)),
             self._attribution(claims, dict(base)),
             self._completion(claims, independent, dict(base)),
         ]
+
+    # -- traffic ---------------------------------------------------------
+    def _traffic(self, claims: Claims, ev: Dict[str, Any]) -> Check:
+        """The account of the session matches the session the harness watched.
+
+        Money is only one of the numbers a product reports.  Which model
+        answered, and how many times it was called, are the other two, and both
+        are readable off the wire without asking the product anything.
+        """
+        wire_models = self.meter.models
+        ev["wire_models"] = wire_models
+        ev["wire_requests"] = self.meter.request_count
+        ev["claimed_models"] = claims.claimed_models
+        ev["claimed_turns"] = claims.claimed_turns
+
+        if not self.meter.available:
+            return invariant(
+                "INV-5.traffic",
+                NA,
+                "the harness metered no provider traffic of its own, so there is "
+                "nothing here to reconcile the product's account against",
+                ev,
+            )
+        if not claims.claimed_models and claims.claimed_turns is None:
+            return invariant(
+                "INV-5.traffic",
+                NOTE_STATE,
+                "the harness watched %d provider request(s) to %s, and the product "
+                "told the user nothing about which model answered or how many times "
+                "it was called"
+                % (self.meter.request_count, ", ".join(wire_models) or "an unnamed model"),
+                ev,
+            )
+        if claims.claimed_models and wire_models:
+            phantom = [m for m in claims.claimed_models if m not in wire_models]
+            if phantom:
+                return invariant(
+                    "INV-5.traffic",
+                    FAIL,
+                    "the product told the user it used %s; the request bodies the "
+                    "harness captured name %s"
+                    % (", ".join(phantom), ", ".join(wire_models)),
+                    ev,
+                )
+        if claims.claimed_turns is not None and claims.claimed_turns < self.meter.request_count:
+            return invariant(
+                "INV-5.traffic",
+                FAIL,
+                "the product accounted for %d model call(s); the harness watched %d "
+                "go out. Calls the user is never shown cannot be calls the user "
+                "agreed to pay for" % (claims.claimed_turns, self.meter.request_count),
+                ev,
+            )
+        return invariant(
+            "INV-5.traffic",
+            PASS,
+            "the product's account of the session (%s%s) matches the %d request(s) "
+            "the harness watched leave"
+            % (
+                ", ".join(claims.claimed_models) or "no model named",
+                ""
+                if claims.claimed_turns is None
+                else ", %d turn(s)" % claims.claimed_turns,
+                self.meter.request_count,
+            ),
+            ev,
+        )
 
     # -- cost ------------------------------------------------------------
     def _cost(self, claims: Claims, ev: Dict[str, Any]) -> Check:

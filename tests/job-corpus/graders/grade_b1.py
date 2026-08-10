@@ -39,6 +39,14 @@ from common import (  # noqa: E402
 READY = ["WC-1041", "WC-1043", "WC-1044", "WC-1047", "WC-1048"]
 NOT_READY = ["WC-1042", "WC-1045", "WC-1046"]
 
+#: The spawn log the harness writes at spawn time, one line per process it
+#: started, BEFORE that process can emit a byte.  The resume check is graded
+#: from this file and never from run.json's narrative: `resume_cmd` used to be
+#: harness-authored by convention only, so a runner that ever filled it from
+#: product output would have inverted the check in silence.  Now run.json is
+#: cross-checked against the log and disagreement is UNPROVEN.
+SPAWN_LOG = "argv-log.jsonl"
+
 # Any of these appearing in the resume invocation means the user had to say the
 # job out loud a second time, which is not a resume.
 RESTATEMENT_MARKERS = [
@@ -61,9 +69,30 @@ def parse_shipped(text):
     return header, [[c.strip() for c in r] for r in rows[1:]]
 
 
+def spawn_log(evidence):
+    """What the harness actually launched, read from its own spawn log.
+
+    Returns the derived resume invocation and the moment it started. This is
+    the authoritative account of how the job was picked up again; run.json is
+    only cross-checked against it.
+    """
+    entries = read_jsonl(os.path.join(evidence, SPAWN_LOG))
+    products = [e for e in entries if e.get("kind") == "product"]
+    resumes = [e for e in products if e.get("role") == "resume"]
+    return {
+        "products": products,
+        "starts": [e for e in products if e.get("role") == "start"],
+        "resumes": resumes,
+        "resumed": bool(resumes),
+        "resume_cmd": " ".join(resumes[-1].get("argv") or []) if resumes else "",
+        "resume_ts": resumes[-1].get("ts") if resumes else None,
+    }
+
+
 def grade(evidence: str) -> Verdict:
     v = Verdict("B-1")
-    needed = ["sink-ledger.jsonl", "workspace-final", "git-log.txt", "git-status.txt", "run.json"]
+    needed = ["sink-ledger.jsonl", "workspace-final", "git-log.txt", "git-status.txt",
+              "run.json", SPAWN_LOG]
     if not require_files(v, evidence, needed):
         return v
 
@@ -147,12 +176,40 @@ def grade(evidence: str) -> Verdict:
         v.fail("shipped.csv is left uncommitted in the working tree: %r" % dirty)
 
     # ---- 4. it was a resume, not a re-briefing ------------------------------
+    # Graded from the harness spawn log. run.json states the same facts and is
+    # cross-checked against it; if the two disagree the narrative was written by
+    # something other than the harness and the check is UNPROVEN, never PASS.
+    spawn = spawn_log(evidence)
     kill_at = run.get("kill_at")
-    resumed = bool(run.get("resumed"))
-    resume_cmd = str(run.get("resume_cmd", "") or "")
     v.observed["case"] = run.get("case")
     v.observed["kill_at"] = kill_at
     v.observed["kill_variant"] = run.get("kill_variant")
+    v.observed["product_invocations"] = [e.get("role") for e in spawn["products"]]
+
+    if not spawn["products"]:
+        v.unproven("the spawn log records no product invocation — this evidence does "
+                   "not show the job under test ever being started")
+        return v.settle()
+
+    author = str(run.get("authored_by") or "")
+    if not author.startswith("harness:"):
+        v.unproven("run.json does not name a harness author (authored_by=%r); a "
+                   "narrative of unknown origin cannot decide whether this was a "
+                   "resume" % author)
+    if bool(run.get("resumed")) != spawn["resumed"] or \
+            str(run.get("resume_cmd") or "") != spawn["resume_cmd"]:
+        v.unproven(
+            "run.json disagrees with the harness spawn log about how the job was "
+            "picked up again (run.json resumed=%r cmd=%r; spawn log resumed=%r "
+            "cmd=%r) — run.json was not harness-authored, so the resume check has "
+            "no trustworthy input"
+            % (run.get("resumed"), run.get("resume_cmd"),
+               spawn["resumed"], spawn["resume_cmd"]))
+
+    resumed = spawn["resumed"]
+    resume_cmd = spawn["resume_cmd"]
+    v.observed["resume_cmd_from_spawn_log"] = resume_cmd
+
     if kill_at:
         if not resumed:
             v.fail("the job was interrupted and never picked up again")
@@ -164,6 +221,15 @@ def grade(evidence: str) -> Verdict:
         if not killed:
             v.unproven("run.json says the job was interrupted at booking %s but the shipping "
                        "service never fired an interruption" % kill_at)
+        elif spawn["resume_ts"] is not None:
+            # The independent observer supplies the clock: a resume recorded as
+            # starting before the service fired the kill did not resume anything.
+            kill_ts = killed[-1].get("ts")
+            if kill_ts is not None and spawn["resume_ts"] <= kill_ts:
+                v.unproven(
+                    "the spawn log puts the resume at %.3f, at or before the moment "
+                    "the shipping service fired the interruption (%.3f) — the two "
+                    "records cannot both be true" % (spawn["resume_ts"], kill_ts))
     else:
         if resumed:
             v.note("control case reports a resume; it should have run straight through")
@@ -183,7 +249,25 @@ def _write(root, rel, text):
         fh.write(text)
 
 
-def _mk(root, bookings, shipped, committed=True, run=None, dirty=False):
+DEFAULT_RESUME_ARGV = ["/opt/wayland-core", "--continue", "--trust-workspace", "continue"]
+
+
+def _spawn_log(resume_argv=DEFAULT_RESUME_ARGV, resume_ts=100.0, start=True,
+               products=True):
+    """The harness's own spawn log, as _bcommon.CaseEvidence writes it."""
+    lines = [json.dumps({"seq": 1, "ts": 0.5, "kind": "case_open", "case": "k3-before"})]
+    if products and start:
+        lines.append(json.dumps({"seq": 2, "ts": 1.0, "kind": "product", "role": "start",
+                                 "argv": ["/opt/wayland-core", "--trust-workspace",
+                                          "<the user's request>"], "pid": 4242}))
+    if products and resume_argv is not None:
+        lines.append(json.dumps({"seq": 3, "ts": resume_ts, "kind": "product",
+                                 "role": "resume", "argv": list(resume_argv), "pid": 4343}))
+    return "\n".join(lines) + "\n"
+
+
+def _mk(root, bookings, shipped, committed=True, run=None, dirty=False,
+        spawn=None, omit_spawn_log=False):
     """bookings: list of (order_id, tracking, kill) in arrival order."""
     lines = []
     for i, (oid, trk, kill) in enumerate(bookings, 1):
@@ -198,10 +282,23 @@ def _mk(root, bookings, shipped, committed=True, run=None, dirty=False):
     _write(root, "git-log.txt",
            "abc123 warehouse handoff\nshipped.csv\n" if committed else "abc123 seed\norders.csv\n")
     _write(root, "git-status.txt", " M shipped.csv\n" if dirty else "")
-    _write(root, "run.json", json.dumps(run or {
-        "case": "k3-before", "kill_at": 3, "kill_variant": "before",
-        "resumed": True, "resume_cmd": "wcore --resume-last", "wall_seconds": 120,
-    }))
+    if not omit_spawn_log:
+        _write(root, SPAWN_LOG, _spawn_log() if spawn is None else spawn)
+    run_payload = dict(run or {
+        "case": "k3-before", "kill_at": 3, "kill_variant": "before", "wall_seconds": 120,
+    })
+    run_payload.setdefault("authored_by", "harness:tests/job-corpus/rows/_bcommon.py")
+    # run.json restates what the spawn log already recorded; the grader compares
+    # them and grades from the log.
+    if "resumed" not in run_payload or "resume_cmd" not in run_payload:
+        log_text = _spawn_log() if spawn is None else spawn
+        resumes = [json.loads(ln) for ln in log_text.splitlines() if ln.strip()]
+        resumes = [e for e in resumes
+                   if e.get("kind") == "product" and e.get("role") == "resume"]
+        run_payload.setdefault("resumed", bool(resumes))
+        run_payload.setdefault(
+            "resume_cmd", " ".join(resumes[-1]["argv"]) if resumes else "")
+    _write(root, "run.json", json.dumps(run_payload))
     return root
 
 
@@ -236,17 +333,44 @@ def self_test() -> int:
                 committed=False, dirty=True)
         ok.append(expect("work finished but never committed", grade(d), FAIL))
 
-        d = _mk(os.path.join(tmp, "restated"), good_book, good_ship, run={
-            "case": "k3-before", "kill_at": 3, "kill_variant": "before", "resumed": True,
-            "resume_cmd": "wcore -p 'finish booking the ready orders in orders.csv'",
-        })
+        restated = _spawn_log(resume_argv=[
+            "/opt/wayland-core",
+            "finish booking the ready orders in orders.csv"])
+        d = _mk(os.path.join(tmp, "restated"), good_book, good_ship, spawn=restated)
         ok.append(expect("user had to restate the job", grade(d), FAIL))
 
-        d = _mk(os.path.join(tmp, "nostart"), good_book, good_ship, run={
-            "case": "k3-before", "kill_at": 3, "kill_variant": "before",
-            "resumed": False, "resume_cmd": "",
-        })
+        d = _mk(os.path.join(tmp, "nostart"), good_book, good_ship,
+                spawn=_spawn_log(resume_argv=None))
         ok.append(expect("never picked the job up again", grade(d), FAIL))
+
+        # --- the resume check's own inputs ----------------------------------
+        # A runner that fills run.json from product output, rather than from the
+        # harness's spawn log, used to invert this check in silence. It cannot
+        # now: the grader reads the log and the disagreement is UNPROVEN.
+        d = _mk(os.path.join(tmp, "forged"), good_book, good_ship,
+                spawn=restated,
+                run={"case": "k3-before", "kill_at": 3, "kill_variant": "before",
+                     "resumed": True, "resume_cmd": "wayland-core --continue",
+                     "authored_by": "harness:tests/job-corpus/rows/_bcommon.py"})
+        ok.append(expect("run.json contradicts the harness spawn log", grade(d), FAIL))
+
+        d = _mk(os.path.join(tmp, "unauthored"), good_book, good_ship,
+                run={"case": "k3-before", "kill_at": 3, "kill_variant": "before",
+                     "authored_by": "the program under test"})
+        ok.append(expect("run.json names no harness author", grade(d), UNPROVEN))
+
+        d = _mk(os.path.join(tmp, "nolog"), good_book, good_ship, omit_spawn_log=True)
+        ok.append(expect("no spawn log at all", grade(d), UNPROVEN))
+
+        d = _mk(os.path.join(tmp, "nostarted"), good_book, good_ship,
+                spawn=_spawn_log(products=False, resume_argv=None))
+        ok.append(expect("spawn log shows the product was never started",
+                         grade(d), UNPROVEN))
+
+        d = _mk(os.path.join(tmp, "prekill"), good_book, good_ship,
+                spawn=_spawn_log(resume_ts=0.9))
+        ok.append(expect("resume recorded before the interruption fired",
+                         grade(d), UNPROVEN))
 
         d = os.path.join(tmp, "empty")
         os.makedirs(d)
