@@ -182,6 +182,29 @@ fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
 /// `tempfile` crate's `.tmpXXXXXX` scratch directories — and therefore that
 /// acceptance suite's escape target — outside the grant.
 ///
+/// **The prefix may not CONTAIN a dot either, and that is not cosmetic.**
+/// mktemp's `XXXXXXXXXX` is ten alphanumerics, and a reverse-DNS directory name
+/// whose last label happens to be ten alphanumerics is the same string shape.
+/// Measured against the real `confstr` directory on Darwin 25.3.0 — 10 517
+/// top-level entries — a prefix class that admitted `.` matched seven live
+/// Apple daemon directories, because `dataaccess`, `adprivacyd`, `biomesyncd`,
+/// `calaccessd`, `sessionkit`, `BiomeAgent` and `ap.adprivacyd` are each
+/// exactly ten characters after the final dot:
+///
+/// ```text
+/// com.apple.BiomeAgent  com.apple.adprivacyd  com.apple.ap.adprivacyd
+/// com.apple.biomesyncd  com.apple.calaccessd  com.apple.dataaccess
+/// com.apple.sessionkit
+/// ```
+///
+/// With `(/.*)?` on the end that was a RECURSIVE READ AND WRITE grant over
+/// seven directories belonging to other processes, and it was live: a sandboxed
+/// `echo pwn > <T>/com.apple.dataaccess/probe` exited 0 and the file was on
+/// disk afterwards, and `ls <T>/com.apple.dataaccess` enumerated it. Dropping
+/// `.` from the prefix class revokes exactly those seven and grants nothing new
+/// (measured: 21 covered entries before, 14 after, 0 added), while `mktemp` and
+/// `mktemp -t <prefix>` both still match — their prefixes carry no dot.
+///
 /// **`xcrun_db` is deliberately NOT covered, and that was measured, not
 /// assumed.** The xcrun shim's "couldn't create cache file" line appears twice
 /// on every sandboxed `git`, `python3` and `clang`, so an earlier revision of
@@ -232,7 +255,7 @@ fn darwin_temp_regex(dir: &std::path::Path) -> Option<String> {
     }
     let ten = "[A-Za-z0-9]".repeat(10); // mktemp's XXXXXXXXXX
     Some(format!(
-        "^{prefix}/[A-Za-z0-9_][A-Za-z0-9_.-]*\\.{ten}(/.*)?$"
+        "^{prefix}/[A-Za-z0-9_][A-Za-z0-9_-]*\\.{ten}(/.*)?$"
     ))
 }
 
@@ -1193,6 +1216,136 @@ mod tests {
         assert!(
             !rx.contains("xcrun"),
             "the xcrun cache is deliberately not granted: {rx}"
+        );
+    }
+
+    /// The prefix half of the pattern may not admit a `.`.
+    ///
+    /// mktemp's `XXXXXXXXXX` is ten alphanumerics, and a reverse-DNS directory
+    /// name whose final label is ten alphanumerics has the same shape. Measured
+    /// against the real `confstr` directory on Darwin 25.3.0 — 10 517 top-level
+    /// entries — a prefix class containing `.` matched seven live Apple daemon
+    /// directories (`com.apple.dataaccess`, `com.apple.adprivacyd`,
+    /// `com.apple.biomesyncd`, `com.apple.calaccessd`, `com.apple.sessionkit`,
+    /// `com.apple.BiomeAgent`, `com.apple.ap.adprivacyd`), and with `(/.*)?`
+    /// appended that was recursive read AND write over each of them.
+    ///
+    /// This is the cheap shape pin that runs on every platform;
+    /// [`the_temp_grant_denies_a_reverse_dns_neighbour`] is the live proof that
+    /// SBPL's own engine agrees, which is the one that actually counts.
+    #[test]
+    fn darwin_temp_regex_prefix_class_admits_no_dot() {
+        let rx = darwin_temp_regex(std::path::Path::new("/private/var/folders/8h/probe/T"))
+            .expect("regex builds");
+        assert!(
+            rx.contains("/[A-Za-z0-9_][A-Za-z0-9_-]*\\."),
+            "the prefix class must exclude `.` or a reverse-DNS neighbour whose \
+             last label is ten alphanumerics falls inside the grant: {rx}"
+        );
+        assert!(
+            !rx.contains("[A-Za-z0-9_.-]"),
+            "this is the exact class that granted seven Apple daemon dirs: {rx}"
+        );
+    }
+
+    /// The live half: SBPL's own engine must refuse a neighbour of the shape
+    /// that used to slip through, while `mktemp`'s shape still works.
+    ///
+    /// Both directions are in ONE test on purpose. A grant that stopped
+    /// matching `mktemp` and a grant that reached a neighbour are both
+    /// failures, and SBPL reports neither — a rule that never matches loads in
+    /// complete silence (that is how the `{10}` interval bug survived). Only a
+    /// positive control next to the negative one separates "correctly narrow"
+    /// from "silently dead".
+    ///
+    /// The neighbour is synthesised rather than borrowed from Apple: it has the
+    /// same NAME SHAPE as `com.apple.dataaccess` (a dotted prefix plus a
+    /// ten-alphanumeric final label) but belongs to this test, so the assertion
+    /// never depends on which daemons happen to be running and the test never
+    /// writes into another process's scratch.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn the_temp_grant_denies_a_reverse_dns_neighbour() {
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+        let t = darwin_user_temp_dir().expect("confstr reports a per-user temp dir");
+        let work = tempfile::tempdir().expect("workspace");
+        let canon_work = std::fs::canonicalize(work.path()).expect("canonicalize workspace");
+        let m = SandboxManifest {
+            fs_write_allow: vec![canon_work],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        // `{:010}` of a u32 pid is always exactly ten digits, which is exactly
+        // mktemp's template width, and unique enough that two concurrent runs
+        // cannot collide.
+        let tag = format!("{:010}", std::process::id());
+        assert_eq!(
+            tag.len(),
+            10,
+            "fixture is dead: the final label must be ten characters or neither \
+             directory has the shape this test exists to discriminate"
+        );
+        let neighbour = t.join(format!("com.waylandtest.{tag}"));
+        let mktemp_shaped = t.join(format!("tmp.{tag}"));
+        std::fs::create_dir_all(&neighbour).expect("create the synthetic neighbour");
+        std::fs::create_dir_all(&mktemp_shaped).expect("create the mktemp-shaped dir");
+
+        // NEGATIVE first, graded from the filesystem rather than the exit code.
+        // An `is_error: false` with no side effect on disk is the failure this
+        // project has been burned by; here the inverse matters just as much —
+        // a file on disk is the only proof the denial did not hold.
+        let denied_target = neighbour.join("probe");
+        let _ = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/tee".into(),
+                        denied_target.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("backend runs even when the confined child fails");
+        let leaked = denied_target.exists();
+        let _ = std::fs::remove_file(&denied_target);
+        let _ = std::fs::remove_dir(&neighbour);
+
+        // POSITIVE: the same operation one directory over, at mktemp's naming,
+        // must still succeed — otherwise the grant is silently dead.
+        let allowed_target = mktemp_shaped.join("probe");
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/tee".into(),
+                        allowed_target.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("backend runs");
+        let landed = allowed_target.exists();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let _ = std::fs::remove_file(&allowed_target);
+        let _ = std::fs::remove_dir(&mktemp_shaped);
+
+        assert!(
+            !leaked,
+            "a sandboxed write reached {denied_target:?} — a reverse-DNS \
+             neighbour under the per-user temp directory is inside the grant again"
+        );
+        assert!(
+            landed,
+            "the grant no longer covers mktemp's own naming, so `mktemp` is \
+             broken under the sandbox; stderr={stderr:?}"
         );
     }
 

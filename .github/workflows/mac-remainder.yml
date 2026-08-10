@@ -18,6 +18,11 @@ on:
   push:
     branches:
       - fix/macos-remainder
+      - fix/macos-toolchains-green
+  # The lane needs a binary on demand, not only when a commit lands: a macOS
+  # release build is the long pole in every fix/measure cycle and re-pushing
+  # just to re-trigger cancels the run already in flight.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -50,7 +55,12 @@ jobs:
     name: build aarch64-apple-darwin
     # Only when the commit asks for it: a release build of wcore-cli is ~1 h of
     # macOS runner time and the red half of a red/green cycle does not need one.
-    if: contains(github.event.head_commit.message, '[artifact]')
+    # `workflow_dispatch` carries no `head_commit`, so without the explicit
+    # event check a manual run would silently produce no artifact — asking for
+    # a binary and getting a green run with nothing in it.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.head_commit.message, '[artifact]')
     runs-on: macos-latest
     timeout-minutes: 90
     steps:
