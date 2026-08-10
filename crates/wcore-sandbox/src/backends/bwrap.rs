@@ -269,6 +269,15 @@ impl BubblewrapBackend {
         // Lifecycle + isolation.
         bwrap_argv.push("--die-with-parent".into());
         bwrap_argv.push("--unshare-all".into());
+        // `--unshare-all` includes UTS, but a fresh UTS namespace is a COPY of
+        // the parent's — the host's node name comes with it, so `uname -n` /
+        // `gethostname(2)` inside the sandbox returned the real machine's name
+        // and anything the agent reported from in there carried host identity.
+        // `--hostname` is what actually sets the new namespace's name, and it
+        // is legal precisely because UTS is unshared above (it stays legal
+        // under `--share-net`, which gives back the NET namespace only).
+        bwrap_argv.push("--hostname".into());
+        bwrap_argv.push(SANDBOX_NODENAME.into());
         // --unshare-all already shares-nothing including network. If the
         // manifest requested Inherit network, give the child the host net ns
         // back via --share-net.
@@ -737,6 +746,20 @@ enum DenyMountKind {
 #[cfg(target_os = "linux")]
 const SYNTHETIC_ETC_FILES: [&str; 4] = ["passwd", "group", "hosts", "nsswitch.conf"];
 
+/// The node name every sandboxed child sees, on every host.
+///
+/// `--unshare-all` puts the child in a fresh UTS namespace, but a fresh UTS
+/// namespace is a COPY of the parent's: the host's node name comes with it and
+/// `gethostname(2)`/`uname -n` inside the sandbox return the real machine's
+/// name. The synthetic `/etc` scaffold already withholds `/etc/hostname`, so
+/// the file path was closed while the syscall path stayed open, and anything
+/// the agent reported from inside the sandbox carried host identity.
+///
+/// It is a fixed literal, not a random or derived string: the point is that
+/// the name reveals nothing, and a per-run value would still be an
+/// observable that differs between hosts.
+const SANDBOX_NODENAME: &str = "wayland-sandbox";
+
 /// Materialise minimal stand-ins for the four `/etc` files the blanket `/etc`
 /// bind used to supply from the host.
 ///
@@ -777,7 +800,15 @@ fn synthetic_etc_scaffold() -> Result<tempfile::TempDir> {
         ("group", format!("sandbox:x:{gid}:\nnogroup:x:65534:\n")),
         (
             "hosts",
-            "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n".to_owned(),
+            // `SANDBOX_NODENAME` is an alias of loopback, not a bare rename:
+            // `getaddrinfo(gethostname())` is a real startup step for the JVM,
+            // MPI and several build systems, and it used to succeed off the
+            // host's own name. Renaming the node without this line would trade
+            // the identity leak for a resolution failure.
+            format!(
+                "127.0.0.1\tlocalhost {SANDBOX_NODENAME}\n\
+                 ::1\tlocalhost ip6-localhost ip6-loopback {SANDBOX_NODENAME}\n"
+            ),
         ),
         (
             "nsswitch.conf",
@@ -908,6 +939,26 @@ fn read_bwrap_child_pid(reader: &mut impl std::io::Read) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This machine's node name, read from the kernel rather than from any
+    /// environment variable a test runner could have set.
+    ///
+    /// Off Linux this is never called (the only caller is `ignore`d there),
+    /// but the body must still compile because `cfg_attr(…, ignore)` keeps the
+    /// test in the tree on every platform.
+    fn hostname_of_this_machine() -> String {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .expect("read /proc/sys/kernel/hostname")
+                .trim()
+                .to_owned()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            String::new()
+        }
+    }
 
     #[test]
     fn is_available_reflects_path() {
@@ -1529,6 +1580,92 @@ mod tests {
         assert!(
             !checkout.join("marker").exists(),
             "child escaped to the swapped-in decoy"
+        );
+    }
+
+    /// The sandbox must not hand the child the HOST's identity.
+    ///
+    /// `--unshare-all` does create a UTS namespace, but a fresh UTS namespace
+    /// INHERITS the parent's node name — unsharing alone changes nothing an
+    /// observer can see. Measured on `Ubuntu-2404-noble-amd64-base` before the
+    /// fix: `hostname` inside the sandbox printed the host's real name, and it
+    /// reached the provider verbatim inside a Bash tool_result. `/etc/hostname`
+    /// was already withheld (the synthetic `/etc` scaffold does not supply it),
+    /// so the file path was closed and the SYSCALL path was not.
+    ///
+    /// Graded from the child's own stdout — the bytes `gethostname(2)` returned
+    /// inside the namespace — never from any argv the parent believes it built.
+    ///
+    /// Arm 1 is the instrument control: without proving the same probe CAN see
+    /// a hostname, "did not print the host name" would also be the reading for
+    /// a probe that printed nothing at all.
+    ///
+    /// Fails if bwrap is absent — never skips.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn required_live_bwrap_does_not_leak_the_host_hostname() {
+        let backend = BubblewrapBackend::new();
+        assert!(
+            backend.is_available(),
+            "required live bwrap must be installed and usable"
+        );
+        let host = hostname_of_this_machine();
+        assert!(
+            !host.is_empty() && host != SANDBOX_NODENAME,
+            "instrument precondition: this host must have a node name of its \
+             own to leak, and it must differ from the sandbox name; got {host:?}"
+        );
+
+        let output = backend
+            .execute(
+                &SandboxManifest {
+                    network: NetworkPolicy::Deny,
+                    ..Default::default()
+                },
+                SandboxCommand {
+                    argv: vec!["sh".into(), "-c".into(), "uname -n".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("required live bwrap hostname execution");
+        assert_eq!(output.exit_code, 0, "{output:?}");
+        let seen = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+
+        // ARM 1 — control: the probe really does read a node name.
+        assert!(
+            !seen.is_empty(),
+            "instrument control: `uname -n` produced nothing, so the \
+             containment assertion below would pass vacuously. {output:?}"
+        );
+        // ARM 2 — containment: it is NOT this machine's.
+        assert_ne!(
+            seen, host,
+            "the sandboxed child read the host's node name; the UTS namespace \
+             was unshared but never given a name of its own"
+        );
+        assert_eq!(
+            seen, SANDBOX_NODENAME,
+            "the child's node name must be the fixed sandbox name, so it \
+             carries no host-derived entropy at all"
+        );
+    }
+
+    /// The synthetic `/etc/hosts` must resolve whatever name the child reads
+    /// from `gethostname(2)`. Renaming the node without this entry is a
+    /// regression, not a fix: `getaddrinfo(gethostname())` is what the JVM,
+    /// MPI and several build systems do on startup, and it would begin
+    /// failing inside the sandbox where it used to work off the host name.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn synthetic_hosts_resolves_the_sandbox_nodename() {
+        let dir = synthetic_etc_scaffold().expect("scaffold");
+        let hosts = std::fs::read_to_string(dir.path().join("hosts")).expect("hosts");
+        assert!(
+            hosts
+                .lines()
+                .any(|l| l.split_whitespace().skip(1).any(|f| f == SANDBOX_NODENAME)),
+            "no /etc/hosts entry maps {SANDBOX_NODENAME} to an address:\n{hosts}"
         );
     }
 }
