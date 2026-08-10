@@ -201,6 +201,9 @@ pub mod tool_search;
 // Wayland Python engine). HELPER module — callers wire it into HTTP-client
 // redirect hooks and tool pre-flight checks.
 pub mod url_safety;
+// P2: refuses a whole-file Write that would delete unsaved user work
+// (lines on disk but not in the file's last committed version).
+pub mod unsaved_work;
 // W8a A.3: VirtualFs trait + RealFs / InMemoryFs / SandboxedFs (X2).
 pub mod vfs;
 // T3-3.5 (sub-wave 5): video_analyze tool — AI video analysis via a
