@@ -89,6 +89,96 @@ fn doctor_exit_code_is_deterministic() {
     );
 }
 
+/// OBS-03, both directions, on a PATH the test owns.
+///
+/// `doctor_exit_code_is_deterministic` above accepts either code, which means
+/// it cannot fail for the thing that matters: it would pass just as happily
+/// against a doctor that always exits 0. This row decides the code instead of
+/// observing it, by building a synthetic PATH that holds every binary the
+/// Linux doctor requires and then removing exactly one.
+///
+/// Linux-only. macOS downgrades the browser row to `Warn` and has no
+/// `wlrctl`/`grim` rows at all, so on macOS there is no required PATH binary
+/// to remove — the arm would be untestable rather than merely skipped, and
+/// pretending otherwise is how a green row that cannot fail gets shipped.
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_fails_when_a_required_dependency_is_missing_and_names_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("wlc-doctor-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let bin_dir = root.join("bin");
+    let home = root.join("home");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    std::fs::create_dir_all(&home).expect("home");
+
+    // `doctor` resolves everything through `which(1)`, so the real one has to
+    // be reachable; the probed binaries are stubs, because the doctor only
+    // asks whether they RESOLVE.
+    let real_which = which_on_the_host("which");
+    std::os::unix::fs::symlink(&real_which, bin_dir.join("which")).expect("link which");
+    for prog in ["chromium", "wlrctl", "grim"] {
+        let p = bin_dir.join(prog);
+        std::fs::write(&p, "#!/bin/sh\nexit 0\n").expect("stub");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    let doctor = |bin_dir: &std::path::Path| -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_wayland-core"))
+            .env_clear()
+            .env("PATH", bin_dir)
+            .env("HOME", &home)
+            .env("WAYLAND_HOME", &home)
+            .arg("--doctor")
+            .output()
+            .expect("spawn wayland-core --doctor")
+    };
+
+    // ARM 1 — control. Every required binary resolves, so the doctor must say
+    // so. Without this arm, arm 2's non-zero could just be "this host is
+    // missing something else entirely".
+    let ok = doctor(&bin_dir);
+    assert_eq!(
+        ok.status.code(),
+        Some(0),
+        "control arm: with every required dependency on PATH the doctor must \
+         exit 0, else arm 2 proves nothing.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ok.stdout),
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    // ARM 2 — remove exactly one required dependency.
+    std::fs::remove_file(bin_dir.join("grim")).expect("remove grim");
+    let missing = doctor(&bin_dir);
+    let stdout = String::from_utf8_lossy(&missing.stdout).into_owned();
+    let _ = std::fs::remove_dir_all(&root);
+
+    assert_eq!(
+        missing.status.code(),
+        Some(1),
+        "a missing REQUIRED dependency must exit 1:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.starts_with("[FAIL]") && l.contains("grim")),
+        "the report must NAME the dependency that is missing — a bare \
+         non-zero exit tells the user nothing actionable:\n{stdout}"
+    );
+}
+
+/// Resolve a program on the REAL host PATH, for wiring into the synthetic one.
+#[cfg(target_os = "linux")]
+fn which_on_the_host(prog: &str) -> std::path::PathBuf {
+    let out = Command::new("/usr/bin/env")
+        .args(["which", prog])
+        .output()
+        .unwrap_or_else(|e| panic!("locate {prog}: {e}"));
+    assert!(out.status.success(), "`which {prog}` failed on this host");
+    std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
 #[test]
 fn doctor_prints_mcp_section_and_does_not_probe_by_default() {
     // A4b: bare `--doctor` must render the CLI-only MCP section AND, since

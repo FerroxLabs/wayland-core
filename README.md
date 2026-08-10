@@ -564,6 +564,7 @@ Closed-source tools (Claude Code, Codex CLI) are a docs-based orientation, not a
 | Document | Covers |
 |----------|--------|
 | [Getting Started](docs/getting-started.md) | Install, CLI reference, config and cascading precedence |
+| [Exit Codes](docs/exit-codes.md) | The process exit-code contract for scripting and CI |
 | [Providers & Auth](docs/providers.md) | Multi-provider setup, ProviderCompat, profiles |
 | [Built-in Tools](docs/tools.md) | The tool catalog and execution flow |
 | [Skills](docs/skills.md) | Front matter, shell expansion, conditional activation |

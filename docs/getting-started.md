@@ -107,6 +107,19 @@ The rest:
 
 ---
 
+## Exit codes
+
+`wayland-core` sets `$?` from the outcome of the run, so a script or CI step
+can branch on it without parsing stdout: `0` completed, `1` never started,
+`2` usage error, `3` ended on an unrecovered tool failure, `4` stopped at a
+limit, `130`/`143`/`129` interrupted / terminated / hung up.
+
+→ [Exit codes](exit-codes.md) is the full contract, and the integration test
+`crates/wcore-cli/tests/exit_code_contract.rs` grades the binary against that
+page so the two cannot drift.
+
+---
+
 ## Configuration
 
 ### Three-Level Cascading
