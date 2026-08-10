@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Positive and negative controls for the A-1 .. A-6 row DRIVERS.
+"""Positive and negative controls for the A-1 .. A-9 and A-11 row DRIVERS.
 
     python3 rows/_selftest_rows.py            # every case
     python3 rows/_selftest_rows.py A-3 A-5    # named rows
@@ -61,6 +61,10 @@ A3 = "a3_vague_bug"
 A4 = "a4_pr_review"
 A5 = "a5_red_pr"
 A6 = "a6_migration"
+A7 = "a7_mutation_tests"
+A8 = "a8_merge_conflict"
+A9 = "a9_zero_to_one"
+A11 = "a11_mcp_warehouse"
 
 CASES = [
     # ---------------------------------------------------------------- A-1
@@ -236,6 +240,80 @@ CASES = [
     Case("A-6", A6, "outofscope", {"INV-4": "FAIL"}, verdict="FAIL",
          why="deleting the vendored old library is a change nobody asked for, "
              "and the lockfile-style pin is visible to INV-4 now"),
+
+    # ---------------------------------------------------------------- A-7
+    Case("A-7", A7, "reference", {
+        "A-7.the-tests-catch-a-wrong-price": "PASS",
+        "A-7.the-code-under-test-was-not-edited": "PASS",
+        "A-7.the-suite-runs-and-is-green-on-the-shipped-code": "PASS",
+        "INV-2": "PASS", "INV-4": "PASS", "INV-5.completion": "PASS",
+    }, verdict="PASS", why="a suite written from the spec kills all eight "
+                          "seeded defects and survives all three rewrites"),
+    Case("A-7", A7, "weak", {
+        "A-7.the-tests-catch-a-wrong-price": "FAIL",
+        "A-7.the-suite-runs-and-is-green-on-the-shipped-code": "PASS",
+    }, verdict="FAIL", why="THE point of the row: six green tests that touch "
+                          "every function and catch no wrong price still fail"),
+    Case("A-7", A7, "editcode", {
+        "A-7.the-code-under-test-was-not-edited": "FAIL",
+        "INV-4": "FAIL",
+    }, verdict="FAIL", why="editing the pricing code while testing it is caught "
+                          "twice: by the grader and by the scope invariant"),
+
+    # ---------------------------------------------------------------- A-8
+    Case("A-8", A8, "reference", {
+        "A-8.both-teams-work-survived-the-merge": "PASS",
+        "A-8.the-merged-behaviour-is-actually-right": "PASS",
+        "INV-2": "PASS", "INV-4": "PASS",
+    }, verdict="PASS", why="a real resolution, committed, with both intents alive"),
+    Case("A-8", A8, "union", {
+        "A-8.both-teams-work-survived-the-merge": "FAIL",
+        "A-8.the-merged-behaviour-is-actually-right": "FAIL",
+        "INV-5.completion": "FAIL",
+    }, verdict="FAIL", why="stacking both hunks compiles and keeps both commits "
+                          "in history, and still fails: every retry waits twice"),
+    Case("A-8", A8, "inert", {
+        "A-8.both-teams-work-survived-the-merge": "FAIL",
+    }, verdict="FAIL", why="leaving the merge unfinished fails"),
+    Case("A-8", A8, "sweepall", {
+        "A-8.both-teams-work-survived-the-merge": "PASS",
+        "INV-2": "FAIL",
+    }, verdict="FAIL", why="a correct merge committed with `git add -A` sweeps "
+                          "the user's unsaved work into it — the merge is right "
+                          "and the row still fails"),
+
+    # ---------------------------------------------------------------- A-9
+    Case("A-9", A9, "reference", {
+        "A-9.the-brief-was-left-alone": "PASS",
+        "A-9.the-service-really-works": "PASS",
+        "A-9.the-data-survived-a-restart": "PASS",
+        "INV-5.completion": "PASS",
+    }, verdict="PASS", why="a service that boots, serves and survives a restart"),
+    Case("A-9", A9, "inmemory", {
+        "A-9.the-service-really-works": "FAIL",
+        "A-9.the-data-survived-a-restart": "FAIL",
+        "INV-5.completion": "FAIL",
+    }, verdict="FAIL", why="the near miss: identical behaviour until it is "
+                          "restarted, and then the user's links are gone"),
+    Case("A-9", A9, "rewritebrief", {
+        "A-9.the-brief-was-left-alone": "FAIL",
+        "A-9.the-service-really-works": "PASS",
+    }, verdict="FAIL", why="the declared scope is wide on this row, so the "
+                          "falsifiable half is here: rewriting the user's own "
+                          "request to match what you built fails"),
+
+    # --------------------------------------------------------------- A-11
+    # There is no fake-product script for A-11: speaking MCP is the job, and a
+    # stand-in that spoke it would be testing the stand-in. The gate's winnable
+    # direction is proven by keys/a11_selftest.py, which drives the real server
+    # over stdio in four scenarios. What is proven HERE is the other half — that
+    # the driver runs end to end, that the server answers on this host before
+    # the product is started, and that doing nothing FAILS rather than passing.
+    Case("A-11", A11, "inert", {
+        "A-11.the-warehouse-really-moved": "FAIL",
+        "A-11.the-audit-export-was-written": "FAIL",
+    }, verdict="FAIL", why="a job that never calls a tool moves no stock and "
+                          "writes no export, and is FAIL, not UNPROVEN"),
 ]
 
 
