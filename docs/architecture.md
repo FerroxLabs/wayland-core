@@ -354,8 +354,8 @@ be transmitted outside the allowed egress set.
 
 **Exec-time capability gate:** `SandboxBackend::enforces_read_deny()` reports
 `true` only for backends that actually enforce `fs_read_deny` at the OS level
-(macOS sandbox-exec, Linux bwrap, Windows AppContainer, Docker with
-`live-docker` feature). The authoritative gate lives inside `bash.rs`
+(macOS sandbox-exec, Linux bwrap, Windows AppContainer when explicitly opted
+into, Docker with `live-docker` feature). The authoritative gate lives inside `bash.rs`
 `execute_with_ctx` / `execute_streaming_with_ctx` — checked on the same
 `default_for_platform()` instance that will run the command (TOCTOU-free). A
 bootstrap UX gate in `channel_tools.rs::keep_under` additionally drops `Bash`
@@ -368,9 +368,18 @@ so the model never sees a tool it cannot safely invoke.
 |---------|-----------|------------------------|
 | macOS sandbox-exec | `(deny file-read* (subpath …))` SBPL rules after allows (last-match-wins) | `true` |
 | Linux bwrap | `--ro-bind /dev/null <file>` / `--tmpfs <dir>` overlay after positive binds | `true` |
-| Windows AppContainer | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) |
+| Windows AppContainer (opt-in, `WAYLAND_SANDBOX=appcontainer`) | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) |
+| Windows Job Object (**the Windows default**) | Kill-on-close Job Object owns the process tree; env scrubbed to the manifest. No AppContainer profile, no Low-integrity token, so no OS filesystem or network confinement. | `false` (default) |
 | Docker (`live-docker`) | `/dev/null:<path>:ro` bind / empty-dir bind after mounts | `true` |
 | `no_sandbox` / `FailClosed` | Not enforced | `false` (default) |
+
+On Windows the default is therefore the RELAXED row, and the `false` there is
+load-bearing rather than a gap left open: it is what makes `channel_tools.rs`
+drop `Bash` from `Workspace` posture and what makes the `bash.rs` gate refuse.
+The relaxation had to be a backend SWAP for exactly that reason —
+`AppContainerBackend::enforces_read_deny()` is derived from its availability
+probe and takes no manifest, so emptying `fs_read_deny` under it would have
+left the claim (and both gates) standing.
 
 **Residuals (each backstopped by network-Deny):**
 

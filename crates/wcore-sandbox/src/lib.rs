@@ -9,8 +9,13 @@
 //! limits are advisory rather than enforced.
 //!
 //! `default_for_platform` selects the platform's real backend by `cfg`:
-//! bubblewrap on Linux, sandbox-exec on macOS, AppContainer on Windows
-//! (Docker is an opt-in via `WAYLAND_SANDBOX=docker`). There is no
+//! bubblewrap on Linux, sandbox-exec on macOS, and on Windows the RELAXED
+//! `windows_job_object` backend — kill-on-close Job Object process-tree
+//! ownership with no AppContainer profile and therefore no OS filesystem or
+//! network confinement. AppContainer STRICT is an opt-in via
+//! `WAYLAND_SANDBOX=appcontainer` (Docker via `WAYLAND_SANDBOX=docker`).
+//! See `platform_candidate` for why relaxing Windows had to be a backend swap
+//! rather than a policy relaxation. There is no
 //! unsandboxed default — when no real backend is available the dispatcher
 //! fails closed via `FailClosedBackend` (refusing execution), and only
 //! falls back to `NoSandboxBackend` under the explicit
@@ -48,7 +53,8 @@ use wcore_types::execution_policy::DangerousSessionGrant;
 /// degrading to host-permission execution (audit M-2 / rel-concurrency-70).
 const ALLOW_NO_SANDBOX_ENV: &str = "WAYLAND_ALLOW_NO_SANDBOX";
 
-/// Env-var name selecting the sandbox backend (`none` / `docker`).
+/// Env-var name selecting the sandbox backend (`none` / `docker`, plus
+/// `appcontainer` on Windows to opt back in to the STRICT posture).
 const SANDBOX_ENV: &str = "WAYLAND_SANDBOX";
 
 /// Resolve the process-level compatibility backend selection. Hosted sessions
@@ -410,8 +416,16 @@ impl SandboxRegistry {
             // `--json-stream` `ready` frame, so selection must not spend a
             // startup-unsafe availability probe here. See
             // [`select_without_startup_probe`].
-            None => real_platform_backend_with(select_without_startup_probe)
+            None => real_platform_backend_with(select_without_startup_probe, false)
                 .unwrap_or_else(|| Box::new(FailClosedBackend::new())),
+            // Windows STRICT, opted in explicitly. Guarded on `cfg!(windows)`
+            // so Linux and macOS keep rejecting the value as
+            // `UnknownBackend` exactly as before — this arm must not become a
+            // way to name a foreign backend on a host that cannot run it.
+            Some(other) if cfg!(windows) && windows_strict_requested(Some(other)) => {
+                real_platform_backend_with(select_without_startup_probe, true)
+                    .unwrap_or_else(|| Box::new(FailClosedBackend::new()))
+            }
             Some("docker") => {
                 use backends::SandboxBackend as _;
                 let docker = backends::docker::DockerBackend::new();
@@ -697,12 +711,42 @@ fn select_without_startup_probe(
     select_probing_now(candidate)
 }
 
+/// Whether the operator's backend choice asks for the Windows STRICT
+/// (AppContainer) posture.
+///
+/// One predicate over the one choice string BOTH cascades already resolve, so
+/// the session path and the compatibility path cannot come to different answers
+/// about the same `WAYLAND_SANDBOX` / `[tools] sandbox` value. Callers gate it
+/// on `cfg!(windows)`: on Linux and macOS `appcontainer` is not a selectable
+/// backend and must keep answering exactly as it did before (`UnknownBackend`
+/// on the session path, ignored on the compatibility path).
+fn windows_strict_requested(choice: Option<&str>) -> bool {
+    matches!(
+        choice.map(|c| c.trim().to_ascii_lowercase()).as_deref(),
+        Some("appcontainer") | Some("strict")
+    )
+}
+
 /// The real backend this target ships, CONSTRUCTED ONLY — never probed.
 ///
 /// Split from selection so the platform `cfg` cascade exists exactly once and
 /// every selection policy sees the same candidate. A second cascade is how the
 /// session path and the compatibility path would drift apart.
-fn platform_candidate() -> Option<Box<dyn backends::SandboxBackend>> {
+///
+/// **Windows defaults to the RELAXED backend.** `windows_strict` restores
+/// AppContainer, and is set only by an explicit operator choice
+/// ([`windows_strict_requested`]). The relaxation is a BACKEND SWAP and must
+/// stay one: `AppContainerBackend::enforces_read_deny()` is derived from its
+/// availability probe and takes no manifest, so it answers `true` on an
+/// ordinary Windows session whatever the manifest says. Relaxing by emptying
+/// `fs_read_deny` while keeping that backend would therefore leave the claim
+/// standing, and both consumers of it — the `Workspace` channel posture's
+/// `Bash` drop and the exec-time gate in `wcore_tools::bash` — would stay open
+/// together, because they read the same predicate. Swapping the backend moves
+/// the predicate, so the net fires exactly as designed. Measured on SEANDESKTOP
+/// 2026-08-10: unprobed `settled_verdict()==None` still yields
+/// `enforces_read_deny()==true`.
+fn platform_candidate(_windows_strict: bool) -> Option<Box<dyn backends::SandboxBackend>> {
     #[cfg(target_os = "linux")]
     {
         let backend = backends::bwrap::BubblewrapBackend::new();
@@ -715,8 +759,8 @@ fn platform_candidate() -> Option<Box<dyn backends::SandboxBackend>> {
     }
     #[cfg(target_os = "windows")]
     {
-        let backend = backends::appcontainer::AppContainerBackend::new();
-        Some(Box::new(backend))
+        announce_windows_posture(_windows_strict);
+        Some(windows_candidate(_windows_strict))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -724,19 +768,88 @@ fn platform_candidate() -> Option<Box<dyn backends::SandboxBackend>> {
     }
 }
 
+/// THE Windows containment decision, isolated into one branch-free-elsewhere
+/// function and compiled on EVERY target so it is testable off Windows.
+///
+/// `strict == false` is the shipping default and must yield a backend whose
+/// `enforces_read_deny()` is the trait default `false`; `strict == true` is the
+/// operator's explicit opt-in back to AppContainer.
+// Off Windows only the tests below call this; the `cfg(windows)` branch of
+// `platform_candidate` is its production caller. Kept compiled everywhere
+// rather than `cfg(windows)`-gated so the decision cannot regress unobserved on
+// the Linux and macOS CI legs, which are the only ones that run on every push.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_candidate(strict: bool) -> Box<dyn backends::SandboxBackend> {
+    if strict {
+        Box::new(backends::appcontainer::AppContainerBackend::new())
+    } else {
+        Box::new(backends::windows_job_object::WindowsJobObjectBackend::new())
+    }
+}
+
+/// State plainly, once per process, what Windows containment is and is not
+/// active. An operator must be able to read the posture out of the log rather
+/// than infer it from a backend name.
+#[cfg(target_os = "windows")]
+fn announce_windows_posture(strict: bool) {
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    ANNOUNCED.call_once(|| {
+        if strict {
+            tracing::info!(
+                target: "wcore_sandbox",
+                backend = "appcontainer",
+                posture = "strict",
+                process_tree_owned = true,
+                filesystem_confined = true,
+                network_denied = true,
+                secret_read_deny_enforced = true,
+                "Windows sandbox posture STRICT (opt-in): AppContainer profile + \
+                 Low-integrity restricted token + kill-on-close Job Object. \
+                 Filesystem allowlists, fs_read_deny and network denial are enforced \
+                 by the OS. PowerShell cannot run under this token.",
+            );
+        } else {
+            tracing::warn!(
+                target: "wcore_sandbox",
+                backend = "windows_job_object",
+                posture = "relaxed",
+                process_tree_owned = true,
+                filesystem_confined = false,
+                network_denied = false,
+                secret_read_deny_enforced = false,
+                "Windows sandbox posture RELAXED (default). ACTIVE: kill-on-close \
+                 Job Object process-tree ownership, and the child's environment is \
+                 scrubbed to the manifest's entries. NOT ACTIVE: no AppContainer \
+                 profile, no Low-integrity token, no OS filesystem confinement \
+                 (fs_read_allow / fs_write_allow / fs_read_deny are not enforced) \
+                 and no OS network denial — a child process runs with this user's \
+                 filesystem and network access. Approval gates and channel tool \
+                 posture are unchanged, and because this backend does not enforce \
+                 secret-read-deny the Bash tool is withheld from remote Workspace \
+                 sessions. Set WAYLAND_SANDBOX=appcontainer (or `[tools] sandbox = \
+                 \"appcontainer\"`) to restore STRICT.",
+            );
+        }
+    });
+}
+
 /// The single platform cascade. Returns the real native backend for this
 /// target when `select` admits it. Never consults process-global configuration
 /// and never falls back to NoSandbox.
 fn real_platform_backend_with(
     select: SelectionPolicy,
+    windows_strict: bool,
 ) -> Option<Box<dyn backends::SandboxBackend>> {
-    platform_candidate().and_then(select)
+    platform_candidate(windows_strict).and_then(select)
 }
 
 /// Return the real native backend when one is available *right now*, probing to
 /// find out. See [`select_probing_now`] for why this caller keeps the probe.
 fn real_platform_backend() -> Option<Box<dyn backends::SandboxBackend>> {
-    real_platform_backend_with(select_probing_now)
+    real_platform_backend_with(
+        select_probing_now,
+        cfg!(windows) && windows_strict_requested(resolved_sandbox_choice().as_deref()),
+    )
 }
 
 #[cfg(test)]
@@ -851,11 +964,165 @@ mod selection_policy_tests {
     }
 }
 
+#[cfg(test)]
+mod windows_posture_tests {
+    //! The Windows RELAXED default, driven through the SAME function
+    //! `platform_candidate` calls. These run on every target: the decision
+    //! ([`windows_candidate`]) is compiled everywhere precisely so the Linux and
+    //! macOS CI legs — the only ones that run on every push — can catch a
+    //! regression of it.
+    // `SandboxBackend` needs no import here: every assertion below is made
+    // against a `Box<dyn SandboxBackend>`, whose methods resolve through the
+    // trait object itself.
+    use super::*;
+
+    /// The lane's headline: the Windows session default must NOT be
+    /// AppContainer.
+    ///
+    /// Non-vacuous on every target — `windows_candidate(false)` returning the
+    /// AppContainer backend fails this by name whether or not the host can run
+    /// AppContainer.
+    #[test]
+    fn windows_default_selects_the_relaxed_job_object_backend() {
+        assert_eq!(
+            windows_candidate(false).name(),
+            "windows_job_object",
+            "the Windows session default must be the relaxed Job Object backend"
+        );
+    }
+
+    /// …and the reason it has to be a backend SWAP: the default must not claim
+    /// OS-level secret-read-deny, because that single predicate is what drops
+    /// `Bash` from the `Workspace` channel posture AND what makes the exec-time
+    /// gate in `wcore_tools::bash` refuse. Emptying `fs_read_deny` under
+    /// AppContainer cannot move it.
+    ///
+    /// NOTE ON VACUITY: off Windows `AppContainerBackend` is the compile stub,
+    /// whose `enforces_read_deny()` is already the trait default `false`, so on
+    /// Linux/macOS this assertion alone would also hold for the WRONG backend.
+    /// The name assertion above is what carries it on those targets, and
+    /// `strict_posture_still_claims_read_deny_enforcement` below is the
+    /// positive control that makes it decisive on Windows.
+    #[test]
+    fn windows_default_does_not_claim_read_deny_enforcement() {
+        assert!(
+            !windows_candidate(false).enforces_read_deny(),
+            "the relaxed Windows default must not claim OS-level secret-read-deny"
+        );
+    }
+
+    /// Positive control for the assertion above. On Windows the AppContainer
+    /// backend DOES claim read-deny enforcement (liveness-derived, `true` even
+    /// unprobed — measured on SEANDESKTOP 2026-08-10), so the relaxed default's
+    /// `false` is a real difference and not a property both arms happen to
+    /// share. Windows-only because off Windows the strict arm is a stub.
+    #[cfg(windows)]
+    #[test]
+    fn strict_posture_still_claims_read_deny_enforcement() {
+        let strict = windows_candidate(true);
+        assert_eq!(strict.name(), "appcontainer");
+        assert!(
+            strict.enforces_read_deny(),
+            "positive control failed: if AppContainer no longer claims read-deny \
+             enforcement, the relaxed default's `false` proves nothing"
+        );
+    }
+
+    /// The opt-in is a real switch, not a one-way door.
+    #[test]
+    fn strict_posture_is_reachable_by_explicit_opt_in() {
+        assert!(
+            windows_candidate(true).name().starts_with("appcontainer"),
+            "`appcontainer` must still be selectable when the operator asks for it"
+        );
+    }
+
+    #[test]
+    fn strict_opt_in_accepts_the_documented_spellings_only() {
+        for accepted in ["appcontainer", "strict", "  AppContainer  ", "STRICT"] {
+            assert!(
+                windows_strict_requested(Some(accepted)),
+                "`{accepted}` must request the strict Windows posture"
+            );
+        }
+        for rejected in [
+            None,
+            Some(""),
+            Some("docker"),
+            Some("none"),
+            Some("relaxed"),
+        ] {
+            assert!(
+                !windows_strict_requested(rejected),
+                "`{rejected:?}` must NOT request the strict Windows posture"
+            );
+        }
+    }
+
+    /// Linux and macOS must be untouched by this lane. `platform_candidate`
+    /// takes a Windows-posture argument now; on these targets BOTH values must
+    /// still produce the same backend they always did.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn other_platforms_ignore_the_windows_posture_argument() {
+        let expected = if cfg!(target_os = "linux") {
+            "bubblewrap"
+        } else {
+            "sandbox_exec"
+        };
+        for strict in [false, true] {
+            let candidate =
+                platform_candidate(strict).expect("this target ships a real backend candidate");
+            assert_eq!(
+                candidate.name(),
+                expected,
+                "the Windows posture argument must not change selection on this target"
+            );
+        }
+    }
+
+    /// …and the value that opts Windows into STRICT must stay an UNKNOWN
+    /// backend on the session path elsewhere, exactly as before this lane.
+    #[cfg(not(windows))]
+    #[test]
+    fn appcontainer_is_still_an_unknown_backend_off_windows() {
+        let _lock = SANDBOX_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(matches!(
+            SandboxRegistry::required_for_session(Some("appcontainer")),
+            Err(SandboxError::UnknownBackend(_))
+        ));
+    }
+
+    /// End-to-end on the real session path: a default Windows session resolves
+    /// to the relaxed backend and reports no read-deny enforcement, which is
+    /// what `bootstrap` reads to decide the channel tool posture.
+    #[cfg(windows)]
+    #[test]
+    fn windows_session_default_is_relaxed_end_to_end() {
+        let _lock = SANDBOX_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = std::env::var(SANDBOX_ENV).ok();
+        // SAFETY: serialized by SANDBOX_TEST_LOCK; restored below.
+        unsafe { std::env::remove_var(SANDBOX_ENV) };
+        let registry = SandboxRegistry::required_for_session(None).expect("session backend");
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var(SANDBOX_ENV, previous) };
+        }
+        assert_eq!(registry.backend_name(), "windows_job_object");
+        assert!(!registry.enforces_read_deny());
+        assert!(
+            !registry.bypasses_containment(),
+            "the relaxed default is a real backend, never a containment bypass"
+        );
+    }
+}
+
 /// Choose the default backend for the current platform.
 ///
-/// Each platform's real backend is selected by a `cfg` branch below:
-/// bubblewrap (Linux), sandbox-exec (macOS), AppContainer (Windows), each
-/// used when its `is_available()` holds. There is no unsandboxed default —
+/// Each platform's real backend is selected by a `cfg` branch in
+/// [`platform_candidate`]: bubblewrap (Linux), sandbox-exec (macOS), and on
+/// Windows the relaxed `windows_job_object` backend unless
+/// `WAYLAND_SANDBOX=appcontainer` opts back in to STRICT — each used when its
+/// `is_available()` holds. There is no unsandboxed default —
 /// when no real backend is available the dispatcher fails closed (see below).
 ///
 /// `WAYLAND_SANDBOX=none` forces the no-op backend, but ONLY when the
