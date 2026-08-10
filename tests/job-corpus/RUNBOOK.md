@@ -293,6 +293,48 @@ are stripped from every child environment.
 Rows that need a provider and have none are **UNPROVEN with that reason** —
 the product was never asked to do anything, so nothing about it was measured.
 
+### Provisioning the credential (A rows AND B rows)
+
+Without it, A-1..A-6 return before entering `RowContext`, so INV-2, INV-3,
+INV-4 and INV-5 are never *constructed* and INV-1 never sees a wire — four of
+the five trust invariants measure nothing while the sheet still looks full.
+
+On `hetzner-dsm`, provisioned into **tmpfs**, never onto a normal filesystem
+and never onto argv:
+
+```
+/dev/shm/jobcorpus/api.key        mode 600, the key and nothing else
+/dev/shm/jobcorpus/provider.toml  mode 600, [default] + [providers.jobcorpus]
+/dev/shm/jobcorpus/env.sh         mode 600, the five variables below
+```
+
+```sh
+export JOBCORPUS_API_KEY_FILE=/dev/shm/jobcorpus/api.key
+export JOBCORPUS_PROVIDER=openai
+export JOBCORPUS_MODEL=claude-sonnet-4-6
+export JOBCORPUS_BASE_URL=https://api.fluxrouter.ai
+export JOBCORPUS_PROVIDER_TOML=/dev/shm/jobcorpus/provider.toml
+```
+
+Deliver the key over ssh **stdin** into a script already on the remote. Never
+`ssh host "... $KEY ..."`: argv is visible in `ps` to every user on the box.
+
+**Teardown, at the end of the run:** `rm -rf /dev/shm/jobcorpus`. It is tmpfs,
+so it never reached a disk and a reboot clears it regardless.
+
+`JOBCORPUS_BASE_URL` is the **bare host**, with no `/v1`. The product appends
+`/v1/chat/completions` to whatever base URL it is given, and the recording
+endpoint relays `<upstream path> + <captured path>`; a `/v1` on both sides
+produces `/v1/v1/chat/completions` and the whole run dies on `404 Not Found`
+having proved nothing. The same applies to `base_url` inside the provider
+fragment.
+
+**Spend ceiling.** The gateway exposes no budget API — `/v1/key`, `/v1/usage`,
+`/v1/credits`, `/v1/limits` and `/v1/account` all answer 404 — so there is no
+provider-side cap to set and none was set. What bounds the run is entirely
+harness-side: `--max-turns 40` per job (`_common.product_argv`) and each row's
+`TIMEOUT`. State it that way; do not describe the run as capped.
+
 ---
 
 ## 6. Reading the output
