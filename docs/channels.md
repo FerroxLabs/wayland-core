@@ -201,23 +201,61 @@ acknowledgement is ONE token, and the refusal prints it for you to paste:
 ```toml
 [inbound]
 dm = "open"
-acknowledge_open_admission = ["admission-v1 enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0"]
+acknowledge_open_admission = ["admission-v2 platform=telegram enabled=true dm=open dm_allowlist=0 group=disabled group_allowlist=0 sender_allowlist=0 require_mention=true tools=conversational tool_workspace_root=0 options.allowed_chat_ids=a:1:s:123456789 options.credential_handle=s:telegram%2Eacme%2Ebot_token"]
 ```
+
+Don't type it: run the product, read the refusal, paste the line it prints.
 
 #### The token is the channel's whole admission shape
 
 It renders every setting that decides who is admitted, what they can
 trigger without addressing the bot, and what the resulting turn may do to
-this host: `enabled`, `dm`, `dm_allowlist`, `group`, `group_allowlist`,
-`sender_allowlist`, `require_mention`, `tools`, `tool_workspace_root`.
-Change any of them and the token changes, so the old consent stops applying
-and the process refuses until you look at the new shape.
+this host: `platform`, `enabled`, `dm`, `dm_allowlist`, `group`,
+`group_allowlist`, `sender_allowlist`, `require_mention`, `tools`,
+`tool_workspace_root`, **and every key in `[options]`**. Change any of them
+and the token changes, so the old consent stops applying and the process
+refuses until you look at the new shape.
 
 `tools` is in there because "anyone may DM this bot" is a materially
 different decision at the safe `conversational` floor than at `full` host
 access, and moving between them is one word. `ack` and the two
 session-shaping flags are NOT in there — they change neither who reaches
 the agent nor what the turn may do.
+
+#### Why `[options]` is in the token, all of it
+
+`[inbound]` is not the only place a channel decides who is admitted. Four
+adapters carry a SECOND admission filter in their own `[options]` table,
+and for every one of them an **absent or empty list admits everyone**:
+
+| Adapter | Key | Empty or absent means |
+|---|---|---|
+| email | `[options.imap] allowed_senders` | every `From:` is admitted |
+| discord | `[options] allowed_channel_ids` | every channel is admitted |
+| telegram | `[options] allowed_chat_ids` | every chat is admitted |
+| imessage | `[options] allowed_handles` | every handle is admitted |
+
+So deleting one line used to widen the admitted set from a named list to
+everyone while producing a byte-identical token, and the widened config
+started on the narrow config's consent.
+
+The token renders the **whole** table rather than those four keys, and that
+is deliberate: the enumeration is the failure mode. This gate has been
+bypassed three times by a category nobody listed. A declared key list fails
+the same way again the day an eleventh adapter ships a filter nobody
+registered. Rendering everything means there is nothing to register and
+nothing to forget — a new key is inside the consent the day it is written.
+
+The price is that editing a reach-irrelevant option (`poll_interval_secs`,
+`max_retry_attempts`) on an **already-open** channel costs you one
+re-acknowledgement. The refusal names the key and prints `acknowledged
+<was>, now <is>`, including `(absent)` when a key was deleted or added, so
+that is a few seconds. Reordering or repeating a list entry admits exactly
+the same principals and is **not** a change.
+
+An `admission-v1` token — the previous encoding, which named neither
+`platform` nor `[options]` — is refused with a message that says so, not
+silently honoured.
 
 That is not pedantry — it is the hole an earlier, per-field token list had.
 With `group_allowlist = ["G1"]` and `sender_allowlist = ["*"]` you have

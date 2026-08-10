@@ -347,9 +347,15 @@ fn json_stream_host_receives_one_clean_error_frame() {
         message.contains("p2chan"),
         "the host must learn WHICH channel is at fault; got: {message}"
     );
+    // The version is read from the crate rather than written out: the literal
+    // that used to be here silently went stale when the token gained the
+    // `[options]` half, and a stale literal here is a test that stops checking
+    // the thing it names.
     assert!(
-        message.contains("acknowledge_open_admission = [\"admission-v1 ")
-            && message.contains("dm=open"),
+        message.contains(&format!(
+            "acknowledge_open_admission = [\"{} ",
+            wcore_channels::ADMISSION_SHAPE_VERSION
+        )) && message.contains("dm=open"),
         "and must carry the exact remedy — the whole-shape token, not prose — or the desktop \
          user has no way forward; got: {message}"
     );

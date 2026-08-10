@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ChannelConfig;
 use crate::event::{ChatType, IncomingMessage};
 
 /// Policy governing who may DM the bot.
@@ -196,18 +197,30 @@ pub struct InboundPolicy {
     /// anything, and one later word (`enabled = true`) admitted everyone.
     ///
     /// So the token is derived from the whole shape — see [`SHAPE_FIELDS`] for
-    /// the exact list and for what is deliberately outside it. Any change to
+    /// the fixed part and for what is deliberately outside it. Any change to
     /// any of those settings changes the token and demands fresh consent.
+    ///
+    /// The same hole opened a THIRD time through `[options]`, which is not in
+    /// `[inbound]` at all: four adapters keep their own admission filter there
+    /// and an ABSENT one admits everyone, so deleting one line widened the
+    /// admitted set while changing no token. The shape therefore covers
+    /// `platform` and every `[options]` key too — see [`AdmissionShape`] for
+    /// why that is the whole table rather than a declared list of keys.
     ///
     /// # What is cosmetic, precisely
     ///
     /// Allowlists are normalised before rendering: sorted, de-duplicated, and
-    /// collapsed to `*` when they hold the wildcard (which subsumes every other
-    /// entry). `["G1","G2"]` and `["G2","G1","G2"]` therefore produce the same
-    /// token, because they admit the same principals. `["G1"]` and `["*"]` do
-    /// not. Refusing a reordering would teach operators that the gate cries
-    /// wolf, and an operator who stops reading refusals reaches for the
-    /// nuclear option — which is the failure mode this key exists to prevent.
+    /// (in `[inbound]`) collapsed to `*` when they hold the wildcard, which
+    /// subsumes every other entry. `["G1","G2"]` and `["G2","G1","G2"]`
+    /// therefore produce the same token, because they admit the same
+    /// principals. `["G1"]` and `["*"]` do not. Refusing a reordering would
+    /// teach operators that the gate cries wolf, and an operator who stops
+    /// reading refusals reaches for the nuclear option — which is the failure
+    /// mode this key exists to prevent.
+    ///
+    /// `[options]` lists are sorted and de-duplicated too, but the wildcard is
+    /// NOT collapsed there: no adapter option list honours `"*"`, so `["*"]`
+    /// and `["*","111"]` admit different sets.
     ///
     /// # Both directions are refusals
     ///
@@ -445,9 +458,13 @@ pub fn open_admissions(policy: &InboundPolicy) -> Vec<OpenAdmission> {
 /// Present so the encoding can change without a stored token silently meaning
 /// something else: a token written under an older tag does not parse, and an
 /// unparseable token refuses rather than being ignored.
-pub const ADMISSION_SHAPE_VERSION: &str = "admission-v1";
+///
+/// `v2` added `platform` and the whole `[options]` table — see
+/// [`AdmissionShape`].
+pub const ADMISSION_SHAPE_VERSION: &str = "admission-v2";
 
-/// Every setting a consent is bound to, in token order.
+/// The FIXED part of the shape, in token order. The `[options]` part is
+/// dynamic and follows these — see [`OPTION_FIELD_PREFIX`].
 ///
 /// # The rule for what is in here
 ///
@@ -455,6 +472,10 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v1";
 /// admitted principal can trigger without addressing the bot, or what the
 /// resulting turn is allowed to do to this host**:
 ///
+/// - `platform` — which adapter parses `[options]`, and therefore what every
+///   key in it MEANS. `allowed_senders` is an email delivery filter and nothing
+///   at all to a Slack channel, so a token that fixed the options but floated
+///   the platform would be consenting to a reading of them that could change.
 /// - `enabled` — a switched-off channel admits nobody. It lives on
 ///   [`crate::config::ChannelConfig`] rather than in `[inbound]`, and it is in
 ///   the shape precisely because leaving it out let an operator consent to an
@@ -482,7 +503,8 @@ pub const ADMISSION_SHAPE_VERSION: &str = "admission-v1";
 /// who reaches the agent or what the turn may do, and every field in here is a
 /// field whose edit costs the operator a re-acknowledgement — so the line is
 /// drawn at reach and authority, not at "everything on the struct".
-pub const SHAPE_FIELDS: [&str; 9] = [
+pub const SHAPE_FIELDS: [&str; 10] = [
+    "platform",
     "enabled",
     "dm",
     "dm_allowlist",
@@ -493,6 +515,109 @@ pub const SHAPE_FIELDS: [&str; 9] = [
     "tools",
     "tool_workspace_root",
 ];
+
+/// Prefix every rendered `[options]` key carries in a token, so the dynamic
+/// tail cannot be confused with (or forge) one of the [`SHAPE_FIELDS`].
+pub const OPTION_FIELD_PREFIX: &str = "options.";
+
+/// Everything a consent is bound to, for ONE channel.
+///
+/// # Why the whole `[options]` table is in here, and not a list of keys
+///
+/// `[inbound]` is not the only place a channel decides who is admitted. Four
+/// of the ten adapters carry a SECOND, adapter-level admission filter in their
+/// own `[options]` table, and in every one of them an ABSENT or EMPTY list is
+/// the most permissive state:
+///
+/// | Adapter | Key | Empty means |
+/// |---|---|---|
+/// | email | `options.imap.allowed_senders` | every `From:` is admitted |
+/// | discord | `options.allowed_channel_ids` | every channel is admitted |
+/// | telegram | `options.allowed_chat_ids` | every chat is admitted |
+/// | imessage | `options.allowed_handles` | every handle is admitted |
+///
+/// So `[options.imap] allowed_senders = ["boss@acme.test"]` and the same file
+/// with that ONE line deleted used to produce a byte-identical token, and the
+/// widened config started on the narrow config's consent. That is the same
+/// defect the whole-shape token was built to close, one config section over.
+///
+/// # Why this is the whole table rather than a declared key list
+///
+/// The obvious repair is for each adapter to declare its admission-relevant
+/// keys and for the token to render those. It was rejected, because **the
+/// enumeration IS the failure mode.** This gate has now been bypassed three
+/// times by a category nobody enumerated: first a per-field token list that
+/// could not see a widening of a field it did not name, then `enabled`, and now
+/// `[options]`. A declared key list fails in exactly that direction again —
+/// adapter number eleven ships a new filter, nobody adds it to the list, and
+/// the bypass is silent, at runtime, with no test able to see it.
+///
+/// Rendering the WHOLE table inverts the direction of the failure. There is
+/// nothing to enumerate, so nothing to forget; a new adapter, a new key, or a
+/// key nobody has thought about yet is inside the token the day it is written,
+/// with no registration step and no coverage test to keep current. The cost of
+/// being wrong becomes an over-refusal an operator SEES (the refusal names the
+/// key, the old value and the new one) rather than a widening nobody sees.
+///
+/// # The cost, honestly
+///
+/// An operator who edits a genuinely reach-irrelevant option — `poll_interval_secs`,
+/// `max_retry_attempts` — on an ALREADY-OPEN channel is asked to re-acknowledge.
+/// That is the whole price, and it is bounded three ways: it applies only to
+/// channels that already admit an unbounded set of senders (a deliberately
+/// exceptional, deliberately uncomfortable state), the ten adapters' option
+/// sets are small and static, and the refusal prints `key: acknowledged <was>,
+/// now <is>` so the operator re-consents in seconds rather than decoding a
+/// hash. Paying that against a silent third bypass is not a close call.
+///
+/// Cosmetic edits are still free: option lists are sorted and de-duplicated
+/// before rendering, exactly as the `[inbound]` allowlists are.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmissionShape<'a> {
+    /// `platform` from [`crate::config::ChannelConfig`].
+    pub platform: &'a str,
+    /// `enabled` from [`crate::config::ChannelConfig`].
+    pub enabled: bool,
+    /// The channel's whole `[options]` table.
+    pub options: &'a toml::Table,
+    /// The channel's `[inbound]` policy.
+    pub inbound: &'a InboundPolicy,
+}
+
+impl<'a> AdmissionShape<'a> {
+    /// Build a shape from its parts. Prefer [`ChannelConfig::admission_shape`]
+    /// — it cannot omit one.
+    pub fn new(
+        platform: &'a str,
+        enabled: bool,
+        options: &'a toml::Table,
+        inbound: &'a InboundPolicy,
+    ) -> Self {
+        Self {
+            platform,
+            enabled,
+            options,
+            inbound,
+        }
+    }
+}
+
+impl ChannelConfig {
+    /// This channel's admission shape — every setting a consent is bound to.
+    ///
+    /// Borrowing the whole `ChannelConfig` is the point: the gate cannot be
+    /// handed a subset of the file, so a field cannot be dropped on the way in.
+    /// The previous signature took `(name, enabled, &inbound)` and that is
+    /// precisely how `[options]` stayed outside the token.
+    pub fn admission_shape(&self) -> AdmissionShape<'_> {
+        AdmissionShape {
+            platform: &self.platform,
+            enabled: self.enabled,
+            options: &self.options,
+            inbound: &self.inbound,
+        }
+    }
+}
 
 /// Rendering of an EMPTY allowlist. Distinct from `1:` (a list holding one
 /// empty-string entry) because those permit different sets.
@@ -532,19 +657,24 @@ fn canonical_opt(value: Option<&str>) -> String {
     }
 }
 
-/// Percent-escape the characters that would otherwise make a token ambiguous:
-/// the entry separator, the escape character itself, and anything whitespace or
-/// control (the field separator is a space).
+/// Percent-escape every character that carries structure in a token: the field
+/// separator (space, and any other whitespace or control), the field/value
+/// separator (`=`), the entry separator (`,`), the `[options]` path separator
+/// (`.`), and the escape character itself.
 ///
 /// Without this, `["a,b"]` and `["a","b"]` would render identically while
 /// admitting different senders — a collision that would let a widening pass as
-/// unchanged.
+/// unchanged. `.` and `=` matter for the same reason on the `[options]` side:
+/// a table key `"a.b"` must not render as the nested path `a.b`, and a key
+/// holding `=` must not be able to split into a field nobody wrote.
 fn escape_entry(entry: &str) -> String {
     let mut out = String::with_capacity(entry.len());
     for ch in entry.chars() {
         match ch {
             '%' => out.push_str("%25"),
             ',' => out.push_str("%2C"),
+            '.' => out.push_str("%2E"),
+            '=' => out.push_str("%3D"),
             c if c.is_whitespace() || c.is_control() => {
                 let mut buf = [0u8; 4];
                 for b in c.encode_utf8(&mut buf).as_bytes() {
@@ -579,26 +709,133 @@ fn canonical_list(list: &[String]) -> String {
     format!("{}:{}", escaped.len(), escaped.join(","))
 }
 
-/// `(field, canonical value)` for every field in [`SHAPE_FIELDS`], in order.
-fn shape_fields(enabled: bool, policy: &InboundPolicy) -> Vec<(&'static str, String)> {
-    let fields = vec![
-        ("enabled", enabled.to_string()),
-        ("dm", dm_policy_name(&policy.dm).to_string()),
-        ("dm_allowlist", canonical_list(&policy.dm_allowlist)),
-        ("group", group_policy_name(&policy.group).to_string()),
-        ("group_allowlist", canonical_list(&policy.group_allowlist)),
-        ("sender_allowlist", canonical_list(&policy.sender_allowlist)),
-        ("require_mention", policy.require_mention.to_string()),
-        ("tools", posture_name(policy.tools).to_string()),
+/// Rendering of a `[options]` table that is PRESENT but empty. Needed because
+/// an empty table contributes no leaf paths, and "present and empty" must not
+/// render as "absent" — for `[options.imap]` those are the difference between
+/// polling a mailbox and not having an inbound leg at all.
+const EMPTY_TABLE: &str = "t:0";
+
+/// Canonical rendering of one `[options]` value.
+///
+/// Every rendering carries a TYPE TAG, because unlike the fixed
+/// [`SHAPE_FIELDS`] the options tree is schemaless: without a tag the string
+/// `"1"` and the integer `1` would render alike, and an operator (or a config
+/// generator) could change the type of a key under a live consent.
+fn canonical_option_value(value: &toml::Value) -> String {
+    match value {
+        toml::Value::String(s) => format!("s:{}", escape_entry(s)),
+        toml::Value::Integer(i) => format!("i:{i}"),
+        toml::Value::Float(f) => format!("f:{f}"),
+        toml::Value::Boolean(b) => format!("b:{b}"),
+        toml::Value::Datetime(d) => format!("d:{}", escape_entry(&d.to_string())),
+        // Sorted and de-duplicated for the same reason the `[inbound]`
+        // allowlists are: every option list in the tree is an ID SET (the four
+        // adapter admission filters all test membership), so a reorder or a
+        // repeat admits exactly the same principals and must not refuse.
+        //
+        // The wildcard is deliberately NOT collapsed here, unlike
+        // [`canonical_list`]. No adapter option list honours `"*"` — they are
+        // exact-membership tests — so `["*"]` and `["*","111"]` admit
+        // DIFFERENT sets and must not share a rendering.
+        toml::Value::Array(items) => {
+            let mut rendered: Vec<String> = items
+                .iter()
+                .map(|v| escape_entry(&canonical_option_value(v)))
+                .collect();
+            rendered.sort();
+            rendered.dedup();
+            format!("a:{}:{}", rendered.len(), rendered.join(","))
+        }
+        // Only reachable for a table nested inside an ARRAY; a table reached
+        // through the tree is flattened into dotted paths by `render_options`.
+        toml::Value::Table(table) => {
+            let mut rendered: Vec<String> = table
+                .iter()
+                .map(|(k, v)| {
+                    escape_entry(&format!(
+                        "{}={}",
+                        escape_entry(k),
+                        canonical_option_value(v)
+                    ))
+                })
+                .collect();
+            rendered.sort();
+            format!("t:{}:{}", rendered.len(), rendered.join(","))
+        }
+    }
+}
+
+/// `(dotted path, canonical value)` for every leaf in the `[options]` tree,
+/// sorted by path and each path prefixed with [`OPTION_FIELD_PREFIX`].
+///
+/// Nested tables are flattened rather than rendered whole so a refusal can name
+/// the ONE key that moved — `options.imap.allowed_senders` — instead of dumping
+/// the whole subtree twice and leaving the operator to diff it by eye.
+///
+/// A key that is ABSENT simply produces no entry, which is what makes deleting
+/// a line change the token: the deleted path is in the acknowledged token and
+/// not in the live one, and the diff reports it as `now (absent)`. That is the
+/// direction that matters, because for all four adapter filters an absent list
+/// is the MOST permissive state.
+fn render_options(options: &toml::Table) -> Vec<(String, String)> {
+    fn walk(prefix: &str, table: &toml::Table, out: &mut Vec<(String, String)>) {
+        if table.is_empty() {
+            // The top-level `[options]` is exempt: absent and empty are the
+            // same input to every adapter (serde fills in an empty table), so
+            // distinguishing them would refuse over a deleted blank header.
+            if !prefix.is_empty() {
+                out.push((prefix.to_string(), EMPTY_TABLE.to_string()));
+            }
+            return;
+        }
+        for (key, value) in table {
+            let path = if prefix.is_empty() {
+                format!("{OPTION_FIELD_PREFIX}{}", escape_entry(key))
+            } else {
+                format!("{prefix}.{}", escape_entry(key))
+            };
+            match value {
+                toml::Value::Table(sub) => walk(&path, sub, out),
+                other => out.push((path, canonical_option_value(other))),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk("", options, &mut out);
+    out.sort();
+    out
+}
+
+/// `(field, canonical value)` for the whole shape: every field in
+/// [`SHAPE_FIELDS`] in order, then every `[options]` leaf, sorted.
+fn shape_fields(shape: &AdmissionShape<'_>) -> Vec<(String, String)> {
+    let policy = shape.inbound;
+    let mut fields: Vec<(String, String)> = vec![
+        ("platform".into(), escape_entry(shape.platform)),
+        ("enabled".into(), shape.enabled.to_string()),
+        ("dm".into(), dm_policy_name(&policy.dm).to_string()),
+        ("dm_allowlist".into(), canonical_list(&policy.dm_allowlist)),
+        ("group".into(), group_policy_name(&policy.group).to_string()),
         (
-            "tool_workspace_root",
+            "group_allowlist".into(),
+            canonical_list(&policy.group_allowlist),
+        ),
+        (
+            "sender_allowlist".into(),
+            canonical_list(&policy.sender_allowlist),
+        ),
+        ("require_mention".into(), policy.require_mention.to_string()),
+        ("tools".into(), posture_name(policy.tools).to_string()),
+        (
+            "tool_workspace_root".into(),
             canonical_opt(policy.tool_workspace_root.as_deref()),
         ),
     ];
     debug_assert!(
-        fields.iter().map(|(k, _)| *k).eq(SHAPE_FIELDS),
+        fields.iter().map(|(k, _)| k.as_str()).eq(SHAPE_FIELDS),
         "the rendered fields and SHAPE_FIELDS must not drift: the parser trusts the order"
     );
+    fields.extend(render_options(shape.options));
     fields
 }
 
@@ -608,11 +845,11 @@ fn shape_fields(enabled: bool, policy: &InboundPolicy) -> Vec<(&'static str, Str
 /// is a rendering rather than a hash on purpose: a refusal has to be able to
 /// print what CHANGED, and nothing can be recovered from a digest. An operator
 /// told only "hash mismatch" learns nothing and reaches for the nuclear option.
-pub fn admission_shape_token(enabled: bool, policy: &InboundPolicy) -> String {
+pub fn admission_shape_token(shape: &AdmissionShape<'_>) -> String {
     let mut out = String::from(ADMISSION_SHAPE_VERSION);
-    for (field, value) in shape_fields(enabled, policy) {
+    for (field, value) in shape_fields(shape) {
         out.push(' ');
-        out.push_str(field);
+        out.push_str(&field);
         out.push('=');
         out.push_str(&value);
     }
@@ -620,10 +857,15 @@ pub fn admission_shape_token(enabled: bool, policy: &InboundPolicy) -> String {
 }
 
 /// Parse a token back into `(field, value)` pairs, or `None` if it is not a
-/// token this version wrote. Field names and their order must match
-/// [`SHAPE_FIELDS`] exactly — a token missing a field would otherwise be a
-/// consent that silently says nothing about it.
-fn parse_shape_token(token: &str) -> Option<Vec<(&'static str, String)>> {
+/// token this version wrote.
+///
+/// The fixed head must match [`SHAPE_FIELDS`] exactly, in order — a token
+/// missing one of those would be a consent that silently says nothing about it.
+/// The `[options]` tail is dynamic, so it is checked structurally instead:
+/// every entry carries [`OPTION_FIELD_PREFIX`] and the paths STRICTLY ASCEND,
+/// which is the same shape [`render_options`] emits and which no repeated or
+/// re-ordered key can satisfy.
+fn parse_shape_token(token: &str) -> Option<Vec<(String, String)>> {
     let mut parts = token.split(' ');
     if parts.next()? != ADMISSION_SHAPE_VERSION {
         return None;
@@ -634,17 +876,37 @@ fn parse_shape_token(token: &str) -> Option<Vec<(&'static str, String)>> {
         if field != expected {
             return None;
         }
-        out.push((expected, value.to_string()));
+        out.push((expected.to_string(), value.to_string()));
     }
-    if parts.next().is_some() {
-        return None;
+    let mut previous: Option<&str> = None;
+    for part in parts {
+        let (field, value) = part.split_once('=')?;
+        if !field.starts_with(OPTION_FIELD_PREFIX) {
+            return None;
+        }
+        if previous.is_some_and(|prev| field <= prev) {
+            return None;
+        }
+        previous = Some(field);
+        out.push((field.to_string(), value.to_string()));
     }
     Some(out)
 }
 
-/// The per-field tokens the FIRST cut of this key used. Recognised only so an
-/// operator upgrading from that shape is told what happened instead of being
-/// handed a bare "this is not a token".
+/// A consent an OLDER cut of this key wrote. Recognised only so an operator
+/// upgrading is told what happened instead of being handed a bare "this is not
+/// a token".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyToken {
+    /// One of the per-field tokens the FIRST cut used (`"dm=open"`, …).
+    PerField,
+    /// An `admission-v1` whole-shape token — correct in its day, but it named
+    /// neither `platform` nor `[options]`, so it cannot see an adapter-level
+    /// admission filter being widened.
+    ShapeV1,
+}
+
+/// The per-field tokens the FIRST cut of this key used.
 const LEGACY_TOKENS: [&str; 4] = [
     "dm=open",
     "dm_allowlist=*",
@@ -652,16 +914,88 @@ const LEGACY_TOKENS: [&str; 4] = [
     "sender_allowlist=*",
 ];
 
+/// Version tag of the whole-shape token that predates `[options]`.
+const LEGACY_SHAPE_VERSION: &str = "admission-v1";
+
+/// Which older spelling `token` is, if any.
+fn legacy_kind(token: &str) -> Option<LegacyToken> {
+    if LEGACY_TOKENS.contains(&token) {
+        Some(LegacyToken::PerField)
+    } else if token
+        .split_once(' ')
+        .is_some_and(|(head, _)| head == LEGACY_SHAPE_VERSION)
+    {
+        Some(LegacyToken::ShapeV1)
+    } else {
+        None
+    }
+}
+
+/// How an ABSENT field is printed in a refusal. A `[options]` key can be
+/// present on one side of the comparison and gone from the other, and for the
+/// four adapter admission filters DELETING the key is the widening — so the
+/// refusal has to be able to say so in words rather than print an empty string
+/// that reads like a narrow value.
+pub const ABSENT_FIELD: &str = "(absent)";
+
 /// One field whose value differs between the acknowledged shape and the live
 /// one. Carried so the refusal can name the change rather than the mismatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionFieldChange {
-    /// The setting that changed, spelled as in [`SHAPE_FIELDS`].
-    pub field: &'static str,
-    /// Its canonical value in the token the operator wrote.
-    pub acknowledged: String,
-    /// Its canonical value in the configuration as it now stands.
-    pub current: String,
+    /// The setting that changed: one of [`SHAPE_FIELDS`], or an `[options]`
+    /// path carrying [`OPTION_FIELD_PREFIX`].
+    pub field: String,
+    /// Its canonical value in the token the operator wrote, or `None` when the
+    /// token did not mention it at all.
+    pub acknowledged: Option<String>,
+    /// Its canonical value in the configuration as it now stands, or `None`
+    /// when the configuration no longer has it.
+    pub current: Option<String>,
+}
+
+/// Render one side of a change for the refusal message.
+fn or_absent(value: Option<&String>) -> &str {
+    value.map_or(ABSENT_FIELD, String::as_str)
+}
+
+/// Every field that differs between an acknowledged shape and the live one.
+///
+/// A UNION over both key sets, not a positional zip: the `[options]` tail is
+/// dynamic, so a key can be on one side only, and a zip would either miss that
+/// or misalign every field after it. Ordered [`SHAPE_FIELDS`] first (which are
+/// always on both sides), then option paths in sorted order.
+fn shape_changes(
+    acknowledged: &[(String, String)],
+    current: &[(String, String)],
+) -> Vec<AdmissionFieldChange> {
+    let acknowledged: std::collections::BTreeMap<&str, &String> =
+        acknowledged.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let current: std::collections::BTreeMap<&str, &String> =
+        current.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+    let mut fields: Vec<&str> = SHAPE_FIELDS.to_vec();
+    let mut options: Vec<&str> = acknowledged
+        .keys()
+        .chain(current.keys())
+        .copied()
+        .filter(|f| f.starts_with(OPTION_FIELD_PREFIX))
+        .collect();
+    options.sort_unstable();
+    options.dedup();
+    fields.extend(options);
+
+    fields
+        .into_iter()
+        .filter_map(|field| {
+            let was = acknowledged.get(field).copied();
+            let now = current.get(field).copied();
+            (was != now).then(|| AdmissionFieldChange {
+                field: field.to_string(),
+                acknowledged: was.cloned(),
+                current: now.cloned(),
+            })
+        })
+        .collect()
 }
 
 /// The `acknowledge_open_admission` value that matches this channel EXACTLY as
@@ -671,11 +1005,11 @@ pub struct AdmissionFieldChange {
 /// Empty when nothing is open — in which case the correct file has no
 /// `acknowledge_open_admission` key at all, because a token present while
 /// nothing is open is a stale consent, not a harmless leftover.
-pub fn required_acknowledgement(enabled: bool, policy: &InboundPolicy) -> Vec<String> {
-    if open_admissions(policy).is_empty() {
+pub fn required_acknowledgement(shape: &AdmissionShape<'_>) -> Vec<String> {
+    if open_admissions(shape.inbound).is_empty() {
         Vec::new()
     } else {
-        vec![admission_shape_token(enabled, policy)]
+        vec![admission_shape_token(shape)]
     }
 }
 
@@ -714,9 +1048,9 @@ pub enum OpenAdmissionFault {
     Unreadable {
         /// The entry as the operator wrote it.
         token: String,
-        /// True when it is one of the per-field tokens the first cut of this
-        /// key used, so the refusal can say so rather than being cryptic.
-        legacy: bool,
+        /// Set when it is a spelling an OLDER cut of this key wrote, so the
+        /// refusal can say which one rather than being cryptic.
+        legacy: Option<LegacyToken>,
     },
     /// More than one entry while the channel is open. Consent is ONE token
     /// naming the whole shape, so a repeated or extra entry is not the exact
@@ -735,9 +1069,9 @@ pub enum OpenAdmissionFault {
 /// state the gate accepts. "Covers" is not enough, because a consent that
 /// covers more than is open is a consent to configurations nobody has looked
 /// at yet.
-pub fn open_admission_faults(enabled: bool, policy: &InboundPolicy) -> Vec<OpenAdmissionFault> {
-    let open = open_admissions(policy);
-    let acks = &policy.acknowledge_open_admission;
+pub fn open_admission_faults(shape: &AdmissionShape<'_>) -> Vec<OpenAdmissionFault> {
+    let open = open_admissions(shape.inbound);
+    let acks = &shape.inbound.acknowledge_open_admission;
 
     if open.is_empty() {
         return acks
@@ -758,19 +1092,10 @@ pub fn open_admission_faults(enabled: bool, policy: &InboundPolicy) -> Vec<OpenA
             let Some(acknowledged) = parse_shape_token(token) else {
                 return vec![OpenAdmissionFault::Unreadable {
                     token: token.clone(),
-                    legacy: LEGACY_TOKENS.contains(&token.as_str()),
+                    legacy: legacy_kind(token),
                 }];
             };
-            let changes: Vec<AdmissionFieldChange> = acknowledged
-                .into_iter()
-                .zip(shape_fields(enabled, policy))
-                .filter(|((_, was), (_, now))| was != now)
-                .map(|((field, was), (_, now))| AdmissionFieldChange {
-                    field,
-                    acknowledged: was,
-                    current: now,
-                })
-                .collect();
+            let changes = shape_changes(&acknowledged, &shape_fields(shape));
             if changes.is_empty() {
                 Vec::new()
             } else {
@@ -863,7 +1188,9 @@ impl std::fmt::Display for OpenAdmissionRefusal {
                             writeln!(
                                 f,
                                 "      {}: acknowledged {}, now {}",
-                                change.field, change.acknowledged, change.current
+                                change.field,
+                                or_absent(change.acknowledged.as_ref()),
+                                or_absent(change.current.as_ref())
                             )?;
                         }
                     }
@@ -873,13 +1200,23 @@ impl std::fmt::Display for OpenAdmissionRefusal {
                             "  channel {channel:?}: acknowledge_open_admission names {token:?}, \
                              which is not an admission-shape token."
                         )?;
-                        if *legacy {
-                            write!(
+                        match legacy {
+                            Some(LegacyToken::PerField) => write!(
                                 f,
                                 " That is the older per-field spelling. Consent is now bound to \
                                  this channel's WHOLE admission shape, because a per-field list \
                                  could not see a widening of a field it did not name."
-                            )?;
+                            )?,
+                            Some(LegacyToken::ShapeV1) => write!(
+                                f,
+                                " That is an {LEGACY_SHAPE_VERSION} token. It named the \
+                                 [inbound] table and `enabled`, but neither `platform` nor the \
+                                 [options] table — so it could not see an adapter's OWN \
+                                 admission filter (for example deleting \
+                                 `{OPTION_FIELD_PREFIX}imap.allowed_senders`, which admits every \
+                                 sender rather than none) being widened underneath it."
+                            )?,
+                            None => {}
                         }
                         writeln!(f)?;
                     }
@@ -926,12 +1263,17 @@ impl std::fmt::Display for OpenAdmissionRefusal {
         }
         write!(
             f,
-            "The token names this channel's ENTIRE admission shape — {} — so changing any of \
-             them refuses again instead of being covered by the old consent. Reordering or \
-             repeating an allowlist entry admits exactly the same principals and is NOT a change. \
-             This key is read only from the profile-scoped channel file; a project-local \
+            "The token names this channel's ENTIRE admission shape — {} — AND every key in its \
+             [options] table, because four of the ten adapters carry their own admission filter \
+             there (email {p}imap.allowed_senders, discord {p}allowed_channel_ids, telegram \
+             {p}allowed_chat_ids, imessage {p}allowed_handles) and in every one of them an \
+             ABSENT or EMPTY list admits EVERYONE. So changing any of them — including deleting \
+             one — refuses again instead of being covered by the old consent. Reordering or \
+             repeating a list entry admits exactly the same principals and is NOT a change. This \
+             key is read only from the profile-scoped channel file; a project-local \
              .wayland-core.toml cannot set it.",
-            SHAPE_FIELDS.join(", ")
+            SHAPE_FIELDS.join(", "),
+            p = OPTION_FIELD_PREFIX,
         )
     }
 }
@@ -952,24 +1294,27 @@ impl std::error::Error for OpenAdmissionRefusal {}
 /// than a reason to skip the check: consenting to an open door while the door
 /// is bricked up is not consent to unbricking it.
 ///
-/// Each item is `(channel name, enabled, policy)`. `enabled` is threaded in
-/// rather than read off the policy because it lives on
-/// [`crate::config::ChannelConfig`], one level up.
+/// Takes the WHOLE [`ChannelConfig`], not a projection of it. The previous
+/// signature was `(name, enabled, &InboundPolicy)`, and that is exactly how
+/// `platform` and `[options]` — where four adapters keep their own admission
+/// filter — stayed outside the consent. A caller cannot now hand the gate a
+/// subset of the file it is meant to be gating.
 pub fn refuse_open_admission<'a>(
-    channels: impl IntoIterator<Item = (&'a str, bool, &'a InboundPolicy)>,
+    channels: impl IntoIterator<Item = &'a ChannelConfig>,
 ) -> Result<(), OpenAdmissionRefusal> {
     let refused: Vec<ChannelOpenAdmission> = channels
         .into_iter()
-        .filter_map(|(name, enabled, policy)| {
-            let faults = open_admission_faults(enabled, policy);
+        .filter_map(|config| {
+            let shape = config.admission_shape();
+            let faults = open_admission_faults(&shape);
             if faults.is_empty() {
                 return None;
             }
             Some(ChannelOpenAdmission {
-                channel: name.to_string(),
-                open: open_admissions(policy),
+                channel: config.name.clone(),
+                open: open_admissions(&config.inbound),
                 faults,
-                required_acknowledgement: required_acknowledgement(enabled, policy),
+                required_acknowledgement: required_acknowledgement(&shape),
             })
         })
         .collect();
@@ -1291,11 +1636,76 @@ mod tests {
         }
     }
 
+    /// The channel every `[inbound]`-only leg is written against: one platform,
+    /// no `[options]`. Legs that exercise the `[options]` half build their own.
+    fn config(name: &str, enabled: bool, policy: &InboundPolicy) -> ChannelConfig {
+        ChannelConfig {
+            name: name.to_string(),
+            platform: "slack".to_string(),
+            enabled,
+            options: toml::Table::new(),
+            inbound: policy.clone(),
+        }
+    }
+
+    /// A channel whose `[options]` is parsed from TOML, for the adapter-level
+    /// admission filters.
+    fn config_with_options(
+        name: &str,
+        platform: &str,
+        options: &str,
+        policy: &InboundPolicy,
+    ) -> ChannelConfig {
+        ChannelConfig {
+            platform: platform.to_string(),
+            options: options.parse().expect("test fixture options must parse"),
+            ..config(name, true, policy)
+        }
+    }
+
+    /// Run the gate over ONE `[inbound]`-only channel.
+    fn refuse_one(
+        name: &str,
+        enabled: bool,
+        policy: &InboundPolicy,
+    ) -> Result<(), OpenAdmissionRefusal> {
+        refuse_open_admission([&config(name, enabled, policy)])
+    }
+
+    /// The token for one `[inbound]`-only channel.
+    fn token_of(enabled: bool, policy: &InboundPolicy) -> String {
+        admission_shape_token(&config("t", enabled, policy).admission_shape())
+    }
+
+    /// The faults of one `[inbound]`-only channel.
+    fn faults_of(enabled: bool, policy: &InboundPolicy) -> Vec<OpenAdmissionFault> {
+        open_admission_faults(&config("t", enabled, policy).admission_shape())
+    }
+
+    /// The required acknowledgement of one `[inbound]`-only channel.
+    fn required_of(enabled: bool, policy: &InboundPolicy) -> Vec<String> {
+        required_acknowledgement(&config("t", enabled, policy).admission_shape())
+    }
+
     /// `policy` with its own required acknowledgement written in.
     fn acknowledged(enabled: bool, policy: &InboundPolicy) -> InboundPolicy {
         InboundPolicy {
-            acknowledge_open_admission: required_acknowledgement(enabled, policy),
+            acknowledge_open_admission: required_acknowledgement(
+                &config("t", enabled, policy).admission_shape(),
+            ),
             ..policy.clone()
+        }
+    }
+
+    /// `config` with its own required acknowledgement written into `[inbound]`.
+    fn acknowledged_config(config: ChannelConfig) -> ChannelConfig {
+        let ack = required_acknowledgement(&config.admission_shape());
+        ChannelConfig {
+            inbound: InboundPolicy {
+                acknowledge_open_admission: ack,
+                ..config.inbound
+            },
+            ..config
         }
     }
 
@@ -1304,7 +1714,7 @@ mod tests {
         // This is the whole defect, at the level of the pure gate: if a bounded
         // channel accepts a consent for shapes it does not have, that file is a
         // standing consent to every future opening.
-        let refusal = refuse_open_admission([("preacked", true, &preacked_but_bounded())])
+        let refusal = refuse_one("preacked", true, &preacked_but_bounded())
             .expect_err("pre-arming a bounded channel must refuse, not be silently accepted");
         let refused = &refusal.channels[0];
         assert_eq!(refused.channel, "preacked");
@@ -1341,14 +1751,14 @@ mod tests {
             dm: DmPolicy::Open,
             ..Default::default()
         };
-        let required = required_acknowledgement(true, &open);
+        let required = required_of(true, &open);
         assert_eq!(
             required,
-            vec![admission_shape_token(true, &open)],
+            vec![token_of(true, &open)],
             "an open channel requires exactly its own shape token"
         );
         let exact = acknowledged(true, &open);
-        refuse_open_admission([("exact", true, &exact)])
+        refuse_one("exact", true, &exact)
             .expect("an acknowledgement that names the live shape exactly must be accepted");
 
         // The SAME token twice. Under the first cut this was accepted, which
@@ -1357,7 +1767,7 @@ mod tests {
             acknowledge_open_admission: vec![required[0].clone(), required[0].clone()],
             ..open.clone()
         };
-        let refusal = refuse_open_admission([("doubled", true, &doubled)])
+        let refusal = refuse_one("doubled", true, &doubled)
             .expect_err("a repeated consent is not an exact match");
         assert_eq!(
             refusal.channels[0].faults,
@@ -1371,7 +1781,7 @@ mod tests {
             ..open.clone()
         };
         assert_eq!(
-            refuse_open_admission([("extra", true, &extra)])
+            refuse_one("extra", true, &extra)
                 .expect_err("two entries must refuse")
                 .channels[0]
                 .faults,
@@ -1386,14 +1796,14 @@ mod tests {
         // `group_allowlist` to `["*"]` grows that to anyone, anywhere. Under a
         // per-field token list this changed NO token and nothing refused.
         let narrow = acknowledged(true, &open_over_one_group());
-        refuse_open_admission([("narrow", true, &narrow)])
+        refuse_one("narrow", true, &narrow)
             .expect("control: the narrow shape, acknowledged, is accepted");
 
         let widened = InboundPolicy {
             group_allowlist: vec![WILDCARD.into()],
             ..narrow.clone()
         };
-        let refusal = refuse_open_admission([("widened", true, &widened)])
+        let refusal = refuse_one("widened", true, &widened)
             .expect_err("widening a field the consent did not single out must still refuse");
         let faults = &refusal.channels[0].faults;
         assert!(
@@ -1402,8 +1812,8 @@ mod tests {
                 [OpenAdmissionFault::ShapeChanged { changes, .. }]
                     if changes.len() == 1
                         && changes[0].field == "group_allowlist"
-                        && changes[0].acknowledged == "1:G1"
-                        && changes[0].current == WILDCARD
+                        && changes[0].acknowledged.as_deref() == Some("1:G1")
+                        && changes[0].current.as_deref() == Some(WILDCARD)
             ),
             "the fault must name the field, what was acknowledged, and what it is now: {faults:?}"
         );
@@ -1428,19 +1838,19 @@ mod tests {
             ..Default::default()
         };
         let off = acknowledged(false, &open);
-        refuse_open_admission([("off", false, &off)])
+        refuse_one("off", false, &off)
             .expect("control: the switched-off shape, acknowledged, is accepted");
 
-        let refusal = refuse_open_admission([("on", true, &off)])
-            .expect_err("flipping enabled must be a new decision");
+        let refusal =
+            refuse_one("on", true, &off).expect_err("flipping enabled must be a new decision");
         assert!(
             matches!(
                 refusal.channels[0].faults.as_slice(),
                 [OpenAdmissionFault::ShapeChanged { changes, .. }]
                     if changes.len() == 1
                         && changes[0].field == "enabled"
-                        && changes[0].acknowledged == "false"
-                        && changes[0].current == "true"
+                        && changes[0].acknowledged.as_deref() == Some("false")
+                        && changes[0].current.as_deref() == Some("true")
             ),
             "the fault must be the `enabled` flip and nothing else: {:?}",
             refusal.channels[0].faults
@@ -1455,7 +1865,7 @@ mod tests {
             ..Default::default()
         };
         for enabled in [false, true] {
-            refuse_open_admission([("bounded", enabled, &bounded)])
+            refuse_one("bounded", enabled, &bounded)
                 .expect("a bounded channel needs no consent at either setting");
         }
     }
@@ -1477,15 +1887,14 @@ mod tests {
             "control: the fixture consents at the safe floor"
         );
         let consented = acknowledged(true, &open);
-        refuse_open_admission([("floor", true, &consented)])
-            .expect("control: the acknowledged floor starts");
+        refuse_one("floor", true, &consented).expect("control: the acknowledged floor starts");
 
         for escalated in [ChannelToolPosture::Workspace, ChannelToolPosture::Full] {
             let policy = InboundPolicy {
                 tools: escalated,
                 ..consented.clone()
             };
-            let refusal = match refuse_open_admission([("escalated", true, &policy)]) {
+            let refusal = match refuse_one("escalated", true, &policy) {
                 Ok(()) => panic!(
                     "{escalated:?}: escalating the tool posture under a live open-admission \
                      consent must refuse"
@@ -1513,13 +1922,12 @@ mod tests {
                 ..open.clone()
             },
         );
-        refuse_open_admission([("jailed", true, &jailed)])
-            .expect("control: the jailed shape starts");
+        refuse_one("jailed", true, &jailed).expect("control: the jailed shape starts");
         let widened = InboundPolicy {
             tool_workspace_root: Some("/".into()),
             ..jailed.clone()
         };
-        let refusal = refuse_open_admission([("widened", true, &widened)])
+        let refusal = refuse_one("widened", true, &widened)
             .expect_err("moving the jail root must demand fresh consent");
         assert!(
             refusal
@@ -1547,7 +1955,7 @@ mod tests {
                 group_allowlist: cosmetic.clone(),
                 ..consented.clone()
             };
-            refuse_open_admission([("cosmetic", true, &reordered)]).unwrap_or_else(|e| {
+            refuse_one("cosmetic", true, &reordered).unwrap_or_else(|e| {
                 panic!("{cosmetic:?} admits exactly the same principals and must not refuse: {e}")
             });
         }
@@ -1564,9 +1972,350 @@ mod tests {
             sender_allowlist: vec![WILDCARD.into(), "U1".into()],
             ..open_over_one_group()
         };
+        assert_eq!(token_of(true, &star), token_of(true, &star_plus));
+    }
+
+    // ---- The consent covers `[options]`, where four adapters keep their OWN
+    // ---- admission filter and an ABSENT one admits everyone ----
+
+    /// The four adapter-level admission filters, as `(platform, the narrow
+    /// `[options]` TOML, the WIDENED `[options]` TOML, the rendered path)`.
+    ///
+    /// The widened variant DELETES the key rather than emptying it, because
+    /// that is the shape the verifier drove: for all four adapters an absent
+    /// list is the most permissive state, so a deletion is a widening and it
+    /// used to produce a byte-identical token.
+    fn adapter_admission_filters() -> Vec<(&'static str, String, String, &'static str)> {
+        vec![
+            (
+                "email",
+                "from_address = \"bot@acme.test\"\n[smtp]\nhost = \"s\"\nuser_credential_handle = \
+                 \"u\"\npassword_credential_handle = \"p\"\n[imap]\nhost = \
+                 \"i\"\nuser_credential_handle = \"u\"\npassword_credential_handle = \
+                 \"p\"\nallowed_senders = [\"boss@acme.test\"]\n"
+                    .to_string(),
+                "from_address = \"bot@acme.test\"\n[smtp]\nhost = \"s\"\nuser_credential_handle = \
+                 \"u\"\npassword_credential_handle = \"p\"\n[imap]\nhost = \
+                 \"i\"\nuser_credential_handle = \"u\"\npassword_credential_handle = \"p\"\n"
+                    .to_string(),
+                "options.imap.allowed_senders",
+            ),
+            (
+                "discord",
+                "credential_handle = \"d\"\nallowed_channel_ids = [\"111\"]\n".to_string(),
+                "credential_handle = \"d\"\n".to_string(),
+                "options.allowed_channel_ids",
+            ),
+            (
+                "telegram",
+                "credential_handle = \"t\"\nallowed_chat_ids = [\"-100\"]\n".to_string(),
+                "credential_handle = \"t\"\n".to_string(),
+                "options.allowed_chat_ids",
+            ),
+            (
+                "imessage",
+                "allowed_handles = [\"+15550000000\"]\n".to_string(),
+                String::new(),
+                "options.allowed_handles",
+            ),
+        ]
+    }
+
+    #[test]
+    fn deleting_an_adapter_admission_filter_refuses() {
+        // N1. THE DEFECT. `[inbound]` is not the only place a channel decides
+        // who is admitted: four adapters carry their own filter in `[options]`,
+        // and for every one of them an ABSENT list admits EVERYONE. Under a
+        // token that rendered only `[inbound]` plus `enabled`, the narrow and
+        // the widened configs produced a byte-identical token, so the widened
+        // config STARTED on the narrow config's consent.
+        for (platform, narrow, widened, path) in adapter_admission_filters() {
+            let open = InboundPolicy {
+                dm: DmPolicy::Open,
+                ..Default::default()
+            };
+            let consented = acknowledged_config(config_with_options("c", platform, &narrow, &open));
+
+            // CONTROL: the narrow config, acknowledged, starts. Without this
+            // the leg below is satisfied by a gate that refuses everything.
+            refuse_open_admission([&consented]).unwrap_or_else(|e| {
+                panic!("{platform}: the acknowledged narrow config must start: {e}")
+            });
+
+            let widened = ChannelConfig {
+                options: widened.parse().expect("fixture parses"),
+                ..consented.clone()
+            };
+            let msg = match refuse_open_admission([&widened]) {
+                Ok(()) => panic!(
+                    "{platform}: deleting {path} widens the admitted set to everyone and MUST \
+                     refuse on the narrow config's consent"
+                ),
+                Err(refusal) => refusal.to_string(),
+            };
+            assert!(
+                msg.contains(&format!("{path}: acknowledged")) && msg.contains(ABSENT_FIELD),
+                "{platform}: the refusal must name the deleted key and say it is now absent; got: \
+                 {msg}"
+            );
+
+            // And the token the refusal advertises must be the one it accepts —
+            // otherwise the operator has no way forward.
+            let reconsented = acknowledged_config(widened);
+            refuse_open_admission([&reconsented]).unwrap_or_else(|e| {
+                panic!("{platform}: the advertised token must be accepted: {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn narrowing_an_adapter_admission_filter_refuses_too() {
+        // The other direction of the same binding. A consent names ONE
+        // configuration; when the file changes it stops applying, whether the
+        // change widened or narrowed. Without this the key would be a one-way
+        // ratchet an operator could not reason about.
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            ..Default::default()
+        };
+        let wide = acknowledged_config(config_with_options(
+            "c",
+            "discord",
+            "credential_handle = \"d\"\n",
+            &open,
+        ));
+        refuse_open_admission([&wide]).expect("control: the acknowledged wide config starts");
+
+        let narrowed = ChannelConfig {
+            options: "credential_handle = \"d\"\nallowed_channel_ids = [\"111\"]\n"
+                .parse()
+                .expect("fixture parses"),
+            ..wide
+        };
+        let msg = refuse_open_admission([&narrowed])
+            .expect_err("adding a filter is still a change to the shape the consent names")
+            .to_string();
+        assert!(
+            msg.contains(&format!(
+                "options.allowed_channel_ids: acknowledged {ABSENT_FIELD}, now"
+            )),
+            "the refusal must say the key was absent and now is not; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_empty_option_list_is_not_the_same_as_an_absent_one() {
+        // The empty-means-everyone inversion, at the rendering level. For all
+        // four adapters `[]` and "key deleted" happen to admit the same set —
+        // everyone — but `["x"]`, `[]` and absent are THREE distinct states of
+        // the file, and collapsing any two of them lets one be edited into
+        // another under a live consent.
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            ..Default::default()
+        };
+        let token = |options: &str| {
+            admission_shape_token(
+                &config_with_options("c", "discord", options, &open).admission_shape(),
+            )
+        };
+        let named = token("allowed_channel_ids = [\"111\"]\n");
+        let empty = token("allowed_channel_ids = []\n");
+        let absent = token("");
+        assert_ne!(
+            named, empty,
+            "a named list and an empty one admit different sets"
+        );
+        assert_ne!(
+            empty, absent,
+            "an EMPTY list and an ABSENT key are different states of the file and must render \
+             differently, or one can be edited into the other under a live consent"
+        );
+        assert_ne!(named, absent);
+
+        // A present-but-empty SUB-TABLE is likewise not an absent one:
+        // `[options.imap]` present with no keys is an inbound leg configured
+        // and empty; absent is no inbound leg at all.
+        let empty_table = token("[imap]\n");
+        assert_ne!(
+            empty_table,
+            token(""),
+            "a present-but-empty [options.imap] must not render as an absent one"
+        );
+    }
+
+    #[test]
+    fn reordering_or_repeating_an_option_list_entry_is_not_a_change() {
+        // The over-refusal direction, and it is load-bearing for the same
+        // reason it is on the `[inbound]` allowlists: a gate that cries wolf on
+        // a cosmetic edit teaches operators to stop reading refusals. Every
+        // adapter option list is an exact-membership ID SET, so a reorder or a
+        // repeat admits exactly the same principals.
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            ..Default::default()
+        };
+        let consented = acknowledged_config(config_with_options(
+            "c",
+            "discord",
+            "credential_handle = \"d\"\nallowed_channel_ids = [\"111\", \"222\"]\n",
+            &open,
+        ));
+        for cosmetic in [
+            "credential_handle = \"d\"\nallowed_channel_ids = [\"222\", \"111\"]\n",
+            "credential_handle = \"d\"\nallowed_channel_ids = [\"222\", \"111\", \"111\"]\n",
+        ] {
+            let reordered = ChannelConfig {
+                options: cosmetic.parse().expect("fixture parses"),
+                ..consented.clone()
+            };
+            refuse_open_admission([&reordered]).unwrap_or_else(|e| {
+                panic!("{cosmetic:?} admits exactly the same principals and must not refuse: {e}")
+            });
+        }
+
+        // But the WILDCARD is NOT collapsed in `[options]`, unlike in the
+        // `[inbound]` allowlists. No adapter honours `"*"` there — they are
+        // exact-membership tests — so `["*"]` and `["*","111"]` admit DIFFERENT
+        // sets and must not share a token.
+        let star = ChannelConfig {
+            options: "allowed_channel_ids = [\"*\"]\n".parse().expect("parses"),
+            ..consented.clone()
+        };
+        let star_plus = ChannelConfig {
+            options: "allowed_channel_ids = [\"*\", \"111\"]\n"
+                .parse()
+                .expect("parses"),
+            ..consented.clone()
+        };
+        assert_ne!(
+            admission_shape_token(&star.admission_shape()),
+            admission_shape_token(&star_plus.admission_shape()),
+            "an option list is an exact-membership test, so \"*\" subsumes nothing and the two \
+             lists admit different sets"
+        );
+    }
+
+    #[test]
+    fn an_options_key_cannot_forge_a_token_field() {
+        // `[options]` is operator-authored and schemaless, so its keys and
+        // values are the one part of the token an attacker-shaped config file
+        // controls. A key holding the field separator, the field/value
+        // separator or the path separator must not be able to inject, rename or
+        // merge a field.
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            ..Default::default()
+        };
+        let token = |options: &str| {
+            admission_shape_token(
+                &config_with_options("c", "slack", options, &open).admission_shape(),
+            )
+        };
+
+        // A dotted key must not read as a nested path, or `{"a.b" = 1}` and
+        // `{a = {b = 1}}` would render alike.
+        assert_ne!(token("\"a.b\" = 1\n"), token("[a]\nb = 1\n"));
+
+        // A key or value holding a space must not add a field to the token.
+        for options in [
+            "\"tools=full\" = 1\n",
+            "\"x y\" = 1\n",
+            "x = \"tools=full enabled=false\"\n",
+        ] {
+            let rendered = token(options);
+            let parsed =
+                parse_shape_token(&rendered).unwrap_or_else(|| panic!("must parse: {rendered}"));
+            assert_eq!(
+                parsed.len(),
+                SHAPE_FIELDS.len() + 1,
+                "{options:?} must contribute exactly ONE options field: {rendered}"
+            );
+            assert_eq!(
+                parsed[SHAPE_FIELDS.len() - 1].0,
+                "tool_workspace_root",
+                "and must not have displaced a fixed field: {rendered}"
+            );
+        }
+
+        // Type is part of the value: a schemaless table would otherwise let
+        // `"1"` become `1` under a live consent.
+        assert_ne!(token("x = 1\n"), token("x = \"1\"\n"));
+        assert_ne!(token("x = true\n"), token("x = \"true\"\n"));
+    }
+
+    #[test]
+    fn a_key_nobody_enumerated_is_inside_the_token() {
+        // THE STRUCTURAL CLAIM, and the reason the token renders the WHOLE
+        // `[options]` table rather than a declared key list. This gate has been
+        // bypassed three times by a category nobody enumerated. A key that no
+        // adapter in this tree has ever had, on a platform string nobody
+        // registered, must already be inside the consent — with no
+        // registration step to forget.
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            ..Default::default()
+        };
+        let consented = acknowledged_config(config_with_options(
+            "c",
+            "adapter-eleven",
+            "admit_everyone_from = [\"someone\"]\n",
+            &open,
+        ));
+        refuse_open_admission([&consented])
+            .expect("control: the acknowledged shape of an unknown platform starts");
+
+        let widened = ChannelConfig {
+            options: "admit_everyone_from = []\n".parse().expect("parses"),
+            ..consented
+        };
+        let msg = refuse_open_admission([&widened])
+            .expect_err(
+                "a key this crate has never heard of must still be bound by the consent, or the \
+                 next adapter ships its admission filter outside the token",
+            )
+            .to_string();
+        assert!(
+            msg.contains("options.admit_everyone_from: acknowledged"),
+            "and the refusal must name it; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_v1_shape_token_is_named_as_such_rather_than_being_cryptic() {
+        // An operator upgrading has an `admission-v1` token in a file that is
+        // still open. That token was correct in its day but named neither
+        // `platform` nor `[options]`, so honouring it would be honouring a
+        // consent that cannot see an adapter filter being widened. It must be
+        // refused, and the refusal must say why.
+        let stale_v1 = "admission-v1 enabled=true dm=open dm_allowlist=0 group=disabled \
+                        group_allowlist=0 sender_allowlist=0 require_mention=true \
+                        tools=conversational tool_workspace_root=0";
+        let open = InboundPolicy {
+            dm: DmPolicy::Open,
+            acknowledge_open_admission: vec![stale_v1.to_string()],
+            ..Default::default()
+        };
         assert_eq!(
-            admission_shape_token(true, &star),
-            admission_shape_token(true, &star_plus)
+            faults_of(true, &open),
+            vec![OpenAdmissionFault::Unreadable {
+                token: stale_v1.to_string(),
+                legacy: Some(LegacyToken::ShapeV1),
+            }]
+        );
+        let msg = refuse_one("upgraded", true, &open)
+            .expect_err("a v1 token must not be honoured")
+            .to_string();
+        assert!(
+            msg.contains("admission-v1") && msg.contains("allowed_senders"),
+            "the refusal must name the old version and what it could not see; got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!(
+                "acknowledge_open_admission = [{:?}]",
+                token_of(true, &open)
+            )),
+            "and must print the token that replaces it; got: {msg}"
         );
     }
 
@@ -1577,7 +2326,20 @@ mod tests {
         // changes. A mutation that drops a field from the rendering — the exact
         // shape of the original defect — fails here.
         let base = open_over_one_group();
-        let base_token = admission_shape_token(true, &base);
+        let base_token = token_of(true, &base);
+
+        // `platform` is not on `InboundPolicy`, so it is varied through the
+        // config rather than through the variant list below.
+        let other_platform = ChannelConfig {
+            platform: "discord".to_string(),
+            ..config("t", true, &base)
+        };
+        assert_ne!(
+            admission_shape_token(&other_platform.admission_shape()),
+            base_token,
+            "changing `platform` must change the token: it decides which adapter reads [options], \
+             and therefore what every key in it means"
+        );
 
         let variants: Vec<(&str, bool, InboundPolicy)> = vec![
             ("enabled", false, base.clone()),
@@ -1647,15 +2409,15 @@ mod tests {
             ),
         ];
         assert_eq!(
-            variants.len(),
+            variants.len() + 1,
             SHAPE_FIELDS.len(),
-            "every field in SHAPE_FIELDS must have a variant here, or a field could be dropped \
-             from the rendering with nothing to catch it"
+            "every field in SHAPE_FIELDS must have a variant here (+1 for `platform`, varied \
+             above), or a field could be dropped from the rendering with nothing to catch it"
         );
 
         let mut seen = vec![base_token.clone()];
         for (field, enabled, policy) in &variants {
-            let token = admission_shape_token(*enabled, policy);
+            let token = token_of(*enabled, policy);
             assert_ne!(
                 token, base_token,
                 "changing {field} must change the token, or a consent written before the change \
@@ -1683,8 +2445,8 @@ mod tests {
             ..open_over_one_group()
         };
         assert_ne!(
-            admission_shape_token(true, &one_weird_entry),
-            admission_shape_token(true, &two_plain_entries)
+            token_of(true, &one_weird_entry),
+            token_of(true, &two_plain_entries)
         );
 
         // An empty list permits nobody; a list holding the empty string permits
@@ -1697,10 +2459,7 @@ mod tests {
             group_allowlist: vec![String::new()],
             ..open_over_one_group()
         };
-        assert_ne!(
-            admission_shape_token(true, &empty),
-            admission_shape_token(true, &empty_string)
-        );
+        assert_ne!(token_of(true, &empty), token_of(true, &empty_string));
 
         // A space in an id must not be readable as the FIELD separator, or a
         // crafted id could inject a field the operator never wrote.
@@ -1708,7 +2467,7 @@ mod tests {
             group_allowlist: vec!["G1 sender_allowlist=0".into()],
             ..open_over_one_group()
         };
-        let token = admission_shape_token(true, &spaced);
+        let token = token_of(true, &spaced);
         assert_eq!(
             token.split(' ').count(),
             SHAPE_FIELDS.len() + 1,
@@ -1726,10 +2485,10 @@ mod tests {
             dm: DmPolicy::Open,
             ..Default::default()
         };
-        let token = admission_shape_token(true, &open);
+        let token = token_of(true, &open);
         let parsed = parse_shape_token(&token).expect("a token this module wrote must parse back");
         assert!(
-            parsed.iter().map(|(k, _)| *k).eq(SHAPE_FIELDS),
+            parsed.iter().map(|(k, _)| k.as_str()).eq(SHAPE_FIELDS),
             "the parse must recover every field, in order: {parsed:?}"
         );
 
@@ -1758,7 +2517,7 @@ mod tests {
                 acknowledge_open_admission: vec![spelling.clone()],
                 ..open.clone()
             };
-            let faults = open_admission_faults(true, &policy);
+            let faults = faults_of(true, &policy);
             assert!(
                 !faults.is_empty(),
                 "{spelling:?} must NOT acknowledge this channel"
@@ -1766,7 +2525,7 @@ mod tests {
         }
 
         // POSITIVE CONTROL: the exact token, and only the exact token, passes.
-        assert!(open_admission_faults(true, &acknowledged(true, &open)).is_empty());
+        assert!(faults_of(true, &acknowledged(true, &open)).is_empty());
     }
 
     #[test]
@@ -1778,14 +2537,14 @@ mod tests {
             dm: DmPolicy::Open,
             ..Default::default()
         };
-        let token = admission_shape_token(true, &open);
+        let token = token_of(true, &open);
         let narrowed = InboundPolicy {
             dm: DmPolicy::Allowlist,
             dm_allowlist: vec!["U-NAMED".into()],
             acknowledge_open_admission: vec![token.clone()],
             ..Default::default()
         };
-        let refusal = refuse_open_admission([("narrowed", true, &narrowed)])
+        let refusal = refuse_one("narrowed", true, &narrowed)
             .expect_err("a leftover consent must be cleared deliberately, not honoured silently");
         assert_eq!(
             refusal.channels[0].faults,
@@ -1811,13 +2570,13 @@ mod tests {
             acknowledge_open_admission: vec!["dm=open".into()],
             ..Default::default()
         };
-        let refusal = refuse_open_admission([("upgraded", true, &open)])
-            .expect_err("the old spelling must not be honoured");
+        let refusal =
+            refuse_one("upgraded", true, &open).expect_err("the old spelling must not be honoured");
         assert_eq!(
             refusal.channels[0].faults,
             vec![OpenAdmissionFault::Unreadable {
                 token: "dm=open".into(),
-                legacy: true
+                legacy: Some(LegacyToken::PerField)
             }]
         );
         let msg = refusal.to_string();
@@ -1828,7 +2587,7 @@ mod tests {
         assert!(
             msg.contains(&format!(
                 "acknowledge_open_admission = [{:?}]",
-                admission_shape_token(true, &open)
+                token_of(true, &open)
             )),
             "and must print the token that replaces it; got: {msg}"
         );
@@ -1898,17 +2657,13 @@ mod tests {
                                 // the gate accepts. A shape the operator cannot
                                 // acknowledge is a wedge, not a gate.
                                 for enabled in [false, true] {
-                                    refuse_open_admission([(
-                                        "sat",
-                                        enabled,
-                                        &acknowledged(enabled, &policy),
-                                    )])
-                                    .unwrap_or_else(|e| {
-                                        panic!(
-                                            "the advertised token must be accepted for \
+                                    refuse_one("sat", enabled, &acknowledged(enabled, &policy))
+                                        .unwrap_or_else(|e| {
+                                            panic!(
+                                                "the advertised token must be accepted for \
                                              {policy:?} (enabled={enabled}): {e}"
-                                        )
-                                    });
+                                            )
+                                        });
                                 }
                             } else {
                                 assert!(
@@ -1921,7 +2676,7 @@ mod tests {
                                 // either `enabled` setting.
                                 for enabled in [false, true] {
                                     assert!(
-                                        required_acknowledgement(enabled, &policy).is_empty(),
+                                        required_of(enabled, &policy).is_empty(),
                                         "a bounded config must demand no acknowledgement: \
                                          {policy:?}"
                                     );
@@ -2038,8 +2793,8 @@ mod tests {
 
             // The refusal must NAME what is open, whatever the fault is — an
             // operator asked to re-consent has to see what they consent to.
-            let refusal = refuse_open_admission([("s", true, policy)])
-                .expect_err("an unacknowledged open shape refuses");
+            let refusal =
+                refuse_one("s", true, policy).expect_err("an unacknowledged open shape refuses");
             let msg = refusal.to_string();
             assert!(
                 msg.contains(&found[0].found) && msg.contains(found[0].consequence()),
@@ -2050,7 +2805,7 @@ mod tests {
                 "and say the consent is absent; got: {msg}"
             );
 
-            let token = admission_shape_token(true, policy);
+            let token = token_of(true, policy);
             assert!(
                 !tokens.contains(&token),
                 "each shape must have its own token: {token:?}"
@@ -2063,7 +2818,7 @@ mod tests {
                 "the refusal must advertise the token; got: {msg}"
             );
             assert!(
-                open_admission_faults(true, &acknowledged(true, policy)).is_empty(),
+                faults_of(true, &acknowledged(true, policy)).is_empty(),
                 "the advertised token must be the one the gate accepts: {token:?}"
             );
         }

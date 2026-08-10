@@ -113,11 +113,10 @@ impl ChannelPolicySnapshot {
         configs: Vec<ChannelConfig>,
         default_workspace_root: &Path,
     ) -> Result<Self, OpenAdmissionRefusal> {
-        refuse_open_admission(
-            configs
-                .iter()
-                .map(|c| (c.name.as_str(), c.enabled, &c.inbound)),
-        )?;
+        // The WHOLE config per channel — `platform` and `[options]` are part of
+        // the admission shape, because four adapters keep their own admission
+        // filter in `[options]` and an absent one admits everyone.
+        refuse_open_admission(configs.iter())?;
 
         let postures: HashMap<String, ChannelToolScope> = configs
             .iter()

@@ -37,10 +37,11 @@ pub use config::{
     parse_channel_config,
 };
 pub use dispatch::{
-    ADMISSION_SHAPE_VERSION, AccessDecision, AckMode, AdmissionFieldChange, AutoReplyRateLimiter,
-    ChannelOpenAdmission, ChannelToolPosture, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
-    DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome, DmPolicy, GroupPolicy,
-    InboundPolicy, OpenAdmission, OpenAdmissionFault, OpenAdmissionRefusal, SHAPE_FIELDS,
+    ABSENT_FIELD, ADMISSION_SHAPE_VERSION, AccessDecision, AckMode, AdmissionFieldChange,
+    AdmissionShape, AutoReplyRateLimiter, ChannelOpenAdmission, ChannelToolPosture,
+    DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache,
+    DedupeKey, DispatchOutcome, DmPolicy, GroupPolicy, InboundPolicy, LegacyToken,
+    OPTION_FIELD_PREFIX, OpenAdmission, OpenAdmissionFault, OpenAdmissionRefusal, SHAPE_FIELDS,
     TurnAdmission, admission_shape_token, build_session_key, classify, decide_access, evaluate,
     open_admission_faults, open_admissions, refuse_open_admission, required_acknowledgement,
 };
