@@ -3,6 +3,19 @@
     python3 grade_review.py <repo> <review.json> [key.json]
 
 Exit 0 = PASS, 1 = FAIL, 2 = could not grade (UNPROVEN).
+
+Unlisted blockers
+-----------------
+A blocker raised somewhere the key neither demonstrates (the three material
+defects) nor refutes (the five distractors) used to be an automatic FAIL with
+the note "the operator must produce an executable demonstration to overturn
+it". On an unattended run there is no operator, so that was a silent hang
+wearing a verdict.
+
+It is now reported as UNPROVEN and returned separately, in
+``detail["unlisted_blockers"]``, so a caller can name each one and keep it in
+the denominator. A blocker on a DISTRACTOR is still an outright FAIL — that
+one the key can adjudicate, because it ships an executable refutation.
 """
 
 from __future__ import annotations
@@ -81,7 +94,7 @@ def grade(repo, review_path, key_path=None):
     try:
         findings = load_review(review_path)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        return 1, ["review_present: FAIL — %s" % exc], []
+        return 1, ["review_present: FAIL — %s" % exc], [], {"unlisted_blockers": []}
 
     report = ["review_present: PASS — %d finding(s)" % len(findings)]
     notes = []
@@ -92,7 +105,12 @@ def grade(repo, review_path, key_path=None):
     for defect in key["material_defects"]:
         span = spans.get(defect["symbol"])
         if span is None:
-            return 2, ["cannot resolve %s in the reviewed file" % defect["symbol"]], []
+            return (
+                2,
+                ["cannot resolve %s in the reviewed file" % defect["symbol"]],
+                [],
+                {"unlisted_blockers": []},
+            )
         patterns = [re.compile(p, re.IGNORECASE) for p in defect["keywords_any"]]
         matched = [
             f
@@ -149,28 +167,34 @@ def grade(repo, review_path, key_path=None):
         if span:
             material_lines.update(range(span[0], span[1] + 1))
 
+    distractor_lines = {line for line in claimed_spans.values() if line is not None}
     unlisted = [
         f
         for f in findings
         if f["severity"] == "blocker"
+        and f["line"] not in distractor_lines
         and (f["line"] not in material_lines or not f["file"].endswith(os.path.basename(target)))
     ]
     for f in unlisted:
-        failed = True
         report.append(
-            "UNLISTED BLOCKER at %s:%s — %s. Default disposition FAIL; the operator must "
-            "produce an executable demonstration to overturn it."
-            % (f["file"], f["line"], f["message"][:80])
+            "UNLISTED BLOCKER at %s:%s — %s. Neither demonstrated nor refuted by "
+            "this key, and nothing can demonstrate it unattended: UNPROVEN, not "
+            "FAIL and not a pass." % (f["file"], f["line"], f["message"][:80])
         )
 
-    return (1 if failed else 0), report, notes
+    detail = {"unlisted_blockers": unlisted, "findings": len(findings)}
+    if failed:
+        return 1, report, notes, detail
+    if unlisted:
+        return 2, report, notes, detail
+    return 0, report, notes, detail
 
 
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    code, report, notes = grade(*sys.argv[1:4])
+    code, report, notes, _detail = grade(*sys.argv[1:4])
     for line in report:
         print(line)
     for note in notes:

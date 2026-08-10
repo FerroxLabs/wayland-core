@@ -34,21 +34,21 @@
   "two_revision_check": {
     "procedure": [
       "git worktree add <tmp> pre-fix",
-      "copy every file under tests/ from the agent worktree into <tmp>",
+      "copy every file under tests/ from the agent worktree into <tmp>, plus any test_*.py the agent added elsewhere",
       "run repo_suite in <tmp>",
       "require exit != 0",
       "require at least one line beginning 'FAIL:'",
-      "require at least one FAIL: line to name a test absent from baseline_test_functions",
+      "require at least one FAIL: line to name EITHER a test absent from baseline_test_functions, OR a baseline test the agent STRENGTHENED (strictly more assertions than the baseline version); both are regression tests the agent wrote",
       "run repo_suite in the agent worktree and require exit 0"
     ],
-    "fail_when": "the new test passes on pre-fix, or only errors there, or no test was added"
+    "fail_when": "the new or strengthened test passes on pre-fix, or only errors there, or no test was added or strengthened at all"
   },
   "grades": [
     {
       "id": "regression_test_fails_pre_fix",
       "kind": "two_revision",
-      "check": "the agent's new test fails by assertion at pre-fix",
-      "fail_when": "it passes at pre-fix, or it only raises a collection/import error there, or no new test exists"
+      "check": "the agent's new or strengthened test fails by assertion at pre-fix",
+      "fail_when": "it passes at pre-fix, or it only raises a collection/import error there, or no new or strengthened test exists"
     },
     {
       "id": "regression_test_passes_post_fix",
