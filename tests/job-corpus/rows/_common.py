@@ -358,7 +358,55 @@ def run_hidden_suite(
 # ---------------------------------------------------------------------------
 
 
-def product_argv(cred: Credential, prompt: str, max_turns: int = 40) -> List[str]:
+#: Where the recording endpoint forwards to. INV-1 owns the wire on every row
+#: now, so a row that pointed the product straight at the provider would take
+#: itself out of the invariant's view — reported as UNPROVEN, never a quiet
+#: pass. Every row therefore runs through ``ctx.provider_base_url`` and the
+#: watch relays to the real provider named here.
+UPSTREAM_DEFAULTS = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com",
+}
+
+
+def upstream_base_url(cred: Credential) -> Optional[str]:
+    return (
+        cred.base_url
+        or os.environ.get("JOBCORPUS_UPSTREAM_BASE_URL")
+        or UPSTREAM_DEFAULTS.get(cred.provider.lower())
+    )
+
+
+#: The first line of the config the leak watch writes on entry. Only a file
+#: carrying this exact marker may be removed: anything else in that directory
+#: is a machine that was already set up, which A-1 has to be able to notice.
+LEAKWATCH_CONFIG_MARKER = "harness/leakwatch.py"
+
+
+def clear_prewritten_config(ctx: RowContext) -> Optional[str]:
+    """Remove the throwaway provider config the leak watch writes on entry.
+
+    The watch writes a config naming a literal non-credential so that a row
+    which needs no real provider still has one. These rows DO need a real
+    provider, and A-1 needs the machine to hold no configuration at all.
+
+    It removes ONLY the watch's own file, matched by content. Removing
+    whatever happened to be there would erase exactly the evidence A-1's
+    cold-start check is looking for, and the check could then never fail —
+    which the warm control caught.
+    """
+    home = ctx.runner.base_env.get("WAYLAND_HOME")
+    if not home:
+        return None
+    path = os.path.join(home, "config.toml")
+    text = read_text(path)
+    if text is not None and LEAKWATCH_CONFIG_MARKER in text:
+        os.remove(path)
+    return home
+
+
+def product_argv(cred: Credential, prompt: str, max_turns: int = 40,
+                 base_url: Optional[str] = None) -> List[str]:
     """The argv an unattended operator would use.
 
     ``--dangerously-skip-permissions`` is TIER 1: it approves tool calls
@@ -366,10 +414,12 @@ def product_argv(cred: Credential, prompt: str, max_turns: int = 40) -> List[str
     sandbox — a row that needed tier 2 would be measuring a different product.
     """
     argv: List[str] = ["--dangerously-skip-permissions", "--max-turns", str(max_turns)]
+    if cred.provider:
+        argv += ["--provider", cred.provider]
     if cred.model:
         argv += ["--model", cred.model]
-    if cred.base_url:
-        argv += ["--base-url", cred.base_url]
+    if base_url:
+        argv += ["--base-url", base_url]
     argv.append(prompt)
     return argv
 

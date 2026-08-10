@@ -68,6 +68,7 @@ def main(binary: str, artifact_dir: str):
         timeout=TIMEOUT,
         tier=TIER,
         title=TITLE,
+        leak_upstream=C.upstream_base_url(cred),
         key_path=os.path.join(C.KEYS, "a2_issue_to_pr", "key.json"),
     ) as ctx:
         try:
@@ -81,13 +82,14 @@ def main(binary: str, artifact_dir: str):
 
 def _run(ctx: RowContext, cred: C.Credential, forge: "_forge.Forge") -> None:
     C.isolate_provider_env(ctx)
+    C.clear_prewritten_config(ctx)
     key = C.key_json("a2_issue_to_pr/key.json")
     C.authenticate(ctx, cred)
 
     env = dict(C.product_env(cred))
     env["PATH"] = forge.bindir + os.pathsep + os.environ.get("PATH", "")
     job = ctx.run(
-        C.product_argv(cred, C.prompt_of(FIXTURE_NAME)), extra_env=env, timeout=TIMEOUT
+        C.product_argv(cred, C.prompt_of(FIXTURE_NAME), base_url=ctx.provider_base_url), extra_env=env, timeout=TIMEOUT
     )
 
     repo = ctx.workspace

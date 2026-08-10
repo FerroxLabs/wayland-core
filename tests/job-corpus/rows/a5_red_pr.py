@@ -83,6 +83,7 @@ def main(binary: str, artifact_dir: str):
         timeout=TIMEOUT,
         tier=TIER,
         title=TITLE,
+        leak_upstream=C.upstream_base_url(cred),
         key_path=os.path.join(C.KEYS, "a5_red_pr", "key.json"),
     ) as ctx:
         try:
@@ -114,6 +115,7 @@ def _pinned_checks(key, repo, scratch):
 
 def _run(ctx: RowContext, cred: C.Credential) -> None:
     C.isolate_provider_env(ctx)
+    C.clear_prewritten_config(ctx)
     key = C.key_json("a5_red_pr/key.json")
     repo = ctx.workspace
 
@@ -122,7 +124,7 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
 
     C.authenticate(ctx, cred)
     job = ctx.run(
-        C.product_argv(cred, C.prompt_of(FIXTURE_NAME)),
+        C.product_argv(cred, C.prompt_of(FIXTURE_NAME), base_url=ctx.provider_base_url),
         extra_env=C.product_env(cred),
         timeout=TIMEOUT,
     )

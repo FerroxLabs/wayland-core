@@ -59,8 +59,21 @@ TIMEOUT = 1800
 FIXTURE_NAME = "a1_cold_start"
 
 
-def _config_root(home: str) -> str:
-    return os.path.join(home, ".local", "share", "wayland-core")
+#: Anything whose presence means this machine was already set up. The leak
+#: watch creates the config DIRECTORY on entry (it owns the wire and plants
+#: its secrets there), so an empty directory proves nothing either way; what
+#: has to be absent is a configuration and a stored credential.
+SETUP_ARTEFACTS = (
+    "config.toml",
+    "credentials.enc",
+    "credentials.toml",
+    "credentials.kdf.json",
+    "auth.json",
+)
+
+
+def _already_set_up(root: str) -> list:
+    return [name for name in SETUP_ARTEFACTS if os.path.exists(os.path.join(root, name))]
 
 
 def main(binary: str, artifact_dir: str):
@@ -84,6 +97,7 @@ def main(binary: str, artifact_dir: str):
         timeout=TIMEOUT,
         tier=TIER,
         title=TITLE,
+        leak_upstream=C.upstream_base_url(cred),
         key_path=os.path.join(C.KEYS, "a1_cold_start", "key.json"),
     ) as ctx:
         try:
@@ -98,18 +112,20 @@ def main(binary: str, artifact_dir: str):
 def _run(ctx: RowContext, cred: C.Credential) -> None:
     C.isolate_provider_env(ctx)
     home = ctx.runner.home
-    root = _config_root(home)
+    root = C.clear_prewritten_config(ctx) or home
 
     # ---------------------------------------------------------------- cold
+    already = _already_set_up(root)
     ctx.expect(
-        not os.path.exists(root),
+        not already,
         ROW_ID + ".starts-from-nothing",
-        "the machine had no wayland-core configuration at all before this row "
-        "started (%s did not exist)" % root,
+        "the machine held no wayland-core configuration and no stored "
+        "credential before this row started (nothing of %s exists under %s)"
+        % (", ".join(SETUP_ARTEFACTS), root),
         "this row was handed a machine that was ALREADY set up (%s existed "
         "before anything ran), so nothing it observes afterwards is evidence "
-        "about a cold start" % root,
-        {"config_root": root},
+        "about a cold start" % ", ".join(already),
+        {"config_root": root, "found": already},
     )
 
     # ------------------------------------------------------------- install
@@ -117,19 +133,19 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
     where = ctx.run(["--config-path"], extra_env={"NO_COLOR": "1"}, timeout=180)
     printed = ctx.runner.text(where).strip().splitlines()
     printed_path = printed[-1].strip() if printed else ""
-    installed = os.path.isdir(root) and bool(printed_path) and os.path.exists(printed_path)
+    installed = bool(printed_path) and os.path.exists(printed_path)
     ctx.expect(
         installed,
         ROW_ID + ".sets-itself-up",
         "starting from nothing, the product created its own configuration and "
         "told the user where it is (%s)" % printed_path,
         "the product could not set itself up on a machine with no existing "
-        "configuration (--init-config exit %s, --config-path printed %r, %s %s)"
+        "configuration (--init-config exit %s, --config-path printed %r, which "
+        "%s)"
         % (
             init.exit_code,
             printed_path,
-            root,
-            "exists" if os.path.isdir(root) else "still does not exist",
+            "exists" if printed_path and os.path.exists(printed_path) else "is not there",
         ),
         {"init_exit": init.exit_code, "printed": printed_path, "config_root": root},
     )
@@ -207,7 +223,7 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
     # ------------------------------------------------------------- the job
     prompt = C.prompt_of(FIXTURE_NAME)
     job = ctx.run(
-        C.product_argv(cred, prompt),
+        C.product_argv(cred, prompt, base_url=ctx.provider_base_url),
         extra_env=C.product_env(cred),
         timeout=TIMEOUT,
     )
