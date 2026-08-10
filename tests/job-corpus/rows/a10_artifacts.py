@@ -325,6 +325,17 @@ def _oversized(ctx, prov, key, sessions):
     if not os.path.isfile(big):
         return Check("%s.degraded_oversized" % ROW_ID, UNPROVEN,
                      "the generator did not produce %s" % spec["artifact"])
+    # The generator writes BOTH degraded artifacts into --out. Leaving the
+    # corrupt invoice beside the oversized one hands the session a second file
+    # containing the 4,120.00 trap, and the oversized sub-case then grades an
+    # answer read out of the wrong document. Observed on the first live run.
+    for name in os.listdir(out_dir):
+        if name != os.path.basename(big):
+            victim = os.path.join(out_dir, name)
+            if os.path.isfile(victim):
+                os.remove(victim)
+            else:
+                shutil.rmtree(victim, ignore_errors=True)
     size = os.path.getsize(big)
     head = _first_mib_sha256(big)
     provenance = {"bytes": size, "expected_bytes": spec["expected_bytes"],
