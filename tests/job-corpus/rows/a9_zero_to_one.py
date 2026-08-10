@@ -131,9 +131,9 @@ def _run(ctx: RowContext, cred: C.Credential) -> None:
         )
         return
 
-    # The probe starts a real server and writes a log beside it, so it runs in
-    # a copy: the graded workspace stays exactly as the product left it.
-    probe_ws = C.throwaway_copy(ctx.workspace, os.path.join(ctx.artifact_dir, "probe-ws"))
+    # a09_probe copies the directory into scratch before it builds or starts
+    # anything, so the graded workspace stays exactly as the product left it.
+    probe_ws = ctx.workspace
     json_path = os.path.join(ctx.artifact_dir, "a09-probe.json")
     rc, report, raw = G.run_grader(
         [G.PY, PROBE, "--workdir", probe_ws, "--json", json_path],
