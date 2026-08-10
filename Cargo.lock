@@ -9554,6 +9554,7 @@ version = "0.12.26"
 dependencies = [
  "async-trait",
  "chrono",
+ "fd-lock",
  "rand 0.8.6",
  "serde",
  "serde_json",

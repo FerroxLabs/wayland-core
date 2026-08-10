@@ -20,14 +20,48 @@
 //!   [`extract_code`]'s strict shape and then compared, in constant
 //!   time, against the stored digests.
 //!
+//! ## Two processes, one file
+//!
+//! The operator half and the runtime half are ALWAYS different
+//! processes: `wayland-core channel pair …` is one short-lived process
+//! per invocation, the gateway's drain loop is another, long-lived one,
+//! and they meet nowhere except `<channels_dir>/pairings/<channel>.toml`.
+//!
+//! So the file — not any in-memory copy of it — is the state. There is
+//! deliberately **no cache** in [`PairingBook`] when it is backed by a
+//! store: every access decision re-reads, and every mutation is a
+//! read-modify-write performed inside an exclusive cross-process lock.
+//! A cache here is not a performance detail, it is a correctness bug:
+//! it makes a freshly minted code invisible to the running gateway,
+//! makes revocation inert while the CLI prints success, and lets each
+//! side publish its stale whole-file snapshot over the other's writes.
+//!
+//! The lock is an advisory `flock` / `LockFileEx` (via `fd-lock`) on a
+//! DEDICATED sibling `<channel>.lock` file — the same mechanism
+//! `wcore-budget`'s daily spend ledger and `wcore-config`'s credential
+//! store already use. Publishing goes through
+//! [`wcore_config::atomic_write`] (tempfile + fsync + rename).
+//!
+//! **Windows.** `fd-lock` maps to `LockFileEx` on a handle we open, and
+//! the lock file is never renamed and never removed, so it can never be
+//! the participant in an `ERROR_SHARING_VIOLATION` during publish. The
+//! state file is opened only INSIDE the lock and closed before the lock
+//! is released, so no reader of ours holds a handle while the writer
+//! renames over it. A third party that opens the file without
+//! `FILE_SHARE_DELETE` (indexer, AV) can still make the rename fail;
+//! that surfaces as a refusal to grant, never as a grant. None of this
+//! has been exercised on a Windows host — see the residuals.
+//!
 //! ## Fail-closed points
 //!
 //! - Unknown channel / missing state file -> empty state -> deny.
-//! - Unreadable or malformed state file -> deny (never "assume open").
+//! - Unreadable or malformed state file -> deny, and no write: the
+//!   phantom empty state is never published over the operator's file.
 //! - Empty `sender_id` (no stable identity to pair) -> deny.
-//! - A grant that cannot be PERSISTED is not granted: the durability
-//!   write happens before the in-memory commit, so a restart and this
-//!   process can never disagree about who is paired.
+//! - A grant that cannot be PERSISTED is not granted: the redeem and
+//!   the durable write happen in ONE locked critical section, so no
+//!   process and no restart can disagree about who is paired, and one
+//!   code can never be burnt twice.
 //! - [`PairingBook::ephemeral`] has no store and no state, so any code
 //!   path that forgets to supply the real book denies rather than opens.
 //!
@@ -140,11 +174,16 @@ impl PairingState {
             .count()
     }
 
-    /// Drop expired codes. Returns whether anything was removed.
-    fn prune(&mut self, now_ms: i64) -> bool {
-        let before = self.pending.len();
+    /// Drop expired codes. Expiry is exclusive: an entry whose
+    /// `expires_at_ms` EQUALS `now_ms` is dead, matching [`Self::redeem`]
+    /// and [`Self::live_code_count`], so a code cannot be redeemed at an
+    /// instant a prune would already have removed it.
+    ///
+    /// Deliberately returns nothing. It used to report whether anything
+    /// was removed and no caller ever read that, which made the flag
+    /// impossible to test — the entries it keeps are the behaviour.
+    fn prune(&mut self, now_ms: i64) {
         self.pending.retain(|p| p.expires_at_ms > now_ms);
-        self.pending.len() != before
     }
 
     /// Record the digest of a freshly minted code.
@@ -347,12 +386,88 @@ impl PairingStore {
         Ok(self.root.join(format!("{channel}.toml")))
     }
 
-    /// Read a channel's state. A missing file is an EMPTY state (nobody
-    /// paired, no live codes) — not an error, and not an open door. A
-    /// present-but-unreadable/malformed file IS an error, so the caller
-    /// denies rather than silently starting from empty and overwriting
-    /// the operator's real pairings.
-    pub fn load(&self, channel: &str) -> Result<PairingState, ChannelError> {
+    /// Open (creating if needed) the advisory lock that serializes access
+    /// to `channel`'s state across processes.
+    ///
+    /// A DEDICATED sibling file, never the state file itself: the state
+    /// file is republished by `rename`, and on Windows renaming over a
+    /// file somebody holds open is `ERROR_SHARING_VIOLATION`. This one is
+    /// only ever opened and locked, so it cannot be that somebody.
+    ///
+    /// The channel name is validated before anything touches the
+    /// filesystem, so a hostile name cannot create a lock file outside
+    /// the root either.
+    fn open_lock(&self, channel: &str) -> Result<fd_lock::RwLock<std::fs::File>, ChannelError> {
+        let lock_path = self.path_for(channel)?.with_extension("lock");
+        std::fs::create_dir_all(&self.root)
+            .map_err(|e| ChannelError::Config(format!("{}: {e}", self.root.display())))?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| ChannelError::Config(format!("{}: {e}", lock_path.display())))?;
+        Ok(fd_lock::RwLock::new(file))
+    }
+
+    /// Read a channel's state under the SHARED cross-process lock, so a
+    /// reader never observes a half-published file and never races the
+    /// operator's write.
+    ///
+    /// A missing file is an EMPTY state (nobody paired, no live codes) —
+    /// not an error, and not an open door. A present-but-unreadable or
+    /// malformed file IS an error, so the caller denies rather than
+    /// silently starting from empty.
+    pub fn read(&self, channel: &str) -> Result<PairingState, ChannelError> {
+        // A shared lock only needs `&self`; the exclusive one in `update`
+        // needs `&mut`.
+        let lock = self.open_lock(channel)?;
+        let _guard = loop {
+            match lock.read() {
+                Ok(guard) => break guard,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(ChannelError::Config(format!("pairing lock: {e}"))),
+            }
+        };
+        self.load_locked(channel)
+    }
+
+    /// Read-modify-write a channel's state inside the EXCLUSIVE
+    /// cross-process lock.
+    ///
+    /// This is the ONLY mutation path. The state handed to `body` is read
+    /// from disk inside the lock, so a decision can never be made against
+    /// a snapshot another process has already superseded, and the write
+    /// back cannot clobber a concurrent one. `body` returns its outcome
+    /// plus whether the state actually changed; an unchanged state is not
+    /// republished, so ordinary denied traffic does no I/O beyond the read.
+    fn update<T>(
+        &self,
+        channel: &str,
+        body: impl FnOnce(&mut PairingState) -> (T, bool),
+    ) -> Result<T, ChannelError> {
+        let mut lock = self.open_lock(channel)?;
+        // `fd_lock`'s write guard borrows the `RwLock` mutably, so the retry
+        // loop cannot return the guard across a function boundary under NLL —
+        // the same closure shape `wcore-budget`'s daily ledger uses.
+        let _guard = loop {
+            match lock.write() {
+                Ok(guard) => break guard,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(ChannelError::Config(format!("pairing lock: {e}"))),
+            }
+        };
+        let mut state = self.load_locked(channel)?;
+        let (outcome, changed) = body(&mut state);
+        if changed {
+            self.save_locked(channel, &state)?;
+        }
+        Ok(outcome)
+    }
+
+    /// Load without taking the lock. Callers must already hold it.
+    fn load_locked(&self, channel: &str) -> Result<PairingState, ChannelError> {
         let path = self.path_for(channel)?;
         let body = match std::fs::read_to_string(&path) {
             Ok(b) => b,
@@ -366,64 +481,94 @@ impl PairingStore {
         toml::from_str(&body).map_err(|e| ChannelError::Config(format!("{}: {e}", path.display())))
     }
 
-    /// Write a channel's state atomically (temp file + rename) with
-    /// owner-only permissions on unix.
-    pub fn save(&self, channel: &str, state: &PairingState) -> Result<(), ChannelError> {
+    /// Publish without taking the lock. Callers must already hold it
+    /// exclusively.
+    ///
+    /// [`wcore_config::atomic_write`] is the workspace's one durable
+    /// publish helper (tempfile + fsync + rename, with the Windows
+    /// long-path handling from F26-03-D). Its tempfile name is random, so
+    /// two writers cannot collide on it the way a fixed `<name>.toml.tmp`
+    /// sibling does.
+    fn save_locked(&self, channel: &str, state: &PairingState) -> Result<(), ChannelError> {
         let path = self.path_for(channel)?;
         std::fs::create_dir_all(&self.root)
             .map_err(|e| ChannelError::Config(format!("{}: {e}", self.root.display())))?;
         let body = toml::to_string_pretty(state)
             .map_err(|e| ChannelError::Config(format!("serialize pairing state: {e}")))?;
-        let tmp = path.with_extension("toml.tmp");
-        write_private(&tmp, &body)?;
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            ChannelError::Config(format!("{}: {e}", path.display()))
-        })
+        wcore_config::atomic_write(&path, body.as_bytes())
+            .map_err(|e| ChannelError::Config(format!("{}: {e}", path.display())))?;
+        restrict_to_owner(&path);
+        Ok(())
     }
 }
 
+/// Re-assert owner-only permissions AFTER the atomic publish, the same
+/// order `wcore-config`'s credential store uses: the rename carries the
+/// tempfile's identity onto the name, and an existing destination's mode
+/// is carried forward — so a file somebody widened to 0644 would stay
+/// 0644 without this.
+///
+/// Best effort with a warning rather than a hard error: the bytes are
+/// already published at this point, and turning "the mode could not be
+/// tightened" into a refusal would deny a sender whose pairing IS on
+/// disk. On a filesystem with no POSIX modes at all this is the only
+/// sane outcome, and the operator gets told.
 #[cfg(unix)]
-fn write_private(path: &Path, body: &str) -> Result<(), ChannelError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| ChannelError::Config(format!("{}: {e}", path.display())))?;
-    f.write_all(body.as_bytes())
-        .map_err(|e| ChannelError::Config(format!("{}: {e}", path.display())))?;
-    f.sync_all()
-        .map_err(|e| ChannelError::Config(format!("{}: {e}", path.display())))
+fn restrict_to_owner(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(
+            target: "wcore_channels::pairing",
+            path = %path.display(),
+            error = %e,
+            "could not restrict pairing state to owner-only"
+        );
+    }
 }
 
+/// Windows has no POSIX mode; the pairing file inherits the directory's
+/// ACL. Named as a no-op rather than left to `#[cfg]` omission — see the
+/// residual in the module docs.
 #[cfg(not(unix))]
-fn write_private(path: &Path, body: &str) -> Result<(), ChannelError> {
-    std::fs::write(path, body).map_err(|e| ChannelError::Config(format!("{}: {e}", path.display())))
-}
+fn restrict_to_owner(_path: &Path) {}
 
-/// The pairing gate's handle: per-channel state, lazily loaded from a
-/// [`PairingStore`] and written back on every change.
+/// The pairing gate's handle over a [`PairingStore`].
 ///
 /// Construct with [`PairingBook::open`] for the real, durable book.
 /// [`PairingBook::ephemeral`] is the fail-closed stand-in used by the
 /// pure `decide_access` entry point — it has no store and no state, so
 /// it admits nobody.
+///
+/// A durable book holds **no cached state**. See the module docs: the
+/// operator CLI is always a second process over the same file, so a
+/// cache here silently loses one side's writes.
 #[derive(Debug)]
 pub struct PairingBook {
     store: Option<PairingStore>,
-    states: HashMap<String, PairingState>,
+    /// State for the STORE-LESS ephemeral book only, which by
+    /// construction has exactly one holder and no file to disagree with.
+    /// Always empty on a durable book.
+    ephemeral_states: HashMap<String, PairingState>,
+}
+
+/// What `admit`'s locked critical section concluded.
+enum Grant {
+    /// Already paired before this message; nothing changed.
+    AlreadyPaired,
+    /// This message presented a live code, which is now burnt.
+    Redeemed,
+    Denied,
 }
 
 impl PairingBook {
-    /// Durable book rooted at `root` (see [`PairingStore::default_root`]).
+    /// Durable book rooted at `root` — normally
+    /// `wcore_channels_registry::pairings_dir()`, i.e.
+    /// [`PairingStore::beside_configs`] of the channels directory the
+    /// runtime actually read.
     pub fn open(root: impl Into<PathBuf>) -> Self {
         Self {
             store: Some(PairingStore::new(root)),
-            states: HashMap::new(),
+            ephemeral_states: HashMap::new(),
         }
     }
 
@@ -433,38 +578,48 @@ impl PairingBook {
     pub fn ephemeral() -> Self {
         Self {
             store: None,
-            states: HashMap::new(),
+            ephemeral_states: HashMap::new(),
         }
     }
 
-    /// Snapshot of one channel's state, loading it on first touch.
-    fn state(&mut self, channel: &str) -> Result<&PairingState, ChannelError> {
-        if !self.states.contains_key(channel) {
-            let loaded = match &self.store {
-                Some(s) => s.load(channel)?,
-                None => {
-                    validate_channel(channel)?;
-                    PairingState::default()
-                }
-            };
-            self.states.insert(channel.to_string(), loaded);
-        }
-        Ok(self
-            .states
-            .get(channel)
-            .expect("state inserted immediately above"))
-    }
-
-    /// Persist `next` FIRST, then commit it in memory. Ordering is
-    /// load-bearing: a durability failure must leave both the disk and
-    /// this process on the previous state, never disagreeing about who
-    /// is paired or which codes are still live.
-    fn commit(&mut self, channel: &str, next: PairingState) -> Result<(), ChannelError> {
+    /// Observe one channel's state. On a durable book this is a fresh
+    /// read under the shared lock, every time — that is what makes an
+    /// operator's mint or revoke visible to a gateway that started
+    /// before it.
+    fn view<T>(
+        &self,
+        channel: &str,
+        f: impl FnOnce(&PairingState) -> T,
+    ) -> Result<T, ChannelError> {
         if let Some(store) = &self.store {
-            store.save(channel, &next)?;
+            return Ok(f(&store.read(channel)?));
         }
-        self.states.insert(channel.to_string(), next);
-        Ok(())
+        validate_channel(channel)?;
+        let empty = PairingState::default();
+        Ok(f(self.ephemeral_states.get(channel).unwrap_or(&empty)))
+    }
+
+    /// Read-modify-write one channel's state. On a durable book the read,
+    /// the decision and the write are one exclusive critical section, so
+    /// two processes can neither lose each other's changes nor both act
+    /// on the same single-use code.
+    ///
+    /// `f` returns its outcome plus whether it changed anything; only a
+    /// change is published.
+    fn mutate<T>(
+        &mut self,
+        channel: &str,
+        f: impl FnOnce(&mut PairingState) -> (T, bool),
+    ) -> Result<T, ChannelError> {
+        if let Some(store) = &self.store {
+            return store.update(channel, f);
+        }
+        validate_channel(channel)?;
+        let entry = self
+            .ephemeral_states
+            .entry(channel.to_string())
+            .or_default();
+        Ok(f(entry).0)
     }
 
     /// **Operator-facing.** Mint a fresh single-use code for `channel`,
@@ -473,56 +628,57 @@ impl PairingBook {
     /// so the operator must deliver it to the person out of band.
     ///
     /// There is no inbound path to this function: nothing a remote
-    /// sender can put in a message reaches it.
+    /// sender can put in a message reaches it. The code is returned only
+    /// after it is durably recorded, so a code that reached the operator
+    /// is always redeemable.
     pub fn mint(
         &mut self,
         channel: &str,
         now_ms: i64,
         ttl_ms: i64,
     ) -> Result<String, ChannelError> {
-        let mut next = self.state(channel)?.clone();
         let code = generate_code();
-        next.record(&code, now_ms, ttl_ms);
-        self.commit(channel, next)?;
+        self.mutate(channel, |state| {
+            state.record(&code, now_ms, ttl_ms);
+            ((), true)
+        })?;
         Ok(code)
     }
 
     /// Whether `sender_id` is already paired on `channel`.
     pub fn is_paired(&mut self, channel: &str, sender_id: &str) -> Result<bool, ChannelError> {
-        Ok(self.state(channel)?.is_paired(sender_id))
+        self.view(channel, |state| state.is_paired(sender_id))
     }
 
     /// Paired senders on `channel`.
     pub fn paired_senders(&mut self, channel: &str) -> Result<Vec<PairedSender>, ChannelError> {
-        Ok(self.state(channel)?.paired().to_vec())
+        self.view(channel, |state| state.paired().to_vec())
     }
 
     /// Live (unexpired, unredeemed) code count for `channel`.
     pub fn live_code_count(&mut self, channel: &str, now_ms: i64) -> Result<usize, ChannelError> {
-        Ok(self.state(channel)?.live_code_count(now_ms))
+        self.view(channel, |state| state.live_code_count(now_ms))
     }
 
     /// **Operator-facing.** Revoke a pairing. Returns whether one existed.
     pub fn unpair(&mut self, channel: &str, sender_id: &str) -> Result<bool, ChannelError> {
-        let mut next = self.state(channel)?.clone();
-        if !next.unpair(sender_id) {
-            return Ok(false);
-        }
-        self.commit(channel, next)?;
-        Ok(true)
+        self.mutate(channel, |state| {
+            let removed = state.unpair(sender_id);
+            (removed, removed)
+        })
     }
 
     /// **Operator-facing.** Invalidate every outstanding code on
     /// `channel` without touching existing pairings.
     pub fn revoke_codes(&mut self, channel: &str) -> Result<usize, ChannelError> {
-        let mut next = self.state(channel)?.clone();
-        let n = next.pending.len();
-        if n == 0 {
-            return Ok(0);
-        }
-        next.pending.clear();
-        self.commit(channel, next)?;
-        Ok(n)
+        self.mutate(channel, |state| {
+            let n = state.pending.len();
+            if n == 0 {
+                return (0, false);
+            }
+            state.pending.clear();
+            (n, true)
+        })
     }
 
     /// The gate. `true` iff `msg`'s sender is already paired on
@@ -533,57 +689,55 @@ impl PairingBook {
     /// no stable sender id, unreadable state, non-code body, wrong code,
     /// expired code, failed persist — returns `false`.
     pub fn admit(&mut self, channel: &str, msg: &IncomingMessage, now_ms: i64) -> bool {
-        let sender = msg.sender_id.clone();
+        let sender = msg.sender_id.as_str();
         if sender.is_empty() {
             // No stable identity to pair; a display name is not one.
             return false;
         }
 
-        let current = match self.state(channel) {
-            Ok(s) => s.clone(),
+        // One critical section: read, decide, burn, persist. Splitting it
+        // is what let a second process resurrect a burnt code or lose the
+        // grant that had just been made.
+        let outcome = self.mutate(channel, |state| {
+            if state.is_paired(sender) {
+                return (Grant::AlreadyPaired, false);
+            }
+            // The ONLY route to a grant: a well-formed code that matches a
+            // live digest. The body is never read as an instruction.
+            let Some(code) = extract_code(&msg.text) else {
+                return (Grant::Denied, false);
+            };
+            if !state.redeem(&code, now_ms) {
+                return (Grant::Denied, false);
+            }
+            // Piggyback the expiry sweep on the write we are already doing,
+            // so denied traffic never rewrites the file.
+            state.prune(now_ms);
+            state.pair(sender, now_ms);
+            (Grant::Redeemed, true)
+        });
+
+        match outcome {
+            Ok(Grant::AlreadyPaired) => true,
+            Ok(Grant::Redeemed) => {
+                tracing::info!(
+                    target: "wcore_channels::pairing",
+                    channel = %channel,
+                    "sender paired via one-time code"
+                );
+                true
+            }
+            Ok(Grant::Denied) => false,
             Err(e) => {
                 tracing::warn!(
                     target: "wcore_channels::pairing",
                     channel = %channel,
                     error = %e,
-                    "pairing state unreadable — denying (fail-closed)"
+                    "pairing state unreadable or unwritable — denying (fail-closed)"
                 );
-                return false;
+                false
             }
-        };
-
-        if current.is_paired(&sender) {
-            return true;
         }
-
-        // The ONLY route to a grant: a well-formed code that matches a
-        // live digest. The body is never read as an instruction.
-        let Some(code) = extract_code(&msg.text) else {
-            return false;
-        };
-
-        let mut next = current;
-        next.prune(now_ms);
-        if !next.redeem(&code, now_ms) {
-            return false;
-        }
-        next.pair(&sender, now_ms);
-
-        if let Err(e) = self.commit(channel, next) {
-            tracing::warn!(
-                target: "wcore_channels::pairing",
-                channel = %channel,
-                error = %e,
-                "could not persist pairing grant — denying (fail-closed)"
-            );
-            return false;
-        }
-        tracing::info!(
-            target: "wcore_channels::pairing",
-            channel = %channel,
-            "sender paired via one-time code"
-        );
-        true
     }
 }
 
@@ -656,7 +810,7 @@ mod tests {
     fn store_missing_file_is_empty_not_error() {
         let tmp = TempDir::new().unwrap();
         let store = PairingStore::new(tmp.path().join("pairings"));
-        let st = store.load("slack").unwrap();
+        let st = store.read("slack").unwrap();
         assert_eq!(st, PairingState::default());
         assert!(!st.is_paired("u1"));
     }
@@ -664,30 +818,86 @@ mod tests {
     #[test]
     fn store_rejects_traversal_channel_names() {
         let tmp = TempDir::new().unwrap();
-        let store = PairingStore::new(tmp.path());
-        for bad in ["../escape", "a/b", "", ".hidden", "sl ack"] {
+        let store = PairingStore::new(tmp.path().join("pairings"));
+        for bad in ["../escape", "a/b", "", ".hidden", "sl ack", "..", "a\\b"] {
             assert!(
-                store.load(bad).is_err(),
-                "channel name {bad:?} must be rejected"
+                store.read(bad).is_err(),
+                "channel name {bad:?} must be rejected on read"
+            );
+            assert!(
+                store
+                    .update(bad, |_: &mut PairingState| ((), true))
+                    .is_err(),
+                "channel name {bad:?} must be rejected on write"
             );
         }
+        // The name is refused BEFORE anything touches the filesystem, so no
+        // state file and no sibling lock file escaped the root.
+        assert!(
+            !tmp.path().join("pairings").exists(),
+            "a refused channel name must not create the pairing root"
+        );
+        let strays: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .collect();
+        assert!(strays.is_empty(), "hostile names created {strays:?}");
     }
 
     #[test]
     fn store_round_trips_and_is_owner_only() {
         let tmp = TempDir::new().unwrap();
         let store = PairingStore::new(tmp.path().join("pairings"));
-        let mut st = PairingState::default();
-        st.record("SOMECODE", 1_000, 60_000);
-        st.pair("u1", 1_000);
-        store.save("slack", &st).unwrap();
-        assert_eq!(store.load("slack").unwrap(), st);
+        let mut expected = PairingState::default();
+        store
+            .update("slack", |st| {
+                st.record("SOMECODE", 1_000, 60_000);
+                st.pair("u1", 1_000);
+                expected = st.clone();
+                ((), true)
+            })
+            .unwrap();
+        assert_eq!(store.read("slack").unwrap(), expected);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = std::fs::metadata(tmp.path().join("pairings").join("slack.toml")).unwrap();
-            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+            let path = tmp.path().join("pairings").join("slack.toml");
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            // Owner-only is RE-asserted on every publish, not just the first:
+            // a file somebody widened must come back locked down.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            store
+                .update("slack", |st| {
+                    st.pair("u2", 2_000);
+                    ((), true)
+                })
+                .unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "a widened pairing file must be re-restricted on the next write"
+            );
         }
+    }
+
+    #[test]
+    fn store_update_publishes_only_when_the_state_changed() {
+        let tmp = TempDir::new().unwrap();
+        let store = PairingStore::new(tmp.path().join("pairings"));
+        // A no-change update must not create the file — denied inbound
+        // traffic is the common case and must not rewrite state.
+        store.update("slack", |_| ((), false)).unwrap();
+        assert!(!tmp.path().join("pairings").join("slack.toml").exists());
+        store
+            .update("slack", |st| {
+                st.pair("u1", 1);
+                ((), true)
+            })
+            .unwrap();
+        assert!(tmp.path().join("pairings").join("slack.toml").exists());
     }
 
     #[test]
@@ -751,6 +961,95 @@ mod tests {
     }
 
     #[test]
+    fn prune_keeps_live_codes_and_drops_expired_ones_at_the_boundary() {
+        let mut st = PairingState::default();
+        st.record("EARLY", 0, 10_000); // expires at 10_000
+        st.record("LATE", 0, 20_000); // expires at 20_000
+
+        // One ms before the earlier ttl: nothing goes.
+        st.prune(9_999);
+        assert_eq!(st.pending.len(), 2, "nothing expires before its ttl");
+
+        // Exactly AT the ttl the entry is already dead — the same exclusive
+        // boundary `redeem` and `live_code_count` use, so there is no
+        // instant at which a code is prunable but still redeemable.
+        st.prune(10_000);
+        assert_eq!(st.pending.len(), 1, "expiry is exclusive: == ttl is dead");
+        assert!(!st.redeem("EARLY", 10_000), "the pruned code is gone");
+        assert!(
+            st.redeem("LATE", 10_000),
+            "the live code survived the prune"
+        );
+    }
+
+    #[test]
+    fn prune_is_a_no_op_when_nothing_has_expired_and_clears_all_when_everything_has() {
+        let mut st = PairingState::default();
+        st.record("A", 0, 10_000);
+        st.record("B", 0, 10_000);
+        let before = st.clone();
+        st.prune(1);
+        assert_eq!(st, before, "a prune with nothing to do changes nothing");
+        st.prune(10_001);
+        assert!(st.pending.is_empty(), "everything expired");
+        st.prune(20_000);
+        assert!(st.pending.is_empty(), "pruning an empty list is safe");
+    }
+
+    #[test]
+    fn prune_leaves_pairings_alone() {
+        // Expiry is about CODES. A paired sender has no ttl and must never
+        // be swept out from under the operator.
+        let mut st = PairingState::default();
+        st.pair("u1", 0);
+        st.record("A", 0, 10_000);
+        st.prune(999_999);
+        assert!(st.pending.is_empty());
+        assert!(
+            st.is_paired("u1"),
+            "a pairing is not a code and never expires"
+        );
+    }
+
+    #[test]
+    fn minting_prunes_expired_codes_instead_of_evicting_live_ones() {
+        // `record` prunes before it enforces the cap. Without that prune the
+        // expired entries stay, consume cap slots, and the eviction at the
+        // cap throws away a LIVE code instead. The discriminating assertion
+        // is the pending length, not the live count.
+        let mut st = PairingState::default();
+        st.record("OLD", 0, 10_000); // dead by t=20_000
+        st.record("LIVE", 0, 100_000); // still good
+        st.record("NEW", 20_000, 10_000); // this mint does the sweep
+
+        assert_eq!(st.pending.len(), 2, "the expired entry was swept, not kept");
+        assert!(!st.redeem("OLD", 20_001));
+        assert!(st.redeem("LIVE", 20_001));
+        assert!(st.redeem("NEW", 20_001));
+    }
+
+    #[test]
+    fn a_grant_sweeps_expired_codes_out_of_the_persisted_state() {
+        // `admit`'s prune runs on the write it was already doing, so the
+        // file does not accumulate dead entries forever.
+        let tmp = TempDir::new().unwrap();
+        let mut book = PairingBook::open(tmp.path());
+        book.mint("slack", 0, 1_000).unwrap(); // dead by t=5_000
+        let live = book.mint("slack", 0, 100_000).unwrap();
+        assert_eq!(book.live_code_count("slack", 1).unwrap(), 2);
+
+        assert!(book.admit("slack", &dm("u1", &live), 5_000));
+
+        let on_disk = PairingStore::new(tmp.path()).read("slack").unwrap();
+        assert!(
+            on_disk.pending.is_empty(),
+            "the redeemed code is burnt and the expired one swept, saw {:?}",
+            on_disk.pending
+        );
+        assert!(on_disk.is_paired("u1"));
+    }
+
+    #[test]
     fn minting_is_capped_and_prunes_expired() {
         let tmp = TempDir::new().unwrap();
         let mut book = PairingBook::open(tmp.path());
@@ -787,11 +1086,67 @@ mod tests {
 
     #[test]
     fn unreadable_state_denies_rather_than_opens() {
+        // The claim has TWO halves and only the second one can fail.
+        //
+        // "Denied" alone proves nothing: the obvious fail-OPEN mutation is
+        // `Err(_) => PairingState::default()`, and an EMPTY state denies
+        // every sender too — so a test that only asserts a denial passes
+        // just as happily with the hole in place. That is exactly why the
+        // original version of this test was unfailable.
+        //
+        // What a phantom empty state DOES do is get published over the
+        // operator's file on the next write, destroying every pairing on
+        // the channel. So the falsifiable half is: an unreadable state
+        // refuses reads AND refuses writes, and the bytes on disk are
+        // untouched.
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path()).unwrap();
-        std::fs::write(tmp.path().join("slack.toml"), "this is not toml {{{").unwrap();
-        let mut book = PairingBook::open(tmp.path());
+        let root = tmp.path().join("pairings");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("slack.toml");
+        let corrupt = "this is not toml {{{";
+        std::fs::write(&path, corrupt).unwrap();
+        let mut book = PairingBook::open(&root);
+
+        // (1) The gate denies — including for a well-formed code, so the
+        //     denial is not just `extract_code` rejecting the body.
         assert!(!book.admit("slack", &dm("u1", "ANY"), 1));
+        assert!(!book.admit("slack", &dm("u1", &generate_code()), 1));
+
+        // (2) Reads refuse rather than reporting a comfortable "nobody is
+        //     paired, no codes outstanding".
+        assert!(book.is_paired("slack", "u1").is_err());
+        assert!(book.paired_senders("slack").is_err());
+        assert!(book.live_code_count("slack", 1).is_err());
+
+        // (3) Writes refuse. `mint` is the one that kills the fail-open
+        //     mutation: with `Err(_) => PairingState::default()` it returns
+        //     Ok and republishes an empty state over the file below.
+        assert!(book.mint("slack", 1, DEFAULT_CODE_TTL_MS).is_err());
+        assert!(book.unpair("slack", "u1").is_err());
+        assert!(book.revoke_codes("slack").is_err());
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            corrupt,
+            "unreadable pairing state must never be replaced by an empty one"
+        );
+    }
+
+    #[test]
+    fn unreadable_state_is_the_reason_and_not_the_channel_name() {
+        // Control for the test above: the SAME calls against a readable
+        // state file all succeed, so the refusals there are attributable to
+        // the unreadable file and not to the fixture.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("pairings");
+        let mut book = PairingBook::open(&root);
+        let code = book.mint("slack", 1, DEFAULT_CODE_TTL_MS).unwrap();
+        assert!(book.admit("slack", &dm("u1", &code), 2));
+        assert!(book.is_paired("slack", "u1").unwrap());
+        assert!(book.paired_senders("slack").is_ok());
+        assert!(book.live_code_count("slack", 2).is_ok());
+        assert!(book.unpair("slack", "u1").unwrap());
+        assert_eq!(book.revoke_codes("slack").unwrap(), 0);
     }
 
     #[test]

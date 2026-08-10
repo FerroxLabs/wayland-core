@@ -151,9 +151,10 @@ pub struct InboundSubscriber {
     /// `await`.
     rate_limiter: Arc<StdMutex<AutoReplyRateLimiter>>,
     /// Durable DM-pairing state, consulted only by channels whose policy is
-    /// [`wcore_channels::DmPolicy::Pairing`]. Owned by the drain loop (it is
-    /// mutated when a code is redeemed) and written through to disk on every
-    /// change, so a pairing survives restart and a burnt code stays burnt.
+    /// [`wcore_channels::DmPolicy::Pairing`]. It is a HANDLE, not a copy: the
+    /// file under the pairing root is the state, and the operator CLI is a
+    /// second process writing the same file, so every decision re-reads and
+    /// every change is made under a cross-process lock.
     ///
     /// Defaults to [`wcore_channels::PairingBook::ephemeral`], which admits
     /// NOBODY — a host that does not opt in with
@@ -188,7 +189,7 @@ impl InboundSubscriber {
     }
 
     /// Back DM pairing with durable state under `root` (normally
-    /// [`wcore_channels::PairingStore::default_root`]).
+    /// [`wcore_channels_registry::pairings_dir`]).
     ///
     /// Without this the subscriber keeps the fail-closed ephemeral book and
     /// `DmPolicy::Pairing` denies every DM. Builder-style so existing
@@ -252,8 +253,9 @@ impl InboundSubscriber {
         // The loop owns the dedupe cache (mutated per non-short-circuited
         // event).
         let mut dedupe = self.dedupe;
-        // Likewise the pairing book: redeeming a code mutates it, and the
-        // drain loop is the only writer.
+        // The pairing book moves in too, but unlike the dedupe cache it owns
+        // no state — it is a handle onto the shared file, and `channel pair`
+        // in another process writes that same file.
         let mut pairings = self.pairings;
 
         tokio::spawn(async move {

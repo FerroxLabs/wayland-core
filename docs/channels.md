@@ -233,6 +233,10 @@ The rules, all enforced rather than advisory:
   pairing denial is the single tag `pairing required`, so a sender cannot
   tell "wrong code" from "no code".
 - **Durable.** Pairings and burnt codes survive a restart.
+- **Live against a running gateway.** `mint`, `revoke` and `revoke-codes`
+  take effect on the next inbound message — no restart, no reload. The CLI
+  and the gateway are different processes over one file, and every change is
+  a locked read-modify-write of it, so neither can lose the other's writes.
 - **`dm_allowlist` is ignored** under this policy — pairing is the whole
   gate. Set `dm = "allowlist"` if you want the list.
 
