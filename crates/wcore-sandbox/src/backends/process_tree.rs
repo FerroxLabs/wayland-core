@@ -277,6 +277,25 @@ impl MacProcessGroupAuthority {
         {
             return Err(std::io::Error::last_os_error());
         }
+        // The sentinel learns that its owner died by seeing EOF on this
+        // channel, and EOF arrives only when the LAST copy of the owner's end
+        // is closed. Without close-on-exec, every process this agent execs
+        // afterwards — an unrelated later tool run, another guard's workload —
+        // inherits a duplicate and holds this channel open past our death, so
+        // the sentinel would wait on a tree it is supposed to be reaping.
+        //
+        // Darwin has no atomic `SOCK_CLOEXEC` for `socketpair`, so this is the
+        // earliest point it can be set; only the OWNER end matters, because
+        // EOF on the sentinel's end is governed by copies of the owner's.
+        // SAFETY: `sockets[0]` is the descriptor socketpair just returned.
+        if unsafe { libc::fcntl(sockets[0], libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(sockets[0]);
+                libc::close(sockets[1]);
+            }
+            return Err(error);
+        }
         // SAFETY: fork duplicates only raw descriptors. The child performs
         // async-signal-safe syscalls and exits without touching Rust state.
         let sentinel_pid = unsafe { libc::fork() };
@@ -298,7 +317,32 @@ impl MacProcessGroupAuthority {
                 let ready = if joined { 1_u8 } else { 0_u8 };
                 libc::write(sockets[1], (&ready as *const u8).cast(), 1);
                 let mut byte = 0_u8;
-                while libc::read(sockets[1], (&mut byte as *mut u8).cast(), 1) > 0 {}
+                loop {
+                    let read = libc::read(sockets[1], (&mut byte as *mut u8).cast(), 1);
+                    // EINTR is not the owner's death; treating it as one would
+                    // reap a live workload on an unrelated signal.
+                    if read > 0 || (read < 0 && *libc::__error() == libc::EINTR) {
+                        continue;
+                    }
+                    break;
+                }
+                // The channel is gone. EITHER the owner tore the guard down —
+                // in which case it has already SIGKILLed this group and the
+                // call below is a no-op — OR the owner DIED, and on Darwin
+                // that second case has no other backstop: no PDEATHSIG, no PID
+                // namespace, no Job Object. Under SIGKILL the owner runs no
+                // Drop, no signal handler and no unwinding, so nothing written
+                // on that side can ever reap the tree. This process, reparented
+                // to launchd and woken by the kernel closing the owner's last
+                // descriptor, is the only participant still running.
+                //
+                // Guarded on `joined`, and that guard is load-bearing: a
+                // sentinel that failed `setpgid` is still in the OWNER's
+                // group, so signalling unconditionally would SIGKILL the
+                // agent's own process group.
+                if joined {
+                    libc::kill(-process_group, libc::SIGKILL);
+                }
                 libc::_exit(if joined { 0 } else { 1 });
             }
         }
