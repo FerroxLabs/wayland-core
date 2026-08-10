@@ -372,6 +372,10 @@ A three-tier automatic compaction strategy that prevents context window overflow
 
   The restored conversation is the pre-compaction buffer verbatim, so it will very likely compact again on the next turn — restore it to *read* what was dropped, or after raising `context_window`. A window number that was never archived is refused by name rather than silently falling back to the summary. Cost: up to `precompact_archive_windows` copies of a full context window on disk per session, bounded regardless of how long the session runs.
 
+- **Autocompact keeps the recent past verbatim.** The last `keep_recent_tokens` tokens of conversation (default 20,000) cross the boundary byte-identical instead of being summarised — so the command you ran a minute ago is still the command and its output, not prose about them. The cut always lands on an assistant message, so a tool call is never separated from its result, and the summary message says explicitly that it and the first verbatim message are not adjacent. The tail is additionally capped at half the autocompact trigger threshold, so raising `keep_recent_tokens` can never leave the post-fold buffer close enough to the watermark to compact again immediately. Set it to `0` to summarise everything, as earlier versions did.
+
+- **Autocompact re-states what the host knows.** Immediately after the fold, wayland-core appends a block it writes itself — never the summariser — carrying the working directory and git branch, whether plan mode is on, the tool-approval tier, the available tools, and two ledgers: files already read and files already written this session, by path and size. A summariser can drop or invent any of those; live state cannot. This is what stops the agent re-reading a file it already read purely because the summary forgot to mention it. The ledgers carry paths and sizes only, never file content, and are bounded by the file-state cache's own capacity.
+
 - **The effective context window** is, in order of precedence: your `context_window` setting if you set one; otherwise the active model's real window when wayland-core knows the model; otherwise 200,000. So a 1,000,000-token model autocompacts at 967,000 and hard-stops at 997,000, a 128k model at 95,000 / 125,000, and an unknown model keeps the 167,000 / 197,000 defaults. Setting `context_window` explicitly always wins — including when you set it *below* what the model allows.
 
 ### Configuration
@@ -389,6 +393,9 @@ max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
 precompact_archive_windows = 3  # Pre-compaction conversations kept on disk
                                 # for --restore-compaction (0 disables)
+keep_recent_tokens = 20000  # Recent conversation kept VERBATIM across an
+                            # autocompact boundary (0 summarizes everything).
+                            # Capped at half the autocompact threshold.
 ```
 
 ### Smart auto-compaction (#280)

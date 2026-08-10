@@ -11,4 +11,6 @@ pub mod emergency;
 pub mod estimate;
 pub mod micro;
 pub mod prompt;
+pub mod rebuild;
 pub mod state;
+pub mod tail;

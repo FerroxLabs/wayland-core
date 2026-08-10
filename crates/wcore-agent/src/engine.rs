@@ -28,7 +28,7 @@ use crate::budget_authority::{
 };
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
-use crate::compact::{auto, emergency, estimate, micro, prompt as compact_prompt};
+use crate::compact::{auto, emergency, estimate, micro, prompt as compact_prompt, rebuild, tail};
 use crate::confirm::ToolConfirmer;
 use crate::journal_provider::JournaledLlmProvider;
 use crate::orchestration::ExecutionControl;
@@ -13816,9 +13816,35 @@ impl AgentEngine {
             // pre-compaction buffer still holds it, so the fold below can
             // re-attach it verbatim.
             self.remember_original_instruction(live_user_turn.as_ref());
+            // CHANGE B — the bounded verbatim tail. Everything from
+            // `tail_cut` onward stays byte-identical across the boundary; only
+            // the prefix is handed to the summariser. `None` means "summarise
+            // everything", which is exactly what this function did before the
+            // tail existed.
+            //
+            // The hard cap is half the autocompact trigger threshold: whatever
+            // the operator sets `keep_recent_tokens` to, the post-fold buffer
+            // lands at most halfway back to the watermark, so a large tail can
+            // never re-trigger compaction on the very next turn.
+            let tail_hard_cap = (auto::autocompact_threshold(
+                &self.compact_config,
+                self.compat.provider_type(),
+                &self.model,
+            )) / 2;
+            let tail_cut = tail::tail_start(
+                &self.messages,
+                self.compact_config.keep_recent_tokens,
+                tail_hard_cap,
+            );
+            let summarise_upto = tail_cut.unwrap_or(self.messages.len());
+            // CHANGE A — gather the typed host facts BEFORE the buffer is
+            // touched. Assembled here rather than inside the fold so the
+            // ledger reflects the session as the summariser saw it, and so
+            // the one `git` subprocess is not held across the fold.
+            let host_state = self.rebuild_host_state().await;
             let result = auto::autocompact(
                 provider.as_ref(),
-                &self.messages,
+                &self.messages[..summarise_upto],
                 &self.model,
                 &self.compact_config,
                 &mut self.compact_state,
@@ -13829,8 +13855,11 @@ impl AgentEngine {
             match result {
                 Ok(result) => {
                     self.output.emit_info(&format!(
-                        "Autocompact: summarized {} messages ({} tokens → compact)",
-                        result.messages_summarized, result.pre_compact_tokens
+                        "Autocompact: summarized {} messages ({} tokens → compact); \
+                         kept {} recent message(s) verbatim",
+                        result.messages_summarized,
+                        result.pre_compact_tokens,
+                        tail_cut.map_or(0, |cut| self.messages.len() - cut),
                     ));
                     // #279(d): capture before `result` is moved into `folded`.
                     let result_pre_compact_tokens = result.pre_compact_tokens;
@@ -13849,11 +13878,36 @@ impl AgentEngine {
                         .into_iter()
                         .flat_map(|m| m.content)
                         .collect();
-                    // B8 — the fold below moves `live_user_turn` into
-                    // `folded`, but the pre-compaction archive has to record
-                    // the buffer as the user actually had it, live turn
-                    // included. One message clone, taken before the move.
+                    // CHANGE B — say out loud that the summary and the first
+                    // verbatim message are NOT adjacent. Without this the model
+                    // reads a summary of turn 1..40 as if it immediately
+                    // preceded turn 41.
+                    if tail_cut.is_some() {
+                        folded.push(ContentBlock::Text {
+                            text: tail::TAIL_NOTICE.to_string(),
+                        });
+                    }
+                    // CHANGE A — the host-authored rebuild block. Appended
+                    // after the summary so the last word on cwd, permissions
+                    // and the read/edit ledgers belongs to typed state rather
+                    // than to prose a summariser may have invented.
+                    if let Some(block) = crate::compact::rebuild::render(&host_state) {
+                        folded.push(ContentBlock::Text { text: block });
+                    }
+                    // B8 — the fold below consumes `live_user_turn`, but the
+                    // pre-compaction archive has to record the buffer as the
+                    // user actually had it, live turn included. One message
+                    // clone, taken before the move.
                     let live_turn_archive = live_user_turn.clone();
+                    // The verbatim tail, lifted out of the buffer before it is
+                    // replaced. Empty when `tail_cut` is `None`, in which case
+                    // everything below behaves exactly as it did before the
+                    // tail existed.
+                    self.archive_precompaction_window(live_turn_archive.as_ref());
+                    let mut tail_messages: Vec<Message> = match tail_cut {
+                        Some(cut) => self.messages.split_off(cut),
+                        None => Vec::new(),
+                    };
                     if let Some(turn) = live_user_turn {
                         // #285 (defense-in-depth) — the live turn that
                         // triggered compaction may carry `tool_result`
@@ -13862,39 +13916,55 @@ impl AgentEngine {
                         // such result is now orphaned. Demote it to text at
                         // the fold so the malformed array never even forms;
                         // the pre-send `repair_orphaned_tool_results` remains
-                        // the guarantee. `folded` here holds only summary
-                        // prose (no surviving `tool_use`), so every
-                        // `tool_result` in the live turn is an orphan.
+                        // the guarantee. The surviving set now spans the tail
+                        // too: a call kept verbatim there legitimately still
+                        // owns its result, and neutralizing that result would
+                        // be a NEW loss the tail was added to prevent.
                         // Own the ids (not `&str` into `folded`) so the
-                        // `folded.push(..)` below isn't blocked by a live
-                        // immutable borrow (E0502).
+                        // pushes below aren't blocked by a live immutable
+                        // borrow (E0502).
                         let surviving_ids: std::collections::HashSet<String> = folded
                             .iter()
+                            .chain(tail_messages.iter().flat_map(|m| m.content.iter()))
                             .filter_map(|b| match b {
                                 ContentBlock::ToolUse { id, .. } => Some(id.to_string()),
                                 _ => None,
                             })
                             .collect();
-                        for block in turn.content {
-                            let keep = !matches!(&block, ContentBlock::ToolResult { tool_use_id, .. }
-                                if !surviving_ids.contains(tool_use_id.as_str()));
-                            if keep {
-                                folded.push(block);
-                            } else {
-                                folded.push(Self::neutralize_orphaned_tool_result(block));
+                        let live_blocks: Vec<ContentBlock> = turn
+                            .content
+                            .into_iter()
+                            .map(|block| {
+                                let keep = !matches!(&block, ContentBlock::ToolResult { tool_use_id, .. }
+                                    if !surviving_ids.contains(tool_use_id.as_str()));
+                                if keep {
+                                    block
+                                } else {
+                                    Self::neutralize_orphaned_tool_result(block)
+                                }
+                            })
+                            .collect();
+                        // AUDIT A7 keeps its teeth: the live turn is folded
+                        // into an existing `User` message wherever appending a
+                        // fresh one would put two `User` messages side by side.
+                        match tail_messages.last_mut() {
+                            None => folded.extend(live_blocks),
+                            Some(last) if matches!(last.role, Role::User) => {
+                                last.content.extend(live_blocks)
                             }
+                            Some(_) => tail_messages.push(Message::now(Role::User, live_blocks)),
                         }
                     }
-                    // B7 — re-attach the user's original instruction verbatim,
-                    // AFTER the live turn is folded in so the duplicate check
-                    // sees the whole message. Skipped when the text is already
-                    // present (single-turn sessions, where the live turn IS the
-                    // instruction, and repeat compactions whose previous fold
-                    // was carved out as the live turn).
+                    // B7 — re-attach the user's original instruction verbatim.
+                    // The duplicate check spans the whole rebuilt buffer, so a
+                    // pin still present in the verbatim tail is not repeated.
                     if let Some(pin) = self.compact_state.pinned_instruction.clone() {
-                        let already_present = folded.iter().any(
-                            |b| matches!(b, ContentBlock::Text { text } if text.contains(&pin)),
-                        );
+                        let already_present = folded
+                            .iter()
+                            .chain(tail_messages.iter().flat_map(|m| m.content.iter()))
+                            .any(
+                                |b| matches!(b, ContentBlock::Text { text } if text.contains(&pin)),
+                            );
                         if !already_present {
                             folded.insert(
                                 0,
@@ -13904,25 +13974,26 @@ impl AgentEngine {
                             );
                         }
                     }
-                    // Token-opt compaction-floor: every message currently in
-                    // `self.messages` is the prefix autocompact just summarized
-                    // (the live user turn was popped out above and re-folded
-                    // verbatim, so it is NOT in this count). Replacing the whole
-                    // buffer with one synthetic boundary+summary message
-                    // collapses all of them away — none map to an original
-                    // index any more. Advance the floor by that count (the
-                    // `+=` accumulates across repeated autocompacts, since the
-                    // synthetic message itself becomes part of the next prefix).
-                    // B8 — compaction must not be the only copy. `self.messages`
-                    // is still the pre-compaction prefix on this line; the very
-                    // next statement destroys it and `save_session_mirror` then
-                    // overwrites the session file with the collapsed buffer, so
-                    // this is the last point at which the conversation the user
-                    // had can be written down.
-                    self.archive_precompaction_window(live_turn_archive.as_ref());
+                    // Token-opt compaction-floor: `self.messages` now holds
+                    // exactly the prefix autocompact summarized — the live user
+                    // turn was popped out above and the verbatim tail was split
+                    // off just now, so neither is in this count. Those prefix
+                    // messages collapse into one synthetic boundary+summary
+                    // message and none map to an original index any more.
+                    // Advance the floor by that count (the `+=` accumulates
+                    // across repeated autocompacts, since the synthetic message
+                    // itself becomes part of the next prefix).
+                    //
+                    // B8 — compaction must not be the only copy, which is why
+                    // `archive_precompaction_window` runs above, while
+                    // `self.messages` still holds prefix AND tail: that is the
+                    // last point at which the conversation the user had can be
+                    // written down before `save_session_mirror` overwrites the
+                    // session file with the collapsed buffer.
                     let collapsed = self.messages.len();
                     self.compaction_floor += collapsed;
                     self.messages = vec![Message::now(Role::User, folded)];
+                    self.messages.append(&mut tail_messages);
                     compacted = true;
                     // #279(d): signal the host a compaction fired. Gated host-side
                     // by capabilities.non_destructive_compact; dormant unless the
@@ -15752,6 +15823,71 @@ impl AgentEngine {
                     false,
                 );
             }
+        }
+    }
+
+    /// Collect the typed host facts the post-compaction rebuild block renders.
+    ///
+    /// Every field is read from live state, never asked of the summariser —
+    /// see `compact/rebuild.rs` for why that distinction is the whole point.
+    /// The read/edit ledgers both come from the shared file-state cache, which
+    /// tags each entry with the provenance that separates them: a `ReadResult`
+    /// is content the model saw as a Read, a `WriteEcho` is post-write disk
+    /// state from an Edit/Write. `FileHistory` is deliberately NOT the source
+    /// — it is wired only into `RollbackTool` and the engine holds no handle
+    /// to it, so the cache is the one place both halves of the frontier
+    /// actually exist together.
+    async fn rebuild_host_state(&self) -> rebuild::HostState {
+        let cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.display().to_string());
+        let git_branch = match cwd.as_deref() {
+            Some(dir) => Self::git_branch_at(dir).await,
+            None => None,
+        };
+        let files = self
+            .file_cache
+            .as_ref()
+            .and_then(|cache| cache.read().ok().map(|guard| guard.ledger()))
+            .unwrap_or_default();
+        rebuild::HostState {
+            cwd,
+            git_branch,
+            plan_mode: self.plan_state.is_active,
+            approval_policy: match self
+                .confirmer
+                .lock()
+                .map(|c| c.approval_policy())
+                .unwrap_or(wcore_types::execution_policy::ApprovalPolicy::Prompt)
+            {
+                wcore_types::execution_policy::ApprovalPolicy::Prompt => "prompt per tool",
+                wcore_types::execution_policy::ApprovalPolicy::AutoEdit => "edits auto-approved",
+                wcore_types::execution_policy::ApprovalPolicy::Bypass => "all tools auto-approved",
+            }
+            .to_string(),
+            read_only: self.tools.read_only(),
+            tools: self.tools.tool_names(),
+            files,
+        }
+    }
+
+    /// Best-effort current git branch. `None` when git is absent, the dir is
+    /// not a work tree, or HEAD is detached. Spawned through the central
+    /// `wcore_config::shell` argv helper (no shell interpreter), mirroring
+    /// `changed_files_via_git`.
+    async fn git_branch_at(cwd: &str) -> Option<String> {
+        let mut cmd =
+            wcore_config::shell::shell_command_argv("git", &["rev-parse", "--abbrev-ref", "HEAD"]);
+        cmd.current_dir(cwd);
+        let out = cmd.output().await.ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if branch.is_empty() || branch == "HEAD" {
+            None
+        } else {
+            Some(branch)
         }
     }
 
@@ -19766,14 +19902,20 @@ mod compact_tests {
             engine.messages
         );
         // The result content must be preserved somewhere as context.
-        let preserved = engine
-            .messages
-            .iter()
-            .flat_map(|m| &m.content)
-            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("port = 8080")));
+        //
+        // "as text" was the original wording, and it was the best available
+        // when the whole prefix became prose. With the verbatim tail the
+        // matching `tool_use` can now survive the fold, in which case the
+        // result is kept as a REAL `tool_result` rather than demoted — a
+        // strictly better outcome that the old assertion would have failed.
+        // What has to hold either way is that the bytes survive.
+        let preserved = engine.messages.iter().flat_map(|m| &m.content).any(|b| {
+            matches!(b, ContentBlock::Text { text } if text.contains("port = 8080"))
+                || matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("port = 8080"))
+        });
         assert!(
             preserved,
-            "the tool_result content must survive as text: {:?}",
+            "the tool_result content must survive, as a tool_result or as text: {:?}",
             engine.messages
         );
     }
@@ -19830,8 +19972,15 @@ mod compact_tests {
         // `compaction_floor()` must equal N, indices `< N` must report
         // not-visible and index N must report visible. A conversation reset
         // (`/clear`) must return the floor to 0.
+        //
+        // `keep_recent_tokens = 0` pins this to the "everything collapses"
+        // case the floor primitive was written against. The tail-aware case —
+        // where the floor must advance by the SUMMARISED count and not by the
+        // whole buffer — is
+        // `autocompact_floor_counts_only_what_the_tail_did_not_keep` below.
         let config = CompactConfig {
             context_window: Some(200_000),
+            keep_recent_tokens: 0,
             ..Default::default()
         };
         let mut state = CompactState::new();
@@ -19900,6 +20049,263 @@ mod compact_tests {
         engine.clear_conversation();
         assert_eq!(engine.compaction_floor(), 0);
         assert!(engine.message_index_still_visible(0));
+    }
+
+    // -- CHANGE A / CHANGE B: the execution frontier across a fold --
+
+    /// A conversation whose recent tail is small enough to keep and whose
+    /// prefix is large enough to be worth summarising.
+    fn frontier_conversation() -> Vec<Message> {
+        let mut msgs = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "OLDEST-INSTRUCTION".into(),
+            }],
+        )];
+        // Bulk prefix: big enough that a 400-token tail cannot reach back to it.
+        for i in 0..6 {
+            msgs.push(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: format!("OLD-ASSISTANT-{i} {}", "q".repeat(4_000)),
+                }],
+            ));
+            msgs.push(Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: format!("OLD-USER-{i} {}", "r".repeat(4_000)),
+                }],
+            ));
+        }
+        // The recent frontier: a command that was RUN, and its output.
+        msgs.push(Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "recent".into(),
+                name: "Bash".into(),
+                input: json!({"command": "cargo test --lib RECENT-COMMAND"}),
+                extra: None,
+            }],
+        ));
+        msgs.push(Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "recent".into(),
+                content: "RECENT-OUTPUT: 3 passed".into(),
+                is_error: false,
+            }],
+        ));
+        // Live user turn — popped and re-attached by the A4 carve-out.
+        msgs.push(Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "the live task".into(),
+            }],
+        ));
+        msgs
+    }
+
+    fn all_text(engine: &super::AgentEngine) -> String {
+        engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::ToolUse { name, input, .. } => format!("{name} {input}"),
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn compact_frontier(keep_recent_tokens: usize) -> super::AgentEngine {
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            keep_recent_tokens,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+        let mut engine = make_compact_engine(config, state, frontier_conversation());
+        engine.provider = Arc::new(SummaryProvider);
+        engine.run_compaction().await.expect("autocompact succeeds");
+        engine
+    }
+
+    #[tokio::test]
+    async fn the_verbatim_tail_carries_the_recent_command_across_the_fold() {
+        // CHANGE B. `SummaryProvider` returns a canned summary that mentions
+        // none of these strings, so anything found afterwards was structurally
+        // preserved rather than described.
+        let engine = compact_frontier(400).await;
+        let text = all_text(&engine);
+        assert!(
+            text.contains("cargo test --lib RECENT-COMMAND"),
+            "the recent command must survive verbatim: {text}"
+        );
+        assert!(
+            text.contains("RECENT-OUTPUT: 3 passed"),
+            "the recent command's OUTPUT must survive verbatim: {text}"
+        );
+        // …and the fold must still be a fold: the bulk prefix is gone.
+        assert!(
+            !text.contains("OLD-ASSISTANT-0"),
+            "the old prefix must NOT survive — this would be an off switch, \
+             not a compaction: {text}"
+        );
+        assert!(
+            engine.messages.len() > 1,
+            "the tail must be separate messages, not folded into the summary"
+        );
+    }
+
+    #[tokio::test]
+    async fn keep_recent_tokens_zero_restores_the_pre_tail_single_message_fold() {
+        // The off switch has to actually switch off: with the tail disabled
+        // the buffer collapses to exactly one synthetic message, as it did
+        // before the tail existed.
+        let engine = compact_frontier(0).await;
+        assert_eq!(engine.messages.len(), 1, "{:?}", engine.messages);
+        assert!(!all_text(&engine).contains("cargo test --lib RECENT-COMMAND"));
+    }
+
+    #[tokio::test]
+    async fn the_tail_never_splits_a_tool_call_from_its_result() {
+        // Every `tool_result` left in the buffer must still have its
+        // `tool_use` — a split pair is a provider 400, not a lost detail.
+        let engine = compact_frontier(400).await;
+        let calls: std::collections::HashSet<&str> = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for block in engine.messages.iter().flat_map(|m| &m.content) {
+            if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                assert!(
+                    calls.contains(tool_use_id.as_str()),
+                    "orphaned tool_result {tool_use_id}: {:?}",
+                    engine.messages
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_rebuilt_buffer_never_places_two_user_messages_side_by_side() {
+        // AUDIT A7's invariant, re-proved now that the tail can end on either
+        // role. Strict-alternation providers reject consecutive same-role
+        // messages outright.
+        let engine = compact_frontier(400).await;
+        for pair in engine.messages.windows(2) {
+            assert!(
+                !(matches!(pair[0].role, Role::User) && matches!(pair[1].role, Role::User)),
+                "two adjacent User messages: {:?}",
+                engine.messages
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fold_announces_that_the_summary_and_the_tail_are_not_adjacent() {
+        // Without this the model reads a summary of turns 1..40 as if it
+        // immediately preceded turn 41.
+        assert!(all_text(&compact_frontier(400).await).contains(crate::compact::tail::TAIL_NOTICE));
+        // …and says nothing when there is no tail to disclaim.
+        assert!(!all_text(&compact_frontier(0).await).contains(crate::compact::tail::TAIL_NOTICE));
+    }
+
+    #[tokio::test]
+    async fn autocompact_floor_counts_only_what_the_tail_did_not_keep() {
+        // The floor is the index-space boundary: it must advance by the number
+        // of messages that ACTUALLY collapsed. Counting the tail would make
+        // still-present messages report as invisible.
+        let engine = compact_frontier(400).await;
+        let kept_tail = engine.messages.len() - 1; // minus the synthetic summary
+        let total_before = frontier_conversation().len() - 1; // minus the popped live turn
+        assert_eq!(
+            engine.compaction_floor(),
+            total_before - kept_tail,
+            "floor {} should equal {total_before} summarised minus {kept_tail} kept",
+            engine.compaction_floor()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_rebuild_block_names_every_file_read_and_written_this_session() {
+        // CHANGE A. The ledger comes from the shared file-state cache, whose
+        // `Provenance` separates "the model read this" from "a tool wrote
+        // this". The summariser is a canned string and cannot have produced
+        // either path.
+        let config = CompactConfig {
+            context_window: Some(200_000),
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+        let mut engine = make_compact_engine(config, state, frontier_conversation());
+        engine.provider = Arc::new(SummaryProvider);
+
+        let cache = Arc::new(std::sync::RwLock::new(
+            wcore_tools::file_cache::FileStateCache::new(
+                &wcore_config::file_cache::FileCacheConfig {
+                    max_entries: 10,
+                    max_size_bytes: 1_000_000,
+                    enabled: true,
+                },
+            ),
+        ));
+        {
+            let mut guard = cache.write().unwrap();
+            guard.insert(
+                std::path::PathBuf::from("/work/was_read.rs"),
+                wcore_types::file_state::FileState {
+                    content: "fn main() {}".into(),
+                    mtime_ms: 0,
+                    offset: None,
+                    limit: None,
+                    provenance: wcore_types::file_state::Provenance::ReadResult,
+                    gen_at_read: 0,
+                },
+            );
+            guard.insert(
+                std::path::PathBuf::from("/work/was_written.rs"),
+                wcore_types::file_state::FileState {
+                    content: "fn other() {}".into(),
+                    mtime_ms: 0,
+                    offset: None,
+                    limit: None,
+                    provenance: wcore_types::file_state::Provenance::WriteEcho,
+                    gen_at_read: 0,
+                },
+            );
+        }
+        engine.set_file_cache(cache);
+        engine.run_compaction().await.expect("autocompact succeeds");
+
+        let text = all_text(&engine);
+        let block = text
+            .split(crate::compact::rebuild::REBUILD_HEADER)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no rebuild block in the folded buffer: {text}"));
+        let (read_side, write_side) = block
+            .split_once("ALREADY WRITTEN")
+            .expect("both ledgers present");
+        assert!(read_side.contains("/work/was_read.rs"), "{block}");
+        assert!(write_side.contains("/work/was_written.rs"), "{block}");
+        assert!(
+            !read_side.contains("/work/was_written.rs"),
+            "provenance must keep the two ledgers apart: {block}"
+        );
+        // The ledger is paths, not content — that is what makes it cheap.
+        assert!(!block.contains("fn main() {}"), "{block}");
     }
 
     #[tokio::test]

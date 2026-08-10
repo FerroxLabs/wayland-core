@@ -86,6 +86,26 @@ pub struct CompactConfig {
     #[serde(default = "default_precompact_archive_windows")]
     pub precompact_archive_windows: usize,
 
+    /// Tokens of the most recent conversation kept BYTE-IDENTICAL across an
+    /// autocompact boundary, instead of being summarised into prose.
+    ///
+    /// What a compaction costs a user is the execution frontier — what has
+    /// already been read, run and edited — and that lives in the recent past.
+    /// Before this existed, Core preserved exactly one thing verbatim across a
+    /// fold: the live user turn.
+    ///
+    /// The default of 20,000 is where Codex, Kimi and openclaw independently
+    /// landed; none of the three publishes a measurement behind it, so treat
+    /// it as a converged order of magnitude rather than a tuned constant —
+    /// which is precisely why it is an operator-settable field.
+    ///
+    /// The engine additionally caps the tail at half the autocompact trigger
+    /// threshold, so a large value here can never leave the post-fold buffer
+    /// close enough to the watermark to re-trigger immediately. `0` disables
+    /// the tail: the fold then summarises everything, as it did before.
+    #[serde(default = "default_keep_recent_tokens")]
+    pub keep_recent_tokens: usize,
+
     /// Enable prompt cache diagnostics output to user.
     /// When true, cache hit/miss info is shown via OutputSink.
     /// Default: false.
@@ -270,6 +290,7 @@ impl Default for CompactConfig {
             compactable_tools: default_compactable_tools(),
             enabled: default_true(),
             precompact_archive_windows: default_precompact_archive_windows(),
+            keep_recent_tokens: default_keep_recent_tokens(),
             cache_diagnostics: false,
             compaction: wcore_compact::CompactionLevel::default(),
             toon: false,
@@ -320,6 +341,11 @@ fn default_true() -> bool {
 }
 fn default_precompact_archive_windows() -> usize {
     3
+}
+/// 20,000 tokens — see [`CompactConfig::keep_recent_tokens`] for where the
+/// number comes from.
+fn default_keep_recent_tokens() -> usize {
+    20_000
 }
 fn default_smart_trigger_fraction() -> f64 {
     0.65

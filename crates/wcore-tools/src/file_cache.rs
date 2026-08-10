@@ -220,6 +220,26 @@ impl FileStateCache {
     pub fn current_size_bytes(&self) -> usize {
         self.current_size_bytes
     }
+
+    /// Every path the model has touched this session, most-recently-used
+    /// first, with how it was touched and how many bytes of it the cache
+    /// holds.
+    ///
+    /// This is the EXECUTION FRONTIER ledger: the compaction rebuild block
+    /// (`wcore-agent/src/compact/rebuild.rs`) renders it after every fold so a
+    /// summariser losing "I already read src/foo.rs" cannot make the model
+    /// re-read it. It is deliberately paths-and-sizes only — roughly 50 bytes
+    /// per file against the tens of thousands a re-read costs.
+    ///
+    /// Bounded by the cache's own LRU capacity, so the ledger is bounded too:
+    /// an evicted path is a path the engine can no longer honestly claim the
+    /// model saw.
+    pub fn ledger(&self) -> Vec<(PathBuf, Provenance, usize)> {
+        self.entries
+            .iter()
+            .map(|(path, state)| (path.clone(), state.provenance, state.content_bytes()))
+            .collect()
+    }
 }
 
 /// Update the cache after a successful file write (Edit or Write).

@@ -611,6 +611,15 @@ async fn tc_2_6_02_micro_before_auto_execution_order() {
         compactable_tools: vec!["mock_tool".into()],
         context_window: Some(200_000),
         emergency_buffer: 3_000,
+        // This test proves the ORDER of the two passes by inspecting the slice
+        // the summariser received. The verbatim tail (`keep_recent_tokens`)
+        // changes what that slice IS — on this tiny conversation the whole
+        // buffer fits inside the tail budget, so the summariser sees one
+        // message and every cleared marker sits in the tail instead. Pinning
+        // the tail off keeps the observable this assertion was written
+        // against; the tail's own behaviour is covered by the `compact_tests`
+        // suite in `engine.rs`.
+        keep_recent_tokens: 0,
         ..Default::default()
     };
     config.max_turns = Some(20);
