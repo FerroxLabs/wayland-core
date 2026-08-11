@@ -16,8 +16,9 @@ use crate::unsaved_work::UnsavedWorkGuard;
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
     /// P2: session-scoped record of the user's unsaved work, so a
-    /// whole-file overwrite can never silently delete it.
-    unsaved: UnsavedWorkGuard,
+    /// whole-file overwrite can never silently delete it. Shared with the
+    /// Bash guard so both tools answer "is this saved?" the same way.
+    unsaved: &'static UnsavedWorkGuard,
 }
 
 impl WriteTool {
@@ -39,7 +40,7 @@ impl WriteTool {
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
         Self {
             file_cache,
-            unsaved: UnsavedWorkGuard::new(),
+            unsaved: crate::unsaved_work::shared(),
         }
     }
 }

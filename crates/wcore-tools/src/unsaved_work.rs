@@ -23,11 +23,36 @@
 //!   has an empty baseline, so repeated Writes to it are never blocked.
 //! * Edit is not guarded: its deletions are named explicitly by the model in
 //!   `old_string`, which is the opposite of an accidental wholesale rewrite.
+//!
+//! P2b — the same work, thrown away through the shell instead.
+//!
+//! Measured defect (job corpus row B-1, 2026-08-11, case `k5-after`): the agent
+//! finished the job, noticed it had touched `SHIPPING-API.md`, and tidied up
+//! with `git checkout -- SHIPPING-API.md`. That file also carried a line the
+//! user had never committed anywhere, and the revert took it. Write's guard saw
+//! nothing because Write was never called. So the same question — "would this
+//! destroy a line that exists nowhere else?" — is asked of a shell command that
+//! discards the work tree, by [`shell_refusal`], before the shell is spawned.
+//!
+//! The guard is shared with Write through [`shared`]: a file Write created this
+//! session has an empty baseline, so the agent is never blocked from reverting
+//! its own new file.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+
+/// The process-wide guard.
+///
+/// Write and Bash must agree about what counts as unsaved, and Write's
+/// first-touch baselines are what keep the agent's own new files unprotected
+/// against its own later revert. Two independent instances would not share
+/// them.
+pub fn shared() -> &'static UnsavedWorkGuard {
+    static GUARD: OnceLock<UnsavedWorkGuard> = OnceLock::new();
+    GUARD.get_or_init(UnsavedWorkGuard::new)
+}
 
 /// Most dropped lines quoted back in a refusal message.
 const MAX_QUOTED_LINES: usize = 5;
@@ -104,6 +129,16 @@ impl UnsavedWorkGuard {
         let _ = self.baseline(path);
     }
 
+    /// Lines of unsaved user work in `path`, i.e. every line a wholesale
+    /// revert of that path would destroy.
+    ///
+    /// This is [`Self::dropped_lines`] against content that keeps nothing,
+    /// which is exactly what `git checkout --`, `git restore`, `git stash` and
+    /// `git clean` do to a path.
+    pub fn unsaved_lines(&self, path: &Path) -> Vec<String> {
+        self.dropped_lines(path, "")
+    }
+
     /// Unsaved lines for `path`, computed once and memoized for the session.
     fn baseline(&self, path: &Path) -> Vec<String> {
         let key = path.to_path_buf();
@@ -118,6 +153,208 @@ impl UnsavedWorkGuard {
         }
         computed
     }
+}
+
+/// Git subcommands that throw away uncommitted changes in the work tree.
+///
+/// Deliberately short. Every entry here is a command whose *purpose* is to
+/// discard, so a refusal cannot be mistaken for over-reach. `git commit`,
+/// `git add`, `git switch -c` and the rest are untouched.
+const DISCARDING_SUBCOMMANDS: [&str; 5] = ["checkout", "restore", "stash", "clean", "reset"];
+
+/// The refusal a shell caller should return, or `None` when nothing the
+/// command discards is unsaved.
+///
+/// `cwd` is the directory the shell will run in, because that is what git
+/// resolves the command's relative paths against.
+///
+/// Scope, stated as honestly as Write's guard:
+/// * Only the git subcommands in [`DISCARDING_SUBCOMMANDS`] are inspected, and
+///   `reset` only in its `--hard` form — a mixed or soft reset keeps the work
+///   tree.
+/// * A discarding command that names paths is judged on those paths. One that
+///   names none (`git checkout -- .`, `git stash`, `git reset --hard`) reaches
+///   the whole work tree and is judged on every file that has unsaved work.
+/// * Outside a git work tree there is no baseline, so nothing is claimed and
+///   nothing is blocked.
+pub fn shell_refusal(command: &str, cwd: &Path) -> Option<String> {
+    let guard = shared();
+    let mut at_risk: Vec<(String, Vec<String>)> = Vec::new();
+    for segment in shell_segments(command) {
+        let Some(paths) = discarding_git_paths(&segment, cwd) else {
+            continue;
+        };
+        let candidates = if paths.is_empty() {
+            unsaved_work_tree_paths(cwd)
+        } else {
+            paths
+        };
+        for rel in candidates {
+            let abs = cwd.join(&rel);
+            let lines = guard.unsaved_lines(&abs);
+            if !lines.is_empty() && !at_risk.iter().any(|(p, _)| *p == rel) {
+                at_risk.push((rel, lines));
+            }
+        }
+    }
+    if at_risk.is_empty() {
+        return None;
+    }
+    let mut detail = String::new();
+    for (path, lines) in &at_risk {
+        detail.push_str(&format!("\n  {path}\n"));
+        for line in lines.iter().take(MAX_QUOTED_LINES) {
+            detail.push_str(&format!("    {line}\n"));
+        }
+        let more = lines.len().saturating_sub(MAX_QUOTED_LINES);
+        if more > 0 {
+            detail.push_str(&format!("    ... and {more} more line(s)\n"));
+        }
+    }
+    Some(format!(
+        "Refused to run this command: it discards uncommitted changes, and {n} file(s) below \
+         hold line(s) that are on disk but in no commit. That is unsaved work which exists \
+         nowhere else, so throwing it away is irreversible.\n\
+         At risk:{detail}\
+         If you only need to undo your OWN change, revert just the part you changed with Edit. \
+         If the user really does want these lines gone, say what will be lost and let them \
+         confirm before you run it.",
+        n = at_risk.len(),
+    ))
+}
+
+/// Split a command line into the segments a shell would run separately.
+///
+/// Enough to find a `git` invocation after `&&`, `||`, `;`, `|` or a newline.
+/// It is not a shell parser and does not need to be: a discarding git command
+/// hidden from this split still has to survive every other guard, and the
+/// worst case is the refusal not firing, never a wrong refusal.
+fn shell_segments(command: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ';' | '\n' | '|' | '&' => {
+                if (c == '|' || c == '&') && chars.peek() == Some(&c) {
+                    chars.next();
+                }
+                segments.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    segments.push(current);
+    segments
+}
+
+/// The paths a single segment's discarding git command would revert.
+///
+/// `None` when the segment is not a discarding git command at all. `Some(vec![])`
+/// when it is one that names no path, and therefore reaches everything.
+fn discarding_git_paths(segment: &str, cwd: &Path) -> Option<Vec<String>> {
+    let mut tokens = segment
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+        .filter(|t| !t.is_empty())
+        .peekable();
+
+    // Skip a leading `sudo` and any VAR=value assignments.
+    while let Some(token) = tokens.peek() {
+        if *token == "sudo" || (token.contains('=') && !token.starts_with('-')) {
+            tokens.next();
+        } else {
+            break;
+        }
+    }
+    let program = tokens.next()?;
+    if program != "git" && !program.ends_with("/git") {
+        return None;
+    }
+    // Skip git's own pre-subcommand options (`-C dir`, `--no-pager`, ...).
+    let mut subcommand = None;
+    while let Some(token) = tokens.next() {
+        if token == "-C" || token == "-c" {
+            tokens.next();
+            continue;
+        }
+        if token.starts_with('-') {
+            continue;
+        }
+        subcommand = Some(token);
+        break;
+    }
+    let subcommand = subcommand?;
+    if !DISCARDING_SUBCOMMANDS.contains(&subcommand) {
+        return None;
+    }
+
+    let rest: Vec<&str> = tokens.collect();
+    // A reset that keeps the work tree discards nothing on disk.
+    if subcommand == "reset" && !rest.iter().any(|t| *t == "--hard") {
+        return None;
+    }
+    // `git stash list|show|pop|apply|drop` reads or restores; only a push
+    // (the bare form, or an explicit push/save) takes the work tree away.
+    if subcommand == "stash"
+        && let Some(first) = rest.iter().find(|t| !t.starts_with('-'))
+        && !matches!(*first, "push" | "save")
+    {
+        return None;
+    }
+
+    // Everything after a `--` is a pathspec, unambiguously.
+    let explicit = rest.iter().position(|t| *t == "--");
+    let paths: Vec<String> = match explicit {
+        Some(i) => rest[i + 1..].iter().map(|t| t.to_string()).collect(),
+        // Without `--` the operand is ambiguous: `git checkout foo` is a
+        // branch switch when `foo` is a branch and a revert when it is a file.
+        // Resolve it by asking the disk, which is the same thing git does. A
+        // branch switch is NOT a discard — git refuses one that would lose
+        // uncommitted work — so an operand that is not a path leaves nothing
+        // to check.
+        None => rest
+            .iter()
+            .filter(|t| !t.starts_with('-'))
+            .filter(|t| cwd.join(t).exists())
+            .map(|t| t.to_string())
+            .collect(),
+    };
+    // A pathspec of `.` is the whole tree, not a file called ".".
+    if paths.iter().any(|p| p == "." || p == "*") {
+        return Some(Vec::new());
+    }
+    // `reset --hard` and a bare `stash` take the whole work tree with no
+    // pathspec at all. `checkout`, `restore` and `clean` given no resolvable
+    // path are a branch or a no-op, and discard nothing.
+    if paths.is_empty() && !matches!(subcommand, "reset" | "stash") {
+        return None;
+    }
+    Some(paths)
+}
+
+/// Every tracked path under `cwd` that git reports as modified.
+///
+/// Used only when the command names no path and therefore reaches the whole
+/// work tree. Empty outside a work tree.
+fn unsaved_work_tree_paths(cwd: &Path) -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain", "-z", "--untracked-files=no"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|entry| entry.len() > 3)
+        .map(|entry| entry[3..].to_string())
+        .collect()
 }
 
 /// Lines present on disk at `path` but absent from its git HEAD blob.
@@ -210,6 +447,110 @@ mod tests {
         git(root, &["config", "user.email", "t@example.com"]);
         git(root, &["config", "user.name", "t"]);
         git(root, &["config", "commit.gpgsign", "false"]);
+    }
+
+    // ---- P2b: the same work discarded through the shell -------------------
+
+    /// The measured B-1 defect, exactly: the job is done, the agent tidies up
+    /// with `git checkout --` on a file that also carries the user's uncommitted
+    /// line, and the line is gone. The refusal must fire and must name the line,
+    /// because a refusal that does not say what is at risk teaches nothing.
+    #[test]
+    fn shell_refusal_blocks_git_checkout_of_a_file_holding_unsaved_work() {
+        let (dir, _file) = repo_with_unsaved_line();
+        let root = dir.path();
+        let refusal = shell_refusal("git checkout -- file.py", root)
+            .expect("reverting a file with an uncommitted line must be refused");
+        assert!(refusal.contains("file.py"), "must name the file: {refusal}");
+        assert!(
+            refusal.contains("# WIP do not touch"),
+            "must quote the line at risk: {refusal}"
+        );
+    }
+
+    /// The same command reaching the whole tree by naming no path at all.
+    #[test]
+    fn shell_refusal_blocks_whole_tree_discards() {
+        let (dir, _file) = repo_with_unsaved_line();
+        let root = dir.path();
+        for command in [
+            "git checkout -- .",
+            "git reset --hard",
+            "git stash",
+            "git restore .",
+        ] {
+            assert!(
+                shell_refusal(command, root).is_some(),
+                "{command:?} discards the whole work tree and must be refused"
+            );
+        }
+    }
+
+    /// Found after a `&&`, and with git reached by absolute path — the two
+    /// dodges a single-token check would miss.
+    #[test]
+    fn shell_refusal_sees_past_chaining_and_an_absolute_git() {
+        let (dir, _file) = repo_with_unsaved_line();
+        let root = dir.path();
+        assert!(
+            shell_refusal("echo hi && git checkout -- file.py", root).is_some(),
+            "a discard after && must still be refused"
+        );
+        assert!(
+            shell_refusal("/usr/bin/git checkout -- file.py", root).is_some(),
+            "an absolute git path must still be refused"
+        );
+    }
+
+    /// The guard must not become a general git ban. Every command here either
+    /// keeps the work tree or does not touch it, and blocking one would make
+    /// the refusal noise rather than signal.
+    #[test]
+    fn shell_refusal_leaves_non_discarding_git_alone() {
+        let (dir, _file) = repo_with_unsaved_line();
+        let root = dir.path();
+        for command in [
+            "git status",
+            "git add file.py",
+            "git commit -m x",
+            "git checkout -b feature",
+            "git reset HEAD file.py",
+            "git reset --soft HEAD~1",
+            "git stash list",
+            "git stash pop",
+            "git log --oneline",
+            "git diff",
+        ] {
+            assert!(
+                shell_refusal(command, root).is_none(),
+                "{command:?} does not discard the work tree and must be allowed"
+            );
+        }
+    }
+
+    /// A discard aimed at a different file is not the user's problem.
+    #[test]
+    fn shell_refusal_ignores_a_path_with_nothing_unsaved() {
+        let (dir, _file) = repo_with_unsaved_line();
+        let root = dir.path();
+        std::fs::write(root.join("clean.py"), "x = 1\n").unwrap();
+        git(root, &["add", "clean.py"]);
+        git(root, &["commit", "-q", "-m", "clean"]);
+        assert!(
+            shell_refusal("git checkout -- clean.py", root).is_none(),
+            "a file with no uncommitted line has nothing to lose"
+        );
+    }
+
+    /// Outside a work tree there is no baseline, so no protection is claimed.
+    #[test]
+    fn shell_refusal_stands_down_outside_a_git_work_tree() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("file.py"), "line\n").unwrap();
+        assert!(
+            shell_refusal("git checkout -- file.py", dir.path()).is_none(),
+            "with no git baseline the guard must not guess"
+        );
     }
 
     /// A repo with `file.py` committed, then an extra uncommitted line on disk.
