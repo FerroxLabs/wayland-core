@@ -316,7 +316,7 @@ pub(super) fn write_snapshot_authority_head(
 pub(super) fn write_snapshot(
     path: impl AsRef<Path>,
     snapshot: &SessionSnapshot,
-) -> Result<File, JournalError> {
+) -> Result<LockedFile, JournalError> {
     snapshot.validate()?;
     let path = path.as_ref();
     let mut bytes = serde_json::to_vec(snapshot).map_err(|source| JournalError::Json {
@@ -1181,15 +1181,67 @@ pub(super) fn load_snapshot_if_present(
     }
 }
 
-pub(super) fn replace_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
+/// A published file that still holds its data-file lock, released on drop.
+///
+/// [`replace_file_atomically_inner`] locks the replacement inode before
+/// publication, and that lock binds to the OPEN FILE DESCRIPTION rather than
+/// to the descriptor: `close(2)` releases it only when the LAST descriptor
+/// referring to that description goes away, and `fork(2)` duplicates the whole
+/// descriptor table. Any subprocess spawned while a published handle is open
+/// therefore pins its lock until that child execs (`O_CLOEXEC`) or exits - and
+/// this agent spawns subprocesses constantly. See [`super::lease::unlock_data_file`].
+///
+/// This is a GUARD rather than an explicit `LOCK_UN` at each call site because
+/// the snapshot publication path returns early on eight distinct error edges,
+/// and a release that has to be remembered on each of them is a release that
+/// will eventually be forgotten - which is exactly how the leak reached here.
+#[derive(Debug)]
+pub(super) struct LockedFile(File);
+
+impl LockedFile {
+    /// Hand the still-locked handle to an owner that takes over responsibility
+    /// for releasing it - `JournalWriter`, whose `Drop` unlocks `self.file`.
+    /// Every other consumer must let the guard drop.
+    pub(super) fn into_locked_inner(self) -> File {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped, so the field is moved exactly once
+        // and `Drop for LockedFile` never runs against the moved-out handle.
+        unsafe { std::ptr::read(&this.0) }
+    }
+}
+
+impl std::ops::Deref for LockedFile {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LockedFile {
+    fn deref_mut(&mut self) -> &mut File {
+        &mut self.0
+    }
+}
+
+impl Drop for LockedFile {
+    fn drop(&mut self) {
+        super::lease::unlock_data_file(&self.0);
+    }
+}
+
+pub(super) fn replace_file_atomically(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<LockedFile, JournalError> {
     replace_file_atomically_inner(path, bytes, true, false)
 }
 
-fn replace_private_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
+fn replace_private_file_atomically(path: &Path, bytes: &[u8]) -> Result<LockedFile, JournalError> {
     replace_file_atomically_inner(path, bytes, false, true)
 }
 
-fn replace_snapshot_file_atomically(path: &Path, bytes: &[u8]) -> Result<File, JournalError> {
+fn replace_snapshot_file_atomically(path: &Path, bytes: &[u8]) -> Result<LockedFile, JournalError> {
     replace_file_atomically_inner(path, bytes, false, true)
 }
 
@@ -1198,7 +1250,7 @@ fn replace_file_atomically_inner(
     bytes: &[u8],
     _inject_test_failure: bool,
     private: bool,
-) -> Result<File, JournalError> {
+) -> Result<LockedFile, JournalError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| JournalError::Io {
         path: parent.to_path_buf(),
@@ -1272,14 +1324,15 @@ fn replace_file_atomically_inner(
     }
     if let Err(source) = persisted.sync_all() {
         // See the injected-failure branch above: leaking one descriptor on an
-        // exceptional durability failure is the fail-closed choice.
+        // exceptional durability failure is the fail-closed choice. It is a
+        // deliberate leak of the LOCK too, so it must stay outside `LockedFile`.
         std::mem::forget(persisted);
         return Err(JournalError::Io {
             path: path.to_path_buf(),
             source,
         });
     }
-    Ok(persisted)
+    Ok(LockedFile(persisted))
 }
 
 /// Fsync the directory containing `_path` so a preceding rename is durable.
