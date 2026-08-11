@@ -36,7 +36,20 @@
 //!   dropped line from a **modified** one. A whole-file transformation that
 //!   renames a symbol occurring on an unsaved line reads here as a drop and is
 //!   refused.
-//! * **Non-UTF-8 files** have no line model, so no protection.
+//! * **Non-UTF-8 files** have no line model, so nothing can be proven about
+//!   which of their bytes are recorded. They are therefore **refused**, not
+//!   waved through, with one exception that proves the whole question at
+//!   once: bytes byte-for-byte identical to the pinned commit are recorded,
+//!   so replacing them loses nothing. Round 4 read them — and every other
+//!   pre-image failure, including a permission denied — as an *empty*
+//!   pre-image and skipped the check outright.
+//! * **The window between reading the pre-image and writing is narrowed, not
+//!   closed.** The assessment runs about five `git` processes, measured at
+//!   13.5 ms, and a save landing inside that window was destroyed 12 times out
+//!   of 12 while the note claimed otherwise. The file is now re-read
+//!   immediately before the write lands and the write refused if it moved, so
+//!   nothing older than one syscall is ever acted on. Closing the window
+//!   entirely needs a lock the user's editor would have to take too.
 //!
 //! # The four moving parts
 //!
@@ -108,10 +121,21 @@
 //! sandbox principal that confines agent subprocesses; and nothing ever
 //! removed any of it.
 //!
-//! The object store has none of those properties to get wrong. It is the
-//! user's existing security domain with the user's existing permissions, it
-//! needs no new directory and no new mode bits. It is also self-documenting:
-//! `git cat-file blob <oid>` is the whole recovery procedure.
+//! The object store needs no new directory and no new mode bits, and it is
+//! self-documenting: `git cat-file blob <oid>` is the whole recovery
+//! procedure. What it is **not** is automatically the user's own security
+//! domain, which is what round 4 claimed. Measured: a `0600` file's bytes
+//! become a `0444` object under a `0755` directory, so a private file would be
+//! copied into a readable one. Under `%USERPROFILE%` on Windows,
+//! `.git\objects` inherits `(I)(OI)(CI)(RX)` for both AppContainer package
+//! SIDs. In a linked worktree or a submodule the object is not even in the
+//! tree the user is working in.
+//!
+//! So placement is no longer argued, it is **proven**, per write — see
+//! [`UnsavedWorkGuard::object_store`]. A copy is made only where it can be
+//! shown to be no more exposed than the file it copies, and where that cannot
+//! be shown the write is refused and nothing is copied. Refusing is always
+//! safe: nothing is lost and no secret spreads.
 //!
 //! What it is **not** is self-disposing, and round 3's tool result told the
 //! user it was ("the repository's normal garbage collection removes it in due
@@ -174,29 +198,30 @@
 //! own [`wcore_safety::PIIScrubber`]; see [`quote_dropped`].)
 //!
 //! What can be controlled is **where the bytes are allowed to go**, and there
-//! are two rules, both of which refuse rather than copy:
+//! is one rule: copy only where the copy is provably no more exposed than the
+//! file itself. Its clauses are listed on [`UnsavedWorkGuard::object_store`]
+//! — an ignored file, a repository that is not this file's archive, a store
+//! outside this work tree, a copy with wider permissions than the original,
+//! and a platform where none of that can be measured. Each of them refuses
+//! rather than copies, and they share one refusal message because they are
+//! one rule.
 //!
-//! * the armD rule above — a repository that records nothing under the file's
-//!   directory is not its archive;
-//! * **a file the repository is configured to ignore is not the repository's
-//!   to hold.** `.gitignore` is the user saying, in that repository's own
-//!   configuration, that this file does not belong in it. Round 3 filed a
-//!   gitignored `.env` into `.git/objects` anyway, and that is not a wash: the
-//!   object then travels with `git clone <path>` and `git fsck --lost-found`
-//!   materialises it as plaintext, so a copy the user believes their ignore
-//!   rules filtered carries the key. Now the `Write` is refused and the `Edit`
-//!   says no copy was made.
+//! Two of those clauses exist because a copy was actually made and should not
+//! have been. Round 3 filed a gitignored `.env` into `.git/objects`, and that
+//! is not a wash: the object travels with `git clone <path>` and
+//! `git fsck --lost-found` materialises it as plaintext, so a copy the user
+//! believes their ignore rules filtered carries the key. Round 4 then decided
+//! "ignored" with `git check-ignore`, which consults the **index** — so one
+//! `git add -f`, a command the agent itself can run, filed the same secret
+//! anyway. The question asked now is about the ignore *rules* alone
+//! (`--no-index`), which are committed configuration.
 //!
-//! The store's *permissions* are the user's own: there is no directory of this
-//! guard's making anywhere, on any platform. Round 2 kept snapshots under the
-//! profile home and tried to lock them down with `restrict_dir`/`restrict_file`
-//! helpers that were `#[cfg(not(unix))]` no-ops, so on Windows
-//! `%USERPROFILE%\.wayland` inherited `CodexSandboxUsers:(OI)(CI)(RX)` plus two
-//! AppContainer package SIDs and the agent's own sandbox could read the copy.
-//! Those helpers and that store are gone. A recovery object is an ordinary
-//! object in `.git/objects`, with byte-identical permissions to every other
-//! object the user's own `git` writes there — which is the same statement on
-//! Windows as on Unix, and is why nothing here is `#[cfg]`-ed.
+//! On **Windows** the permission clause cannot be evaluated at all from here,
+//! so the copy is not made. That is a real cost — a Windows agent gets a
+//! refusal where a Unix one gets a recoverable copy — and it is the honest
+//! position until an ACL comparison exists: the measurement that matters
+//! (whether the file itself already carries those same inherited ACEs) is one
+//! this code cannot take.
 //!
 //! # Edit
 //!

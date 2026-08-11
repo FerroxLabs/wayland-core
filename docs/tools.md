@@ -59,8 +59,9 @@ can be made, the write is refused and nothing changes.
 
 - The baseline is the commit **the session started at**, not current `HEAD`, so
   a commit made mid-session cannot launder unsaved work into it.
-- The recovery copy is a loose, unreferenced object in the repository's own
-  `.git/objects`, made with `git hash-object -w`. The tool result prints the
+- The recovery copy is a loose, unreferenced object in the object store git
+  itself names for that repository (`git rev-parse --git-path objects`), made
+  with `git hash-object -w`, and only where that store passes the proof below. The tool result prints the
   exact command to get the bytes back:
   `git -C <repo> cat-file blob <oid>`. Nothing is staged, committed or
   referenced. **`git gc` does not remove it.** Measured on git 2.43.0 and
@@ -86,38 +87,61 @@ can be made, the write is refused and nothing changes.
   remove existing lines are unaffected.
 - Outside any repository there is no object store, so a Write that would drop
   lines is refused for want of anywhere to put a recoverable copy.
-- **A file the repository is configured to ignore is not the repository's to
-  hold.** If `git check-ignore` says the path is ignored, a Write that would
-  drop lines is refused and **nothing is copied**; an Edit says no copy was
-  made. `.gitignore` is the user declaring that this file does not belong in
-  this repository, and filing its prior bytes into `.git/objects` anyway would
-  put a gitignored `.env`'s contents somewhere `git clone <path>` carries them
-  and `git fsck --lost-found` writes out as plaintext. A *tracked* file matched
-  by an ignore rule is unaffected — `check-ignore` consults the index and
-  reports it as not ignored.
+- **The copy is only made where it is provably no more exposed than the file
+  itself.** One rule, checked per write; where the proof does not hold the
+  Write is refused, **nothing is copied**, and an Edit says no copy was made.
+  It holds only when all of these do:
+  - the repository does not ignore the file. Asked of the ignore *rules* with
+    `git check-ignore --no-index`, never of the index: the index is mutable
+    mid-session and one `git add -f` on a gitignored `.env` used to file it
+    into `.git/objects`, where `git clone <path>` carries it and
+    `git fsck --lost-found` writes it out as plaintext. A *tracked* file
+    matched by an ignore rule now reads as ignored, which costs a refusal
+    rather than a copy;
+  - the session's commit records something under the file's own directory, or
+    the file is at the repository root — measured live with `$HOME` as a
+    dotfiles repository and the private file at `~/work/env.local`;
+  - the object store is inside the work tree the file is in. In a **linked
+    worktree** the objects belong to the main repository, and in a
+    **submodule** to `<super>/.git/modules/<name>/objects`; both would put the
+    bytes outside the repository the user is working in, so both are refused;
+  - the copy is no wider-permissioned than the file. git writes a loose object
+    `0444`, so a `0600` file is refused rather than copied into a
+    world-readable object, as is any file whose directory is reachable by
+    fewer people than `.git/objects` is.
+- **On Windows the proof cannot be made, so the copy is not made.** Measured on
+  git 2.54.0.windows.1: under `%USERPROFILE%`, where most Windows repositories
+  live, `.git\objects` inherits `(I)(OI)(CI)(RX)` for both AppContainer package
+  SIDs — the principals that confine agent subprocesses. The file may carry the
+  same inherited ACEs, which would make the copy no more exposed; this code
+  cannot demonstrate that, and a copy that cannot be bounded is not made. A
+  Windows Write that would drop unrecorded lines is refused.
 - **The recovery copy is never scrubbed, and nothing claims it is.** A copy
   with the secret redacted is not a recovery copy — it is lost work wearing a
   disguise. Placement is the only lever, and the two rules above are it. The
   lines a *refusal* quotes back are a different surface and are scrubbed with
   the engine's own `PIIScrubber`.
-- **The store's permissions are the user's own, on every platform.** This guard
-  creates no directory anywhere. Earlier rounds kept snapshots under the
-  profile home behind `restrict_dir`/`restrict_file` helpers that were no-ops
-  off Unix, so on Windows `%USERPROFILE%\.wayland` inherited
+- **This guard creates no directory anywhere.** Earlier rounds kept snapshots
+  under the profile home behind `restrict_dir`/`restrict_file` helpers that
+  were no-ops off Unix, so on Windows `%USERPROFILE%\.wayland` inherited
   `CodexSandboxUsers:(OI)(CI)(RX)` and two AppContainer SIDs. That store is
-  gone; a recovery object is an ordinary object in `.git/objects` whose ACL is
-  byte-identical to every other object the user's own `git` writes.
-- **An enclosing repository is not automatically this file's archive.** If the
-  session's commit records nothing under the file's own directory — measured
-  live with `$HOME` as a dotfiles repository and the private file at
-  `~/work/env.local` — that repository is treated exactly as no repository. A
-  Write that would drop lines is refused and **nothing is copied into it**, so
-  the user learns where their bytes would have gone before the write rather
-  than after. A file at the repository root, or in a directory the repository
-  does record, is unaffected.
+  gone.
+- **A pre-image that cannot be read is refused, not treated as an empty file.**
+  A permission denied, a directory in the way, or bytes that are not UTF-8 all
+  used to produce an empty pre-image, which skipped the check entirely: as an
+  unprivileged uid against a root-owned `0600` file in a writable directory,
+  the write proceeded and the file went `root:root 0600` to
+  `nobody:nogroup 0644`. The one case that still proceeds is bytes that are
+  byte-for-byte what the pinned commit records.
+- **The file is re-read immediately before the write lands.** The assessment
+  runs several `git` processes — measured at 13.5 ms — and a save that arrived
+  inside that window was destroyed 12 times out of 12 while the note claimed
+  the previous contents were preserved. If the file is not byte-for-byte what
+  was judged, the write is refused. That narrows the window to a single
+  syscall rather than closing it.
 - git is run with `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`,
-  `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and
-  `GIT_QUARANTINE_PATH` cleared, so an inherited git environment cannot
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+  and `GIT_QUARANTINE_PATH` cleared, so an inherited git environment cannot
   redirect either the recovery write or the read-back that verifies it.
 
 **What does not hold.** Three limits, stated because a broader claim would be
@@ -129,7 +153,14 @@ untrue:
 - **A modified line is not distinguished from a dropped one.** A whole-file
   transformation that renames a symbol occurring on an unsaved line reads as a
   drop and is refused.
-- **Non-UTF-8 files** have no line model and are not protected.
+- **Non-UTF-8 files** have no line model, so no line of them can be judged.
+  They are refused rather than left unprotected, unless their bytes are
+  exactly what the pinned commit records.
+- **The recovery note hands the model the object id and the `git cat-file`
+  command that retrieves the prior contents unscrubbed** — the same contents
+  whose *quoted* lines are scrubbed when they appear in a refusal. There is one
+  channel to both the user and the model here, and the user needs the command,
+  so the exposure is accepted and stated rather than closed.
 
 ## Bash
 
