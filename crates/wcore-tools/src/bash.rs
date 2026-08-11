@@ -203,6 +203,23 @@ fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: b
 /// Retained for direct compatibility tests. Hosted sessions must query their
 /// registry-owned [`SandboxRegistry`] so capability checks and execution use
 /// the same immutable backend.
+/// P2b — refuse a shell command that would throw away unsaved user work.
+///
+/// The shell runs in the workspace root when a policy supplies one and in the
+/// process directory otherwise. Git resolves the command's relative paths
+/// against that same directory, so the guard is asked about it and not about
+/// some other tree.
+fn unsaved_shell_refusal(
+    command: &str,
+    workspace: Option<&crate::workspace_policy::WorkspacePolicy>,
+) -> Option<String> {
+    let cwd = match workspace {
+        Some(policy) => policy.root().to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+    crate::unsaved_work::shell_refusal(command, &cwd)
+}
+
 pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
@@ -370,6 +387,16 @@ impl Tool for BashTool {
             };
         }
 
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, None) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -423,6 +450,16 @@ impl Tool for BashTool {
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
+                is_error: true,
+            };
+        }
+
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, None) {
+            return ToolResult {
+                content: refusal,
                 is_error: true,
             };
         }
@@ -533,6 +570,16 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
+
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, ctx.workspace.as_deref()) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -620,6 +667,16 @@ impl Tool for BashTool {
         if let Some(reason) = check_denylist(command) {
             return ToolResult {
                 content: reason.to_string(),
+                is_error: true,
+            };
+        }
+
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, ctx.workspace.as_deref()) {
+            return ToolResult {
+                content: refusal,
                 is_error: true,
             };
         }
