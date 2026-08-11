@@ -1687,6 +1687,14 @@ impl AgentBootstrap {
         );
 
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
+        // Kept past the connect block so the engine can re-derive a
+        // refreshed tool's deferral exactly as boot-time registration did.
+        // Plugin-supplied servers are deliberately absent: they translate to
+        // `deferred: None`, which is what a lookup miss already resolves to.
+        let mut mcp_refresh_configs: std::collections::HashMap<
+            String,
+            wcore_config::config::McpServerConfig,
+        > = std::collections::HashMap::new();
         // wayland#551 — when the caller deferred config MCP, skip the
         // connect entirely; the caller connects in the background after
         // boot so a slow/hung server cannot gate the host's ready frame.
@@ -1732,6 +1740,7 @@ impl AgentBootstrap {
                         &resolved_servers,
                         &self.config.builtin_tools.defer_cold,
                     );
+                    mcp_refresh_configs = resolved_servers.clone();
                     mcp_managers.push(mgr.clone());
                     Some(mgr)
                 }
@@ -1783,6 +1792,16 @@ impl AgentBootstrap {
         if let Some(plugin_mcp_mgr) = plugin_mcp_manager {
             mcp_managers.push(plugin_mcp_mgr);
         }
+
+        // An MCP server may register or drop tools mid-session and say so
+        // with `notifications/tools/list_changed`. Boot-time discovery is
+        // one-shot, so without this the engine never re-lists and the tool
+        // stays uncallable for the rest of the session.
+        let mcp_catalog_refresh = Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            mcp_managers.clone(),
+            builtin_names.clone(),
+            mcp_refresh_configs,
+        ));
 
         let has_mcp = mcp_manager.is_some() || !mcp_managers.is_empty();
 
@@ -3240,6 +3259,7 @@ impl AgentBootstrap {
         // (the same instance the `SpawnTool` was built with) so the engine
         // and the spawner resolve plugin agents identically.
         engine.set_agent_registry(plugin_agent_registry);
+        engine.set_mcp_catalog_refresh(mcp_catalog_refresh);
         // v0.6.4 Task 1.3/1.7 — forward plugin-contributed hooks into the
         // engine's `HookEngine` (constructed inside `new_with_provider` /
         // `resume_with_provider`, so this must happen post-construction).

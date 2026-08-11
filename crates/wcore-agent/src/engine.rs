@@ -3017,6 +3017,17 @@ pub struct AgentEngine {
     /// (a cache READ, not a per-turn prefix rewrite). Reset when the MCP
     /// inventory or the MCP budget changes.
     mcp_cap_cache: Option<(u64, Vec<String>)>,
+    /// Inputs for re-registering an MCP server whose tool list changed
+    /// mid-session. `None` until `set_mcp_catalog_refresh` is called (no MCP
+    /// servers, or a host that never wired it), in which case the per-turn
+    /// poll is skipped entirely.
+    ///
+    /// Tool discovery is otherwise one-shot at connect, so a server that
+    /// registers a tool after the session starts — and announces it with
+    /// `notifications/tools/list_changed`, which is what that notification is
+    /// FOR — would never reach the registry and the tool would be
+    /// permanently uncallable.
+    mcp_catalog_refresh: Option<Arc<wcore_mcp::tool_proxy::McpCatalogRefresh>>,
     /// Layer D1 follow-up (hydrated-tool admission): tool names the model has
     /// hydrated via a successful `ToolSearch` this session, in FIRST-HYDRATION
     /// order. Providers validate tool calls against the CURRENT `tools[]`
@@ -3691,6 +3702,7 @@ impl AgentEngine {
             mcp_curation: config.mcp.curation.clone(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -3967,6 +3979,7 @@ impl AgentEngine {
             mcp_curation: config.mcp.curation.clone(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -4134,6 +4147,62 @@ impl AgentEngine {
     /// has leaked.
     pub fn registry_mut(&mut self) -> Option<&mut ToolRegistry> {
         Arc::get_mut(&mut self.tools)
+    }
+
+    /// Wire the mid-session MCP catalogue refresh (post-construction setter,
+    /// matching `set_agent_registry`). Bootstrap calls this once it has both
+    /// the connected managers and the `builtin_names` / server-config
+    /// snapshots the boot-time registration used.
+    ///
+    /// Without it the engine still runs; it simply never notices a server
+    /// that changes its tool list after connect.
+    pub fn set_mcp_catalog_refresh(
+        &mut self,
+        refresh: Arc<wcore_mcp::tool_proxy::McpCatalogRefresh>,
+    ) {
+        if refresh.is_empty() {
+            return;
+        }
+        self.mcp_catalog_refresh = Some(refresh);
+    }
+
+    /// Pick up any MCP server that announced `notifications/tools/list_changed`
+    /// since the last turn and re-register its tools on the live registry.
+    ///
+    /// Run at the TOP of a turn, before the outbound `tools[]` is built, so a
+    /// tool that appeared during the previous turn is offered on this one.
+    /// This is the only point in the loop where the registry `Arc` is
+    /// uniquely held — the per-turn executor adapter takes a clone and drops
+    /// it at the end of the iteration — so `Arc::get_mut` succeeds here and
+    /// nowhere later. If a clone has leaked the refresh is skipped LOUDLY
+    /// rather than silently: a missed refresh means an uncallable tool.
+    async fn refresh_mcp_catalog(&mut self) {
+        let Some(refresh) = self.mcp_catalog_refresh.clone() else {
+            return;
+        };
+        let defer_cold = self.config.builtin_tools.defer_cold.clone();
+        let Some(registry) = Arc::get_mut(&mut self.tools) else {
+            tracing::warn!(
+                target: "wcore_agent::engine",
+                "MCP tool-list refresh skipped: the tool registry is still shared, \
+                 so a mid-session tool change cannot be applied this turn"
+            );
+            return;
+        };
+        let refreshed = refresh.apply(registry, &defer_cold).await;
+        if refreshed.is_empty() {
+            return;
+        }
+        tracing::info!(
+            target: "wcore_agent::engine",
+            servers = ?refreshed,
+            "re-registered MCP tools after a mid-session tools/list_changed"
+        );
+        // The MCP inventory itself moved, so the cache-stability keep-sets
+        // computed against the old inventory no longer describe it.
+        self.mcp_curation_cache = None;
+        self.mcp_cap_cache = None;
+        self.prune_stale_hydrated_tools();
     }
 
     /// Static cold-deferral policy used when a host refreshes ToolSearch after
@@ -10450,6 +10519,12 @@ impl AgentEngine {
                         self.save_session_mirror();
                         return Err(e);
                     }
+
+                    // MCP servers may register or drop tools mid-session.
+                    // Apply any signalled change BEFORE the tool list is
+                    // built, so a tool that appeared during the last turn is
+                    // offered on this one.
+                    self.refresh_mcp_catalog().await;
 
                     // Build tool list: filter based on plan mode state
                     let tools = if self.plan_state.is_active {
@@ -17390,6 +17465,7 @@ mod set_config_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -19205,6 +19281,7 @@ mod phase6_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -19526,6 +19603,7 @@ mod compact_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -21133,6 +21211,7 @@ mod plan_mode_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -21587,6 +21666,7 @@ mod hook_integration_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -22728,6 +22808,7 @@ mod approval_bridge_engine_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
@@ -23790,6 +23871,7 @@ mod user_model_writeback_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            mcp_catalog_refresh: None,
             hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,

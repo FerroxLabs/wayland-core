@@ -257,14 +257,14 @@ pub fn register_mcp_tools(
 
         // MCP tools are deferred by default; server config can override.
         let deferred = server_configs
-            .get(*server_name)
+            .get(server_name)
             .and_then(|c| c.deferred)
             .unwrap_or(true);
 
         let proxy = McpToolProxy::new(
             display_name,
             original_name.clone(),
-            server_name.to_string(),
+            server_name.clone(),
             tool_def.description.clone().unwrap_or_default(),
             tool_def.input_schema.clone(),
             Arc::clone(manager),
@@ -306,7 +306,7 @@ pub fn register_single_server_tools(
     let all_tools = manager.all_tools();
     let server_tools: Vec<_> = all_tools
         .iter()
-        .filter(|(sn, _)| *sn == server_name)
+        .filter(|(sn, _)| sn == server_name)
         .collect();
 
     for (_, tool_def) in &server_tools {
@@ -345,6 +345,99 @@ pub fn register_single_server_tools(
     // Refresh in this shared registration seam so both JSON AddMcpServer and
     // the TUI `/mcp add` path cannot advertise tools that remain undiscoverable.
     registry.refresh_tool_search_catalog(defer_cold);
+}
+
+/// Everything needed to re-register a live MCP catalogue, captured once at
+/// boot so a host can refresh mid-session without re-deriving it.
+///
+/// `builtin_names` and `server_configs` are the same snapshots the boot-time
+/// registration used, so a refreshed tool gets the same collision prefix and
+/// the same deferral it would have had if the server had advertised it at
+/// connect.
+pub struct McpCatalogRefresh {
+    managers: Vec<Arc<McpManager>>,
+    builtin_names: Vec<String>,
+    server_configs: HashMap<String, McpServerConfig>,
+}
+
+impl McpCatalogRefresh {
+    pub fn new(
+        managers: Vec<Arc<McpManager>>,
+        builtin_names: Vec<String>,
+        server_configs: HashMap<String, McpServerConfig>,
+    ) -> Self {
+        Self {
+            managers,
+            builtin_names,
+            server_configs,
+        }
+    }
+
+    /// Whether there is anything to poll at all.
+    pub fn is_empty(&self) -> bool {
+        self.managers.is_empty()
+    }
+
+    /// Poll every manager and re-register the servers that changed.
+    /// See [`refresh_changed_mcp_tools`].
+    pub async fn apply(
+        &self,
+        registry: &mut wcore_tools::registry::ToolRegistry,
+        defer_cold: &wcore_config::tools::DeferColdConfig,
+    ) -> Vec<String> {
+        refresh_changed_mcp_tools(
+            registry,
+            &self.managers,
+            &self.builtin_names,
+            &self.server_configs,
+            defer_cold,
+        )
+        .await
+    }
+}
+
+/// Re-register the tools of every MCP server that announced
+/// `notifications/tools/list_changed` since the last call, and return the
+/// refreshed server names.
+///
+/// This is the second half of the mid-session tool story. `refresh_signalled_tools`
+/// makes the manager agree with the server; this makes the LIVE tool registry —
+/// the thing the model is actually offered and the thing dispatch resolves
+/// against — agree with the manager. Without it a late-registered tool exists
+/// in `all_tools()` and nowhere the model can reach.
+///
+/// The server is dropped from the registry and re-registered wholesale rather
+/// than diffed: a `list_changed` can REMOVE a tool as well as add one, and a
+/// stale proxy for a tool the server no longer serves is a call that fails at
+/// the far end. `register_single_server_tools` refreshes the `ToolSearch`
+/// snapshot, so a newly arrived tool is discoverable in the same pass.
+pub async fn refresh_changed_mcp_tools(
+    registry: &mut wcore_tools::registry::ToolRegistry,
+    managers: &[Arc<McpManager>],
+    builtin_names: &[String],
+    server_configs: &HashMap<String, McpServerConfig>,
+    defer_cold: &wcore_config::tools::DeferColdConfig,
+) -> Vec<String> {
+    let mut refreshed = Vec::new();
+    for manager in managers {
+        for server_name in manager.refresh_signalled_tools().await {
+            let deferred = server_configs
+                .get(&server_name)
+                .and_then(|config| config.deferred)
+                .unwrap_or(true);
+            registry.remove_mcp_server(&server_name);
+            register_single_server_tools(
+                registry,
+                manager,
+                &server_name,
+                builtin_names,
+                deferred,
+                defer_cold,
+            );
+            refreshed.push(server_name);
+        }
+    }
+    refreshed
 }
 
 // ---------------------------------------------------------------------------

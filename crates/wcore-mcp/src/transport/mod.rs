@@ -19,6 +19,23 @@ pub trait McpTransport: Send + Sync {
     /// Close the transport
     async fn close(&self) -> Result<(), McpError>;
 
+    /// Take-and-clear the "the server told us its tool list changed" flag.
+    ///
+    /// MCP servers may register or drop tools mid-session and announce it
+    /// with `notifications/tools/list_changed` (declared via the
+    /// `tools.listChanged` capability). That notification carries no `id`,
+    /// so it is not a response to any request and can only be observed by
+    /// whatever owns the inbound stream — the transport. This is how the
+    /// manager learns to re-issue `tools/list`.
+    ///
+    /// Returns `true` at most once per notification burst: the flag is
+    /// cleared by reading it, so a poller cannot re-refresh forever off one
+    /// signal. Transports that do not observe server-initiated
+    /// notifications always return `false`.
+    fn take_tools_changed(&self) -> bool {
+        false
+    }
+
     /// Whether the transport is still believed to be usable.
     ///
     /// Audit C4/C7: a server that dies (child process exits) or that the
