@@ -42,7 +42,7 @@ fn hide_git(empty_dir: &Path) {
 async fn with_no_git_binary_a_repository_refuses_and_a_bare_directory_still_answers() {
     // Build both worlds while git still works.
     let repo = tempfile::tempdir().unwrap();
-    let repo_root = std::fs::canonicalize(repo.path()).unwrap();
+    let repo_root = dunce::canonicalize(repo.path()).unwrap();
     for args in [
         vec!["init", "-q"],
         vec!["config", "user.email", "u@example.com"],
@@ -61,7 +61,7 @@ async fn with_no_git_binary_a_repository_refuses_and_a_bare_directory_still_answ
     std::fs::write(&tracked, "def parse():\n    pass\n# unsaved user line\n").unwrap();
 
     let loose = tempfile::tempdir().unwrap();
-    let loose_root = std::fs::canonicalize(loose.path()).unwrap();
+    let loose_root = dunce::canonicalize(loose.path()).unwrap();
     let loose_file = loose_root.join("loose.txt");
     std::fs::write(&loose_file, "the user's only copy\nsecond line\n").unwrap();
 
@@ -75,10 +75,17 @@ async fn with_no_git_binary_a_repository_refuses_and_a_bare_directory_still_answ
         .execute(json!({"file_path": tracked.to_str().unwrap(),
                         "content": "def parse():\n    pass\n"}))
         .await;
-    println!("[MATRIX] no-git-in-repo           => is_error={}\n           {}",
-             r.is_error, r.content.lines().next().unwrap_or(""));
+    println!(
+        "[MATRIX] no-git-in-repo           => is_error={}\n           {}",
+        r.is_error,
+        r.content.lines().next().unwrap_or("")
+    );
     assert!(r.is_error, "got: {}", r.content);
-    assert!(r.content.contains("could not be established"), "{}", r.content);
+    assert!(
+        r.content.contains("could not be established"),
+        "{}",
+        r.content
+    );
     assert_eq!(
         std::fs::read_to_string(&tracked).unwrap(),
         "def parse():\n    pass\n# unsaved user line\n",
@@ -90,8 +97,11 @@ async fn with_no_git_binary_a_repository_refuses_and_a_bare_directory_still_answ
     let r = tool
         .execute(json!({"file_path": loose_file.to_str().unwrap(), "content": "replaced\n"}))
         .await;
-    println!("[MATRIX] no-git-no-repo           => is_error={}\n           {}",
-             r.is_error, r.content.lines().next().unwrap_or(""));
+    println!(
+        "[MATRIX] no-git-no-repo           => is_error={}\n           {}",
+        r.is_error,
+        r.content.lines().next().unwrap_or("")
+    );
     assert!(r.is_error, "got: {}", r.content);
     assert!(r.content.contains("in no repository"), "{}", r.content);
 
@@ -102,7 +112,10 @@ async fn with_no_git_binary_a_repository_refuses_and_a_bare_directory_still_answ
     let r = tool
         .execute(json!({"file_path": loose_file.to_str().unwrap(), "content": kept}))
         .await;
-    println!("[MATRIX] no-git-no-repo-additive  => is_error={}", r.is_error);
+    println!(
+        "[MATRIX] no-git-no-repo-additive  => is_error={}",
+        r.is_error
+    );
     assert!(!r.is_error, "got: {}", r.content);
     assert_eq!(std::fs::read_to_string(&loose_file).unwrap(), kept);
 }

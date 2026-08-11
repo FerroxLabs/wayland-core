@@ -34,6 +34,7 @@ Write content to a file atomically.
 
 - Atomic write: writes to a temp file first, then renames
 - Auto-creates parent directories
+- Subject to the [unsaved-work guarantee](#unsaved-work-guarantee) below
 
 ## Edit
 
@@ -42,11 +43,58 @@ Find and replace exact strings in a file.
 - Matches `old_string` exactly and replaces with `new_string`
 - Requires a unique match by default; errors on multiple matches
 - Use `replace_all` to replace all occurrences
+- Subject to the [unsaved-work guarantee](#unsaved-work-guarantee) below
+
+### Unsaved-work guarantee
+
+An agent that rewrites a file from its own picture of the contents can silently
+drop a line the user had on disk and had not committed. Write and Edit are
+therefore checked at the tool layer, not by asking the model to be careful.
+
+**What holds.** Through **Write**, a line that is on disk and that the tool
+cannot prove is recorded in the commit the session started at will not leave
+the disk unless the previous contents have first been written to the
+repository's own object store *and read back byte-for-byte*. Where no such copy
+can be made, the write is refused and nothing changes.
+
+- The baseline is the commit **the session started at**, not current `HEAD`, so
+  a commit made mid-session cannot launder unsaved work into it.
+- The recovery copy is a loose, unreferenced object in the repository's own
+  `.git/objects`, made with `git hash-object -w`. The tool result prints the
+  exact command to get the bytes back:
+  `git -C <repo> cat-file blob <oid>`. Nothing is staged, committed or
+  referenced, so ordinary `git gc` clears it in due course. If the file was
+  gitignored, its prior bytes do sit inside `.git/objects` until then, and the
+  tool result says so.
+- **Edit is never refused** — its `old_string` must match the bytes on disk, so
+  anything it removes was quoted from disk rather than silently omitted. It
+  copies where it can and states plainly when it could not.
+- If git cannot be consulted for a repository that plainly exists — dubious
+  ownership under `safe.directory`, an unreadable config, no `git` binary — the
+  baseline is unknown, so a Write that would drop lines is **refused** rather
+  than allowed, and the refusal quotes git's own reason. Writes that do not
+  remove existing lines are unaffected.
+- Outside any repository there is no object store, so a Write that would drop
+  lines is refused for want of anywhere to put a recoverable copy.
+
+**What does not hold.** Three limits, stated because a broader claim would be
+untrue:
+
+- **Bash is not covered.** `sed -i`, `>` and `rm` do not route through the tool
+  layer and can still destroy unsaved work. The guarantee covers two of the
+  three write surfaces.
+- **A modified line is not distinguished from a dropped one.** A whole-file
+  transformation that renames a symbol occurring on an unsaved line reads as a
+  drop and is refused.
+- **Non-UTF-8 files** have no line model and are not protected.
 
 ## Bash
 
 Execute a shell command and return the result.
 
+- **Not covered by the [unsaved-work guarantee](#unsaved-work-guarantee).** A
+  command like `sed -i '2d' file` deletes a line the tool layer never sees, so
+  uncommitted work can be lost this way even though Write and Edit protect it.
 - Default timeout: 120 seconds, max 600 seconds
 - Returns exit code, stdout, and stderr
 - Interpreter: `sh -c` on Unix, `cmd /C` on Windows. **Windows override** — run

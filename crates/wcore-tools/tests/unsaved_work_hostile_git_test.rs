@@ -111,7 +111,7 @@ fn oid_in(s: &str) -> Option<String> {
 /// then one unsaved line appended.
 fn corpus_repo() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "u@example.com"]);
     git(&root, &["config", "user.name", "u"]);
@@ -138,7 +138,7 @@ fn report(arm: &str, outcome: &Outcome, detail: &str) {
 #[tokio::test]
 async fn healthy_repository_refuses_the_measured_harm_shape() {
     let (dir, file) = corpus_repo();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
     report("healthy", &outcome, &detail);
     assert_eq!(outcome, Outcome::Refused);
@@ -161,7 +161,7 @@ async fn dubious_ownership_refuses_rather_than_calling_it_an_empty_baseline() {
          green, which is worse than not having it"
     );
     let (dir, file) = corpus_repo();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     chown_tree(&root, 65534);
 
     let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
@@ -195,7 +195,7 @@ fn chown_tree(root: &Path, uid: u32) {
 #[tokio::test]
 async fn a_corrupt_git_config_refuses() {
     let (dir, file) = corpus_repo();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     std::fs::write(root.join(".git/config"), "[[[not a config\n").unwrap();
 
     let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
@@ -213,7 +213,7 @@ async fn a_corrupt_index_still_resolves_the_real_baseline() {
     // does on a healthy repository — citing the unsaved line, not hiding
     // behind "git did not answer".
     let (dir, file) = corpus_repo();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     std::fs::write(root.join(".git/index"), "JUNKJUNKJUNKJUNK").unwrap();
 
     let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
@@ -228,7 +228,7 @@ async fn a_corrupt_index_still_resolves_the_real_baseline() {
 #[tokio::test]
 async fn no_repository_at_all_refuses_because_no_copy_is_possible() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     let file = root.join("loose.txt");
     std::fs::write(&file, "the user's only copy\nsecond line\n").unwrap();
 
@@ -246,7 +246,7 @@ async fn an_unborn_head_is_a_real_answer_and_allows_a_verified_copy() {
     // failing, which is the whole reason this case can be told apart from a
     // broken repository at all.
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q"]);
     let file = root.join("draft.md");
     std::fs::write(&file, "first thoughts\nsecond thoughts\n").unwrap();
@@ -261,7 +261,7 @@ async fn an_unborn_head_is_a_real_answer_and_allows_a_verified_copy() {
 #[tokio::test]
 async fn an_untracked_file_in_a_healthy_repo_allows_a_verified_copy() {
     let (dir, _) = corpus_repo();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     let notes = root.join("notes.md");
     std::fs::write(&notes, "# Deploy notes\nstep one\nstep two\n").unwrap();
 
