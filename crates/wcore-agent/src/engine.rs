@@ -24303,22 +24303,68 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
-    async fn retryable_stream_err_uses_the_bounded_engine_retry_budget() {
-        // The provider ring is disabled for production engine calls. A
-        // permanent retryable failure therefore gets exactly three physical
-        // sends: the initial attempt plus two engine-owned retries.
+    async fn unserved_stream_err_uses_the_larger_bounded_retry_budget() {
+        // The provider ring is disabled for production engine calls, so one
+        // engine attempt is exactly one physical send. `Connection` means the
+        // provider never served the request, which earns
+        // `MAX_UNSERVED_STREAM_RETRIES`: 1 initial send plus 6 retries. Job
+        // corpus row B-2 is why — three sends span 1.5 s and cannot outlast a
+        // provider blip, and the job dies with its work uncommitted.
         let provider = Arc::new(StreamErrProvider::new(usize::MAX)); // always fails
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
         let result = engine.run("task", "m-1").await;
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
-            "a permanent HTTP-exhausted failure must fail the turn, got {result:?}"
+            "a permanent unserved failure must still fail the turn, got {result:?}"
         );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
+            7,
+            "1 initial send plus 6 retries for a request the provider never served"
+        );
+    }
+
+    /// Control for the budget split: a failure that arrives AFTER the provider
+    /// began serving the stream keeps `MAX_STREAM_RETRIES`. Re-sending that one
+    /// costs a full context the provider already billed, so the larger budget
+    /// must not leak onto it.
+    #[tokio::test]
+    async fn served_stream_err_keeps_the_default_retry_budget() {
+        struct MidStreamErrProvider {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for MidStreamErrProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(LlmEvent::Error("upstream died mid-stream".into()))
+                        .await;
+                });
+                Ok(rx)
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(MidStreamErrProvider {
+            calls: Arc::clone(&calls),
+        });
+        let mut engine = engine_with(provider);
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "a permanent mid-stream failure must fail the turn, got {result:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
             3,
-            "the engine must make 1 initial send plus 2 bounded retries"
+            "a served stream keeps 1 initial send plus 2 bounded retries"
         );
     }
 
