@@ -1409,6 +1409,31 @@ fn is_unserved_request_failure(failure_code: &str) -> bool {
     )
 }
 
+/// True for the provider failure codes that name a PERMANENT property of the
+/// configured endpoint rather than a condition that can heal.
+///
+/// A retry budget — count or window — is only meaningful when a later send can
+/// get a different answer. A host name that does not resolve cannot: the same
+/// `base_url` produces the same NXDOMAIN on send 1 and on send 36. Measured on
+/// this tree before the split existed: `base_url =
+/// "https://unreachable.invalid.localdomain:9999"` ran 902 s and 36 sends
+/// against `UNSERVED_OUTAGE_BUDGET` before exiting 1. Fifteen minutes of
+/// silence is indistinguishable from a hang, and the trigger is one typo.
+///
+/// The fix is CLASSIFICATION, deliberately not a smaller budget: transient
+/// recovery is worth what it costs (a measured 3-reset outage still heals in
+/// 3.7 s) and shrinking the window to catch this would pay for it with the
+/// case the window exists for.
+///
+/// Scoped to name resolution alone. `connection_refused` is NOT here — a port
+/// that refuses today can accept in a second (a provider rolling a listener) —
+/// it is merely no longer admitted to the outage WINDOW, so it keeps the
+/// ordinary bounded `MAX_STREAM_RETRIES`. Anything unrecognised keeps the old
+/// generous behaviour; see `wcore_providers::retry::connect_failure_code`.
+fn is_permanent_endpoint_failure(failure_code: &str) -> bool {
+    failure_code == wcore_providers::retry::FAILURE_DNS
+}
+
 /// Wall-clock window over which the engine keeps re-issuing a request the
 /// provider never served (see [`is_unserved_request_failure`]).
 ///
@@ -2018,6 +2043,48 @@ mod v0911_engine_recovery_tests {
                 "must NOT be classified as an auth refusal: {reason}"
             );
         }
+    }
+
+    /// The classification split, graded from the engine's side.
+    ///
+    /// A permanently-unreachable endpoint used to be admitted to the
+    /// unserved-outage WINDOW, which is how a `base_url` typo cost a measured
+    /// 902 s and 36 sends. Three properties keep that from coming back, and
+    /// all three can fail independently.
+    #[test]
+    fn a_permanent_endpoint_is_neither_retried_nor_counted_as_dispatched() {
+        use wcore_providers::retry::{FAILURE_CONNECTION, FAILURE_CONNECTION_REFUSED, FAILURE_DNS};
+
+        // 1. A name that does not resolve is permanent: zero retries.
+        assert!(is_permanent_endpoint_failure(FAILURE_DNS));
+
+        // 2. Neither new class may reach the outage window. `connection_refused`
+        //    is NOT permanent — a listener can come back — it simply keeps the
+        //    ordinary bounded count instead of the 900 s window.
+        assert!(!is_unserved_request_failure(FAILURE_DNS));
+        assert!(!is_unserved_request_failure(FAILURE_CONNECTION_REFUSED));
+        assert!(!is_permanent_endpoint_failure(FAILURE_CONNECTION_REFUSED));
+
+        // 3. The transient classes the window exists for are UNTOUCHED. This is
+        //    the regression guard: a fix that makes everything fail fast is
+        //    worse than the defect, because a real provider blip then kills a
+        //    job that used to survive it (measured: a 3-reset outage still
+        //    recovers in 3.7 s).
+        for transient in [FAILURE_CONNECTION, "transport", "http_503", "http_529"] {
+            assert!(
+                is_unserved_request_failure(transient),
+                "{transient} must keep the outage budget"
+            );
+            assert!(
+                !is_permanent_endpoint_failure(transient),
+                "{transient} is not permanent and must still be retried"
+            );
+        }
+
+        // 4. `unserved_resends` — the count in the billing disclosure — is
+        //    driven by the SAME predicate, so a connect-phase failure no longer
+        //    inflates a sentence that claims each request "was dispatched".
+        assert!(!is_unserved_request_failure(FAILURE_DNS));
     }
 
     #[test]
@@ -12714,6 +12781,10 @@ impl AgentEngine {
                 // more, each send billed and each certain to fail.
                 let is_auth_failure = is_provider_auth_failure(&reason);
                 let is_client_error = is_http_4xx_error(&reason) || is_auth_failure;
+                // A permanently-unreachable endpoint is retried zero times:
+                // the budget below can only spend wall-clock the user reads as
+                // a hang. See `is_permanent_endpoint_failure`.
+                let permanent_endpoint = is_permanent_endpoint_failure(&failure_code);
                 // F11 owns retry admission at this layer. The provider call
                 // above runs under `scope_max_retries(0)`, so one engine
                 // attempt is exactly one physical send and one reservation.
@@ -12736,7 +12807,7 @@ impl AgentEngine {
                 } else {
                     stream_attempt < MAX_STREAM_RETRIES
                 };
-                if !is_client_error && retry_admitted {
+                if !is_client_error && !permanent_endpoint && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
                     // carries FAILED tool results, that context is
@@ -12866,13 +12937,31 @@ impl AgentEngine {
                     );
                 }
                 self.save_session_mirror();
+                let sends = stream_attempt.saturating_add(1);
                 // Lead with the fault the user can act on. "Provider stream
                 // failed after retries: API error 500" reads as a provider
                 // outage; for an auth refusal it is the key that is wrong, the
                 // 500 is incidental, and there were no retries to speak of.
                 // The provider's own words are kept, in parentheses, because
                 // they are the evidence for the claim.
-                let final_error = if is_auth_failure {
+                let final_error = if permanent_endpoint {
+                    // Name the remedy, in the shape the no-API-key error
+                    // already uses: what is wrong, and the exact setting to
+                    // change. The URL itself is deliberately NOT echoed — a
+                    // provider may carry its credential in the query string
+                    // (H-2), and the config key is what the user edits anyway.
+                    format!(
+                        "Cannot reach the configured provider: the endpoint host name does not \
+                         resolve. That is a permanent failure — every re-send gets the same \
+                         answer — so the run stopped after {sends} attempt(s) instead of \
+                         spending the {budget}s provider-outage budget on it. Check `base_url` \
+                         for the selected provider in your wayland-core config (or the \
+                         `--base-url` you passed), then check DNS on this host. The session has \
+                         been saved — resume it once the endpoint is right. (underlying error: \
+                         {reason})",
+                        budget = UNSERVED_OUTAGE_BUDGET.as_secs(),
+                    )
+                } else if is_auth_failure {
                     format!("{AUTH_FAILURE_REMEDY} The provider reported: {reason}")
                 } else {
                     format!(
@@ -12880,7 +12969,8 @@ impl AgentEngine {
                          saved — resume it to continue from here rather than starting over."
                     )
                 };
-                self.output.emit_error(&final_error, !is_client_error);
+                self.output
+                    .emit_error(&final_error, !is_client_error && !permanent_endpoint);
                 return Err(AgentError::ApiError(final_error));
             }
 

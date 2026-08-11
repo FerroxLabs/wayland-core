@@ -47,13 +47,27 @@ fn code(output: &Output) -> i32 {
 ///
 /// Returns the session directory, the session id and the tool execution id.
 fn crashed_mid_tool_session(home: &Path) -> (std::path::PathBuf, String, String) {
+    crashed_mid_tool_session_with(
+        home,
+        "Bash",
+        wcore_types::tool::ToolEffectContract::default(),
+    )
+}
+
+/// As above, for a named tool with a named effect contract. The contract is
+/// what decides whether the product can settle the interruption itself, so a
+/// test about that distinction must be able to set it.
+fn crashed_mid_tool_session_with(
+    home: &Path,
+    tool_name: &str,
+    contract: wcore_types::tool::ToolEffectContract,
+) -> (std::path::PathBuf, String, String) {
     use wcore_agent::journal_effects::JournalEffectCoordinator;
     use wcore_agent::session::SessionManager;
     use wcore_agent::session_journal::{
         HookManifestSlot, HookSlotReceipt, HookSlotSource, HookSlotTerminalStatus, SessionEvent,
         ToolHookPhase, state_payload_digest,
     };
-    use wcore_types::tool::ToolEffectContract;
 
     let sessions = home.join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
@@ -142,10 +156,10 @@ fn crashed_mid_tool_session(home: &Path) -> (std::path::PathBuf, String, String)
         .prepare_tool_after_hook(
             "call-1",
             0,
-            "Bash",
+            tool_name,
             tool_input.clone(),
             tool_input,
-            ToolEffectContract::default(),
+            contract,
             pre_hook_phase_id,
         )
         .unwrap();
@@ -260,5 +274,161 @@ fn cancel_still_refuses_while_a_tool_effect_has_no_operator_disposition() {
         String::from_utf8_lossy(&cancelled.stderr).contains("outstanding reconcile item"),
         "the refusal must name the outstanding item; stderr: {}",
         String::from_utf8_lossy(&cancelled.stderr)
+    );
+}
+
+/// The refusal must name the way out, with the real identifier substituted.
+///
+/// Reproduced before this test existed: `session cancel` exited 5 with ZERO
+/// bytes on stdout and one stderr line counting items, and the user had no way
+/// to learn which command clears them. The product already has the shape this
+/// should take — the missing-API-key error names the exact command, the
+/// one-off flag and the env vars.
+#[test]
+fn the_cancel_refusal_prints_the_exact_command_that_clears_it() {
+    let home = tempfile::tempdir().unwrap();
+    let (sessions, id, tool_execution_id) = crashed_mid_tool_session(home.path());
+    let dir = sessions.to_str().unwrap();
+
+    let cancelled = run(&["session", "--dir", dir, "cancel", &id], home.path());
+    assert_eq!(code(&cancelled), 5);
+    let out = stdout(&cancelled);
+
+    assert!(
+        !out.is_empty(),
+        "a refusal that prints nothing on stdout cannot be read by the `> log` \
+         redirect this surface documents"
+    );
+    // The remedy, exact and copy-pasteable, carrying the REAL uuid.
+    for outcome in ["not-started", "succeeded", "failed"] {
+        let expected = format!(
+            "wayland-core session reconcile {id} --resolve {tool_execution_id} \
+             --as-outcome {outcome}"
+        );
+        assert!(
+            out.contains(&expected),
+            "the refusal must print `{expected}`; got:\n{out}"
+        );
+    }
+    // And what each one COMMITS the session to, because the question is one
+    // the operator can only guess at.
+    assert!(
+        out.contains("no output is invented") && out.contains("the work never began"),
+        "each disposition must state its consequence; got:\n{out}"
+    );
+    assert!(
+        out.contains(&format!("wayland-core session cancel {id}")),
+        "the refusal must name the command to re-run afterwards; got:\n{out}"
+    );
+    // Unchanged contract: the classifier line stays on stderr and the exit
+    // code stays 5.
+    assert!(
+        String::from_utf8_lossy(&cancelled.stderr).contains("outstanding reconcile item"),
+        "stderr: {}",
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
+}
+
+/// `--as-outcome` used to DEFAULT to `not-started`, which answered "did the
+/// effect land?" on the operator's behalf and wrote the answer durably. For a
+/// tool the journal cannot settle, omitting it must refuse — and the refusal
+/// must be the thing that teaches the choice.
+#[test]
+fn reconcile_refuses_to_guess_for_a_tool_whose_effect_it_cannot_know() {
+    let home = tempfile::tempdir().unwrap();
+    let (sessions, id, tool_execution_id) = crashed_mid_tool_session(home.path());
+    let dir = sessions.to_str().unwrap();
+
+    let guessed = run(
+        &[
+            "session",
+            "--dir",
+            dir,
+            "reconcile",
+            &id,
+            "--resolve",
+            &tool_execution_id,
+        ],
+        home.path(),
+    );
+    assert_eq!(
+        code(&guessed),
+        4,
+        "an unanswerable disposition must be refused, not defaulted; stdout: {} stderr: {}",
+        stdout(&guessed),
+        String::from_utf8_lossy(&guessed.stderr)
+    );
+    let refusal = String::from_utf8_lossy(&guessed.stderr).into_owned();
+    for outcome in ["not-started", "succeeded", "failed"] {
+        assert!(
+            refusal.contains(outcome),
+            "the refusal must explain `{outcome}`; got:\n{refusal}"
+        );
+    }
+    assert!(
+        refusal.contains("only you can say what happened"),
+        "the refusal must say plainly that the product does not know; got:\n{refusal}"
+    );
+
+    // The durable state is untouched: refusing wrote nothing.
+    let after = run(&["session", "--dir", dir, "show", &id], home.path());
+    assert!(
+        stdout(&after).contains("interrupted=1"),
+        "a refusal must not have changed the session; got:\n{}",
+        stdout(&after)
+    );
+}
+
+/// The other half: where the journal DOES know, it must not ask.
+///
+/// A tool that declares `RepeatSafe` cannot have created an external effect,
+/// so there is nothing for an operator to have an opinion about — and the
+/// four-command recovery collapses to one.
+#[test]
+fn a_repeat_safe_tool_is_settled_by_cancel_alone_in_one_command() {
+    use wcore_agent::session_journal::SessionJournal;
+
+    let home = tempfile::tempdir().unwrap();
+    let (sessions, id, tool_execution_id) = crashed_mid_tool_session_with(
+        home.path(),
+        "Grep",
+        wcore_types::tool::ToolEffectContract {
+            kind: wcore_types::tool::ToolEffectKind::RepeatSafe,
+            reconciler: None,
+        },
+    );
+    let dir = sessions.to_str().unwrap();
+
+    // ONE command. No reconcile list, no --resolve, no --as-outcome.
+    let cancelled = run(&["session", "--dir", dir, "cancel", &id], home.path());
+    assert_eq!(
+        code(&cancelled),
+        0,
+        "a repeat-safe effect needs no human judgement; stdout: {} stderr: {}",
+        stdout(&cancelled),
+        String::from_utf8_lossy(&cancelled.stderr)
+    );
+    let out = stdout(&cancelled);
+    assert!(
+        out.contains(&format!(
+            "F23_SESSION=cancel_auto_resolved id={id} kind=tool_execution \
+             ref={tool_execution_id} tool=Grep determined_by=repeat_safe_effect_contract"
+        )),
+        "every receipt written on the operator's behalf must be reported; got:\n{out}"
+    );
+    assert!(
+        out.contains("auto_resolved=1"),
+        "the summary must count it; got:\n{out}"
+    );
+
+    // External truth, read by a fresh process.
+    let state = SessionJournal::recovered_state(sessions.join(format!("{id}.journal"))).unwrap();
+    assert!(
+        state.turns.values().all(|turn| turn.completion.is_some()),
+        "no turn may remain interrupted after the one-command path"
+    );
+    assert!(
+        stdout(&run(&["session", "--dir", dir, "show", &id], home.path()))
+            .contains("interrupted=0")
     );
 }

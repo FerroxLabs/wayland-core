@@ -1121,6 +1121,21 @@ const NON_TTY_NO_PROMPT_ADVICE: &str = "wayland-core: stdin is not a terminal an
      Use --json-stream for headless/piped use, or pass the prompt as an\n\
      argument: wayland-core \"your prompt here\".";
 
+/// Added when the user asked to RESUME and still got the advice above.
+///
+/// UAT-UXA2: recovering a crash-interrupted session begins with
+/// `wayland-core --resume <id>`, and the generic refusal above is all the
+/// product said — it never mentioned that resuming takes a message too, and
+/// never mentioned the reconcile/cancel path the engine's own interrupted-turn
+/// refusal names. A user who reads it learns nothing about the state they are
+/// actually in.
+const RESUME_NO_PROMPT_ADVICE: &str = "Resuming needs a message as well as the session:\n\
+     wayland-core --resume <id> \"your next message\"\n\
+     If that then refuses because the session was interrupted mid-turn, close the\n\
+     interrupted turn first — it prints the exact command for anything it cannot\n\
+     decide itself:\n\
+     wayland-core session cancel <id>";
+
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
     // Record protocol mode before ANY fallible startup work, so every refusal
@@ -2136,6 +2151,9 @@ async fn run() -> anyhow::Result<ExitCode> {
         // Any flag this advice names is checked against the real clap
         // definition by `non_tty_advice_names_only_flags_that_do_what_it_says`.
         eprintln!("{NON_TTY_NO_PROMPT_ADVICE}");
+        if cli.resume.is_some() || cli.continue_latest {
+            eprintln!("{RESUME_NO_PROMPT_ADVICE}");
+        }
         return Ok(ExitCode::FAILURE);
     }
 
@@ -6119,7 +6137,9 @@ mod tests {
         );
 
         // ── The assertion itself ──
-        let tokens: Vec<&str> = NON_TTY_NO_PROMPT_ADVICE
+        let tokens: Vec<&str> = [NON_TTY_NO_PROMPT_ADVICE, RESUME_NO_PROMPT_ADVICE]
+            .concat()
+            .leak()
             .split(|c: char| c.is_whitespace() || c == '"' || c == ',')
             .map(|t| t.trim_end_matches('.'))
             .filter(|t| t.starts_with('-') && t.len() > 1)
