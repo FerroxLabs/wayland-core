@@ -65,10 +65,19 @@
 //! **Fail closed on an unresolved baseline.** [`Baseline::Unknown`] proves
 //! nothing, so nothing is claimed: a `Write` that would drop lines is refused
 //! and names git's own reason, and an `Edit` proceeds while saying plainly
-//! that no copy was made. Crucially the failure is **never memoized** — round
-//! 2 cached it, so a single transient git fault at startup disarmed the whole
-//! session, every sub-agent with it, and repairing git did not bring the guard
-//! back. Only a settled answer is remembered.
+//! that no copy was made.
+//!
+//! **Nothing repairable is memoized.** Round 2 cached [`Baseline::Unknown`],
+//! so a single transient git fault at startup disarmed the whole session,
+//! every sub-agent with it, and repairing git did not bring the guard back.
+//! Round 3 stopped caching `Unknown` and, in the same change, made
+//! [`Baseline::NoRepo`] a *refusing* state for the first time while still
+//! caching it — the same latch one class over. Measured: no repository ->
+//! refuse; `git init` plus a commit, so every line is now provably recorded ->
+//! the **same** guard still refuses, while a fresh guard on identical inputs
+//! proceeds. Process-wide via the `OnceLock`, so every sub-agent inherited it.
+//! Only [`Baseline::Repo`] is cached now, and it is immutable for the session
+//! by construction because the commit is pinned.
 //!
 //! **A partial/wholesale split.** The discriminator is a property of the
 //! file's prior state alone — *is any of the user's content in this file
@@ -101,21 +110,58 @@
 //!
 //! The object store has none of those properties to get wrong. It is the
 //! user's existing security domain with the user's existing permissions, it
-//! needs no new directory, no new mode bits and no new retention policy, and
-//! `git gc` prunes the unreferenced object on the user's own schedule. It is
-//! also self-documenting: `git cat-file blob <oid>` is the whole recovery
-//! procedure.
+//! needs no new directory and no new mode bits. It is also self-documenting:
+//! `git cat-file blob <oid>` is the whole recovery procedure.
 //!
-//! One honest consequence: when the dropped content comes from a **gitignored**
-//! file, that file's prior bytes become an unreferenced loose object inside
-//! `.git/objects`. Unreferenced objects are not pushed and are pruned by `gc`,
-//! but they are on disk inside the repository until then. That is disclosed in
-//! the tool result rather than being quietly true.
+//! What it is **not** is self-disposing, and round 3's tool result told the
+//! user it was ("the repository's normal garbage collection removes it in due
+//! course"). Measured on git 2.43.0 (Linux) and 2.54.0 (Windows): `git gc`
+//! does not remove an unreferenced object. `gc.cruftPacks` has been on by
+//! default since git 2.42, so gc *moves* it into a cruft pack
+//! (`pack-*.mtimes`) and `git cat-file blob <oid>` still prints it — still
+//! readable after six consecutive `git gc` runs. Only `git gc --prune=now`, or
+//! an ordinary gc once `gc.pruneExpire` (**two weeks** by default) has passed,
+//! disposes of it; `git gc --auto` needs more than 6700 loose objects before
+//! it fires at all, so one guard copy never triggers it. Realistic persistence
+//! is **unbounded**, so the note names the command instead of promising a
+//! schedule.
+//!
+//! Also measured, and also in the note: the object travels with a filesystem
+//! copy of the repository (`cp -a`, `tar`, `rsync`) and with
+//! `git clone /local/path` — including `--local`, `--no-hardlinks`, and after
+//! a `gc` — and `git fsck --lost-found` materialises it as a **plaintext
+//! file** under `.git/lost-found/other/`. It does not travel with `git push`,
+//! `git bundle --all`, or `git clone file://`.
+//!
+//! The prior bytes are by construction in no commit, so `.git/objects` becomes
+//! the only place they exist. Round 3 conditioned that warning on "if this
+//! file is gitignored"; the exposure is identical for a merely **untracked**
+//! file, and for a tracked one that has been wholly rewritten, so it is now
+//! stated unconditionally.
 //!
 //! When there is **no repository at all** there is no object store, so there is
 //! nowhere to put a copy. A `Write` that would drop lines is refused. This is
 //! narrower than round 2, which allowed it against a profile-home copy; that
 //! copy is the one the adversary broke, so the allowance goes with it.
+//!
+//! # An enclosing repository is not necessarily this file's archive
+//!
+//! Measured live (`armD`): `$HOME` is a dotfiles repository — a very common
+//! setup — and the private file is `~/work/env.local`, holding a Stripe key
+//! and a database password. The file is inside that repository's work tree, so
+//! the marker walk is right and this is not a bug in it. Round 3 nevertheless
+//! measured **zero refusals**: the write proceeded and the user's secrets were
+//! filed into the dotfiles repository's object store, still recoverable after
+//! `git gc`.
+//!
+//! So an enclosing repository counts as this file's object store only when the
+//! pinned commit records something under the file's **own directory**, or the
+//! file sits at the repository root. Where it does not, the repository is
+//! treated exactly as no repository: a `Write` that would drop lines is
+//! refused and **nothing is copied into it**, and an `Edit` proceeds saying
+//! plainly that no copy was made. That way the user is told where their bytes
+//! would have gone *before* the write, which a tool-result note cannot do —
+//! the note is assembled after `fs::write` has already returned.
 //!
 //! # Edit
 //!
@@ -142,8 +188,21 @@
 //! * **Trim-normalised comparison.** Counting is exact (N copies of a line are
 //!   not the same as 1), but an unsaved line whose trimmed text matches a
 //!   recorded line, at equal counts, is still invisible.
+//! * **Agent-authored lines are exempted per instance, never per text.** Round
+//!   3 keyed the exemption to the trimmed text, so once this tool had written
+//!   one line of text into a file, *every* later user line with that same text
+//!   in that file was permanently unprotected — reachable through ordinary
+//!   boilerplate (`import logging`, a repeated log call). Measured: agent
+//!   writes `TOKEN = load()`, user adds their own second copy, a rewrite
+//!   dropping both returns `Proceed`. The exemption is now a count — as many
+//!   copies as this tool actually introduced, never more than are on disk —
+//!   so the user's own copy stays the user's.
+//! * **The ambient git environment is removed, not inherited.** `GIT_DIR`,
+//!   `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_OBJECT_DIRECTORY`,
+//!   `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_QUARANTINE_PATH` are cleared
+//!   for every invocation; see [`git_run`] for what each of them broke.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -187,6 +246,19 @@ pub enum Verdict {
     ProceedWithNote(String),
 }
 
+/// Where this file's prior bytes may be copied.
+enum Store<'a> {
+    /// A repository that records the file's own directory, or that the file
+    /// sits at the root of. This is the file's archive.
+    Owned(&'a Path),
+    /// A repository encloses the file but records nothing under its directory
+    /// — measured: a `$HOME` dotfiles repository holding `~/work/env.local`.
+    /// Not this file's archive, so treated as no store at all.
+    Foreign { root: &'a Path, dir: String },
+    /// No repository, so no object store.
+    Absent,
+}
+
 /// What is known about where a path's saved state lives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Baseline {
@@ -205,16 +277,6 @@ enum Baseline {
     Unknown(String),
 }
 
-impl Baseline {
-    /// The repository root, when there is one to write a recovery object into.
-    fn root(&self) -> Option<&Path> {
-        match self {
-            Baseline::Repo { root, .. } => Some(root.as_path()),
-            _ => None,
-        }
-    }
-}
-
 /// Session-scoped enforcement of the unsaved-work guarantee.
 ///
 /// One instance is shared by every Write and Edit tool in the process (see
@@ -231,8 +293,10 @@ pub struct UnsavedWorkGuard {
     pins: Mutex<HashMap<PathBuf, Option<String>>>,
     /// Blob cache keyed by (commit, repo-relative path). Immutable content.
     blobs: Mutex<HashMap<(String, String), String>>,
-    /// Path -> trimmed lines this tool itself introduced.
-    authored: Mutex<HashMap<PathBuf, HashSet<String>>>,
+    /// Path -> how many copies of each trimmed line this tool itself
+    /// introduced. A count, not a set: exempting every copy of a text the
+    /// agent wrote once leaves the user's own later copies unprotected.
+    authored: Mutex<HashMap<PathBuf, HashMap<String, usize>>>,
 }
 
 static SHARED: OnceLock<Arc<UnsavedWorkGuard>> = OnceLock::new();
@@ -383,8 +447,8 @@ impl UnsavedWorkGuard {
             ));
         }
 
-        match baseline.root() {
-            Some(root) => match self.recoverable_copy(root, previous) {
+        match self.object_store(&baseline, path) {
+            Store::Owned(root) => match self.recoverable_copy(root, previous) {
                 Ok(oid) => {
                     Verdict::ProceedWithNote(copy_note(dropped_total, mode, root, &oid, wholesale))
                 }
@@ -394,8 +458,21 @@ impl UnsavedWorkGuard {
                      recoverable could not be made ({why}). Nothing was changed."
                 )),
             },
+            // A repository encloses the file but is not its archive. Copying
+            // into it is the armD harm, so it is treated as no store at all.
+            Store::Foreign { root, dir } => match mode {
+                Mode::Rewrite => Verdict::Refuse(foreign_store_refusal(
+                    display_path,
+                    dropped_total,
+                    root,
+                    &dir,
+                )),
+                Mode::Surgical => {
+                    Verdict::ProceedWithNote(foreign_store_note(dropped_total, root, &dir))
+                }
+            },
             // No repository, so no object store, so nowhere to put a copy.
-            None => match mode {
+            Store::Absent => match mode {
                 Mode::Rewrite => Verdict::Refuse(format!(
                     "Refused to overwrite {display_path}: this content would delete \
                      {dropped_total} line(s) that are on disk. This file is in no repository, so \
@@ -415,33 +492,35 @@ impl UnsavedWorkGuard {
 
     /// Record what this tool just put on disk at `path`.
     ///
-    /// A line counts as agent-authored from the moment the tool writes it and
-    /// it was not already there. Lines that were already on disk stay the
-    /// user's, however many times the agent's own writes carry them through —
-    /// otherwise two writes would launder any line into being unprotected.
+    /// Only the copies this tool actually introduced count as agent-authored.
+    /// Copies that were already on disk stay the user's, however many times
+    /// the agent's own writes carry them through — otherwise two writes would
+    /// launder any line into being unprotected — and so does a second copy the
+    /// user adds later of a line the agent wrote once, which is the
+    /// granularity round 3 got wrong.
     pub fn note_written(&self, path: &Path, previous: &str, written: &str) {
-        let already: HashSet<&str> = previous
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .collect();
-        let introduced: Vec<String> = written
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !already.contains(l))
-            .map(str::to_owned)
-            .collect();
-        if introduced.is_empty() {
+        let before = tally(previous);
+        let after = tally(written);
+        let Ok(mut map) = self.authored.lock() else {
             return;
+        };
+        let entry = map.entry(path.to_path_buf()).or_default();
+        let mut owned: HashMap<String, usize> = HashMap::new();
+        for (line, now) in &after {
+            let introduced = now.saturating_sub(before.get(line).copied().unwrap_or(0));
+            let carried = entry.get(*line).copied().unwrap_or(0);
+            // Never claim more copies than are on disk: a line the agent wrote
+            // and later removed stops being agent-authored, so a user who
+            // types that text back gets the protection.
+            let count = (carried + introduced).min(*now);
+            if count > 0 {
+                owned.insert((*line).to_owned(), count);
+            }
         }
-        if let Ok(mut map) = self.authored.lock() {
-            map.entry(path.to_path_buf())
-                .or_default()
-                .extend(introduced);
-        }
+        *entry = owned;
     }
 
-    fn authored_lines(&self, path: &Path) -> HashSet<String> {
+    fn authored_lines(&self, path: &Path) -> HashMap<String, usize> {
         self.authored
             .lock()
             .ok()
@@ -464,10 +543,14 @@ impl UnsavedWorkGuard {
             return hit.clone();
         }
         let resolved = self.resolve_baseline(dir);
-        // Only a settled answer is remembered. Round 2 memoized the failure
-        // too, so one transient git fault disarmed the session permanently:
-        // measured as break git -> allow, repair git -> still allow.
-        if matches!(resolved, Baseline::Unknown(_)) {
+        // Only an answer that cannot change is remembered, and the only such
+        // answer is a pinned repository. Round 2 memoized `Unknown` — break
+        // git -> allow, repair git -> still allow. Round 3 fixed that and then
+        // memoized `NoRepo`, which it had just made a *refusing* state: no
+        // repository -> refuse, `git init` + commit -> the same guard still
+        // refuses. Both faults are repairable mid-session, so neither is
+        // cached.
+        if !matches!(resolved, Baseline::Repo { .. }) {
             return resolved;
         }
         if let Ok(mut map) = self.dirs.lock() {
@@ -592,6 +675,52 @@ impl UnsavedWorkGuard {
         Ok(text)
     }
 
+    /// Which object store, if any, may hold this file's prior bytes.
+    ///
+    /// An enclosing repository qualifies only when the pinned commit records
+    /// something under the file's own directory, or the file sits at the
+    /// repository root. See the module docs for the measured armD shape this
+    /// exists to refuse.
+    fn object_store<'a>(&self, baseline: &'a Baseline, path: &Path) -> Store<'a> {
+        let Baseline::Repo { root, commit } = baseline else {
+            return Store::Absent;
+        };
+        let root = root.as_path();
+        let Some(rel) = repo_relative(root, path) else {
+            return Store::Foreign {
+                root,
+                dir: "this file's directory".to_owned(),
+            };
+        };
+        let Some((dir, _)) = rel.rsplit_once('/') else {
+            // At the repository root: unambiguously this repository's.
+            return Store::Owned(root);
+        };
+        // With no commit nothing is recorded anywhere, so nothing records this
+        // subdirectory either.
+        let Some(commit) = commit else {
+            return Store::Foreign {
+                root,
+                dir: dir.to_owned(),
+            };
+        };
+        let pathspec = format!("{dir}/");
+        match git_run(
+            root,
+            &["ls-tree", "--full-tree", "-z", commit, "--", &pathspec],
+            None,
+        ) {
+            // Non-empty output is the only proof the directory is recorded.
+            // git failing to answer is not proof, and lands in the safe
+            // direction: no copy goes anywhere.
+            Some(run) if run.ok() && !run.stdout.is_empty() => Store::Owned(root),
+            _ => Store::Foreign {
+                root,
+                dir: dir.to_owned(),
+            },
+        }
+    }
+
     /// Put `bytes` in the repository's own object database and prove they can
     /// be read back before returning.
     ///
@@ -645,22 +774,40 @@ impl UnsavedWorkGuard {
 /// Deliberately errs towards "yes": anything other than a definite "no such
 /// entry" counts as present, because the consequence of a false "no" is the
 /// fail-open this whole module exists to close.
+///
+/// `GIT_DIR` and `GIT_WORK_TREE` are deliberately *not* consulted. Round 3
+/// read either of them as proof of a repository, and git honoured the same
+/// variables, so a file in no repository at all was classified as being in one
+/// and its prior bytes landed in an unrelated repository. [`git_run`] now
+/// clears them, so git answers for `dir` alone and so does this.
 fn repository_marker_present(dir: &Path) -> bool {
-    if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
-        return true;
-    }
     let start = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    // Upward, and that is the whole basis of the test: a `.git` marker for
+    // `dir` normally lives several levels above it. Probe only `dir` itself
+    // and every subdirectory of a repository git refuses to open classifies as
+    // `NoRepo`, which is B1 re-opened.
     for ancestor in start.ancestors() {
-        // `.git` is a directory in a normal clone and a file in a worktree or
-        // submodule, so the kind is not checked.
-        match std::fs::symlink_metadata(ancestor.join(".git")) {
-            Ok(_) => return true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            // Not evidence of absence.
-            Err(_) => return true,
+        if marker_probe_is_present(std::fs::symlink_metadata(ancestor.join(".git"))) {
+            return true;
         }
     }
     false
+}
+
+/// How one probe of a candidate `.git` marker is read.
+///
+/// `.git` is a directory in a normal clone and a file in a worktree or
+/// submodule, so the kind is not checked. Only `NotFound` is evidence of
+/// absence: a probe that fails for any other reason — a permission denied on
+/// the parent, an I/O error, a non-directory component — must not be read as
+/// "there is no repository here", because that is the fail-open direction this
+/// module exists to close.
+fn marker_probe_is_present(probe: std::io::Result<std::fs::Metadata>) -> bool {
+    match probe {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 fn is_hex_oid(s: &str) -> bool {
@@ -709,16 +856,21 @@ fn tally(text: &str) -> HashMap<&str, usize> {
     counts
 }
 
-/// As [`tally`], minus any line this tool itself introduced.
-fn tally_excluding<'a>(text: &'a str, authored: &HashSet<String>) -> HashMap<&'a str, usize> {
-    let mut counts = HashMap::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || authored.contains(trimmed) {
-            continue;
-        }
-        *counts.entry(trimmed).or_insert(0) += 1;
-    }
+/// As [`tally`], minus the copies this tool itself introduced.
+///
+/// Subtracts a count rather than deleting a key. Round 3 deleted the key, so
+/// one agent-written line of text disarmed that text for the rest of the
+/// session in that file, including copies the user typed afterwards.
+fn tally_excluding<'a>(
+    text: &'a str,
+    authored: &HashMap<String, usize>,
+) -> HashMap<&'a str, usize> {
+    let mut counts = tally(text);
+    counts.retain(|line, remaining| {
+        let exempt = authored.get(*line).copied().unwrap_or(0);
+        *remaining = remaining.saturating_sub(exempt);
+        *remaining > 0
+    });
     counts
 }
 
@@ -807,6 +959,37 @@ fn unresolved_note(dropped_total: usize, why: &str) -> String {
     )
 }
 
+/// The armD refusal: a repository does enclose this file, but it is not this
+/// file's archive, so its prior bytes are not going into it and it is told
+/// before the write rather than after.
+fn foreign_store_refusal(
+    display_path: &str,
+    dropped_total: usize,
+    root: &Path,
+    dir: &str,
+) -> String {
+    format!(
+        "Refused to overwrite {display_path}: this content would delete {dropped_total} line(s) \
+         that are on disk and in no commit. The only object store that could hold a recovery \
+         copy is the git repository at {root}, and that repository records nothing under {dir} \
+         — it encloses this file but is not its archive, so filing this file's private contents \
+         into it would put them somewhere the user does not think of as holding them. Nothing \
+         was changed and nothing was copied. Carry those lines into the content you write, or \
+         have this file recorded somewhere that does track it.",
+        root = root.display(),
+    )
+}
+
+fn foreign_store_note(dropped_total: usize, root: &Path, dir: &str) -> String {
+    format!(
+        "\nNote: {dropped_total} line(s) that were on disk are not in the new content. The only \
+         repository enclosing this file is {root}, which records nothing under {dir}, so it is \
+         not this file's archive and no recovery copy was put there. Those lines are not \
+         recoverable.",
+        root = root.display(),
+    )
+}
+
 fn copy_note(dropped_total: usize, mode: Mode, root: &Path, oid: &str, wholesale: bool) -> String {
     let why = if wholesale && mode == Mode::Rewrite {
         " None of this file was in any commit, so the whole of it counted as unsaved work."
@@ -818,9 +1001,15 @@ fn copy_note(dropped_total: usize, mode: Mode, root: &Path, oid: &str, wholesale
          content.{why} The previous contents were written to this repository's own object store \
          and read back to confirm they match, so they can be recovered with:\n    \
          git -C {root} cat-file blob {oid}\n\
-         The object is unreferenced, so the repository's normal garbage collection removes it in \
-         due course. If this file is gitignored, note that its prior bytes are now inside \
-         .git/objects until then.",
+         The object is unreferenced, but that does not make it short-lived: `git gc` does NOT \
+         remove it — it moves it into a cruft pack and it stays readable. Disposing of it takes \
+         `git -C {root} gc --prune=now`; an ordinary gc only prunes it once gc.pruneExpire (two \
+         weeks by default) has passed, and `git gc --auto` will not fire for one object at all.\n\
+         Until then these bytes live in {root}/.git/objects, and they are in no commit, so that \
+         is the only place they exist — whether this file is gitignored, merely untracked, or \
+         tracked and wholly rewritten. They travel with a filesystem copy of the repository \
+         (cp -a, tar, rsync) and with `git clone` of this local path, and `git fsck --lost-found` \
+         writes them out as a plaintext file; `git push` and `git bundle` do not carry them.",
         root = root.display(),
     )
 }
@@ -874,6 +1063,30 @@ impl GitRun {
 /// separates it from options, and `core.fsmonitor=false` plus
 /// `GIT_TERMINAL_PROMPT=0` stop a repository's own config from starting a
 /// helper process or blocking this guard on a prompt.
+///
+/// The ambient git environment is **removed**, not inherited, because every
+/// variable in it relocates something this guard depends on. Measured: with
+/// `GIT_OBJECT_DIRECTORY` set — the shape a hook inherits inside a push
+/// quarantine — `hash-object -w` and the `cat-file` read-back both redirect to
+/// the same non-repository store, so the byte-for-byte check passes, the write
+/// proceeds, and the `git -C <root> cat-file blob <oid>` the note advertises
+/// fails: allow, plus a recovery claim that does not recover. With `GIT_DIR`
+/// set, a file in no repository at all is classified as being in one and its
+/// prior bytes land in an unrelated repository. `GIT_COMMON_DIR`,
+/// `GIT_WORK_TREE` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are the same two
+/// failures by another name, and `GIT_QUARANTINE_PATH` is how the object
+/// variables usually arrive.
+///
+/// Declared deviation: this is `std::process::Command`, not
+/// `wcore_config::shell::shell_command_argv`. The injection property is
+/// identical — argv mode, `--literal-pathspecs`, `--` before every path — but
+/// round 3's stated reason for the deviation was wrong. It said the call sites
+/// are sync; the registration site `BootstrapBuilder::build_scoped` *is* an
+/// `async fn` and `Tool::execute` is async too. The accurate statement is that
+/// `assess` is a sync fn and the eager pin runs inside `OnceLock::get_or_init`,
+/// which cannot await. So the real cost of the deviation is blocking `git`
+/// spawns on a tokio worker — up to three at bootstrap for the eager pin —
+/// with no timeout on them. A timeout is a fair follow-up.
 fn git_run(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<GitRun> {
     let mut cmd = Command::new("git");
     cmd.arg("--literal-pathspecs")
@@ -883,6 +1096,12 @@ fn git_run(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<GitRun> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_PAGER", "cat")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_QUARANTINE_PATH")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(if stdin.is_some() {

@@ -47,10 +47,12 @@ impl WriteTool {
 
     /// Use `guard` instead of the process-wide one.
     ///
-    /// The shared guard writes its recovery snapshots under the real profile
-    /// home, which a test process must never touch; a test hands in a guard
-    /// rooted in its own temporary directory. A host that runs several
-    /// independent sessions in one process can use it for the same reason.
+    /// The process-wide guard pins one baseline per repository for the whole
+    /// session and is shared by every sub-agent, so a test that needs its own
+    /// pins hands in an isolated guard; a host running several independent
+    /// sessions in one process wants one for the same reason. There is no
+    /// longer any snapshot directory under the profile home — recovery copies
+    /// go to the repository's own object store.
     pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
         self.unsaved = guard;
         self

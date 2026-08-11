@@ -39,8 +39,22 @@ impl Fixture {
     }
     fn write(&self, name: &str, body: &str) -> PathBuf {
         let p = self.root.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(&p, body).unwrap();
         p
+    }
+    /// Can this object still be read out of the repository?
+    fn blob_readable(&self, oid: &str) -> bool {
+        Command::new("git")
+            .args(["cat-file", "blob", oid])
+            .current_dir(&self.root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
     fn read(&self, name: &str) -> String {
         std::fs::read_to_string(self.root.join(name)).unwrap()
@@ -925,4 +939,288 @@ fn a_surgical_edit_that_touches_nothing_unsaved_is_silent() {
         ),
         Verdict::Proceed
     ));
+}
+
+// ---- round 4 --------------------------------------------------------------
+
+/// The disposal sentence round 3 shipped was measurably false, and this pins
+/// the replacement against git rather than against itself: `gc` does not
+/// remove the copy, `gc --prune=now` does.
+#[test]
+fn the_note_names_the_command_that_actually_disposes_of_the_copy() {
+    let f = repo();
+    f.write("keep.txt", "keep\n");
+    git(&f.root, &["add", "keep.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let prior = "DEPLOY_TOKEN=abc\nother\n";
+    let p = f.write("secret.env", prior);
+
+    let note = assert_noted(f.guard().assess(
+        &p,
+        "secret.env",
+        prior,
+        "DEPLOY_TOKEN=placeholder\n",
+        Mode::Rewrite,
+    ));
+    let oid = oid_in(&note);
+
+    assert!(
+        !note.contains("removes it in due course"),
+        "the round-3 disposal claim is back: {note}"
+    );
+    assert!(note.contains("gc --prune=now"), "{note}");
+    assert!(
+        note.contains("cp -a") && note.contains("rsync") && note.contains("git clone"),
+        "the note must say what carries the bytes off this machine: {note}"
+    );
+    assert!(note.contains("lost-found"), "{note}");
+    assert!(
+        note.contains("git push") && note.contains("bundle"),
+        "the note must say what does NOT carry them: {note}"
+    );
+
+    // Measured, not asserted. `gc` moves it into a cruft pack and leaves it
+    // readable; only `--prune=now` disposes of it.
+    for _ in 0..3 {
+        git(&f.root, &["gc", "-q"]);
+    }
+    assert!(
+        f.blob_readable(&oid),
+        "gc disposed of the copy after all — the note is now wrong the other way"
+    );
+    git(&f.root, &["gc", "-q", "--prune=now"]);
+    assert!(
+        !f.blob_readable(&oid),
+        "--prune=now did not dispose of the copy, so the note names the wrong command"
+    );
+}
+
+/// F1. The agent writes one line of text; the user writes their own copy of
+/// the same text. Round 3 keyed the exemption to the text, so the user's copy
+/// was unprotected for the rest of the session.
+#[test]
+fn a_user_copy_of_a_line_the_agent_also_wrote_is_still_protected() {
+    let f = repo();
+    f.write("app.py", "start\n");
+    git(&f.root, &["add", "app.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.root.join("app.py");
+    let g = f.guard();
+
+    // The agent introduces the line.
+    g.note_written(&p, "start\n", "start\nTOKEN = load()\n");
+    // The user adds their own second copy of the same text.
+    let disk = "start\nTOKEN = load()\nTOKEN = load()\n";
+    std::fs::write(&p, disk).unwrap();
+
+    let msg = assert_refused(g.assess(&p, "app.py", disk, "start\n", Mode::Rewrite));
+    assert!(
+        msg.contains("1 line(s)"),
+        "exactly the user's one copy is protected, not both and not neither: {msg}"
+    );
+}
+
+/// The other half of the same granularity: a line the agent wrote and then
+/// removed stops being agent-authored, so a user who types that text back
+/// afterwards gets the protection.
+#[test]
+fn a_line_the_agent_wrote_and_removed_is_no_longer_its_own() {
+    let f = repo();
+    f.write("app.py", "start\n");
+    git(&f.root, &["add", "app.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.root.join("app.py");
+    let g = f.guard();
+
+    g.note_written(&p, "start\n", "start\nTMP = 1\n");
+    g.note_written(&p, "start\nTMP = 1\n", "start\n");
+
+    let disk = "start\nTMP = 1\n";
+    std::fs::write(&p, disk).unwrap();
+    let msg = assert_refused(g.assess(&p, "app.py", disk, "start\n", Mode::Rewrite));
+    assert!(msg.contains("1 line(s)"), "{msg}");
+}
+
+/// R1. Round 3 stopped memoizing `Unknown` and started memoizing `NoRepo`,
+/// which it had just made a refusing state — the same latch one class over.
+#[test]
+fn initialising_a_repository_rearms_the_same_guard() {
+    let dir = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let p = root.join("notes.txt");
+    std::fs::write(&p, "one\ntwo\n").unwrap();
+    let g = UnsavedWorkGuard::new_isolated();
+
+    let first = assert_refused(g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite));
+    assert!(first.contains("in no repository"), "{first}");
+
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.email", "t@example.com"]);
+    git(&root, &["config", "user.name", "t"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    git(&root, &["add", "notes.txt"]);
+    git(&root, &["commit", "-qm", "base"]);
+
+    // Every line is now provably recorded, so nothing unsaved can be dropped.
+    match g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite) {
+        Verdict::Proceed => {}
+        other => panic!("the same guard is still latched to NoRepo: {other:?}"),
+    }
+}
+
+/// The other way into `NoRepo`: a work tree git reports as bare.
+#[test]
+fn repairing_core_bare_rearms_the_same_guard() {
+    let f = repo();
+    f.write("notes.txt", "one\ntwo\n");
+    git(&f.root, &["add", "notes.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.root.join("notes.txt");
+    let g = f.guard();
+
+    git(&f.root, &["config", "core.bare", "true"]);
+    let first = assert_refused(g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite));
+    assert!(first.contains("in no repository"), "{first}");
+
+    git(&f.root, &["config", "core.bare", "false"]);
+    match g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite) {
+        Verdict::Proceed => {}
+        other => panic!("the same guard is still latched to NoRepo: {other:?}"),
+    }
+}
+
+/// S2. The marker walk goes upward, and that is the whole basis of the
+/// filesystem repository test: a file in a subdirectory of a repository git
+/// refuses to open must still be told apart from a file in no repository.
+#[test]
+fn a_subdirectory_of_a_repository_git_refuses_to_open_still_refuses_for_the_right_reason() {
+    let f = repo();
+    f.write("src/parser.py", "def a():\n    return 1\n");
+    git(&f.root, &["add", "src/parser.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.write("src/parser.py", "def a():\n    return 1\n# WIP\n");
+    f.break_git();
+
+    let msg = assert_refused(f.guard().assess(
+        &p,
+        "src/parser.py",
+        "def a():\n    return 1\n# WIP\n",
+        "def a():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    assert!(
+        msg.contains("git did not answer"),
+        "a subdirectory of a broken repository read as no repository at all — B1: {msg}"
+    );
+}
+
+/// S3. The erring-to-present rule is what stops a probe failure becoming a
+/// fail-open. Both directions, plus a real filesystem error that is not
+/// `NotFound`.
+#[test]
+fn only_a_definite_not_found_is_read_as_no_marker() {
+    use std::io::{Error, ErrorKind};
+
+    assert!(!marker_probe_is_present(Err(Error::from(
+        ErrorKind::NotFound
+    ))));
+    assert!(marker_probe_is_present(Err(Error::from(
+        ErrorKind::PermissionDenied
+    ))));
+
+    let dir = TempDir::new().unwrap();
+    let regular = dir.path().join("regular");
+    std::fs::write(&regular, "not a directory\n").unwrap();
+    assert!(marker_probe_is_present(std::fs::symlink_metadata(
+        regular.join("sub/.git")
+    )));
+    assert!(marker_probe_is_present(std::fs::symlink_metadata(
+        dir.path()
+    )));
+    assert!(repository_marker_present(&regular.join("sub")));
+}
+
+/// armD, measured live: `$HOME` is a dotfiles repository and the private file
+/// is `~/work/env.local`. The repository encloses the file but records nothing
+/// under its directory, so it is not this file's archive and the secrets do
+/// not go into it.
+#[test]
+fn a_repository_that_records_nothing_under_the_files_directory_is_not_its_store() {
+    let f = repo();
+    f.write(".zshrc", "export EDITOR=vi\n");
+    git(&f.root, &["add", ".zshrc"]);
+    git(&f.root, &["commit", "-qm", "dotfiles"]);
+    let prior = "STRIPE_KEY=sk_live_x\nDB_PASSWORD=hunter2\n";
+    let p = f.write("work/env.local", prior);
+
+    let msg = assert_refused(f.guard().assess(
+        &p,
+        "work/env.local",
+        prior,
+        "STRIPE_KEY=<placeholder>\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("records nothing under work"), "{msg}");
+    assert!(
+        msg.contains("nothing was copied"),
+        "the refusal must say the bytes did not go anywhere: {msg}"
+    );
+
+    // Nothing was filed into the dotfiles repository.
+    let out = Command::new("git")
+        .args(["fsck", "--no-progress"])
+        .current_dir(&f.root)
+        .output()
+        .unwrap();
+    let report =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !report.contains("dangling blob"),
+        "prior bytes were written into a repository that is not this file's archive: {report}"
+    );
+}
+
+/// The same shape through Edit: never refused, but no copy goes into a
+/// repository that is not this file's archive, and it says so.
+#[test]
+fn an_edit_in_a_repository_that_is_not_this_files_archive_makes_no_copy() {
+    let f = repo();
+    f.write(".zshrc", "export EDITOR=vi\n");
+    git(&f.root, &["add", ".zshrc"]);
+    git(&f.root, &["commit", "-qm", "dotfiles"]);
+    let prior = "STRIPE_KEY=sk_live_x\nDB_PASSWORD=hunter2\n";
+    let p = f.write("work/env.local", prior);
+
+    let note = assert_noted(f.guard().assess(
+        &p,
+        "work/env.local",
+        prior,
+        "STRIPE_KEY=sk_live_x\n",
+        Mode::Surgical,
+    ));
+    assert!(note.contains("no recovery copy"), "{note}");
+    assert!(note.contains("not recoverable"), "{note}");
+    assert!(
+        !note.contains("cat-file blob"),
+        "a copy was claimed that was not made: {note}"
+    );
+}
+
+/// The negative control for the rule above: a subdirectory the repository does
+/// record is still its own, so an untracked file there is copied as before.
+#[test]
+fn a_subdirectory_the_repository_records_is_still_its_store() {
+    let f = repo();
+    f.write("src/a.py", "tracked\n");
+    git(&f.root, &["add", "src/a.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let prior = "scratch one\nscratch two\n";
+    let p = f.write("src/b.py", prior);
+
+    let note =
+        assert_noted(
+            f.guard()
+                .assess(&p, "src/b.py", prior, "scratch one\n", Mode::Rewrite),
+        );
+    assert_eq!(f.recover(&note), prior);
 }

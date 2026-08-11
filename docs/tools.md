@@ -63,9 +63,19 @@ can be made, the write is refused and nothing changes.
   `.git/objects`, made with `git hash-object -w`. The tool result prints the
   exact command to get the bytes back:
   `git -C <repo> cat-file blob <oid>`. Nothing is staged, committed or
-  referenced, so ordinary `git gc` clears it in due course. If the file was
-  gitignored, its prior bytes do sit inside `.git/objects` until then, and the
-  tool result says so.
+  referenced. **`git gc` does not remove it.** Measured on git 2.43.0 and
+  2.54.0: with `gc.cruftPacks` (default on since git 2.42) gc moves the object
+  into a cruft pack and `git cat-file blob` still returns it — still readable
+  after six consecutive `git gc` runs. Disposal takes
+  `git -C <repo> gc --prune=now`, or an ordinary gc once `gc.pruneExpire` (two
+  weeks by default) has passed; `git gc --auto` needs thousands of loose
+  objects and never fires for one. Until then the bytes are inside
+  `.git/objects` and, being in no commit, that is the only place they exist —
+  whether the file was gitignored, merely untracked, or tracked and wholly
+  rewritten. They travel with `cp -a`, `tar`, `rsync` and `git clone` of the
+  local path, and `git fsck --lost-found` writes them out as a plaintext file;
+  `git push` and `git bundle` do not carry them. The tool result says all of
+  this.
 - **Edit is never refused** — its `old_string` must match the bytes on disk, so
   anything it removes was quoted from disk rather than silently omitted. It
   copies where it can and states plainly when it could not.
@@ -76,6 +86,18 @@ can be made, the write is refused and nothing changes.
   remove existing lines are unaffected.
 - Outside any repository there is no object store, so a Write that would drop
   lines is refused for want of anywhere to put a recoverable copy.
+- **An enclosing repository is not automatically this file's archive.** If the
+  session's commit records nothing under the file's own directory — measured
+  live with `$HOME` as a dotfiles repository and the private file at
+  `~/work/env.local` — that repository is treated exactly as no repository. A
+  Write that would drop lines is refused and **nothing is copied into it**, so
+  the user learns where their bytes would have gone before the write rather
+  than after. A file at the repository root, or in a directory the repository
+  does record, is unaffected.
+- git is run with `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`,
+  `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and
+  `GIT_QUARANTINE_PATH` cleared, so an inherited git environment cannot
+  redirect either the recovery write or the read-back that verifies it.
 
 **What does not hold.** Three limits, stated because a broader claim would be
 untrue:
