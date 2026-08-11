@@ -130,13 +130,13 @@ impl Tool for WriteTool {
         // exactly as it was. On a create there is nothing to lose, and
         // recording the empty baseline now is what keeps the agent's own later
         // rewrites of its own file free.
-        let previous = if existed {
-            std::fs::read_to_string(path).unwrap_or_default()
-        } else {
-            String::new()
-        };
+        // Gated on the pre-image, not on `existed`: a probe that reports
+        // "no such file" on an error it could not classify would otherwise
+        // wave the overwrite straight through. If there are bytes there, they
+        // are judged, whatever `exists` said.
+        let previous = std::fs::read_to_string(path).unwrap_or_default();
         let mut unsaved_note = String::new();
-        if existed {
+        if !previous.is_empty() {
             match self
                 .unsaved
                 .assess(path, file_path, &previous, content, Mode::Rewrite)
@@ -250,18 +250,15 @@ impl Tool for WriteTool {
         // the sandbox would reject never reaches the guard at all — the
         // sandbox denial, not a message quoting that file's lines, is the
         // right answer there.
-        let previous = if existed {
-            ctx.vfs
-                .read(path)
-                .await
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let previous = ctx
+            .vfs
+            .read(path)
+            .await
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_default();
         let mut unsaved_note = String::new();
-        if existed {
+        if !previous.is_empty() {
             match self
                 .unsaved
                 .assess(path, file_path, &previous, content, Mode::Rewrite)

@@ -201,8 +201,9 @@ pub mod tool_search;
 // Wayland Python engine). HELPER module — callers wire it into HTTP-client
 // redirect hooks and tool pre-flight checks.
 pub mod url_safety;
-// P2: refuses a whole-file Write that would delete unsaved user work
-// (lines on disk but not in the file's last committed version).
+// INV-2 / P2: content on disk that no commit holds never leaves the disk
+// through Write or Edit without either being refused or being copied to a
+// durable snapshot whose path is reported back to the caller.
 pub mod unsaved_work;
 // W8a A.3: VirtualFs trait + RealFs / InMemoryFs / SandboxedFs (X2).
 pub mod vfs;
