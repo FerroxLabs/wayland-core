@@ -14975,7 +14975,19 @@ impl AgentEngine {
         }
 
         // 1. Microcompact (lightweight, no LLM call)
-        if micro::should_microcompact(&self.messages, &self.compact_config) {
+        //
+        // A-6: the count trigger is gated on the SAME real-pressure watermark
+        // the autocompact trigger reads, so clearing tool results is pressure
+        // relief rather than an unconditional wipe on the eleventh tool call.
+        let micro_pressure = micro::ContextPressure {
+            real_input_tokens: self.compact_state.last_real_input_tokens,
+            autocompact_threshold: auto::autocompact_threshold(
+                &self.compact_config,
+                self.compat.provider_type(),
+                &self.model,
+            ),
+        };
+        if micro::should_microcompact(&self.messages, &self.compact_config, micro_pressure) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
             if result.cleared_count > 0 {
                 self.output.emit_info(&format!(
@@ -20508,38 +20520,71 @@ mod compact_tests {
         }
     }
 
-    // -- Microcompact runs when count trigger fires --
+    // -- Microcompact runs when count trigger fires AND pressure is real --
 
-    #[tokio::test]
-    async fn microcompact_clears_old_results() {
-        // 12 tool results with keep_recent=3 (threshold=6) → should clear 9
+    /// Build 12 `Read` results so the count trigger (keep_recent=3 →
+    /// threshold 6) is satisfied, leaving pressure the only variable.
+    fn twelve_read_results() -> Vec<Message> {
         let mut messages = Vec::new();
         for i in 0..12 {
             let id = format!("t{i}");
             messages.push(tool_use_msg(&id, "Read"));
             messages.push(tool_result_msg(&id, &format!("data-{i}")));
         }
+        messages
+    }
 
-        let config = CompactConfig {
-            micro_keep_recent: 3,
-            ..Default::default()
-        };
-        let state = CompactState::new();
-
-        let mut engine = make_compact_engine(config, state, messages);
-        engine.run_compaction().await.unwrap();
-
-        // Last 3 tool results should be preserved
-        let cleared_count = engine
+    fn cleared_results(engine: &super::AgentEngine) -> usize {
+        engine
             .messages
             .iter()
             .flat_map(|m| &m.content)
             .filter(|b| {
                 matches!(b, ContentBlock::ToolResult { content, .. } if content == "[Tool result cleared]")
             })
-            .count();
+            .count()
+    }
 
-        assert_eq!(cleared_count, 9);
+    #[tokio::test]
+    async fn microcompact_clears_old_results() {
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // Past 0.5 * (200_000 - 20_000 - 13_000) = 83_500.
+        state.last_real_input_tokens = 120_000;
+
+        let mut engine = make_compact_engine(config, state, twelve_read_results());
+        engine.run_compaction().await.unwrap();
+
+        // Last 3 tool results should be preserved
+        assert_eq!(cleared_results(&engine), 9);
+    }
+
+    /// A-6: the same conversation with the same count trigger, but in a nearly
+    /// empty window, must keep every result. Graded on the ENGINE path
+    /// (`run_compaction`), not on `should_microcompact` alone — the corpus
+    /// failure was a wiring outcome, and a helper-only test would not have
+    /// seen it.
+    #[tokio::test]
+    async fn microcompact_leaves_results_alone_under_low_pressure() {
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // What an A-6-shaped session actually reported: ~16k in a 200k window.
+        state.last_real_input_tokens = 16_000;
+
+        let mut engine = make_compact_engine(config, state, twelve_read_results());
+        engine.run_compaction().await.unwrap();
+
+        assert_eq!(
+            cleared_results(&engine),
+            0,
+            "microcompact erased tool results at 16k/167k pressure (the A-6 defect)"
+        );
     }
 
     // -- Manual /compact runs deterministic micro-compaction, not the
