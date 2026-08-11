@@ -117,6 +117,19 @@ fn assert_noted(v: Verdict) -> String {
     }
 }
 
+/// The ref the note says anchors the copy.
+#[cfg(unix)] // only the copy arms are unix-only
+fn ref_in(note: &str) -> String {
+    let marker = "refs/wayland-core/unsaved/";
+    let start = note.find(marker).expect("note names an anchor ref");
+    note[start..]
+        .split_whitespace()
+        .next()
+        .expect("note terminates the ref")
+        .trim_end_matches([',', '.', '`'])
+        .to_owned()
+}
+
 #[cfg(unix)] // only the copy arms use this, and they are unix-only
 fn oid_in(note: &str) -> String {
     let marker = "cat-file blob ";
@@ -966,14 +979,17 @@ fn a_surgical_edit_that_touches_nothing_unsaved_is_silent() {
 
 // ---- round 4 --------------------------------------------------------------
 
-/// The disposal sentence round 3 shipped was measurably false, and this pins
-/// the replacement against git rather than against itself: `gc` does not
-/// remove the copy, `gc --prune=now` does.
+/// Round 3's disposal sentence was measurably false and round 5's was
+/// measurably incomplete: it was right that `gc` keeps the copy and wrong
+/// that `gc --prune=now` is a thing the user might not run. Round 6 anchors
+/// the copy, so the claim under test inverts — nothing gc can be asked to do
+/// disposes of it — and the note's own deletion recipe is executed here to
+/// prove the user is still given a way out.
 #[cfg(unix)]
 // the copy is only made where it is provably no wider,
 // and Windows has no comparison to make: see object_store
 #[test]
-fn the_note_names_the_command_that_actually_disposes_of_the_copy() {
+fn the_note_names_what_keeps_the_copy_and_what_disposes_of_it() {
     let f = repo();
     f.write("keep.txt", "keep\n");
     git(&f.root, &["add", "keep.txt"]);
@@ -990,34 +1006,52 @@ fn the_note_names_the_command_that_actually_disposes_of_the_copy() {
     ));
     let oid = oid_in(&note);
 
+    let anchor = ref_in(&note);
+
     assert!(
         !note.contains("removes it in due course"),
         "the round-3 disposal claim is back: {note}"
     );
-    assert!(note.contains("gc --prune=now"), "{note}");
+    assert!(
+        !note.contains("The object is unreferenced"),
+        "the round-5 retention claim is back: {note}"
+    );
+    assert!(
+        note.contains("for-each-ref"),
+        "the note must name the command that lists every copy: {note}"
+    );
+    assert!(
+        note.contains("update-ref -d") && note.contains("gc --prune=now"),
+        "the note must name the way out: {note}"
+    );
     assert!(
         note.contains("cp -a") && note.contains("rsync") && note.contains("git clone"),
         "the note must say what carries the bytes off this machine: {note}"
     );
-    assert!(note.contains("lost-found"), "{note}");
     assert!(
         note.contains("git push") && note.contains("bundle"),
-        "the note must say what does NOT carry them: {note}"
+        "the note must say what does and does not carry them: {note}"
     );
 
-    // Measured, not asserted. `gc` moves it into a cruft pack and leaves it
-    // readable; only `--prune=now` disposes of it.
+    // Measured, not asserted, and this is the inversion: no gc the user can
+    // ask for reaches an anchored copy.
     for _ in 0..3 {
         git(&f.root, &["gc", "-q"]);
     }
+    assert!(f.blob_readable(&oid), "an ordinary gc disposed of the copy");
+    git(&f.root, &["gc", "-q", "--aggressive", "--prune=now"]);
     assert!(
         f.blob_readable(&oid),
-        "gc disposed of the copy after all — the note is now wrong the other way"
+        "gc --aggressive --prune=now destroyed the copy: the anchor is not holding it"
     );
+
+    // The way out, run exactly as the note gives it. Without this the arm
+    // could not tell "the ref keeps it" from "nothing here can remove it".
+    git(&f.root, &["update-ref", "-d", &anchor]);
     git(&f.root, &["gc", "-q", "--prune=now"]);
     assert!(
         !f.blob_readable(&oid),
-        "--prune=now did not dispose of the copy, so the note names the wrong command"
+        "the note's own deletion recipe did not dispose of the copy"
     );
 }
 
@@ -1300,12 +1334,20 @@ fn a_subdirectory_the_repository_records_is_still_its_store() {
 
 // ---- round 4: every sentence in the note, measured against git -------------
 
-/// Bar 3. The note makes six checkable claims about where the recovery object
+/// Bar 3. The note makes checkable claims about where the recovery object
 /// goes and what carries it. Round 3 shipped a disposal sentence that was
 /// simply false, and the way that got through was that nothing ever executed
-/// it. Each claim here is exercised against real git, and the two negative
-/// claims (`git push`, `git bundle`) are what stop the arm being the vacuous
-/// "everything carries everything".
+/// it. Each claim here is exercised against real git, and the negative
+/// claims (`git push --all`, a plain `git clone` after its own gc,
+/// `fsck --lost-found`) are what stop the arm being the vacuous "everything
+/// carries everything".
+///
+/// Round 6 anchors the copy under a ref, which moves four of these. Carried
+/// now and not before: `git clone --mirror`, `git push --mirror`,
+/// `git bundle --all`. Not carried now and carried before:
+/// `git fsck --lost-found`, which only materialises *dangling* objects — and
+/// that one gets its own positive control, because "the file is absent" would
+/// otherwise also be what a fsck that never ran looks like.
 #[cfg(unix)] // cp / tar / touch
 #[test]
 fn every_travel_claim_the_note_makes_is_executed_against_git() {
@@ -1363,8 +1405,10 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
     let untarred = untar.join(f.root.file_name().unwrap());
     assert!(readable_in(&untarred, &oid), "tar did not carry the copy");
 
-    // And with `git clone` of the local path — the channel that matters most,
-    // because a clone is the one copy a user believes is filtered.
+    // A plain `git clone` of the local path copies the object store but not
+    // this ref, so the bytes arrive and the clone's own gc then drops them.
+    // Both halves are asserted: the first is the exposure, the second is the
+    // note's claim about how long it lasts.
     let cloned = out.join("clone");
     assert!(
         Command::new("git")
@@ -1377,11 +1421,35 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
     );
     assert!(
         readable_in(&cloned, &oid),
-        "git clone of the local path did not carry the copy"
+        "git clone of the local path did not carry the copy at all"
+    );
+    git(&cloned, &["gc", "-q", "--prune=now"]);
+    assert!(
+        !readable_in(&cloned, &oid),
+        "the note says a plain clone leaves the copy unreferenced and its own \
+         gc drops it; the clone kept it"
     );
 
-    // `git fsck --lost-found` writes it out as plaintext, which is how it
-    // stops being a thing only git can read.
+    // `git clone --mirror`, which does take the ref, keeps them.
+    let mirrored = out.join("mirror");
+    assert!(
+        Command::new("git")
+            .args(["clone", "-q", "--mirror"])
+            .arg(&f.root)
+            .arg(&mirrored)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        readable_in(&mirrored, &oid),
+        "the note says clone --mirror carries the copy, and it did not"
+    );
+
+    // `git fsck --lost-found` no longer writes it out as plaintext: the
+    // object is referenced, so it is not lost. The dangling control is what
+    // makes the absence mean something.
+    let dangling = hash_object(&f.root, "an object nothing references\n");
     assert!(
         Command::new("git")
             .args(["fsck", "--lost-found", "--no-progress"])
@@ -1391,12 +1459,16 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
             .status
             .success()
     );
-    let found = f.root.join(".git/lost-found/other").join(&oid);
-    let plaintext = std::fs::read_to_string(&found)
-        .unwrap_or_else(|e| panic!("lost-found did not materialise {}: {e}", found.display()));
+    let lost = f.root.join(".git/lost-found/other");
     assert!(
-        plaintext.contains(CANARY),
-        "the note claims fsck writes plaintext; it wrote {plaintext:?}"
+        lost.join(&dangling).exists(),
+        "control failed: fsck --lost-found materialised nothing at all, so \
+         the absence of the anchored copy proves nothing"
+    );
+    assert!(
+        !lost.join(&oid).exists(),
+        "the anchored copy was still materialised as plaintext under \
+         .git/lost-found/other"
     );
     std::fs::remove_dir_all(f.root.join(".git/lost-found")).unwrap();
 
@@ -1423,7 +1495,31 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
     );
     assert!(
         !readable_in(&bare, &oid),
-        "the note says push does not carry the copy, and it did"
+        "the note says push --all does not carry the copy, and it did"
+    );
+
+    // ...but `--mirror` pushes every ref, including this one.
+    let bare_mirror = out.join("remote-mirror.git");
+    assert!(
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare_mirror)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["push", "-q", "--mirror"])
+            .arg(&bare_mirror)
+            .current_dir(&f.root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        readable_in(&bare_mirror, &oid),
+        "the note says push --mirror carries the copy, and it did not"
     );
 
     let bundle = out.join("all.bundle");
@@ -1448,18 +1544,26 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
             .success()
     );
     assert!(
-        !readable_in(&from_bundle, &oid),
-        "the note says a bundle does not carry the copy, and it did"
+        readable_in(&from_bundle, &oid),
+        "the note says `git bundle --all` carries the copy, and it did not"
     );
 }
 
-/// The other measured half of the disposal sentence: an *ordinary* gc does
-/// dispose of the copy once `gc.pruneExpire` has passed. Backdating the loose
-/// object is the only way to observe the two-week default inside a test, and
-/// without this arm the note's "two weeks" is an unexecuted claim.
+/// The prune window is what round 5's retention story rested on, and this is
+/// the arm that used to confirm it: backdating the loose object past
+/// `gc.pruneExpire` and watching an ordinary gc take it. Round 6 anchors the
+/// copy, so the property inverts — age stops mattering — and the arm has to
+/// carry two controls or the inversion is unfalsifiable.
+///
+/// 1. An unreferenced object of *the same backdated age* is pruned by the
+///    same gc run. Without it, "the copy survived" would not distinguish an
+///    anchor that works from a gc that pruned nothing.
+/// 2. Deleting the anchor and running gc again disposes of the copy. Without
+///    it, "the copy survived" would not distinguish the anchor holding it
+///    from something else in the repository holding it.
 #[cfg(unix)] // cp / tar / touch
 #[test]
-fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
+fn the_prune_window_does_not_reach_an_anchored_copy() {
     let f = repo();
     f.write("keep.txt", "keep\n");
     git(&f.root, &["add", "keep.txt"]);
@@ -1472,51 +1576,52 @@ fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
     );
     let oid = oid_in(&note);
 
+    let anchor = ref_in(&note);
+
     let loose = f
         .root
         .join(format!(".git/objects/{}/{}", &oid[..2], &oid[2..]));
     assert!(loose.exists(), "the copy is not a loose object: {loose:?}");
 
-    // The control travels in the same gc run: an object of identical shape
-    // whose only difference is its age. Without it, "gc removed it" would not
-    // distinguish the prune window from gc removing unreferenced objects
-    // outright — which is exactly what round 3 believed.
-    let fresh = hash_object(&f.root, "a fresh unreferenced object\n");
-    assert_ne!(fresh, oid);
+    // Control 1: an unreferenced object aged exactly as far past the prune
+    // window as the copy is. It has to go in the same gc run the copy
+    // survives, or the survival measures nothing.
+    let unheld = hash_object(&f.root, "an object with no ref on it\n");
+    assert_ne!(unheld, oid);
+    let unheld_loose = f
+        .root
+        .join(format!(".git/objects/{}/{}", &unheld[..2], &unheld[2..]));
 
-    // The note's other unexecuted sentence: `git gc --auto` does not fire for
-    // one object. Measured here, on both sides of the prune window, so it is
-    // a result rather than a quotation of gc.auto's 6700 default.
-    git(&f.root, &["gc", "-q", "--auto"]);
-    assert!(
-        f.blob_readable(&oid),
-        "gc --auto disposed of the copy, so the note is wrong about it"
-    );
+    let backdate = |path: &std::path::Path| {
+        assert!(
+            Command::new("touch")
+                .args(["-d", "3 weeks ago"])
+                .arg(path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    backdate(&loose);
+    backdate(&unheld_loose);
 
-    assert!(
-        Command::new("touch")
-            .args(["-d", "3 weeks ago"])
-            .arg(&loose)
-            .status()
-            .unwrap()
-            .success()
-    );
-    git(&f.root, &["gc", "-q", "--auto"]);
-    assert!(
-        f.blob_readable(&oid),
-        "gc --auto fired once the object was old enough; the note says it \
-         does not fire at all for one object"
-    );
     git(&f.root, &["gc", "-q"]);
     assert!(
-        f.blob_readable(&fresh),
-        "control failed: gc removed a fresh unreferenced object too, so this \
-         arm does not measure the prune window at all"
+        !f.blob_readable(&unheld),
+        "control failed: the prune window did not fire at all in this gc run, \
+         so the copy surviving it proves nothing"
     );
     assert!(
+        f.blob_readable(&oid),
+        "an ordinary gc pruned a three-week-old anchored copy"
+    );
+
+    // Control 2: the anchor is what is holding it, and nothing else.
+    git(&f.root, &["update-ref", "-d", &anchor]);
+    git(&f.root, &["gc", "-q", "--prune=now"]);
+    assert!(
         !f.blob_readable(&oid),
-        "an ordinary gc did not prune a three-week-old copy, so the note's \
-         two-week window is wrong"
+        "the copy outlived its own anchor, so this arm never measured the anchor"
     );
 }
 

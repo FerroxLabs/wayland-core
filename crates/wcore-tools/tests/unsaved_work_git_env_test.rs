@@ -98,6 +98,8 @@ fn write(path: &PathBuf, body: &str) {
     std::fs::write(path, body).unwrap();
 }
 
+const ANCHOR_PREFIX: &str = "refs/wayland-core/unsaved/";
+
 #[test]
 fn the_ambient_git_environment_cannot_redirect_the_guard() {
     // ---- arm 1: GIT_OBJECT_DIRECTORY -------------------------------------
@@ -195,6 +197,26 @@ fn the_ambient_git_environment_cannot_redirect_the_guard() {
         other => panic!("expected a refusal for a file in no repository, got {other:?}"),
     }
 
+    // Round 6 anchors every copy under a ref, so counting `dangling blob`
+    // would now count zero of them. The property is unchanged — exactly the
+    // arm-1 copy belongs to this repository — so it is counted where the
+    // copies actually are, and `fsck` is kept as the other half: a copy that
+    // reached the object store *without* an anchor would show up as dangling
+    // here and must not.
+    let anchors = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", ANCHOR_PREFIX])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let anchored = String::from_utf8_lossy(&anchors.stdout).lines().count();
+    assert_eq!(
+        anchored,
+        usize::from(copied.is_some()),
+        "exactly the arm-1 copy should be anchored in this repository; arm 2's \
+         bytes must not be: {}",
+        String::from_utf8_lossy(&anchors.stdout)
+    );
+
     let out = Command::new("git")
         .args(["fsck", "--no-progress"])
         .current_dir(&root)
@@ -207,9 +229,8 @@ fn the_ambient_git_environment_cannot_redirect_the_guard() {
         .filter(|l| l.contains("dangling blob"))
         .count();
     assert_eq!(
-        dangling,
-        usize::from(copied.is_some()),
-        "exactly the arm-1 copy should be in this repository; arm 2's bytes must not be: {report}"
+        dangling, 0,
+        "a copy reached the object store without an anchor: {report}"
     );
 
     // ---- arm 3: GIT_WORK_TREE --------------------------------------------

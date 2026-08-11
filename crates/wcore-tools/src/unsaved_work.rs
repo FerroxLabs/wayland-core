@@ -18,16 +18,21 @@
 //! > **Through the Write tool, a line that is on disk and that this module
 //! > cannot prove is recorded in the session's pinned commit never leaves the
 //! > disk unless the prior bytes have first been written to the repository's
-//! > own object store *and read back byte-for-byte*. Where no such copy can be
-//! > made, the write is refused.**
+//! > own object store, *read back byte-for-byte*, and *anchored under a ref*
+//! > that keeps them reachable through `git gc --prune=now` and listable by
+//! > `git for-each-ref`. Where no such copy can be made, or can be made but
+//! > not kept, the write is refused.**
 //!
 //! Nothing in that sentence depends on the model choosing to cooperate, and
 //! nothing in it is claimed when it has not been checked. Three limits are part
 //! of the statement, not footnotes to it:
 //!
 //! * It covers **all three write surfaces, but not equally**. `Write` is
-//!   refused-or-copied as above. `Edit` is never refused (see below) but never
-//!   claims a copy it did not make. **`Bash` is covered for one shape only**:
+//!   refused-or-copied as above. `Edit` is never refused for *dropping* a
+//!   line (see below) and never claims a copy it did not make; the one thing
+//!   that does refuse an Edit is a copy that was attempted and failed
+//!   outright, where proceeding would destroy the line with nothing to show
+//!   for it. **`Bash` is covered for one shape only**:
 //!   a git command whose whole purpose is to throw the work tree away is
 //!   refused by [`shell_refusal`], from every `BashTool` entry point, before
 //!   any shell is spawned — see "The shell surface" below. Everything else a
@@ -141,25 +146,49 @@
 //! be shown the write is refused and nothing is copied. Refusing is always
 //! safe: nothing is lost and no secret spreads.
 //!
-//! What it is **not** is self-disposing, and round 3's tool result told the
-//! user it was ("the repository's normal garbage collection removes it in due
-//! course"). Measured on git 2.43.0 (Linux) and 2.54.0 (Windows): `git gc`
-//! does not remove an unreferenced object. `gc.cruftPacks` has been on by
-//! default since git 2.42, so gc *moves* it into a cruft pack
-//! (`pack-*.mtimes`) and `git cat-file blob <oid>` still prints it — still
-//! readable after six consecutive `git gc` runs. Only `git gc --prune=now`, or
-//! an ordinary gc once `gc.pruneExpire` (**two weeks** by default) has passed,
-//! disposes of it; `git gc --auto` needs more than 6700 loose objects before
-//! it fires at all, so one guard copy never triggers it. Realistic persistence
-//! is **unbounded**, so the note names the command instead of promising a
-//! schedule.
+//! # The copy is anchored, because an unreferenced one is not a backup
 //!
-//! Also measured, and also in the note: the object travels with a filesystem
-//! copy of the repository (`cp -a`, `tar`, `rsync`) and with
-//! `git clone /local/path` — including `--local`, `--no-hardlinks`, and after
-//! a `gc` — and `git fsck --lost-found` materialises it as a **plaintext
-//! file** under `.git/lost-found/other/`. It does not travel with `git push`,
-//! `git bundle --all`, or `git clone file://`.
+//! Round 5 stopped at the object and argued that the user's own `git gc` was
+//! therefore a sufficient retention policy. It measured that argument only
+//! against a *default* gc, and it was wrong on both halves of what a backup
+//! has to be.
+//!
+//! **Durability.** `gc.pruneExpire` defaults to two weeks and
+//! `git gc --prune=now` disposes of an unreferenced object at once — measured
+//! on git 2.43.0: the copy is gone and `git cat-file blob <oid>` answers
+//! `bad file`. That is the red arm of `unsaved_work_durable_test`.
+//! **Discoverability.** Nothing referenced it, so it appeared in no
+//! `git log`, no `git stash list` and no `git for-each-ref`. A user who lost
+//! the terminal scrollback carrying the object id had `git fsck --lost-found`
+//! and nothing else. Disclosing all of that honestly, which round 5 did, does
+//! not make an expiring invisible copy into a recovery.
+//!
+//! So every copy is now anchored under `refs/wayland-core/unsaved/`, as an
+//! **annotated tag** — see [`anchor_copy`] for the measurements that chose a
+//! tag over a commit and over a bare blob ref. It survives
+//! `git gc --aggressive --prune=now`, `git fsck` stays clean, and
+//! `git for-each-ref --sort=-creatordate refs/wayland-core/unsaved/` lists
+//! every copy with its date and the file it came from, so the object id is
+//! not something the user has to have kept.
+//!
+//! Nothing here ever deletes one of those refs. An automatic policy that
+//! discarded the wrong one would be this module's own failure mode wearing a
+//! schedule, so retention is explicit instead: the note names the listing
+//! command and the two-command deletion. The cost is disk, bounded by the
+//! distinct pre-images actually preserved — git stores an object once, so
+//! re-preserving identical bytes adds a ref and no object.
+//!
+//! **Anchoring widens where the bytes travel, and that is stated rather than
+//! glossed.** Measured on git 2.43.0, before and after. Unchanged: they go
+//! with a filesystem copy of the repository (`cp -a`, `tar`, `rsync`), and
+//! `git push`, `git push --all`, `git push --tags` and `git push --follow-tags`
+//! do not carry them. Newly carried, because a ref is now what git packs
+//! against: `git clone --mirror`, `git push --mirror` and
+//! `git bundle --all` — none of which took the dangling object. Newly *not*
+//! carried: a plain `git clone` of this local path, which copies the objects
+//! but not the ref, so the clone's first `git gc --prune=now` drops them; and
+//! `git fsck --lost-found`, which no longer materialises them as a plaintext
+//! file under `.git/lost-found/other/` because they are no longer dangling.
 //!
 //! The prior bytes are by construction in no commit, so `.git/objects` becomes
 //! the only place they exist. Round 3 conditioned that warning on "if this
@@ -229,7 +258,8 @@
 //!
 //! # Edit
 //!
-//! Edit is guarded too, but it never refuses. Two reasons, both measured:
+//! Edit is guarded too, and it is never refused for dropping a line. Two
+//! reasons, both measured:
 //!
 //! 1. Edit's `old_string` must match the bytes on disk exactly, so every line
 //!    it removes was quoted from disk by the model. That is the opposite of
@@ -240,7 +270,28 @@
 //!    become uneditable.
 //!
 //! So an Edit that removes unrecorded content copies first where it can, and
-//! where it cannot it says so instead of pretending otherwise.
+//! where it cannot it says so instead of pretending otherwise. It gets the
+//! **same floor as Write**: the same pinned baseline, the same object store
+//! rule, and the same anchored ref. That equality is the point. A model
+//! refused on Write can reach the same file through Edit, so if Edit's copy
+//! were the weaker one the Write refusal would be routing traffic onto it —
+//! and before anchoring, Edit's copy *was* the weaker one, because it was the
+//! expiring one. It is now the same copy, and
+//! `unsaved_work_durable_test::the_edit_path_a_refused_write_reroutes_to_is_no_weaker`
+//! grades that by running the reroute.
+//!
+//! What stays asymmetric is that Write also **refuses**, and that is
+//! deliberate. Prevention beats recovery: a refusal puts the dropped lines
+//! back in front of the model, which repairs the file, where a note only
+//! files them away. Edit cannot be refused for a drop without becoming
+//! unusable on a dirty tree, and Write can, because a whole-file rewrite that
+//! silently omits lines recorded nowhere is the measured harm itself. The two
+//! surfaces now differ in whether the loss is *prevented*, never in whether
+//! the bytes are *kept*.
+//!
+//! One case does refuse an Edit, and it is not a drop: a copy that was
+//! attempted and failed. There, proceeding would destroy the line and have
+//! nothing to show for it.
 //!
 //! # The shell surface
 //!
@@ -341,6 +392,27 @@ const MAX_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
 /// Longest reason quoted back from git's own stderr.
 const MAX_GIT_REASON_CHARS: usize = 200;
 
+/// Ref namespace every preserved pre-image is anchored under.
+///
+/// An unreferenced object is not a backup. It appears in no `git log`, no
+/// `git stash list` and no `git for-each-ref`; the only route back to it is
+/// the object id in a tool result the user may never see, or
+/// `git fsck --lost-found`. And it expires: `gc.pruneExpire` defaults to two
+/// weeks and `git gc --prune=now` removes it at once. Under a ref it is
+/// reachable, so gc keeps it, and it is listable, so the id is not something
+/// the user has to have retained.
+const UNSAVED_REF_PREFIX: &str = "refs/wayland-core/unsaved";
+
+/// Identity written onto the anchor object.
+///
+/// Written into the object rather than read from `user.name`/`user.email`,
+/// which is why the anchor is a tag and not a commit: measured on git 2.43.0
+/// in a repository with no identity configured, `commit-tree` exits non-zero
+/// with "Author identity unknown" while `mktag` — which takes its tagger from
+/// the object body — succeeds. Anchoring must not be the thing that fails in
+/// a freshly `git init`ed tree.
+const ANCHOR_TAGGER: &str = "wayland-core <unsaved-work@wayland-core.invalid>";
+
 /// How the caller is replacing the file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -379,6 +451,16 @@ enum Store<'a> {
     Unproven { why: String },
     /// No repository, so no object store to reason about at all.
     Absent,
+}
+
+/// A copy of a file's prior bytes that has been made and read back.
+struct Preserved {
+    /// The blob. Read back byte-for-byte before this value existed.
+    oid: String,
+    /// The ref anchoring it, or why it could not be anchored. Unanchored is
+    /// the round-5 state: a real, verified copy that `git gc --prune=now`
+    /// removes and that no command lists.
+    anchor: Result<String, String>,
 }
 
 /// What is known about where a path's saved state lives.
@@ -578,21 +660,45 @@ impl UnsavedWorkGuard {
         }
 
         match self.object_store(&baseline, path) {
-            Store::Owned { root, objects } => match self.recoverable_copy(root, previous) {
-                Ok(oid) => Verdict::ProceedWithNote(copy_note(
-                    dropped_total,
-                    mode,
-                    root,
-                    &oid,
-                    wholesale,
-                    &objects,
-                )),
-                Err(why) => Verdict::Refuse(format!(
-                    "Refused to overwrite {display_path}: it holds {dropped_total} line(s) that \
-                     are on disk and in no commit, and the copy that would make replacing them \
-                     recoverable could not be made ({why}). Nothing was changed."
-                )),
-            },
+            Store::Owned { root, objects } => {
+                match self.recoverable_copy(root, previous, display_path, dropped_total) {
+                    Ok(copy) => match &copy.anchor {
+                        Ok(anchor) => Verdict::ProceedWithNote(copy_note(
+                            dropped_total,
+                            mode,
+                            root,
+                            &copy.oid,
+                            anchor,
+                            wholesale,
+                            &objects,
+                        )),
+                        // The bytes were copied and verified, but nothing
+                        // references them: `git gc --prune=now` disposes of
+                        // them and no command lists them. A copy that expires
+                        // is not the guarantee at the top of this file, so a
+                        // rewrite does not get to proceed on one.
+                        Err(why) => match mode {
+                            Mode::Rewrite => Verdict::Refuse(unanchored_refusal(
+                                display_path,
+                                dropped_total,
+                                why,
+                            )),
+                            Mode::Surgical => Verdict::ProceedWithNote(unanchored_note(
+                                dropped_total,
+                                root,
+                                &copy.oid,
+                                why,
+                            )),
+                        },
+                    },
+                    Err(why) => Verdict::Refuse(format!(
+                        "Refused to overwrite {display_path}: it holds {dropped_total} line(s) \
+                         that are on disk and in no commit, and the copy that would make \
+                         replacing them recoverable could not be made ({why}). Nothing was \
+                         changed."
+                    )),
+                }
+            }
             // The copy could not be proven no more exposed than the file, so
             // it is not made. See [`UnsavedWorkGuard::object_store`].
             Store::Unproven { why } => match mode {
@@ -1099,13 +1205,27 @@ impl UnsavedWorkGuard {
         )
     }
 
-    /// Put `bytes` in the repository's own object database and prove they can
-    /// be read back before returning.
+    /// Put `bytes` in the repository's own object database, prove they can be
+    /// read back, and anchor them under a ref so they stay there.
     ///
-    /// Nothing is referenced, staged or committed: the result is a loose,
-    /// unreferenced object, which is why the user's own `git gc` is a
-    /// sufficient retention policy and no new one is invented here.
-    fn recoverable_copy(&self, root: &Path, bytes: &str) -> Result<String, String> {
+    /// Round 5 stopped at the object and called the user's own `git gc` a
+    /// sufficient retention policy. It is not one. The object it left was
+    /// reachable from nothing, so it appeared in no `git log`, no
+    /// `git stash list` and no `git for-each-ref`, and `git gc --prune=now`
+    /// removed it outright — measured, and reproduced as the red arm of
+    /// `unsaved_work_durable_test`. Nothing staged and nothing committed is
+    /// still right; nothing *referenced* was the defect.
+    ///
+    /// The blob is copied and verified first and anchored second, so a
+    /// failure to anchor is reported as exactly that — a real copy that will
+    /// not last — and never as a failure to copy.
+    fn recoverable_copy(
+        &self,
+        root: &Path,
+        bytes: &str,
+        display_path: &str,
+        dropped_total: usize,
+    ) -> Result<Preserved, String> {
         if bytes.len() > MAX_RECOVERY_BYTES {
             return Err(format!(
                 "file is {} bytes, over the {MAX_RECOVERY_BYTES}-byte recovery limit",
@@ -1139,8 +1259,108 @@ impl UnsavedWorkGuard {
         if !read_back_matches(&back.stdout, bytes.as_bytes()) {
             return Err(read_back_mismatch(&back.stdout, bytes.as_bytes()));
         }
-        Ok(oid)
+        Ok(Preserved {
+            anchor: anchor_copy(root, &oid, display_path, dropped_total),
+            oid,
+        })
     }
+}
+
+/// Make the verified copy at `oid` reachable, and return the ref that does it.
+///
+/// **An annotated tag, not a commit and not a bare blob ref.** All three are
+/// legal and all three survive `git gc --aggressive --prune=now`; the tag is
+/// the one that behaves. Measured on git 2.43.0:
+///
+/// * a ref pointing straight at the blob carries no date and no message, so
+///   `git for-each-ref --sort=-creatordate` renders an empty date and the user
+///   cannot tell which file a given copy came from without reading it;
+/// * a commit is listed by `git log --all` and `git log --graph`, so every
+///   backup this guard ever makes turns up in the user's own history views;
+///   and `git commit-tree` exits non-zero with "Author identity unknown" in a
+///   repository with no `user.email`, which is a plain `git init` tree;
+/// * the tag carries a tagger date and a subject naming the file, is peeled by
+///   `<ref>^{}`, does **not** appear in `git log --all` and does **not**
+///   appear in `git tag -l` (it is not under `refs/tags`), and `git mktag`
+///   takes its identity from the object body so no configuration is consulted.
+///
+/// `git fsck` is clean in all three shapes.
+///
+/// **Retention is: nothing here ever deletes one of these refs.** No age
+/// threshold, no cap, no eviction — an automatic policy that discarded the
+/// wrong one would be this module's own failure mode wearing a schedule. The
+/// cost is disk, and it is bounded by the distinct pre-images actually
+/// preserved: git stores an object once, so re-preserving identical bytes adds
+/// one ref (about sixty bytes packed) and no new object. Every ref is listed
+/// by `git for-each-ref refs/wayland-core/unsaved/`, the note names that
+/// command, and the note names the two-command deletion.
+fn anchor_copy(
+    root: &Path,
+    oid: &str,
+    display_path: &str,
+    dropped_total: usize,
+) -> Result<String, String> {
+    let now = chrono::Utc::now();
+    // Timestamp first so the names sort chronologically, object id second so
+    // two copies in the same second do not collide. Identical bytes preserved
+    // twice in one second land on the same name, and `update-ref` is happy to
+    // rewrite a ref to the value it already holds.
+    let leaf = format!(
+        "{}-{}",
+        now.format("%Y%m%dT%H%M%SZ"),
+        oid.get(..12).unwrap_or(oid)
+    );
+    let anchor = format!("{UNSAVED_REF_PREFIX}/{leaf}");
+    let tag = format!(
+        "object {oid}\ntype blob\ntag {leaf}\ntagger {ANCHOR_TAGGER} {stamp} +0000\n\n\
+         wayland-core: {dropped_total} unsaved line(s) from {path}\n",
+        stamp = now.timestamp(),
+        path = one_line(display_path),
+    );
+
+    let made = git_run(root, &["mktag"], Some(tag.as_bytes()))
+        .ok_or_else(|| "git could not be run to anchor the copy".to_owned())?;
+    if !made.ok() {
+        return Err(made.why("git would not write the anchor object"));
+    }
+    let tag_oid = made.stdout_text().trim().to_owned();
+    if !is_hex_oid(&tag_oid) {
+        return Err("git returned no usable anchor object id".to_owned());
+    }
+
+    let set = git_run(root, &["update-ref", &anchor, &tag_oid], None)
+        .ok_or_else(|| "git could not be run to write the anchor ref".to_owned())?;
+    if !set.ok() {
+        return Err(set.why("git would not write the anchor ref"));
+    }
+
+    // Graded from the repository rather than from the exit codes above, for
+    // the same reason the blob is read back rather than assumed: an anchor
+    // that does not peel to this exact object anchors nothing. `rev-parse`
+    // rather than a second `cat-file blob`, because the read-back arm asserts
+    // that the only `cat-file blob` in an assessment is its own.
+    let peeled = git_run(root, &["rev-parse", &format!("{anchor}^{{}}")], None)
+        .ok_or_else(|| "git could not be run to verify the anchor".to_owned())?;
+    if !peeled.ok() {
+        return Err(peeled.why("the anchor ref could not be read back"));
+    }
+    if peeled.stdout_text().trim() != oid {
+        return Err(format!(
+            "the anchor ref {anchor} does not resolve to the copy that was made"
+        ));
+    }
+    Ok(anchor)
+}
+
+/// `text` with its control characters flattened to spaces.
+///
+/// The path goes into a tag message whose first line is what
+/// `%(contents:subject)` shows. A newline in it would put the rest somewhere
+/// the listing does not display, and the listing is the whole point.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// The file's exact recorded bytes in `commit`, or `Ok(None)` when that commit
@@ -1636,11 +1856,17 @@ fn describe_classes(mask: u32) -> String {
     parts.join(", ")
 }
 
+/// The note for a copy that was made, verified and anchored.
+///
+/// The first `cat-file blob` in it is the recovery command and the object id
+/// follows it: several suites run this note's own command rather than matching
+/// its wording, which is what caught round 2's false snapshot claim.
 fn copy_note(
     dropped_total: usize,
     mode: Mode,
     root: &Path,
     oid: &str,
+    anchor: &str,
     wholesale: bool,
     objects: &Path,
 ) -> String {
@@ -1657,19 +1883,63 @@ fn copy_note(
     let store = objects.display();
     format!(
         "\nNote: {dropped_total} line(s) that were on disk and in no commit are not in the new \
-         content.{why} The previous contents were written to this repository's own object store \
-         and read back to confirm they match, so they can be recovered with:\n    \
+         content.{why} The previous contents were written to this repository's own object store, \
+         read back to confirm they match, and anchored at the ref {anchor} — so they survive \
+         `git gc`, including `git gc --aggressive --prune=now`. Recover them with:\n    \
          git -C {root} cat-file blob {oid}\n\
-         The object is unreferenced, but that does not make it short-lived: `git gc` does NOT \
-         remove it — it moves it into a cruft pack and it stays readable. Disposing of it takes \
-         `git -C {root} gc --prune=now`; an ordinary gc only prunes it once gc.pruneExpire (two \
-         weeks by default) has passed, and `git gc --auto` will not fire for one object at all.\n\
-         Until then these bytes live in {store}, and they are in no commit, so that \
-         is the only place they exist — whether this file is gitignored, merely untracked, or \
-         tracked and wholly rewritten. They travel with a filesystem copy of the repository \
-         (cp -a, tar, rsync) and with `git clone` of this local path, and `git fsck --lost-found` \
-         writes them out as a plaintext file; `git push` and `git bundle` do not carry them.",
+         or, without needing that object id at all:\n    \
+         git -C {root} show {anchor}\n\
+         Every copy this guard has made is listed, newest first, by:\n    \
+         git -C {root} for-each-ref --sort=-creatordate \
+         --format='%(refname) %(creatordate:iso) %(contents:subject)' {prefix}/\n\
+         Nothing deletes those refs automatically. To drop this one: \
+         `git -C {root} update-ref -d {anchor}`, then `git -C {root} gc --prune=now`.\n\
+         Until then these bytes live in {store}, and they are in no commit, so that is the only \
+         place they exist — whether this file is gitignored, merely untracked, or tracked and \
+         wholly rewritten. Anchoring widens where they travel, so: they go with a filesystem \
+         copy of the repository (cp -a, tar, rsync), with `git clone --mirror` and with \
+         `git bundle --all`. A plain `git clone` of this path leaves them unreferenced and the \
+         clone's first `git gc --prune=now` drops them. `git push`, `git push --all`, \
+         `git push --tags` and `git push --follow-tags` do not carry them; `git push --mirror` \
+         does.",
         root = root.display(),
+        prefix = UNSAVED_REF_PREFIX,
+    )
+}
+
+/// The refusal for a copy that was made but could not be anchored.
+///
+/// The bytes are in the object store and were read back, so nothing has been
+/// lost by refusing; what could not be established is that they will still be
+/// there later. Round 5 shipped exactly this state as the guarantee.
+fn unanchored_refusal(display_path: &str, dropped_total: usize, why: &str) -> String {
+    format!(
+        "Refused to overwrite {display_path}: it holds {dropped_total} line(s) that are on disk \
+         and in no commit. A copy of the previous contents was made and read back, but it could \
+         not be anchored under a ref ({why}), so nothing in the repository would reference it: \
+         no `git for-each-ref` would list it and `git gc --prune=now` would remove it. A copy \
+         that expires is not a recovery, so nothing was changed. Carry those lines into the \
+         content you write."
+    )
+}
+
+/// The same state on the Edit surface, which does not refuse for it.
+///
+/// Edit is never refused for a *drop* (see the module doc), so the honest
+/// thing is to proceed and say precisely what the copy is and is not — and to
+/// name the one command that turns it into a durable one.
+fn unanchored_note(dropped_total: usize, root: &Path, oid: &str, why: &str) -> String {
+    format!(
+        "\nNote: {dropped_total} line(s) that were on disk and in no commit are not in the new \
+         content. The previous contents were copied into this repository's object store and read \
+         back, so they are there now:\n    \
+         git -C {root} cat-file blob {oid}\n\
+         but the copy could not be anchored under a ref ({why}). Nothing references it, so no \
+         `git for-each-ref` lists it and `git gc --prune=now` removes it. To make it durable:\n    \
+         git -C {root} update-ref {prefix}/manual-{short} {oid}",
+        root = root.display(),
+        prefix = UNSAVED_REF_PREFIX,
+        short = oid.get(..12).unwrap_or(oid),
     )
 }
 
