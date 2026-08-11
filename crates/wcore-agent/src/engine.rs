@@ -9377,13 +9377,10 @@ impl AgentEngine {
         if sent == 0 {
             return;
         }
-        let (subject, verb) = if sent == 1 {
-            ("request", "was")
-        } else {
-            ("requests", "were")
-        };
+        let subject = if sent == 1 { "request" } else { "requests" };
+        // "Each" is singular whatever `sent` is, so the verb never varies with it.
         self.output.emit_info(&format!(
-            "{sent} provider {subject} never returned a response. Each {verb} \
+            "{sent} provider {subject} never returned a response. Each was \
              dispatched, so the provider may have served and billed it; that \
              spend is not included in any cost or token figure shown here."
         ));
