@@ -21,6 +21,7 @@
 //! | 2    | CLI usage error (`clap`). |
 //! | 3    | The run ended on an UNRECOVERED tool failure: the last tool results before the model's final answer contained an error and the model made no further tool call. |
 //! | 4    | The engine stopped the run at a limit (`max_turns`) instead of the model finishing. |
+//! | 5    | The model's response was cut off by the provider's OUTPUT token cap (`finish_reason=length`) — the answer, or a tool call it was writing, is incomplete. |
 //! | 130  | Interrupted (SIGINT / Ctrl-C). |
 //! | 143  | Terminated (SIGTERM). |
 //! | 129  | Hung up (SIGHUP). |
@@ -38,6 +39,12 @@ pub const FAILURE: u8 = 1;
 pub const TOOL_FAILURE: u8 = 3;
 /// The engine stopped the run at a limit rather than the model finishing.
 pub const LIMIT: u8 = 4;
+/// The provider cut the model off at its output-token cap. Distinct from
+/// [`LIMIT`]: "the agent ran out of turns" and "the model was cut off
+/// mid-answer" are unrelated events with different remedies (raise
+/// `max_turns` vs. raise `max_tokens` / ask for smaller writes), and while
+/// they shared one code no caller or harness could tell them apart.
+pub const OUTPUT_TRUNCATED: u8 = 5;
 
 /// Shell convention for a process killed by signal N.
 const SIGNALLED_BASE: u8 = 128;
@@ -81,7 +88,8 @@ impl ShutdownSignal {
 /// verdict on the task.
 pub fn for_run_outcome(stop_reason: StopReason, unrecovered_tool_failure: bool) -> u8 {
     match stop_reason {
-        StopReason::MaxTurns | StopReason::MaxTokens => LIMIT,
+        StopReason::MaxTurns => LIMIT,
+        StopReason::MaxTokens => OUTPUT_TRUNCATED,
         _ if unrecovered_tool_failure => TOOL_FAILURE,
         _ => OK,
     }
@@ -115,6 +123,22 @@ mod tests {
         assert_ne!(LIMIT, OK);
     }
 
+    /// An output-cap truncation and a turn-cap stop are unrelated events. They
+    /// shared code 4, so a caller learnt only "some limit" — not which, and
+    /// not that its deliverable might be half-written.
+    #[test]
+    fn an_output_cap_truncation_is_not_the_turn_cap() {
+        assert_eq!(for_run_outcome(StopReason::MaxTokens, false), OUTPUT_TRUNCATED);
+        assert_eq!(
+            for_run_outcome(StopReason::MaxTokens, true),
+            OUTPUT_TRUNCATED,
+            "a limit stop still outranks the trailing tool state"
+        );
+        assert_ne!(OUTPUT_TRUNCATED, LIMIT);
+        assert_ne!(OUTPUT_TRUNCATED, OK);
+        assert_ne!(OUTPUT_TRUNCATED, TOOL_FAILURE);
+    }
+
     #[test]
     fn every_documented_code_is_distinct() {
         let codes = [
@@ -122,6 +146,7 @@ mod tests {
             FAILURE,
             TOOL_FAILURE,
             LIMIT,
+            OUTPUT_TRUNCATED,
             INTERRUPTED,
             TERMINATED,
             HUNG_UP,
