@@ -483,12 +483,70 @@ fn read_only_authority_replay_subprocess() {
     SessionJournal::recovered_state(path).unwrap();
 }
 
+/// Temp root for the read-only replay fixture.
+///
+/// `read_only_authority_replay_subprocess` drops to `nobody` before it
+/// replays, so EVERY ancestor of the fixture must be traversable by that uid,
+/// not just the fixture directory this test chowns. `std::env::temp_dir()`
+/// carries whatever mode the host gives it: a host that hardens `/tmp` to
+/// `0700 root:root` (hetzner-dsm does) puts the fixture out of the child's
+/// reach entirely - it fails EACCES on the first `statx` before it opens a
+/// single journal byte, and the parent could only report "read-only replay
+/// child failed", which names neither the file nor the reason.
+///
+/// So when the child WILL drop privileges, pick a root whose whole chain is
+/// world-traversable, preferring the system temp dir so a normal host is
+/// unaffected, and if none qualifies say exactly which directory blocked it.
+/// When this process is already unprivileged the child keeps its uid, the
+/// chain is walkable by construction, and the system temp dir is used as-is.
+#[cfg(unix)]
+fn read_only_fixture_root() -> std::path::PathBuf {
+    let system_root = std::env::temp_dir();
+    // SAFETY: `geteuid` reads this process's own credentials and cannot fail.
+    if unsafe { libc::geteuid() } != 0 {
+        return system_root;
+    }
+    let mut blockers = Vec::new();
+    for candidate in [system_root, std::path::PathBuf::from("/var/tmp")] {
+        match first_untraversable_ancestor(&candidate) {
+            None => return candidate,
+            Some(blocker) => blockers.push(blocker),
+        }
+    }
+    panic!(
+        "no world-traversable temp root for the privilege-dropped replay child; \
+         blocked by {}",
+        blockers.join(", ")
+    );
+}
+
+/// First ancestor of `path` (inclusive) that a foreign uid cannot walk
+/// through, rendered as `<path> (mode 0oNNN)`, or `None` when the whole chain
+/// is traversable.
+#[cfg(unix)]
+fn first_untraversable_ancestor(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    path.ancestors()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .find_map(|ancestor| {
+            let mode = match std::fs::metadata(ancestor) {
+                Ok(metadata) => metadata.permissions().mode(),
+                Err(error) => return Some(format!("{} ({error})", ancestor.display())),
+            };
+            (mode & 0o001 == 0)
+                .then(|| format!("{} (mode {:#o})", ancestor.display(), mode & 0o7777))
+        })
+}
+
 #[cfg(unix)]
 #[test]
 fn replay_accepts_read_only_authority_files() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir_in(read_only_fixture_root()).unwrap();
     let path = dir.path().join("session.journal");
     let journal = SessionJournal::open(&path, "s1").unwrap();
     journal.append(turn_started("t0")).unwrap();
