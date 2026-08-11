@@ -71,8 +71,11 @@ impl Tool for WriteTool {
          - Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n\
          - Use Write only for creating new files or complete rewrites.\n\
          - A rewrite that would delete a line present on disk but absent from the \
-         file's last commit is refused: that is unsaved user work. Reproduce those \
-         lines in the content you write."
+         file's last commit is refused: that is unsaved user work. Carry those lines \
+         into the content you write — in their changed form if what you are doing \
+         changes them.\n\
+         - That check covers Write and Edit only. It cannot see a write made through \
+         Bash (`sed -i`, `>`, `rm`), so those can still destroy unsaved work."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -142,7 +145,7 @@ impl Tool for WriteTool {
                 .assess(path, file_path, &previous, content, Mode::Rewrite)
             {
                 Verdict::Proceed => {}
-                Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+                Verdict::ProceedWithNote(note) => unsaved_note = note,
                 Verdict::Refuse(refusal) => {
                     return ToolResult {
                         content: refusal,
@@ -264,7 +267,7 @@ impl Tool for WriteTool {
                 .assess(path, file_path, &previous, content, Mode::Rewrite)
             {
                 Verdict::Proceed => {}
-                Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+                Verdict::ProceedWithNote(note) => unsaved_note = note,
                 Verdict::Refuse(refusal) => {
                     return ToolResult {
                         content: refusal,
@@ -337,9 +340,7 @@ mod tests {
     /// rather than the real `~/.wayland`.
     fn tool(cache: Option<Arc<RwLock<FileStateCache>>>) -> WriteTool {
         WriteTool::new(cache).with_unsaved_guard(Arc::new(
-            crate::unsaved_work::UnsavedWorkGuard::with_snapshot_root(
-                std::env::temp_dir().join("wcore-tools-test-unsaved-snapshots"),
-            ),
+            crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
         ))
     }
 
@@ -492,9 +493,7 @@ mod tests {
         let cache = make_cache();
         let write_tool = tool(Some(cache.clone()));
         let edit_tool = crate::edit::EditTool::new(Some(cache)).with_unsaved_guard(Arc::new(
-            crate::unsaved_work::UnsavedWorkGuard::with_snapshot_root(
-                std::env::temp_dir().join("wcore-tools-test-unsaved-snapshots"),
-            ),
+            crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
         ));
 
         // Write creates the file and populates cache.

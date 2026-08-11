@@ -48,7 +48,9 @@ async fn tc_5_4_01_read_then_edit() {
 
     let cache = make_cache();
     let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let edit_tool = EditTool::new(Some(cache)).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     read_file(&read_tool, &file).await;
 
@@ -75,7 +77,9 @@ async fn tc_5_4_02_edit_without_read() {
     std::fs::write(&file, "content").unwrap();
 
     let cache = make_cache();
-    let edit_tool = EditTool::new(Some(cache));
+    let edit_tool = EditTool::new(Some(cache)).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     let input = json!({
         "file_path": file.to_str().unwrap(),
@@ -103,7 +107,9 @@ async fn tc_5_4_03_external_modification_detected() {
 
     let cache = make_cache();
     let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let edit_tool = EditTool::new(Some(cache)).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     read_file(&read_tool, &file).await;
 
@@ -138,7 +144,9 @@ async fn tc_5_4_04_edit_then_edit() {
 
     let cache = make_cache();
     let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let edit_tool = EditTool::new(Some(cache)).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     read_file(&read_tool, &file).await;
 
@@ -170,7 +178,9 @@ async fn tc_5_4_05_no_cache_edit_bypasses_guard() {
     let file = dir.path().join("nocache.txt");
     std::fs::write(&file, "hello").unwrap();
 
-    let edit_tool = EditTool::new(None);
+    let edit_tool = EditTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     let input = json!({
         "file_path": file.to_str().unwrap(),
@@ -196,7 +206,9 @@ async fn tc_5_4_06_replace_all_updates_cache() {
 
     let cache = make_cache();
     let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache.clone()));
+    let edit_tool = EditTool::new(Some(cache.clone())).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     read_file(&read_tool, &file).await;
 
@@ -233,7 +245,9 @@ async fn tc_5_4_w01_write_then_read_returns_content() {
     let file = dir.path().join("write_read.txt");
 
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
+    let write_tool = WriteTool::new(Some(cache.clone())).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let read_tool = ReadTool::new(Some(cache));
 
     // Write creates file and populates cache (as WriteEcho).
@@ -268,8 +282,12 @@ async fn tc_5_4_w02_write_then_edit() {
     let file = dir.path().join("write_edit.txt");
 
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let write_tool = WriteTool::new(Some(cache.clone())).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
+    let edit_tool = EditTool::new(Some(cache)).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     let write_input = json!({
         "file_path": file.to_str().unwrap(),
@@ -302,7 +320,9 @@ async fn tc_5_4_w03_write_overwrite_then_read() {
     let file = dir.path().join("overwrite.txt");
 
     let cache = make_cache();
-    let write_tool = WriteTool::new(Some(cache.clone()));
+    let write_tool = WriteTool::new(Some(cache.clone())).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let read_tool = ReadTool::new(Some(cache));
 
     // First write.
@@ -360,7 +380,9 @@ async fn read_edit_read_returns_post_edit_content() {
 
     let cache = make_cache();
     let read_tool = ReadTool::new(Some(cache.clone()));
-    let edit_tool = EditTool::new(Some(cache));
+    let edit_tool = EditTool::new(Some(cache)).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     // Read (model sees `alpha beta`).
     read_file(&read_tool, &file).await;

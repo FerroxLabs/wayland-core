@@ -9,7 +9,6 @@ use tempfile::TempDir;
 struct Fixture {
     _dir: TempDir,
     root: PathBuf,
-    snaps: PathBuf,
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -27,21 +26,16 @@ fn git(dir: &Path, args: &[&str]) {
 fn repo() -> Fixture {
     let dir = TempDir::new().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    let snaps = root.join("_snapshots_outside");
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
     git(&root, &["config", "commit.gpgsign", "false"]);
-    Fixture {
-        _dir: dir,
-        root,
-        snaps,
-    }
+    Fixture { _dir: dir, root }
 }
 
 impl Fixture {
     fn guard(&self) -> UnsavedWorkGuard {
-        UnsavedWorkGuard::with_snapshot_root(self.snaps.clone())
+        UnsavedWorkGuard::new_isolated()
     }
     fn write(&self, name: &str, body: &str) -> PathBuf {
         let p = self.root.join(name);
@@ -50,6 +44,36 @@ impl Fixture {
     }
     fn read(&self, name: &str) -> String {
         std::fs::read_to_string(self.root.join(name)).unwrap()
+    }
+    /// Make git refuse to open this repository, the way dubious ownership and
+    /// an unreadable config do in the field: exit 128 while `.git` is plainly
+    /// still there.
+    fn break_git(&self) {
+        std::fs::write(
+            self.root.join(".git/config.wcore-bak"),
+            self.read(".git/config"),
+        )
+        .unwrap();
+        std::fs::write(self.root.join(".git/config"), "[[[not a config\n").unwrap();
+    }
+    fn repair_git(&self) {
+        let saved = self.read(".git/config.wcore-bak");
+        std::fs::write(self.root.join(".git/config"), saved).unwrap();
+    }
+    /// Recover the bytes a note says are recoverable, exactly as the note's
+    /// own instructions say to.
+    fn recover(&self, note: &str) -> String {
+        let oid = oid_in(note);
+        let out = Command::new("git")
+            .args(["cat-file", "blob", &oid])
+            .current_dir(&self.root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "the note's own recovery command failed"
+        );
+        String::from_utf8(out.stdout).unwrap()
     }
 }
 
@@ -70,18 +94,21 @@ fn assert_refused(v: Verdict) -> String {
     }
 }
 
-fn assert_snapshotted(v: Verdict) -> String {
+fn assert_noted(v: Verdict) -> String {
     match v {
-        Verdict::ProceedWithSnapshot(m) => m,
-        other => panic!("expected ProceedWithSnapshot, got {other:?}"),
+        Verdict::ProceedWithNote(m) => m,
+        other => panic!("expected ProceedWithNote, got {other:?}"),
     }
 }
 
-fn snapshot_path(note: &str) -> PathBuf {
-    let start = note.find("copied to ").expect("note names a path") + "copied to ".len();
-    let rest = &note[start..];
-    let end = rest.find(" first,").expect("note terminates the path");
-    PathBuf::from(rest[..end].trim())
+fn oid_in(note: &str) -> String {
+    let marker = "cat-file blob ";
+    let start = note.find(marker).expect("note names a recovery object") + marker.len();
+    note[start..]
+        .split_whitespace()
+        .next()
+        .expect("note terminates the object id")
+        .to_owned()
 }
 
 // ---- the original round-1 behaviours that must not regress -------------
@@ -222,49 +249,224 @@ fn git_rm_cached_mid_session_does_not_disarm_the_guard() {
     assert!(!msg.contains("def a():"), "{msg}");
 }
 
+// ---- B1: a git that will not answer is not an answer -------------------
+
+#[test]
+fn a_repository_git_refuses_to_open_refuses_the_rewrite() {
+    // Round 2 read git's exit 128 as an authoritative "no repository here",
+    // which made every line unsaved, which made the rewrite wholesale, which
+    // meant it was allowed. On these hosts that was strictly worse than round
+    // 1: `safe.directory` rejection is the default for Docker bind mounts, CI
+    // checkouts and sudo-run agents.
+    let (f, p) = parser_fixture();
+    f.break_git();
+    let g = f.guard();
+    let msg = assert_refused(g.assess(
+        &p,
+        "parser.py",
+        &f.read("parser.py"),
+        "def a():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("could not be established"), "{msg}");
+    assert!(msg.contains("git did not answer"), "{msg}");
+}
+
+#[test]
+fn a_repository_git_refuses_to_open_is_never_called_no_repository() {
+    let (f, _p) = parser_fixture();
+    f.break_git();
+    let g = f.guard();
+    match g.baseline_for_dir(&f.root) {
+        Baseline::Unknown(_) => {}
+        other => panic!("a broken repository must not resolve to {other:?}"),
+    }
+}
+
+#[test]
+fn the_unresolved_refusal_quotes_gits_own_reason() {
+    let (f, p) = parser_fixture();
+    f.break_git();
+    let g = f.guard();
+    let msg = assert_refused(g.assess(
+        &p,
+        "parser.py",
+        &f.read("parser.py"),
+        "def a():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    // git's own words, so the user learns the actual remedy rather than being
+    // told something generic.
+    assert!(msg.contains("bad config"), "{msg}");
+}
+
+#[test]
+fn an_unresolved_baseline_never_claims_a_recovery_copy() {
+    let (f, p) = parser_fixture();
+    f.break_git();
+    let g = f.guard();
+    let note = assert_noted(g.assess(
+        &p,
+        "parser.py",
+        &f.read("parser.py"),
+        "def a():\n    return 1\n",
+        Mode::Surgical,
+    ));
+    assert!(note.contains("No recovery copy was made"), "{note}");
+    assert!(!note.contains("nothing is lost"), "{note}");
+}
+
+#[test]
+fn an_unresolved_baseline_still_allows_a_write_that_drops_nothing() {
+    // Fail-closed must not mean fail-useless: a broken-git environment stays
+    // fully usable for every write that only adds.
+    let (f, p) = parser_fixture();
+    f.break_git();
+    let g = f.guard();
+    assert!(matches!(
+        g.assess(
+            &p,
+            "parser.py",
+            &f.read("parser.py"),
+            "def a():\n    return 1\n# WIP do not touch\nnew line\n",
+            Mode::Rewrite,
+        ),
+        Verdict::Proceed
+    ));
+}
+
+#[test]
+fn a_genuinely_absent_repository_is_still_recognised_without_git() {
+    // The filesystem answers this one, so it holds even with no git binary:
+    // no `.git` on any ancestor means nothing is recorded, and that is a fact
+    // rather than a failure to establish one.
+    let dir = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    assert!(!repository_marker_present(&root));
+    let g = UnsavedWorkGuard::new_isolated();
+    assert_eq!(g.baseline_for_dir(&root), Baseline::NoRepo);
+}
+
+#[test]
+fn a_broken_repository_is_told_apart_from_an_absent_one_by_the_filesystem() {
+    let (f, _p) = parser_fixture();
+    f.break_git();
+    // git exits 128 for this directory exactly as it does for a directory
+    // with no repository at all. The marker is what separates them.
+    assert!(repository_marker_present(&f.root));
+}
+
+#[test]
+fn a_corrupt_index_is_not_a_broken_baseline() {
+    // Measured on git 2.43.0: rev-parse and ls-tree never read the index, so
+    // a corrupt one is a non-event. Asserted so that a future change which
+    // starts consulting the index is caught here rather than in the field.
+    let (f, p) = parser_fixture();
+    std::fs::write(f.root.join(".git/index"), "JUNKJUNKJUNK").unwrap();
+    let g = f.guard();
+    let msg = assert_refused(g.assess(
+        &p,
+        "parser.py",
+        &f.read("parser.py"),
+        "def a():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("# WIP do not touch"), "{msg}");
+    assert!(!msg.contains("git did not answer"), "{msg}");
+}
+
+// ---- B2: the degradation must not latch --------------------------------
+
+#[test]
+fn repairing_git_rearms_the_same_guard() {
+    // Round 2 memoized the failure, so one transient fault disarmed the whole
+    // session: break git -> allow, repair git -> still allow, and only a
+    // brand-new guard on the identical repository refused. Here the same
+    // instance must recover.
+    let (f, p) = parser_fixture();
+    let g = f.guard();
+
+    f.break_git();
+    // A rewrite that drops only a COMMITTED line. With a baseline it is
+    // provably safe; without one it cannot be, so the verdicts differ in kind
+    // and the recovery is observable in both directions.
+    let broken = g.assess(
+        &p,
+        "parser.py",
+        &f.read("parser.py"),
+        "# WIP do not touch\n",
+        Mode::Rewrite,
+    );
+    let msg = assert_refused(broken);
+    assert!(msg.contains("git did not answer"), "{msg}");
+
+    f.repair_git();
+    assert!(
+        matches!(
+            g.assess(
+                &p,
+                "parser.py",
+                &f.read("parser.py"),
+                "# WIP do not touch\n",
+                Mode::Rewrite
+            ),
+            Verdict::Proceed
+        ),
+        "the same guard must recover once git works again"
+    );
+}
+
+#[test]
+fn a_failed_resolution_is_never_memoized() {
+    let (f, _p) = parser_fixture();
+    let g = f.guard();
+    f.break_git();
+    assert!(matches!(g.baseline_for_dir(&f.root), Baseline::Unknown(_)));
+    assert!(
+        !g.dirs.lock().unwrap().contains_key(&f.root),
+        "an Unknown baseline must not be cached"
+    );
+    f.repair_git();
+    assert!(matches!(g.baseline_for_dir(&f.root), Baseline::Repo { .. }));
+}
+
 // ---- residual 3: the over-refusal, and its replacement -----------------
 
 #[test]
-fn wholesale_rewrite_of_an_untracked_file_is_allowed_and_snapshotted() {
+fn wholesale_rewrite_of_an_untracked_file_is_allowed_against_a_verified_copy() {
     let f = repo();
     f.write("seed", "x");
     git(&f.root, &["add", "seed"]);
     git(&f.root, &["commit", "-qm", "base"]);
     let p = f.write("notes.md", "# Deploy notes\nold step 1\nold step 2\n");
     let g = f.guard();
-    let note = assert_snapshotted(g.assess(
+    let note = assert_noted(g.assess(
         &p,
         "notes.md",
         &f.read("notes.md"),
         "# Runbook\n1. deploy\n",
         Mode::Rewrite,
     ));
-    let snap = snapshot_path(&note);
-    assert_eq!(
-        std::fs::read_to_string(&snap).unwrap(),
-        "# Deploy notes\nold step 1\nold step 2\n"
-    );
-    assert!(!snap.starts_with(f.root.join(".git")), "not in the repo db");
+    assert_eq!(f.recover(&note), "# Deploy notes\nold step 1\nold step 2\n");
 }
 
 #[test]
-fn a_gitignored_file_is_allowed_and_snapshotted_not_refused() {
+fn a_gitignored_file_is_allowed_against_a_verified_copy() {
     let f = repo();
     f.write(".gitignore", ".env\n");
     git(&f.root, &["add", ".gitignore"]);
     git(&f.root, &["commit", "-qm", "base"]);
     let p = f.write(".env", "DB=postgres://u:p@h/db\nFEATURE=1\n");
     let g = f.guard();
-    let note =
-        assert_snapshotted(g.assess(&p, ".env", &f.read(".env"), "FEATURE=2\n", Mode::Rewrite));
-    assert_eq!(
-        std::fs::read_to_string(snapshot_path(&note)).unwrap(),
-        "DB=postgres://u:p@h/db\nFEATURE=1\n"
-    );
+    let note = assert_noted(g.assess(&p, ".env", &f.read(".env"), "FEATURE=2\n", Mode::Rewrite));
+    assert_eq!(f.recover(&note), "DB=postgres://u:p@h/db\nFEATURE=1\n");
+    // The one honest consequence of using the repository's own store, stated
+    // in the tool result rather than left quietly true.
+    assert!(note.contains("gitignored"), "{note}");
 }
 
 #[test]
-fn a_staged_but_never_committed_file_is_allowed_and_snapshotted() {
+fn a_staged_but_never_committed_file_is_allowed_against_a_verified_copy() {
     let f = repo();
     f.write("seed", "x");
     git(&f.root, &["add", "seed"]);
@@ -272,27 +474,64 @@ fn a_staged_but_never_committed_file_is_allowed_and_snapshotted() {
     let p = f.write("new.py", "a\nb\nc\n");
     git(&f.root, &["add", "new.py"]);
     let g = f.guard();
-    assert_snapshotted(g.assess(&p, "new.py", &f.read("new.py"), "z\n", Mode::Rewrite));
+    let note = assert_noted(g.assess(&p, "new.py", &f.read("new.py"), "z\n", Mode::Rewrite));
+    assert_eq!(f.recover(&note), "a\nb\nc\n");
 }
 
 #[test]
-fn a_file_outside_any_repository_is_allowed_and_snapshotted() {
+fn a_repository_with_no_commits_yet_is_allowed_against_a_verified_copy() {
+    let f = repo();
+    let p = f.write("draft.md", "first thoughts\nsecond thoughts\n");
+    let g = f.guard();
+    let note = assert_noted(g.assess(
+        &p,
+        "draft.md",
+        &f.read("draft.md"),
+        "rewritten\n",
+        Mode::Rewrite,
+    ));
+    assert_eq!(f.recover(&note), "first thoughts\nsecond thoughts\n");
+}
+
+#[test]
+fn a_file_outside_any_repository_is_refused_because_no_copy_is_possible() {
+    // Narrower than round 2, deliberately. Round 2 allowed this against a
+    // plaintext copy in `~/.wayland/unsaved-work`, which is the store the
+    // adversarial seat broke: secrets in clear, a no-op hardening call on
+    // Windows, and no garbage collection. With no object store to write to
+    // there is nowhere safe for the copy, so the honest answer is to refuse
+    // rather than to claim a recoverability that does not exist.
     let dir = TempDir::new().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let p = root.join("loose.txt");
     std::fs::write(&p, "user content\n").unwrap();
-    let g = UnsavedWorkGuard::with_snapshot_root(root.join("_snaps"));
-    let note = assert_snapshotted(g.assess(
+    let g = UnsavedWorkGuard::new_isolated();
+    let msg = assert_refused(g.assess(
         &p,
         "loose.txt",
         "user content\n",
         "different\n",
         Mode::Rewrite,
     ));
-    assert_eq!(
-        std::fs::read_to_string(snapshot_path(&note)).unwrap(),
-        "user content\n"
-    );
+    assert!(msg.contains("in no repository"), "{msg}");
+    assert!(!msg.contains("recovered with"), "{msg}");
+}
+
+#[test]
+fn an_edit_outside_any_repository_says_no_copy_was_made() {
+    let dir = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let p = root.join("loose.txt");
+    std::fs::write(&p, "user content\nsecond\n").unwrap();
+    let g = UnsavedWorkGuard::new_isolated();
+    let note = assert_noted(g.assess(
+        &p,
+        "loose.txt",
+        "user content\nsecond\n",
+        "second\n",
+        Mode::Surgical,
+    ));
+    assert!(note.contains("not recoverable"), "{note}");
 }
 
 // ---- residual 4: no stale memoized baseline ----------------------------
@@ -388,17 +627,14 @@ fn carrying_a_user_line_through_does_not_launder_it_into_agent_authored() {
     g.note_written(&p, &f.read("notes.md"), carried);
     f.write("notes.md", carried);
     // Second write drops the user's lines. They are still the user's.
-    let note = assert_snapshotted(g.assess(
+    let note = assert_noted(g.assess(
         &p,
         "notes.md",
         &f.read("notes.md"),
         "agent line\n",
         Mode::Rewrite,
     ));
-    assert_eq!(
-        std::fs::read_to_string(snapshot_path(&note)).unwrap(),
-        carried
-    );
+    assert_eq!(f.recover(&note), carried);
 }
 
 // ---- residual 5: counting ----------------------------------------------
@@ -424,39 +660,124 @@ fn dropping_one_of_several_identical_unsaved_lines_is_caught() {
     assert!(msg.contains("pass"), "{msg}");
 }
 
-// ---- residual 6: git that will not answer ------------------------------
+// ---- B3: recoverability is verified, never asserted --------------------
 
 #[test]
-fn an_unanswerable_baseline_snapshots_and_says_so() {
-    // `PATH` without git: `Command::new("git")` cannot spawn.
-    let dir = TempDir::new().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
-    let p = root.join("x.txt");
-    std::fs::write(&p, "user content\n").unwrap();
-    let g = UnsavedWorkGuard::with_snapshot_root(root.join("_snaps"));
-    // Force the Unknown branch directly: no git binary is reachable.
-    g.dirs
-        .lock()
-        .unwrap()
-        .insert(root.clone(), Baseline::Unknown);
-    let note = assert_snapshotted(g.assess(&p, "x.txt", "user content\n", "z\n", Mode::Rewrite));
-    assert!(note.contains("could not be established"), "{note}");
-    assert_eq!(
-        std::fs::read_to_string(snapshot_path(&note)).unwrap(),
-        "user content\n"
+fn the_recovery_copy_is_read_back_before_it_is_claimed() {
+    let f = repo();
+    let p = f.write("notes.md", "line one\nline two\n");
+    let g = f.guard();
+    let note = assert_noted(g.assess(
+        &p,
+        "notes.md",
+        &f.read("notes.md"),
+        "replaced\n",
+        Mode::Rewrite,
+    ));
+    // The object exists, in the repository's own store, and holds exactly the
+    // prior bytes — checked through the very command the note tells the user
+    // to run.
+    assert_eq!(f.recover(&note), "line one\nline two\n");
+}
+
+#[test]
+fn a_copy_that_cannot_be_written_refuses_rather_than_proceeding() {
+    let f = repo();
+    let p = f.write("notes.md", "user content\n");
+
+    // Block the exact object this copy will need, leaving the repository
+    // itself perfectly healthy — so the refusal below is the copy failing and
+    // not the baseline going unresolved. A mode bit would not do: this suite
+    // runs as root on the build host and root ignores mode bits, so the check
+    // would pass for the wrong reason. Emptying `.git/objects` would not do
+    // either: git then calls the whole directory "not a git repository" and
+    // the fail-closed path answers first, which is what the earlier version
+    // of this test actually measured.
+    let out = Command::new("git")
+        .args(["hash-object", "--stdin"])
+        .current_dir(&f.root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write as _;
+            c.stdin.take().unwrap().write_all(b"user content\n")?;
+            c.wait_with_output()
+        })
+        .unwrap();
+    let oid = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+    // A file where git needs the fanout directory.
+    std::fs::write(f.root.join(".git/objects").join(&oid[..2]), b"blocked").unwrap();
+
+    let g = f.guard();
+    let verdict = g.assess(&p, "notes.md", "user content\n", "z\n", Mode::Rewrite);
+    let msg = assert_refused(verdict);
+    assert!(msg.contains("could not be made"), "{msg}");
+    assert!(
+        !msg.contains("git did not answer"),
+        "the repo must still be readable: {msg}"
     );
 }
 
 #[test]
-fn a_snapshot_that_cannot_be_written_refuses_rather_than_proceeding() {
+fn a_file_too_large_to_copy_refuses_rather_than_proceeding() {
+    // The guarantee has no size exemption: past the limit the answer is a
+    // refusal, never an unprotected write.
     let f = repo();
-    let p = f.write("notes.md", "user content\n");
-    // Snapshot root is a path that cannot be created: an existing FILE.
-    let blocker = f.root.join("blocked");
-    std::fs::write(&blocker, "").unwrap();
-    let g = UnsavedWorkGuard::with_snapshot_root(blocker.join("nested"));
-    let msg = assert_refused(g.assess(&p, "notes.md", "user content\n", "z\n", Mode::Rewrite));
-    assert!(msg.contains("could not be written"), "{msg}");
+    let big = "x".repeat(MAX_RECOVERY_BYTES + 1) + "\n";
+    let p = f.write("big.txt", &big);
+    let g = f.guard();
+    let msg = assert_refused(g.assess(&p, "big.txt", &big, "small\n", Mode::Rewrite));
+    assert!(msg.contains("over the"), "{msg}");
+    assert!(msg.contains("could not be made"), "{msg}");
+}
+
+#[test]
+fn nothing_is_ever_written_outside_the_repository() {
+    // Round 2 created `~/.wayland/unsaved-work/<session>` from the tool layer
+    // and nothing ever removed it: the build box accumulated 6 session
+    // directories and 21 plaintext files just from running the test suite.
+    // There is no such directory to create any more, and this asserts it.
+    let f = repo();
+    let p = f.write("notes.md", "line one\nline two\n");
+    let g = f.guard();
+    let before = std::fs::read_dir(&f.root).unwrap().count();
+    assert_noted(g.assess(
+        &p,
+        "notes.md",
+        &f.read("notes.md"),
+        "replaced\n",
+        Mode::Rewrite,
+    ));
+    assert_eq!(
+        std::fs::read_dir(&f.root).unwrap().count(),
+        before,
+        "the guard must not create anything in the work tree"
+    );
+}
+
+#[test]
+fn identical_prior_states_reuse_one_object() {
+    let f = repo();
+    let p = f.write("notes.md", "a\nb\n");
+    let g = f.guard();
+    let one = oid_in(&assert_noted(g.assess(
+        &p,
+        "notes.md",
+        "a\nb\n",
+        "z\n",
+        Mode::Rewrite,
+    )));
+    let two = oid_in(&assert_noted(g.assess(
+        &p,
+        "notes.md",
+        "a\nb\n",
+        "y\n",
+        Mode::Rewrite,
+    )));
+    // Content addressing is git's, not ours: the same prior state is the same
+    // object, so repeated overwrites in one session do not accumulate.
+    assert_eq!(one, two);
 }
 
 // ---- residual 7: what gets echoed back ---------------------------------
@@ -497,24 +818,41 @@ fn the_refusal_does_not_name_another_tool_to_route_around_it() {
     assert!(!msg.contains("Edit"), "{msg}");
 }
 
+#[test]
+fn the_refusal_does_not_tell_a_transformation_to_undo_itself() {
+    // Measured by the adversarial seat: a legitimate whole-file rename of a
+    // symbol occurring on an unsaved line was refused with "reproduce those
+    // lines", which would undo the rename. The refusal still fires — this
+    // module cannot tell a modified line from a dropped one — but it must not
+    // give instructions that are wrong.
+    let (f, p) = parser_fixture();
+    let g = f.guard();
+    let msg = assert_refused(g.assess(
+        &p,
+        "parser.py",
+        &f.read("parser.py"),
+        "def a():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    assert!(!msg.contains("reproduce those lines"), "{msg}");
+    assert!(msg.contains("in their changed form"), "{msg}");
+}
+
 // ---- residual 1: Edit ---------------------------------------------------
 
 #[test]
-fn a_surgical_edit_that_removes_unsaved_work_snapshots_it() {
+fn a_surgical_edit_that_removes_unsaved_work_copies_it() {
     let (f, p) = parser_fixture();
     let g = f.guard();
     let before = f.read("parser.py");
-    let note = assert_snapshotted(g.assess(
+    let note = assert_noted(g.assess(
         &p,
         "parser.py",
         &before,
         "def a():\n    return 1\n",
         Mode::Surgical,
     ));
-    assert_eq!(
-        std::fs::read_to_string(snapshot_path(&note)).unwrap(),
-        before
-    );
+    assert_eq!(f.recover(&note), before);
 }
 
 #[test]
@@ -549,42 +887,4 @@ fn a_surgical_edit_that_touches_nothing_unsaved_is_silent() {
         ),
         Verdict::Proceed
     ));
-}
-
-#[test]
-fn identical_prior_states_reuse_one_snapshot_file() {
-    let f = repo();
-    let p = f.write("notes.md", "a\nb\n");
-    let g = f.guard();
-    let one = snapshot_path(&assert_snapshotted(g.assess(
-        &p,
-        "notes.md",
-        "a\nb\n",
-        "z\n",
-        Mode::Rewrite,
-    )));
-    let two = snapshot_path(&assert_snapshotted(g.assess(
-        &p,
-        "notes.md",
-        "a\nb\n",
-        "y\n",
-        Mode::Rewrite,
-    )));
-    assert_eq!(one, two);
-    assert_eq!(std::fs::read_dir(&f.snaps).unwrap().count(), 1);
-}
-
-#[cfg(unix)]
-#[test]
-fn a_snapshot_is_owner_only() {
-    use std::os::unix::fs::PermissionsExt;
-    let f = repo();
-    let p = f.write("notes.md", "secret-ish\n");
-    let g = f.guard();
-    let note = assert_snapshotted(g.assess(&p, "notes.md", "secret-ish\n", "z\n", Mode::Rewrite));
-    let mode = std::fs::metadata(snapshot_path(&note))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600, "snapshot must not be world-readable");
 }

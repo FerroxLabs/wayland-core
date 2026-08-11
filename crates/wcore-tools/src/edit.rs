@@ -298,7 +298,7 @@ impl Tool for EditTool {
             .assess(path, file_path, &content, &new_content, Mode::Surgical)
         {
             Verdict::Proceed => {}
-            Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+            Verdict::ProceedWithNote(note) => unsaved_note = note,
             Verdict::Refuse(refusal) => {
                 return ToolResult {
                     content: refusal,
@@ -426,7 +426,7 @@ impl Tool for EditTool {
             .assess(path, file_path, &content, &new_content, Mode::Surgical)
         {
             Verdict::Proceed => {}
-            Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+            Verdict::ProceedWithNote(note) => unsaved_note = note,
             Verdict::Refuse(refusal) => {
                 return ToolResult {
                     content: refusal,
@@ -492,13 +492,11 @@ mod tests {
     use crate::file_cache::update_cache_after_write;
     use wcore_config::file_cache::FileCacheConfig;
 
-    /// An Edit tool whose recovery snapshots land in a throwaway directory
-    /// rather than the real `~/.wayland`.
+    /// An Edit tool with its own guard, sharing no pinned baseline with the
+    /// session-wide one.
     fn tool(cache: Option<Arc<RwLock<FileStateCache>>>) -> EditTool {
         EditTool::new(cache).with_unsaved_guard(Arc::new(
-            crate::unsaved_work::UnsavedWorkGuard::with_snapshot_root(
-                std::env::temp_dir().join("wcore-tools-test-unsaved-snapshots"),
-            ),
+            crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
         ))
     }
 

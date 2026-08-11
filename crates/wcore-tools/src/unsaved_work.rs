@@ -9,15 +9,36 @@
 //! `src/receipts/parser.py` and `retry.py`.
 //!
 //! A prompt cannot make a whole-file overwrite safe, so the check lives here at
-//! the tool layer. The guarantee this module enforces is:
+//! the tool layer.
 //!
-//! > **Content that is on disk and recorded in no commit never leaves the disk
-//! > through Write or Edit without either being refused or being copied to a
-//! > durable snapshot whose path is reported back to the caller.**
+//! # What this module actually guarantees
 //!
-//! Nothing in that sentence depends on the model choosing to cooperate.
+//! Stated narrowly, because a broad statement of it would not be true:
 //!
-//! # The three moving parts
+//! > **Through the Write tool, a line that is on disk and that this module
+//! > cannot prove is recorded in the session's pinned commit never leaves the
+//! > disk unless the prior bytes have first been written to the repository's
+//! > own object store *and read back byte-for-byte*. Where no such copy can be
+//! > made, the write is refused.**
+//!
+//! Nothing in that sentence depends on the model choosing to cooperate, and
+//! nothing in it is claimed when it has not been checked. Three limits are part
+//! of the statement, not footnotes to it:
+//!
+//! * It covers **two of the three write surfaces**. `Write` is refused-or-
+//!   copied as above. `Edit` is never refused (see below) but never claims a
+//!   copy it did not make. **`Bash` is not covered at all** — `sed -i '2d'`,
+//!   `>` and `rm` do not route through here and cannot at this altitude. In
+//!   the round-1 `adv-armB` arm `sed -i`, not Edit, is what actually destroyed
+//!   the line. A guarantee described as holding "at the tool layer" without
+//!   that carve-out would be false.
+//! * It is a guarantee about **dropped** lines, and this module cannot tell a
+//!   dropped line from a **modified** one. A whole-file transformation that
+//!   renames a symbol occurring on an unsaved line reads here as a drop and is
+//!   refused.
+//! * **Non-UTF-8 files** have no line model, so no protection.
+//!
+//! # The four moving parts
 //!
 //! **A pinned baseline.** "Saved" means "present in the commit this session
 //! started at", not "present in current `HEAD`". The commit is resolved once,
@@ -28,35 +49,73 @@
 //! repository root, not from `git ls-files`, so `git rm --cached` cannot
 //! disarm it either.
 //!
-//! **An agent-authored set.** A line becomes agent-authored the moment this
-//! tool puts it on disk when it was not there before. Agent-authored lines are
-//! not user work: they are excluded from both the numerator and the
-//! denominator of every judgement below. That is what keeps the agent's own
-//! files, and its own iterating on an uncommitted branch, completely free —
-//! while a line the user typed, even one the agent's own write carried
-//! through, stays protected. There is no memoized "baseline at first touch":
-//! the disk is re-read on every call, so unsaved work the user creates
-//! mid-session is protected from that moment, and a line legitimately removed
-//! earlier is never cited again.
+//! **A repository test that does not depend on git working.** Round 2 asked
+//! `git rev-parse --is-inside-work-tree` and read *any* non-zero exit as an
+//! authoritative "there is no repository here". git exits 128 for a missing
+//! repository **and** for every repository it refuses to open: dubious
+//! ownership (the default for Docker bind mounts, CI checkouts and sudo-run
+//! agents), an unreadable `.git/config`, a bad `GIT_DIR`. All of those became
+//! "nothing here is recorded", which makes every line unsaved, which makes
+//! every rewrite wholesale, which means the guard never refuses. So the
+//! question git cannot answer honestly is answered from the filesystem
+//! instead: is there a `.git` marker on any ancestor? A missing repository is
+//! then a fact that holds even with no `git` binary at all, and a repository
+//! git will not open is [`Baseline::Unknown`] rather than "no repository".
 //!
-//! **A partial/wholesale split.** The discriminator is a property of the file's
-//! prior state alone — *is any of the user's content in this file recorded in
-//! the pinned commit?* — so the model cannot reach it by choosing what to
-//! write.
+//! **Fail closed on an unresolved baseline.** [`Baseline::Unknown`] proves
+//! nothing, so nothing is claimed: a `Write` that would drop lines is refused
+//! and names git's own reason, and an `Edit` proceeds while saying plainly
+//! that no copy was made. Crucially the failure is **never memoized** — round
+//! 2 cached it, so a single transient git fault at startup disarmed the whole
+//! session, every sub-agent with it, and repairing git did not bring the guard
+//! back. Only a settled answer is remembered.
+//!
+//! **A partial/wholesale split.** The discriminator is a property of the
+//! file's prior state alone — *is any of the user's content in this file
+//! recorded in the pinned commit?* — so the model cannot reach it by choosing
+//! what to write.
 //!
 //! * *Partial* — part of the file is recorded and part is not. A rewrite that
 //!   drops the unrecorded part is exactly the measured harm shape: the file
 //!   still looks right, so the user never notices. **Refused.**
-//! * *Wholesale* — none of the user's content in this file is recorded
-//!   anywhere (an untracked scratch file, a file in no repository at all, a
-//!   fully-uncommitted rewrite). Replacing it is the evident request and the
-//!   user sees the result immediately. **Snapshotted, then allowed**, with the
-//!   snapshot path in the tool result.
+//! * *Wholesale* — none of the user's content in this file is recorded (an
+//!   untracked file, a fully-uncommitted rewrite). Replacing it is the evident
+//!   request and the user sees the result immediately, so it is allowed —
+//!   **but only against a verified copy**, and refused when none can be made.
 //!
-//! Against the two measured cases the split is not close: `parser.py` is 1
-//! unsaved line out of 9 (partial → refuse, the round-1 behaviour is
-//! preserved), and the `notes.md` that round 1 wrongly refused is 4 out of 4
-//! (wholesale → snapshot and proceed, the task now completes).
+//! # Where the recovery copy goes, and why not somewhere new
+//!
+//! Into the repository's own object database, via `git hash-object -w`. It is
+//! then read back with `git cat-file` and compared byte-for-byte before the
+//! tool result says a word about recoverability.
+//!
+//! Round 2 instead copied the prior bytes to `~/.wayland/unsaved-work`. The
+//! adversarial seat measured what that bought: a gitignored `.env` holding a
+//! live `STRIPE_SK` and an `AWS_SECRET_ACCESS_KEY` was copied there in clear,
+//! the scrubber having been applied only to the copy that goes to the *model*
+//! and never to the copy that goes to *disk*; the hardening that made it
+//! owner-only was a `#[cfg(not(unix))]` no-op on Windows, where this project's
+//! own machine grants `(OI)(CI)(RX)` on the profile directory to the very
+//! sandbox principal that confines agent subprocesses; and nothing ever
+//! removed any of it.
+//!
+//! The object store has none of those properties to get wrong. It is the
+//! user's existing security domain with the user's existing permissions, it
+//! needs no new directory, no new mode bits and no new retention policy, and
+//! `git gc` prunes the unreferenced object on the user's own schedule. It is
+//! also self-documenting: `git cat-file blob <oid>` is the whole recovery
+//! procedure.
+//!
+//! One honest consequence: when the dropped content comes from a **gitignored**
+//! file, that file's prior bytes become an unreferenced loose object inside
+//! `.git/objects`. Unreferenced objects are not pushed and are pruned by `gc`,
+//! but they are on disk inside the repository until then. That is disclosed in
+//! the tool result rather than being quietly true.
+//!
+//! When there is **no repository at all** there is no object store, so there is
+//! nowhere to put a copy. A `Write` that would drop lines is refused. This is
+//! narrower than round 2, which allowed it against a profile-home copy; that
+//! copy is the one the adversary broke, so the allowance goes with it.
 //!
 //! # Edit
 //!
@@ -70,26 +129,22 @@
 //!    common working state. Every uncommitted line the *user* wrote would
 //!    become uneditable.
 //!
-//! So an Edit that removes unrecorded content snapshots first and says so.
-//! Routing around a Write refusal into Edit — which the round-1 adversarial
-//! seat measured the model doing unprompted — no longer loses anything.
+//! So an Edit that removes unrecorded content copies first where it can, and
+//! where it cannot it says so instead of pretending otherwise.
 //!
-//! # Where the guarantee does not reach — stated, not implied
+//! # Other limits, stated
 //!
-//! * **Bash.** `sed -i`, `>`, `rm` and friends are not routed through here and
-//!   cannot be at this altitude. In the round-1 `adv-armB` arm this, not Edit,
-//!   is what actually destroyed the line.
-//! * **Non-UTF-8 files.** No line model, so no protection.
 //! * **A repository first touched mid-session** pins at that moment rather
 //!   than at session start. The session's own working repository is pinned
-//!   eagerly at construction.
+//!   eagerly at construction. A repository that was *unresolvable* at session
+//!   start pins whenever it first resolves, which is later than session start
+//!   — strictly better than round 2, which stayed disarmed forever.
 //! * **Trim-normalised comparison.** Counting is exact (N copies of a line are
 //!   not the same as 1), but an unsaved line whose trimmed text matches a
 //!   recorded line, at equal counts, is still invisible.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -97,20 +152,25 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Most dropped lines quoted back in a refusal message.
 const MAX_QUOTED_LINES: usize = 5;
 
-/// Largest file this guard will copy into a snapshot. An overwrite that would
-/// drop unrecorded content from a file bigger than this is refused rather than
-/// allowed unprotected — the guarantee has no size exemption.
-const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
+/// Largest file this guard will copy. An overwrite that would drop unrecorded
+/// content from a file bigger than this is refused rather than allowed
+/// unprotected — the guarantee has no size exemption.
+const MAX_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Longest reason quoted back from git's own stderr.
+const MAX_GIT_REASON_CHARS: usize = 200;
 
 /// How the caller is replacing the file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     /// Whole-file replacement authored from the model's own picture of the
-    /// contents (the Write tool). Omission is silent here, so a partial drop
-    /// of unrecorded content is refused.
+    /// contents (the Write tool). Omission is silent here, so a drop of
+    /// content that cannot be proven recorded is refused unless it can be
+    /// copied first.
     Rewrite,
     /// Targeted replacement of bytes the model quoted from disk (the Edit
-    /// tool). Never refused; a drop is snapshotted and reported.
+    /// tool). Never refused; a drop is copied where a copy is possible, and
+    /// reported accurately either way.
     Surgical,
 }
 
@@ -119,29 +179,40 @@ pub enum Mode {
 pub enum Verdict {
     /// No unrecorded content leaves the disk. Write it.
     Proceed,
-    /// The measured silent-drop shape. Do not write; return this message.
+    /// Do not write; return this message.
     Refuse(String),
-    /// Unrecorded content does leave the disk, but the prior bytes are already
-    /// saved. Write it, and append this note to the tool result.
-    ProceedWithSnapshot(String),
+    /// Write it, and append this note to the tool result. The note states
+    /// exactly what happened to the prior bytes and never claims a copy that
+    /// was not made and verified.
+    ProceedWithNote(String),
 }
 
-/// The commit a repository was pinned to, or why there is no pin.
+/// What is known about where a path's saved state lives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Baseline {
-    /// git answered authoritatively: this path is in no work tree. Nothing
-    /// about it is recorded anywhere.
+    /// No repository governs this path. Established from the filesystem, so it
+    /// holds even when `git` cannot be run at all.
     NoRepo,
-    /// git could not be consulted at all (no binary, spawn failure). The
-    /// baseline is unknowable, so no protection may be *claimed* — every drop
-    /// is treated as unrecorded and snapshotted.
-    Unknown,
-    /// Repository root plus the commit pinned when it was first seen. `None`
-    /// commit means the repository has no commits yet: nothing is recorded.
-    Pinned {
+    /// A work tree, pinned to the commit it was at when first resolved. `None`
+    /// means the repository had no commits at pin time — a real state, not a
+    /// failure to establish one.
+    Repo {
         root: PathBuf,
         commit: Option<String>,
     },
+    /// A repository is present but git would not answer for it. Nothing can be
+    /// certified, so nothing is claimed, and this is never memoized.
+    Unknown(String),
+}
+
+impl Baseline {
+    /// The repository root, when there is one to write a recovery object into.
+    fn root(&self) -> Option<&Path> {
+        match self {
+            Baseline::Repo { root, .. } => Some(root.as_path()),
+            _ => None,
+        }
+    }
 }
 
 /// Session-scoped enforcement of the unsaved-work guarantee.
@@ -151,8 +222,9 @@ enum Baseline {
 /// agent-authored set are the same set of facts for both tools and for every
 /// sub-agent.
 pub struct UnsavedWorkGuard {
-    /// Directory -> its resolved baseline. Memoized because it is immutable
-    /// for the session by construction.
+    /// Directory -> its settled baseline. Memoized because a settled answer is
+    /// immutable for the session by construction. [`Baseline::Unknown`] is
+    /// never stored here.
     dirs: Mutex<HashMap<PathBuf, Baseline>>,
     /// Repository root -> pinned commit, so two directories in one repository
     /// share one pin.
@@ -161,8 +233,6 @@ pub struct UnsavedWorkGuard {
     blobs: Mutex<HashMap<(String, String), String>>,
     /// Path -> trimmed lines this tool itself introduced.
     authored: Mutex<HashMap<PathBuf, HashSet<String>>>,
-    /// Where snapshots go. Outside the user's repository, always.
-    snapshot_root: PathBuf,
 }
 
 static SHARED: OnceLock<Arc<UnsavedWorkGuard>> = OnceLock::new();
@@ -173,10 +243,13 @@ impl UnsavedWorkGuard {
     /// baseline. On first call the working directory's repository is pinned
     /// immediately — that call happens while the tool registry is being built,
     /// which is session start.
+    ///
+    /// If that eager resolution fails it is simply not cached, so the next
+    /// call retries it. Round 2 cached the failure and never recovered.
     pub fn shared() -> Arc<UnsavedWorkGuard> {
         SHARED
             .get_or_init(|| {
-                let guard = Arc::new(UnsavedWorkGuard::with_snapshot_root(default_snapshot_root()));
+                let guard = Arc::new(UnsavedWorkGuard::new_isolated());
                 if let Ok(cwd) = std::env::current_dir() {
                     guard.baseline_for_dir(&cwd);
                 }
@@ -185,29 +258,26 @@ impl UnsavedWorkGuard {
             .clone()
     }
 
-    /// An isolated guard with its own snapshot root. For tests, which must not
-    /// share a pinned baseline with each other.
-    pub fn with_snapshot_root(snapshot_root: PathBuf) -> Self {
+    /// A guard with its own empty state, sharing no pinned baseline with any
+    /// other. For tests, and for callers that must not join the session-wide
+    /// guard.
+    pub fn new_isolated() -> Self {
         Self {
             dirs: Mutex::new(HashMap::new()),
             pins: Mutex::new(HashMap::new()),
             blobs: Mutex::new(HashMap::new()),
             authored: Mutex::new(HashMap::new()),
-            snapshot_root,
         }
-    }
-
-    /// Where this guard puts recovery copies.
-    pub fn snapshot_root(&self) -> &Path {
-        &self.snapshot_root
     }
 
     /// Judge replacing `previous` (the bytes currently at `path`, read by the
     /// caller through whichever filesystem it is actually writing to) with
     /// `new_content`.
     ///
-    /// Takes the snapshot itself, before returning, so that a caller acting on
-    /// [`Verdict::ProceedWithSnapshot`] cannot write ahead of the copy.
+    /// Makes the recovery copy itself, and verifies it, before returning — so
+    /// a caller acting on [`Verdict::ProceedWithNote`] cannot write ahead of
+    /// the copy, and a note that mentions a copy always refers to one that has
+    /// been read back.
     pub fn assess(
         &self,
         path: &Path,
@@ -226,20 +296,30 @@ impl UnsavedWorkGuard {
         }
 
         let baseline = self.baseline_for(path);
-        let (saved, baseline_known) = match &baseline {
-            Baseline::Pinned {
+        // `saved` is only what can be *proven* recorded. Where git will not
+        // answer, nothing is proven and `unresolved` carries git's own reason;
+        // the empty baseline that results is the safe direction, because it
+        // makes every line count as unsaved and forces the drop to justify
+        // itself below.
+        let mut unresolved: Option<String> = None;
+        let saved = match &baseline {
+            Baseline::Repo {
                 root,
                 commit: Some(commit),
             } => match self.recorded_blob(path, root, commit) {
-                Ok(text) => (text, true),
-                // Inside a work tree, but git would not answer. Claim nothing.
-                Err(()) => (String::new(), false),
+                Ok(text) => text,
+                Err(why) => {
+                    unresolved = Some(why);
+                    String::new()
+                }
             },
-            // Repository with no commits yet, or authoritatively no repository:
-            // nothing about this file is recorded, and that is a fact, not a
-            // failure to establish one.
-            Baseline::Pinned { commit: None, .. } | Baseline::NoRepo => (String::new(), true),
-            Baseline::Unknown => (String::new(), false),
+            // A repository with no commits yet, or no repository at all:
+            // nothing about this file is recorded, and that is an answer.
+            Baseline::Repo { commit: None, .. } | Baseline::NoRepo => String::new(),
+            Baseline::Unknown(why) => {
+                unresolved = Some(why.clone());
+                String::new()
+            }
         };
 
         let recorded = tally(&saved);
@@ -269,7 +349,25 @@ impl UnsavedWorkGuard {
         }
         let dropped_total: usize = dropped.values().sum();
         if dropped_total == 0 {
+            // Nothing leaves the disk. An unresolved baseline does not matter
+            // here, which is what keeps a broken-git environment usable for
+            // every write that only adds.
             return Verdict::Proceed;
+        }
+
+        // Fail closed. Without a baseline the partial/wholesale split is not
+        // knowable either, so neither branch below may be taken on a guess.
+        if let Some(why) = unresolved {
+            return match mode {
+                Mode::Rewrite => Verdict::Refuse(unresolved_refusal(
+                    display_path,
+                    previous,
+                    &dropped,
+                    dropped_total,
+                    &why,
+                )),
+                Mode::Surgical => Verdict::ProceedWithNote(unresolved_note(dropped_total, &why)),
+            };
         }
 
         // The discriminator. Derived only from the file's prior state and the
@@ -285,18 +383,33 @@ impl UnsavedWorkGuard {
             ));
         }
 
-        match self.snapshot(path, previous) {
-            Ok(saved_to) => Verdict::ProceedWithSnapshot(snapshot_note(
-                dropped_total,
-                baseline_known,
-                mode,
-                &saved_to,
-            )),
-            Err(why) => Verdict::Refuse(format!(
-                "Refused to overwrite {display_path}: it holds {dropped_total} line(s) that are \
-                 on disk and in no commit, and the copy that would make replacing them \
-                 recoverable could not be written ({why}). Nothing was changed."
-            )),
+        match baseline.root() {
+            Some(root) => match self.recoverable_copy(root, previous) {
+                Ok(oid) => {
+                    Verdict::ProceedWithNote(copy_note(dropped_total, mode, root, &oid, wholesale))
+                }
+                Err(why) => Verdict::Refuse(format!(
+                    "Refused to overwrite {display_path}: it holds {dropped_total} line(s) that \
+                     are on disk and in no commit, and the copy that would make replacing them \
+                     recoverable could not be made ({why}). Nothing was changed."
+                )),
+            },
+            // No repository, so no object store, so nowhere to put a copy.
+            None => match mode {
+                Mode::Rewrite => Verdict::Refuse(format!(
+                    "Refused to overwrite {display_path}: this content would delete \
+                     {dropped_total} line(s) that are on disk. This file is in no repository, so \
+                     nothing about it is recorded anywhere and there is nowhere to put a copy \
+                     that would make replacing them recoverable — losing them would be \
+                     irreversible. Nothing was changed. Carry those lines into the content you \
+                     write, or have the file recorded somewhere first."
+                )),
+                Mode::Surgical => Verdict::ProceedWithNote(format!(
+                    "\nNote: {dropped_total} line(s) that were on disk are not in the new \
+                     content. This file is in no repository, so no recovery copy was made and \
+                     those lines are not recoverable."
+                )),
+            },
         }
     }
 
@@ -339,11 +452,11 @@ impl UnsavedWorkGuard {
     fn baseline_for(&self, path: &Path) -> Baseline {
         match path.parent() {
             Some(dir) => self.baseline_for_dir(dir),
-            None => Baseline::Unknown,
+            None => Baseline::Unknown("the file has no parent directory".to_owned()),
         }
     }
 
-    /// Resolve — and pin — the baseline for `dir`, once.
+    /// Resolve the baseline for `dir`, pinning it once it settles.
     fn baseline_for_dir(&self, dir: &Path) -> Baseline {
         if let Ok(map) = self.dirs.lock()
             && let Some(hit) = map.get(dir)
@@ -351,6 +464,12 @@ impl UnsavedWorkGuard {
             return hit.clone();
         }
         let resolved = self.resolve_baseline(dir);
+        // Only a settled answer is remembered. Round 2 memoized the failure
+        // too, so one transient git fault disarmed the session permanently:
+        // measured as break git -> allow, repair git -> still allow.
+        if matches!(resolved, Baseline::Unknown(_)) {
+            return resolved;
+        }
         if let Ok(mut map) = self.dirs.lock() {
             return map.entry(dir.to_path_buf()).or_insert(resolved).clone();
         }
@@ -358,57 +477,114 @@ impl UnsavedWorkGuard {
     }
 
     fn resolve_baseline(&self, dir: &Path) -> Baseline {
-        match git_output(dir, &["rev-parse", "--is-inside-work-tree"]) {
-            // git ran and said no. Authoritative.
-            Ok(None) => return Baseline::NoRepo,
-            // git could not be run at all.
-            Err(()) => return Baseline::Unknown,
-            Ok(Some(answer)) if answer.trim() != "true" => return Baseline::NoRepo,
-            Ok(Some(_)) => {}
-        }
-        let Ok(Some(top)) = git_output(dir, &["rev-parse", "--show-toplevel"]) else {
-            return Baseline::Unknown;
+        // git exits 128 both for "there is no repository" and for "there is a
+        // repository and I refuse to open it". Only the filesystem can tell
+        // those apart without trusting git to be healthy.
+        let present = repository_marker_present(dir);
+        let unopenable = |why: String| {
+            if present {
+                Baseline::Unknown(why)
+            } else {
+                Baseline::NoRepo
+            }
         };
-        let root = PathBuf::from(top.trim());
+
+        match git_run(dir, &["rev-parse", "--is-inside-work-tree"], None) {
+            None => return unopenable("git could not be run".to_owned()),
+            Some(run) if run.ok() => {
+                if run.stdout_text().trim() != "true" {
+                    // A bare repository or a path inside `.git`: no work tree,
+                    // so nothing here is tracked in the sense this guard means.
+                    return Baseline::NoRepo;
+                }
+            }
+            Some(run) => return unopenable(run.why("git would not open this repository")),
+        }
+
+        let root = match git_run(dir, &["rev-parse", "--show-toplevel"], None) {
+            Some(run) if run.ok() => {
+                let text = run.stdout_text().trim().to_owned();
+                if text.is_empty() {
+                    return Baseline::Unknown("git named no repository root".to_owned());
+                }
+                PathBuf::from(text)
+            }
+            Some(run) => {
+                return Baseline::Unknown(run.why("git would not name the repository root"));
+            }
+            None => return Baseline::Unknown("git could not be run".to_owned()),
+        };
+
         if let Ok(map) = self.pins.lock()
             && let Some(commit) = map.get(&root)
         {
-            return Baseline::Pinned {
+            return Baseline::Repo {
                 root,
                 commit: commit.clone(),
             };
         }
-        // A repository with no commits yet answers non-zero here; that is a
-        // real state (nothing is recorded), not a failure to ask.
-        let commit = match git_output(dir, &["rev-parse", "HEAD"]) {
-            Ok(Some(sha)) => Some(sha.trim().to_owned()),
-            Ok(None) => None,
-            Err(()) => return Baseline::Unknown,
+
+        // `--verify --quiet` exits 1 for "that ref does not exist", which is
+        // an unborn HEAD and a real state, and 128 for git failing, which is
+        // not. Measured on git 2.43.0: unborn HEAD exits 1; dubious ownership
+        // and an unreadable config exit 128.
+        let commit = match git_run(dir, &["rev-parse", "--verify", "--quiet", "HEAD"], None) {
+            Some(run) if run.ok() => {
+                let sha = run.stdout_text().trim().to_owned();
+                if !is_hex_oid(&sha) {
+                    return Baseline::Unknown("git returned no usable commit id".to_owned());
+                }
+                Some(sha)
+            }
+            Some(run) if run.code == Some(1) => None,
+            Some(run) => return Baseline::Unknown(run.why("git would not resolve HEAD")),
+            None => return Baseline::Unknown("git could not be run".to_owned()),
         };
+
         if let Ok(mut map) = self.pins.lock() {
             map.entry(root.clone()).or_insert_with(|| commit.clone());
         }
-        Baseline::Pinned { root, commit }
+        Baseline::Repo { root, commit }
     }
 
     /// The file's content in the pinned commit, or `""` if that commit did not
-    /// contain it. `Err(())` only when git could not answer.
-    fn recorded_blob(&self, path: &Path, root: &Path, commit: &str) -> Result<String, ()> {
+    /// contain it. `Err(why)` only when git could not answer.
+    fn recorded_blob(&self, path: &Path, root: &Path, commit: &str) -> Result<String, String> {
         // Derived from the repository root, never from `git ls-files`: the
         // index is mutable during the session, the pinned commit is not.
-        let rel = repo_relative(root, path).ok_or(())?;
+        let rel = repo_relative(root, path).ok_or_else(|| {
+            "the file's path inside the repository could not be resolved".to_owned()
+        })?;
         let key = (commit.to_owned(), rel.clone());
         if let Ok(cache) = self.blobs.lock()
             && let Some(hit) = cache.get(&key)
         {
             return Ok(hit.clone());
         }
-        let spec = format!("{commit}:{rel}");
-        let text = match git_output(root, &["show", &spec]) {
-            Ok(Some(t)) => t,
-            // Not present in that commit: recorded nowhere, which is an answer.
-            Ok(None) => String::new(),
-            Err(()) => return Err(()),
+
+        // `ls-tree` reports "not in that commit" as exit 0 with no output, so
+        // an absent path never has to be told apart from a broken repository
+        // by its exit code. `git show <commit>:<path>` cannot do that: it
+        // exits 128 for both, which is the same conflation as B1.
+        let listing = git_run(
+            root,
+            &["ls-tree", "--full-tree", "-z", commit, "--", &rel],
+            None,
+        )
+        .ok_or_else(|| "git could not be run".to_owned())?;
+        if !listing.ok() {
+            return Err(listing.why("git would not read the pinned commit"));
+        }
+        let text = match blob_oid(&listing.stdout_text()) {
+            None => String::new(),
+            Some(oid) => {
+                let blob = git_run(root, &["cat-file", "blob", &oid], None)
+                    .ok_or_else(|| "git could not be run".to_owned())?;
+                if !blob.ok() {
+                    return Err(blob.why("git would not read the recorded contents"));
+                }
+                String::from_utf8_lossy(&blob.stdout).into_owned()
+            }
         };
         if let Ok(mut cache) = self.blobs.lock() {
             cache.insert(key, text.clone());
@@ -416,98 +592,96 @@ impl UnsavedWorkGuard {
         Ok(text)
     }
 
-    /// Copy `bytes` somewhere durable and outside the user's repository.
+    /// Put `bytes` in the repository's own object database and prove they can
+    /// be read back before returning.
     ///
-    /// Content-addressed, so repeatedly overwriting the same prior state
-    /// during one session reuses one file rather than accumulating copies.
-    fn snapshot(&self, path: &Path, bytes: &str) -> Result<PathBuf, String> {
-        if bytes.len() > MAX_SNAPSHOT_BYTES {
+    /// Nothing is referenced, staged or committed: the result is a loose,
+    /// unreferenced object, which is why the user's own `git gc` is a
+    /// sufficient retention policy and no new one is invented here.
+    fn recoverable_copy(&self, root: &Path, bytes: &str) -> Result<String, String> {
+        if bytes.len() > MAX_RECOVERY_BYTES {
             return Err(format!(
-                "file is {} bytes, over the {}-byte snapshot limit",
-                bytes.len(),
-                MAX_SNAPSHOT_BYTES
+                "file is {} bytes, over the {MAX_RECOVERY_BYTES}-byte recovery limit",
+                bytes.len()
             ));
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unnamed");
-        let safe: String = name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let target = self.snapshot_root.join(format!(
-            "{safe}.{:016x}.{:016x}",
-            hash_of(&path.to_string_lossy()),
-            hash_of(bytes)
-        ));
-        if target.exists() {
-            return Ok(target);
+        let written = git_run(
+            root,
+            &["hash-object", "-w", "--stdin"],
+            Some(bytes.as_bytes()),
+        )
+        .ok_or_else(|| "git could not be run".to_owned())?;
+        if !written.ok() {
+            return Err(written.why("git would not write the object"));
         }
-        std::fs::create_dir_all(&self.snapshot_root).map_err(|e| e.to_string())?;
-        // Both the per-session directory and the `unsaved-work` root above it:
-        // `create_dir_all` uses the process umask, which is commonly 022.
-        if let Some(parent) = self.snapshot_root.parent() {
-            restrict_dir(parent);
+        let oid = written.stdout_text().trim().to_owned();
+        if !is_hex_oid(&oid) {
+            return Err("git returned no usable object id".to_owned());
         }
-        restrict_dir(&self.snapshot_root);
-        std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
-        // The prior contents can hold anything the user had in that file,
-        // including a credential they pasted. Owner-only.
-        restrict_file(&target);
-        Ok(target)
+
+        // Never claim recoverability that has not been exercised. Round 2
+        // returned early from an `exists()` probe, so a directory sitting at
+        // the target path produced a tool result telling the user "nothing is
+        // lost" and naming something unreadable. The copy is read back here,
+        // through the same command the user would run, and compared.
+        let back = git_run(root, &["cat-file", "blob", &oid], None)
+            .ok_or_else(|| "git could not be run to verify the copy".to_owned())?;
+        if !back.ok() {
+            return Err(back.why("the copy could not be read back"));
+        }
+        if back.stdout != bytes.as_bytes() {
+            return Err(format!(
+                "the copy read back as {} bytes rather than {}",
+                back.stdout.len(),
+                bytes.len()
+            ));
+        }
+        Ok(oid)
     }
 }
 
-/// `~/.wayland/unsaved-work/<start>-<pid>` — the profile state directory, never
-/// the user's working tree. Writing uninvited files into a user's repository is
-/// an open corpus defect against this product; a recovery copy must not add to
-/// it.
-fn default_snapshot_root() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    wcore_config::config::profile_home()
-        .join("unsaved-work")
-        .join(format!("{stamp}-{}", std::process::id()))
+/// Is a repository plausibly present for `dir`, judged without asking git?
+///
+/// Deliberately errs towards "yes": anything other than a definite "no such
+/// entry" counts as present, because the consequence of a false "no" is the
+/// fail-open this whole module exists to close.
+fn repository_marker_present(dir: &Path) -> bool {
+    if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_WORK_TREE").is_some() {
+        return true;
+    }
+    let start = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    for ancestor in start.ancestors() {
+        // `.git` is a directory in a normal clone and a file in a worktree or
+        // submodule, so the kind is not checked.
+        match std::fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Not evidence of absence.
+            Err(_) => return true,
+        }
+    }
+    false
 }
 
-#[cfg(unix)]
-fn restrict_dir(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+fn is_hex_oid(s: &str) -> bool {
+    s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-#[cfg(not(unix))]
-fn restrict_dir(_dir: &Path) {
-    // Windows: the copy inherits the ACL of the per-user profile directory,
-    // which is already owner-scoped. There is no portable mode bit to set.
+/// The blob id from the first `ls-tree -z` record, if that record is a blob.
+fn blob_oid(record: &str) -> Option<String> {
+    let entry = record.split('\0').next()?;
+    let (meta, _path) = entry.split_once('\t')?;
+    let mut fields = meta.split_whitespace();
+    let _mode = fields.next()?;
+    if fields.next()? != "blob" {
+        return None;
+    }
+    let oid = fields.next()?;
+    is_hex_oid(oid).then(|| oid.to_owned())
 }
 
-#[cfg(unix)]
-fn restrict_file(file: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600));
-}
-
-#[cfg(not(unix))]
-fn restrict_file(_file: &Path) {}
-
-fn hash_of(s: &str) -> u64 {
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    h.finish()
-}
-
-/// `path` expressed the way a `<commit>:<path>` spec wants it: relative to the
-/// repository root, forward-slashed, on every platform.
+/// `path` expressed the way a tree lookup wants it: relative to the repository
+/// root, forward-slashed, on every platform.
 fn repo_relative(root: &Path, path: &Path) -> Option<String> {
     let root = std::fs::canonicalize(root).ok()?;
     let full = std::fs::canonicalize(path).ok()?;
@@ -548,15 +722,8 @@ fn tally_excluding<'a>(text: &'a str, authored: &HashSet<String>) -> HashMap<&'a
     counts
 }
 
-/// The refusal. It deliberately names no other tool: round 1 shipped a message
-/// recommending Edit, and the model took that route on the first refusal in
-/// both live adversarial arms.
-fn refusal_text(
-    display_path: &str,
-    previous: &str,
-    dropped: &HashMap<&str, usize>,
-    dropped_total: usize,
-) -> String {
+/// The dropped lines, scrubbed, for quoting back in a refusal.
+fn quote_dropped(previous: &str, dropped: &HashMap<&str, usize>, dropped_total: usize) -> String {
     let mut budget: HashMap<&str, usize> = dropped.clone();
     let mut quoted = Vec::new();
     for line in previous.lines() {
@@ -580,67 +747,169 @@ fn refusal_text(
     } else {
         String::new()
     };
+    format!("{}{tail}", quoted.join("\n"))
+}
+
+/// The partial-rewrite refusal: the measured silent-loss shape.
+///
+/// It deliberately names no other tool — round 1 shipped a message
+/// recommending Edit, and the model took that route on the first refusal in
+/// both live adversarial arms — and it no longer says "reproduce those lines",
+/// which was actively wrong guidance for a rewrite that *transforms* them: the
+/// adversarial seat measured a legitimate symbol rename being told to undo
+/// itself.
+fn refusal_text(
+    display_path: &str,
+    previous: &str,
+    dropped: &HashMap<&str, usize>,
+    dropped_total: usize,
+) -> String {
     format!(
         "Refused to overwrite {display_path}: this content would delete {dropped_total} line(s) \
          that are on disk but in no commit. That is unsaved work which exists nowhere else, so \
          losing it is irreversible.\n\
-         Lines that would be lost:\n{quoted}{tail}\n\
+         Lines that would be lost:\n{quoted}\n\
          The rest of this file IS committed, so this is not the whole-file replacement the user \
          asked for — it is a partial rewrite that would silently drop their in-progress work. \
-         Read the file as it stands on disk now and reproduce those lines in the content you \
-         write. If the user genuinely asked for those specific lines to go, they must be \
-         recorded somewhere first.",
-        quoted = quoted.join("\n"),
+         Read the file as it stands on disk now and carry those lines into the content you write \
+         — in their changed form if what you are doing changes them. If the user genuinely asked \
+         for those specific lines to go, they must be recorded somewhere first.",
+        quoted = quote_dropped(previous, dropped, dropped_total),
     )
 }
 
-fn snapshot_note(
+/// The fail-closed refusal: git would not say what is saved, so nothing is
+/// assumed to be.
+fn unresolved_refusal(
+    display_path: &str,
+    previous: &str,
+    dropped: &HashMap<&str, usize>,
     dropped_total: usize,
-    baseline_known: bool,
-    mode: Mode,
-    saved_to: &Path,
+    why: &str,
 ) -> String {
-    let why = match (baseline_known, mode) {
-        (false, _) => {
-            " The last saved version could not be established (git did not answer), so no \
-             protection was assumed."
-        }
-        (true, Mode::Rewrite) => {
-            " None of this file was in any commit, so the whole of it counted as unsaved work."
-        }
-        (true, Mode::Surgical) => "",
+    format!(
+        "Refused to overwrite {display_path}: this content would delete {dropped_total} line(s) \
+         that are on disk, and the last saved version of this file could not be established, so \
+         there is no way to tell whether any of them exist anywhere else. git did not answer: \
+         {why}\n\
+         Lines that would be lost:\n{quoted}\n\
+         Nothing was changed. Fix the reason git could not answer, or carry those lines into the \
+         content you write. Writes that do not remove existing lines are unaffected.",
+        quoted = quote_dropped(previous, dropped, dropped_total),
+    )
+}
+
+fn unresolved_note(dropped_total: usize, why: &str) -> String {
+    format!(
+        "\nNote: {dropped_total} line(s) that were on disk are not in the new content, and the \
+         last saved version of this file could not be established (git did not answer: {why}), \
+         so it is not known whether they exist anywhere else. No recovery copy was made."
+    )
+}
+
+fn copy_note(dropped_total: usize, mode: Mode, root: &Path, oid: &str, wholesale: bool) -> String {
+    let why = if wholesale && mode == Mode::Rewrite {
+        " None of this file was in any commit, so the whole of it counted as unsaved work."
+    } else {
+        ""
     };
     format!(
         "\nNote: {dropped_total} line(s) that were on disk and in no commit are not in the new \
-         content.{why} The previous contents were copied to {} first, so nothing is lost — tell \
-         the user that path if they want any of it back.",
-        saved_to.display()
+         content.{why} The previous contents were written to this repository's own object store \
+         and read back to confirm they match, so they can be recovered with:\n    \
+         git -C {root} cat-file blob {oid}\n\
+         The object is unreferenced, so the repository's normal garbage collection removes it in \
+         due course. If this file is gitignored, note that its prior bytes are now inside \
+         .git/objects until then.",
+        root = root.display(),
     )
 }
 
-/// Run `git` in `dir`.
+/// One `git` invocation, with enough of its result kept to classify it.
+struct GitRun {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: String,
+}
+
+impl GitRun {
+    fn ok(&self) -> bool {
+        self.code == Some(0)
+    }
+
+    fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// A short, scrubbed reason taken from git's own first line of stderr, so
+    /// the user is told the actual remedy (`safe.directory`, a bad config
+    /// line) rather than a generic failure.
+    fn why(&self, fallback: &str) -> String {
+        let first = self
+            .stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default();
+        if first.is_empty() {
+            return fallback.to_owned();
+        }
+        let scrubbed = wcore_safety::PIIScrubber.scrub(first);
+        if scrubbed.chars().count() > MAX_GIT_REASON_CHARS {
+            return scrubbed
+                .chars()
+                .take(MAX_GIT_REASON_CHARS)
+                .collect::<String>()
+                + "…";
+        }
+        scrubbed.into_owned()
+    }
+}
+
+/// Run `git` in `dir`, returning `None` only when it could not be started.
 ///
-/// `Ok(Some(stdout))` when git ran and succeeded, `Ok(None)` when git ran and
-/// returned non-zero (a real answer: not a repository, no commits, path not in
-/// the commit), `Err(())` when git could not be run at all. Round 1 collapsed
-/// the last two into "no protection, and no signal to anyone".
-///
-/// `--literal-pathspecs` so an LLM-supplied file name containing `*`, `:` or a
-/// leading `-` is never read as a pattern or an option. Argv mode throughout —
-/// no shell is involved.
-fn git_output(dir: &Path, args: &[&str]) -> Result<Option<String>, ()> {
-    let out = Command::new("git")
-        .arg("--literal-pathspecs")
+/// Argv mode throughout — no shell interpreter is involved, so an LLM-supplied
+/// file name containing `;`, `$()` or a backtick reaches git as literal bytes.
+/// `--literal-pathspecs` stops such a name being read as a pattern, `--`
+/// separates it from options, and `core.fsmonitor=false` plus
+/// `GIT_TERMINAL_PROMPT=0` stop a repository's own config from starting a
+/// helper process or blocking this guard on a prompt.
+fn git_run(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<GitRun> {
+    let mut cmd = Command::new("git");
+    cmd.arg("--literal-pathspecs")
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(dir)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| ())?;
-    if !out.status.success() {
-        return Ok(None);
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_PAGER", "cat")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
+
+    let mut child = cmd.spawn().ok()?;
+    if let Some(data) = stdin {
+        // Fed from its own thread: git can fill its stdout pipe before it has
+        // consumed all of stdin, and a single-threaded write would deadlock.
+        // The handle is moved in, so it closes — signalling EOF — when the
+        // write finishes.
+        if let Some(mut sink) = child.stdin.take() {
+            let owned = data.to_vec();
+            std::thread::spawn(move || {
+                let _ = sink.write_all(&owned);
+            });
+        }
     }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    let out = child.wait_with_output().ok()?;
+    Some(GitRun {
+        code: out.status.code(),
+        stdout: out.stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
 }
 
 #[cfg(test)]

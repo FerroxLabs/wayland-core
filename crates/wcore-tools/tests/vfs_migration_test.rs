@@ -32,7 +32,9 @@ fn sandboxed_ctx(root: &std::path::Path) -> ToolContext {
 async fn write_through_ctx_vfs_succeeds_inside_sandbox() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let ctx = sandboxed_ctx(tmp.path());
-    let tool = WriteTool::new(None);
+    let tool = WriteTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     let target = tmp.path().join("hello.txt");
     let result = tool
@@ -56,7 +58,9 @@ async fn write_through_ctx_vfs_rejected_outside_sandbox() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let other = tempfile::tempdir().expect("other");
     let ctx = sandboxed_ctx(tmp.path());
-    let tool = WriteTool::new(None);
+    let tool = WriteTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
 
     let outside = other.path().join("escape.txt");
     let result = tool
@@ -148,7 +152,9 @@ async fn edit_through_ctx_vfs_inside_sandbox() {
     tokio::fs::write(&target, b"hello world").await.unwrap();
 
     let ctx = sandboxed_ctx(tmp.path());
-    let tool = EditTool::new(None);
+    let tool = EditTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let result = tool
         .execute_with_ctx(
             json!({
@@ -205,7 +211,9 @@ async fn write_with_notifier_marks_path_before_write() {
     let notifier = Arc::new(RecordingNotifier::default());
     let (ctx, n) = ctx_with_notifier(tmp.path(), notifier);
 
-    let tool = WriteTool::new(None);
+    let tool = WriteTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let target = tmp.path().join("notified.txt");
     let result = tool
         .execute_with_ctx(
@@ -234,7 +242,9 @@ async fn edit_with_notifier_marks_path_before_write() {
     let target = tmp.path().join("editme.txt");
     tokio::fs::write(&target, b"alpha beta").await.unwrap();
 
-    let tool = EditTool::new(None);
+    let tool = EditTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let result = tool
         .execute_with_ctx(
             json!({
@@ -264,7 +274,9 @@ async fn write_without_notifier_does_not_panic() {
     // test, but pins behaviour AFTER D.4 wiring.
     let tmp = tempfile::tempdir().expect("tempdir");
     let ctx = sandboxed_ctx(tmp.path());
-    let tool = WriteTool::new(None);
+    let tool = WriteTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let target = tmp.path().join("nonotify.txt");
     let result = tool
         .execute_with_ctx(
@@ -288,7 +300,9 @@ async fn write_failure_still_marks_before_attempt() {
     let notifier = Arc::new(RecordingNotifier::default());
     let (ctx, n) = ctx_with_notifier(tmp.path(), notifier);
 
-    let tool = WriteTool::new(None);
+    let tool = WriteTool::new(None).with_unsaved_guard(std::sync::Arc::new(
+        wcore_tools::unsaved_work::UnsavedWorkGuard::new_isolated(),
+    ));
     let outside = other.path().join("escape.txt");
     let result = tool
         .execute_with_ctx(

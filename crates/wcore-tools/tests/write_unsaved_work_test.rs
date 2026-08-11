@@ -10,8 +10,9 @@
 //! measured the guard causing (`/root/adv-armB`: a plain "rewrite notes.md as
 //! a runbook" was refused and the task was never accomplished).
 //!
-//! Every tool here is built with its own snapshot root: the shipped guard
-//! writes recovery copies under the real `~/.wayland`, which a test must not.
+//! Round 3 moves the recovery copy into the repository's own object store and
+//! makes every claim of recoverability an exercised one, so these tests
+//! recover the bytes with `git cat-file` rather than trusting a sentence.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,26 +46,19 @@ const UNSAVED_LINE: &str = "# JOBCORPUS-UNSAVED-USER-WORK in-progress edit, do n
 /// shares one guard across Write, Edit and every sub-agent.
 struct Ws {
     dir: TempDir,
-    /// Deliberately NOT inside `dir`: the shipped guard writes under the
-    /// profile home, and a test root inside the work tree would make the
-    /// "nothing lands in the user's repository" assertion vacuous.
-    _snaps: TempDir,
     guard: Arc<UnsavedWorkGuard>,
 }
 
 impl Ws {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let snaps = tempfile::tempdir().unwrap();
-        let snap_root = snaps.path().join("snapshot-root");
         git(dir.path(), &["init", "-q"]);
         git(dir.path(), &["config", "user.email", "user@example.com"]);
         git(dir.path(), &["config", "user.name", "user"]);
         git(dir.path(), &["config", "commit.gpgsign", "false"]);
         Self {
             dir,
-            _snaps: snaps,
-            guard: Arc::new(UnsavedWorkGuard::with_snapshot_root(snap_root)),
+            guard: Arc::new(UnsavedWorkGuard::new_isolated()),
         }
     }
 
@@ -97,16 +91,29 @@ fn workspace_with_unsaved_work() -> (Ws, PathBuf) {
     (ws, file)
 }
 
-/// The snapshot path a tool result names, so a test can prove the bytes are
-/// really there rather than trusting the sentence.
-fn snapshot_named_in(result: &str) -> PathBuf {
+/// Recover the bytes a tool result claims are recoverable, by running the
+/// result's own recovery command. A test that only matched the sentence would
+/// have passed against round 2's false snapshot claim.
+fn recovered(repo: &Path, result: &str) -> String {
+    let marker = "cat-file blob ";
     let start = result
-        .find("copied to ")
-        .unwrap_or_else(|| panic!("result names no snapshot: {result}"))
-        + "copied to ".len();
-    let rest = &result[start..];
-    let end = rest.find(" first,").expect("result terminates the path");
-    PathBuf::from(rest[..end].trim())
+        .find(marker)
+        .unwrap_or_else(|| panic!("result names no recovery object: {result}"))
+        + marker.len();
+    let oid = result[start..]
+        .split_whitespace()
+        .next()
+        .expect("result terminates the object id");
+    let out = Command::new("git")
+        .args(["cat-file", "blob", oid])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the result's own recovery command failed: {result}"
+    );
+    String::from_utf8(out.stdout).unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -312,9 +319,9 @@ async fn editing_out_the_line_a_write_refusal_named_preserves_it_elsewhere() {
         edited.content
     );
     assert_eq!(
-        std::fs::read_to_string(snapshot_named_in(&edited.content)).unwrap(),
+        recovered(ws.root(), &edited.content),
         before,
-        "the pre-edit bytes must be recoverable from the named snapshot"
+        "the pre-edit bytes must be recoverable by the command the result names"
     );
 }
 
@@ -331,7 +338,7 @@ async fn an_edit_that_leaves_unsaved_work_alone_says_nothing() {
         .await;
     assert!(!edited.is_error, "got: {}", edited.content);
     assert!(
-        !edited.content.contains("copied to"),
+        !edited.content.contains("Note:"),
         "no unsaved work moved, so there is nothing to report: {}",
         edited.content
     );
@@ -383,14 +390,14 @@ async fn rewriting_a_pre_existing_untracked_file_completes_and_is_recoverable() 
     );
     assert_eq!(ws.text("notes.md"), runbook, "the task must complete");
     assert_eq!(
-        std::fs::read_to_string(snapshot_named_in(&result.content)).unwrap(),
+        recovered(ws.root(), &result.content),
         notes,
-        "and the prior contents must still exist somewhere"
+        "and the prior contents must still be recoverable"
     );
 }
 
 #[tokio::test]
-async fn the_recovery_snapshot_is_not_written_into_the_users_repository() {
+async fn the_recovery_copy_is_not_written_into_the_users_work_tree() {
     let ws = Ws::new();
     let file = ws.put("notes.md", "user notes nobody committed\n");
     let result = ws
@@ -413,14 +420,35 @@ async fn the_recovery_snapshot_is_not_written_into_the_users_repository() {
     );
 }
 
-#[test]
-fn the_shipped_snapshot_root_is_under_the_profile_home_not_the_work_tree() {
-    let root = UnsavedWorkGuard::shared();
-    let root = root.snapshot_root();
-    assert!(
-        root.starts_with(wcore_config::config::profile_home()),
-        "snapshots must live in profile state, got {}",
-        root.display()
+/// The shipped guard must not create a recovery store of its own anywhere.
+///
+/// Round 2's did: `~/.wayland/unsaved-work/<start>-<pid>`, holding the prior
+/// bytes in clear, hardened by a `#[cfg(not(unix))]` no-op on Windows, and
+/// never garbage collected. Running the test suite alone left 6 session
+/// directories and 21 plaintext files on the build host.
+#[tokio::test]
+async fn the_shipped_guard_creates_no_store_of_its_own() {
+    let legacy = wcore_config::config::profile_home().join("unsaved-work");
+    let existed_before = legacy.exists();
+
+    let ws = Ws::new();
+    let file = ws.put("notes.md", "user notes nobody committed\n");
+    let tool = WriteTool::new(None).with_unsaved_guard(UnsavedWorkGuard::shared());
+    let result = tool
+        .execute(json!({"file_path": file.to_str().unwrap(), "content": "replaced\n"}))
+        .await;
+
+    assert!(!result.is_error, "got: {}", result.content);
+    assert_eq!(
+        recovered(ws.root(), &result.content),
+        "user notes nobody committed\n",
+        "the copy must live in the repository the file belongs to"
+    );
+    assert_eq!(
+        legacy.exists(),
+        existed_before,
+        "the guard must not create {}",
+        legacy.display()
     );
 }
 
@@ -448,24 +476,48 @@ async fn a_partial_drop_is_still_refused_even_when_most_of_the_file_goes() {
 // Outside git.
 // ---------------------------------------------------------------------------
 
+/// Narrower than round 2, deliberately.
+///
+/// Round 2 allowed this against a plaintext copy under `~/.wayland`, which is
+/// the store the adversarial seat broke. With no repository there is no object
+/// store, so there is nowhere to put a copy, and allowing the drop would mean
+/// claiming a recoverability that does not exist.
 #[tokio::test]
-async fn outside_a_git_repo_a_rewrite_completes_and_the_prior_bytes_survive() {
+async fn outside_a_git_repo_a_rewrite_that_drops_content_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("loose.txt");
     std::fs::write(&file, "whatever the user had\n").unwrap();
-    let tool = WriteTool::new(None).with_unsaved_guard(Arc::new(
-        UnsavedWorkGuard::with_snapshot_root(dir.path().join("snaps")),
-    ));
+    let tool = WriteTool::new(None).with_unsaved_guard(Arc::new(UnsavedWorkGuard::new_isolated()));
 
     let result = tool
         .execute(json!({"file_path": file.to_str().unwrap(), "content": "replaced\n"}))
         .await;
-    assert!(!result.is_error, "got: {}", result.content);
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "replaced\n");
-    // No git means no baseline means nothing here was ever recoverable. Round 1
-    // stood the guard down entirely; the copy is what makes that safe.
-    assert_eq!(
-        std::fs::read_to_string(snapshot_named_in(&result.content)).unwrap(),
-        "whatever the user had\n"
+    assert!(result.is_error, "got: {}", result.content);
+    assert!(
+        result.content.contains("in no repository"),
+        "got: {}",
+        result.content
     );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "whatever the user had\n",
+        "a refusal must leave the file exactly as it was"
+    );
+}
+
+/// ...and the same place stays fully usable for every write that does not drop
+/// anything, which is what keeps this from being round 1's over-refusal.
+#[tokio::test]
+async fn outside_a_git_repo_a_rewrite_that_keeps_the_content_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("loose.txt");
+    std::fs::write(&file, "whatever the user had\n").unwrap();
+    let tool = WriteTool::new(None).with_unsaved_guard(Arc::new(UnsavedWorkGuard::new_isolated()));
+
+    let kept = "whatever the user had\nplus a line the agent adds\n";
+    let result = tool
+        .execute(json!({"file_path": file.to_str().unwrap(), "content": kept}))
+        .await;
+    assert!(!result.is_error, "got: {}", result.content);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), kept);
 }
