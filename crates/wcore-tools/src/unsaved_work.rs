@@ -293,16 +293,14 @@ pub enum Verdict {
 
 /// Where this file's prior bytes may be copied.
 enum Store<'a> {
-    /// A repository that records the file's own directory, or that the file
-    /// sits at the root of. This is the file's archive.
-    Owned(&'a Path),
-    /// A repository encloses the file but is not its archive — it records
-    /// nothing under the file's directory (measured: a `$HOME` dotfiles
-    /// repository holding `~/work/env.local`), or its own configuration says
-    /// to ignore the file. Treated as no store at all. `why` completes the
-    /// sentence "that repository ...".
-    Foreign { root: &'a Path, why: String },
-    /// No repository, so no object store.
+    /// A store in which a copy is provably no more exposed than the file
+    /// itself. `objects` is the directory git named, not one assumed from
+    /// `root`.
+    Owned { root: &'a Path, objects: PathBuf },
+    /// No copy may be made. `why` is a full clause completing "and here it
+    /// cannot: ...".
+    Unproven { why: String },
+    /// No repository, so no object store to reason about at all.
     Absent,
 }
 
@@ -503,14 +501,14 @@ impl UnsavedWorkGuard {
         }
 
         match self.object_store(&baseline, path) {
-            Store::Owned(root) => match self.recoverable_copy(root, previous) {
+            Store::Owned { root, objects } => match self.recoverable_copy(root, previous) {
                 Ok(oid) => Verdict::ProceedWithNote(copy_note(
                     dropped_total,
                     mode,
                     root,
                     &oid,
                     wholesale,
-                    objects_dir(root),
+                    &objects,
                 )),
                 Err(why) => Verdict::Refuse(format!(
                     "Refused to overwrite {display_path}: it holds {dropped_total} line(s) that \
@@ -518,17 +516,14 @@ impl UnsavedWorkGuard {
                      recoverable could not be made ({why}). Nothing was changed."
                 )),
             },
-            // A repository encloses the file but is not its archive. Copying
-            // into it is the armD harm, so it is treated as no store at all.
-            Store::Foreign { root, why } => match mode {
-                Mode::Rewrite => Verdict::Refuse(foreign_store_refusal(
-                    display_path,
-                    dropped_total,
-                    root,
-                    &why,
-                )),
+            // The copy could not be proven no more exposed than the file, so
+            // it is not made. See [`UnsavedWorkGuard::object_store`].
+            Store::Unproven { why } => match mode {
+                Mode::Rewrite => {
+                    Verdict::Refuse(unproven_store_refusal(display_path, dropped_total, &why))
+                }
                 Mode::Surgical => {
-                    Verdict::ProceedWithNote(foreign_store_note(dropped_total, root, &why))
+                    Verdict::ProceedWithNote(unproven_store_note(dropped_total, &why))
                 }
             },
             // No repository, so no object store, so nowhere to put a copy.
@@ -797,56 +792,125 @@ impl UnsavedWorkGuard {
 
     /// Which object store, if any, may hold this file's prior bytes.
     ///
-    /// An enclosing repository qualifies only when it is plainly this file's
-    /// archive: the file is not one the repository is configured to ignore,
-    /// and the pinned commit records something under the file's own directory
-    /// (or the file sits at the repository root). See the module docs for the
-    /// measured armD shape and the ignored-secret shape this exists to refuse.
+    /// The rule, adopted in round 5 after placement had been broken three
+    /// different ways in three rounds: **copy only where the copy can be
+    /// proven no more exposed than the file itself; where it cannot be
+    /// proven, refuse and copy nothing.** A recovery copy is verbatim by
+    /// construction, so scrubbing it is not available and placement is the
+    /// only lever there is — and an always-safe location turned out not to
+    /// exist. Refusing is always safe: nothing is lost and no secret spreads.
+    /// So exposure is a precondition that gets checked here rather than a
+    /// property that was hoped for, and the linked-worktree, submodule,
+    /// gitignored and Windows-ACL cases are one rule instead of four
+    /// carve-outs.
+    ///
+    /// What has to hold:
+    ///
+    /// * the repository does not say to ignore the file — its own committed
+    ///   configuration saying this file does not belong in it;
+    /// * the pinned commit records something under the file's own directory,
+    ///   or the file sits at the repository root. Measured armD: `$HOME` is a
+    ///   dotfiles repository and `~/work/env.local` is not its business;
+    /// * the store git actually uses is **inside the work tree the file is
+    ///   in**. In a linked worktree the bytes land in the main repository, and
+    ///   in a submodule in `<super>/.git/modules/<name>/objects` — both
+    ///   outside the tree the user is working in;
+    /// * the copy is no wider-permissioned than the file. Measured: a `0600`
+    ///   file's bytes become a `0444` object under a `0755` directory.
     fn object_store<'a>(&self, baseline: &'a Baseline, path: &Path) -> Store<'a> {
         let Baseline::Repo { root, commit } = baseline else {
             return Store::Absent;
         };
         let root = root.as_path();
         let Some(rel) = repo_relative(root, path) else {
-            return Store::Foreign {
-                root,
-                why: "cannot place this file inside itself".to_owned(),
+            return Store::Unproven {
+                why: format!(
+                    "this file could not be placed inside the repository at {}",
+                    root.display()
+                ),
             };
         };
         // The user has already said, in this repository's own configuration,
-        // that this file does not belong in it. A recovery copy is verbatim by
-        // construction, so where it goes is the only lever there is.
+        // that this file does not belong in it.
         if self.repository_ignores(root, &rel) {
-            return Store::Foreign {
-                root,
-                why: "is configured to ignore this file".to_owned(),
+            return Store::Unproven {
+                why: format!(
+                    "the repository at {} is configured to ignore this file, so a copy is not \
+                     that repository's to hold",
+                    root.display()
+                ),
             };
         }
-        let Some((dir, _)) = rel.rsplit_once('/') else {
-            // At the repository root: unambiguously this repository's.
-            return Store::Owned(root);
-        };
-        let unrecorded = || Store::Foreign {
-            root,
-            why: format!("records nothing under {dir}"),
-        };
-        // With no commit nothing is recorded anywhere, so nothing records this
-        // subdirectory either.
-        let Some(commit) = commit else {
-            return unrecorded();
-        };
-        let pathspec = format!("{dir}/");
-        match git_run(
-            root,
-            &["ls-tree", "--full-tree", "-z", commit, "--", &pathspec],
-            None,
-        ) {
+        // armD: an enclosing repository is not necessarily this file's archive.
+        if let Some((dir, _)) = rel.rsplit_once('/') {
             // Non-empty output is the only proof the directory is recorded.
             // git failing to answer is not proof, and lands in the safe
             // direction: no copy goes anywhere.
-            Some(run) if run.ok() && !run.stdout.is_empty() => Store::Owned(root),
-            _ => unrecorded(),
+            let recorded = match commit {
+                None => false,
+                Some(commit) => matches!(
+                    git_run(
+                        root,
+                        &[
+                            "ls-tree",
+                            "--full-tree",
+                            "-z",
+                            commit,
+                            "--",
+                            &format!("{dir}/"),
+                        ],
+                        None,
+                    ),
+                    Some(run) if run.ok() && !run.stdout.is_empty()
+                ),
+            };
+            if !recorded {
+                return Store::Unproven {
+                    why: format!(
+                        "the repository at {} records nothing under {dir}, so it encloses this \
+                         file without being its archive",
+                        root.display()
+                    ),
+                };
+            }
         }
+        // Where git would actually put the object, asked of git.
+        let Some(objects) = objects_dir(root) else {
+            return Store::Unproven {
+                why: format!(
+                    "git would not name the object store of the repository at {}",
+                    root.display()
+                ),
+            };
+        };
+        // Topology. `--git-path objects` resolves to the *main* repository in
+        // a linked worktree and to `<super>/.git/modules/<name>` in a
+        // submodule, so a copy would leave the tree the user is working in.
+        match (std::fs::canonicalize(&objects), std::fs::canonicalize(root)) {
+            (Ok(obj), Ok(top)) if obj.starts_with(&top) => {}
+            (Ok(obj), Ok(_)) => {
+                return Store::Unproven {
+                    why: format!(
+                        "this work tree keeps its objects at {}, outside the tree this file is \
+                         in — a linked worktree and a submodule both file them into a different \
+                         repository",
+                        obj.display()
+                    ),
+                };
+            }
+            _ => {
+                return Store::Unproven {
+                    why: format!(
+                        "the object store at {} could not be resolved on disk",
+                        objects.display()
+                    ),
+                };
+            }
+        }
+        if let Err(why) = copy_no_wider_than_file(path, &objects) {
+            return Store::Unproven { why };
+        }
+        Store::Owned { root, objects }
     }
 
     /// Does this repository's configuration say to ignore `rel`?
@@ -1201,35 +1265,174 @@ fn unresolved_note(dropped_total: usize, why: &str) -> String {
     )
 }
 
-/// The armD refusal: a repository does enclose this file, but it is not this
-/// file's archive, so its prior bytes are not going into it and it is told
-/// before the write rather than after.
-fn foreign_store_refusal(
-    display_path: &str,
-    dropped_total: usize,
-    root: &Path,
-    why: &str,
-) -> String {
+/// The refusal for a copy that cannot be proven no more exposed than the file
+/// itself: an ignored file, a repository that is not this file's archive, a
+/// store outside this work tree, a copy wider-permissioned than the original,
+/// or a platform where none of that can be measured. One message, because it
+/// is one rule — see [`UnsavedWorkGuard::object_store`].
+fn unproven_store_refusal(display_path: &str, dropped_total: usize, why: &str) -> String {
     format!(
         "Refused to overwrite {display_path}: this content would delete {dropped_total} line(s) \
-         that are on disk and in no commit. The only object store that could hold a recovery \
-         copy is the git repository at {root}, and that repository {why} — it encloses this \
-         file but is not its archive, so filing this file's private contents into it would put \
-         them somewhere the user does not think of as holding them, and somewhere a later \
-         `git clone` of this path would carry them. Nothing was changed and nothing was copied. \
-         Carry those lines into the content you write, or have this file recorded somewhere \
-         that does track it.",
-        root = root.display(),
+         that are on disk and in no commit. A recovery copy is only made where it can be proven \
+         to be no more exposed than the file itself, and here it cannot: {why}. Nothing was \
+         changed and nothing was copied. Carry those lines into the content you write, or have \
+         this file recorded somewhere that tracks it."
     )
 }
 
-fn foreign_store_note(dropped_total: usize, root: &Path, why: &str) -> String {
+fn unproven_store_note(dropped_total: usize, why: &str) -> String {
     format!(
-        "\nNote: {dropped_total} line(s) that were on disk are not in the new content. The only \
-         repository enclosing this file is {root}, which {why}, so it is not this file's \
-         archive and no recovery copy was put there. Those lines are not recoverable.",
-        root = root.display(),
+        "\nNote: {dropped_total} line(s) that were on disk are not in the new content, and no \
+         recovery copy was made: one could not be proven to be no more exposed than the file \
+         itself ({why}). Those lines are not recoverable."
     )
+}
+
+/// One class of principal, for comparing how far a file's bytes reach.
+const OWNER: u32 = 0b100;
+const GROUP: u32 = 0b010;
+const OTHER: u32 = 0b001;
+
+/// Prove that a copy of `source` placed under `objects` is readable by no one
+/// who cannot already read `source`.
+///
+/// Two comparisons, both of them measured rather than assumed:
+///
+/// 1. **Mode.** git writes a loose object `0444` before the umask, so every
+///    class that can reach the store can read the copy. A `0600` file
+///    therefore fails: measured, its bytes become a `0444` object under a
+///    `0755` directory. Assuming a narrower object mode would mean assuming a
+///    umask this process cannot read without racing every other thread in it.
+/// 2. **Reach.** The search bits of every directory above the file, against
+///    the search bits of every directory above the store. A `0644` file in a
+///    `0700` directory is reachable only by its owner; `.git/objects` at
+///    `0755` is reachable by everyone, so that copy is wider.
+///
+/// Stated limits: this compares *classes*, not principals — the object is
+/// owned by this process and the file may be owned by someone else — and it
+/// does not model ACLs, MAC labels or capabilities. Both are in the refusing
+/// direction here, because the object's mode is taken at its widest.
+#[cfg(unix)]
+fn copy_no_wider_than_file(source: &Path, objects: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = std::fs::symlink_metadata(source)
+        .map_err(|e| format!("this file's own permissions could not be read ({e})"))?
+        .permissions()
+        .mode();
+    let file_read = read_classes(mode);
+    let wider = (OWNER | GROUP | OTHER) & !file_read;
+    if wider != 0 {
+        return Err(format!(
+            "this file is readable by {} (mode 0{:03o}), but a recovery copy is a 0444 object \
+             that {} could read as well",
+            describe_classes(file_read),
+            mode & 0o777,
+            describe_classes(wider),
+        ));
+    }
+    let file_reach = reachable_classes(source.parent().unwrap_or(source))?;
+    let store_reach = reachable_classes(objects)?;
+    let wider = store_reach & !file_reach;
+    if wider != 0 {
+        return Err(format!(
+            "this file sits where only {} can reach it, while the object store at {} is \
+             reachable by {} as well",
+            describe_classes(file_reach),
+            objects.display(),
+            describe_classes(wider),
+        ));
+    }
+    Ok(())
+}
+
+/// Windows has no comparison here that this module can make.
+///
+/// Measured on this project's own machine (git 2.54.0.windows.1): under
+/// `%USERPROFILE%`, where most Windows repositories live, `.git\objects`
+/// inherits `S-1-15-2-…:(I)(OI)(CI)(RX)` for both AppContainer package SIDs —
+/// the principals that confine agent subprocesses. The file may well inherit
+/// exactly the same ACEs, which would make the copy no more exposed; the point
+/// is that this code cannot demonstrate it, and a copy that cannot be bounded
+/// is not made. A real ACL comparison would lift this, and until one exists
+/// the platform costs refusals rather than copies.
+#[cfg(not(unix))]
+fn copy_no_wider_than_file(_source: &Path, objects: &Path) -> Result<(), String> {
+    Err(format!(
+        "on this platform the permissions of a copy in {} cannot be compared with this file's \
+         own, so the copy cannot be bounded",
+        objects.display()
+    ))
+}
+
+/// Which classes a mode lets read.
+#[cfg(unix)]
+fn read_classes(mode: u32) -> u32 {
+    let mut mask = 0;
+    if mode & 0o400 != 0 {
+        mask |= OWNER;
+    }
+    if mode & 0o040 != 0 {
+        mask |= GROUP;
+    }
+    if mode & 0o004 != 0 {
+        mask |= OTHER;
+    }
+    mask
+}
+
+/// Which classes a mode lets search a directory.
+#[cfg(unix)]
+fn search_classes(mode: u32) -> u32 {
+    let mut mask = 0;
+    if mode & 0o100 != 0 {
+        mask |= OWNER;
+    }
+    if mode & 0o010 != 0 {
+        mask |= GROUP;
+    }
+    if mode & 0o001 != 0 {
+        mask |= OTHER;
+    }
+    mask
+}
+
+/// Which classes can reach `dir` at all: the search bits of every directory
+/// from the filesystem root down, intersected.
+#[cfg(unix)]
+fn reachable_classes(dir: &Path) -> Result<u32, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let start = std::fs::canonicalize(dir)
+        .map_err(|e| format!("{} could not be resolved ({e})", dir.display()))?;
+    let mut mask = OWNER | GROUP | OTHER;
+    for ancestor in start.ancestors() {
+        let mode = std::fs::metadata(ancestor)
+            .map_err(|e| format!("{} could not be inspected ({e})", ancestor.display()))?
+            .permissions()
+            .mode();
+        mask &= search_classes(mode);
+        if mask == 0 {
+            break;
+        }
+    }
+    Ok(mask)
+}
+
+#[cfg(unix)]
+fn describe_classes(mask: u32) -> String {
+    let mut parts = Vec::new();
+    if mask & OWNER != 0 {
+        parts.push("its owner");
+    }
+    if mask & GROUP != 0 {
+        parts.push("its group");
+    }
+    if mask & OTHER != 0 {
+        parts.push("everyone else");
+    }
+    if parts.is_empty() {
+        return "nobody".to_owned();
+    }
+    parts.join(", ")
 }
 
 fn copy_note(
@@ -1238,7 +1441,7 @@ fn copy_note(
     root: &Path,
     oid: &str,
     wholesale: bool,
-    objects: Option<String>,
+    objects: &Path,
 ) -> String {
     let why = if wholesale && mode == Mode::Rewrite {
         " None of this file was in any commit, so the whole of it counted as unsaved work."
@@ -1247,8 +1450,10 @@ fn copy_note(
     };
     // Never `<root>/.git/objects`: in a linked worktree or a submodule `.git`
     // is a *file* and the store belongs to the main repository, so that path
-    // names a directory that does not exist. Measured on git 2.43.0.
-    let store = objects.unwrap_or_else(|| "this repository's own object store".to_owned());
+    // names a directory that does not exist. Measured on git 2.43.0. Those
+    // two topologies no longer reach here at all — a store outside this work
+    // tree is refused rather than used — but the path still comes from git.
+    let store = objects.display();
     format!(
         "\nNote: {dropped_total} line(s) that were on disk and in no commit are not in the new \
          content.{why} The previous contents were written to this repository's own object store \
@@ -1273,9 +1478,9 @@ fn copy_note(
 /// `<root>/.git/objects` is wrong whenever `.git` is a file: a linked worktree
 /// and a submodule both keep their objects in the main repository's store, and
 /// naming the worktree's own `.git` sends the user to a path that is not a
-/// directory. `None` when git will not answer — the note then says "this
-/// repository's own object store" rather than a path that might be a lie.
-fn objects_dir(root: &Path) -> Option<String> {
+/// directory. `None` when git will not answer, which is a refusal: a store that
+/// cannot be named cannot be bounded either.
+fn objects_dir(root: &Path) -> Option<PathBuf> {
     let run = git_run(
         root,
         &[
@@ -1290,7 +1495,7 @@ fn objects_dir(root: &Path) -> Option<String> {
         return None;
     }
     let text = run.stdout_text().trim().to_owned();
-    (!text.is_empty()).then_some(text)
+    (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
 /// One `git` invocation, with enough of its result kept to classify it.

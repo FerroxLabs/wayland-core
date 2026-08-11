@@ -1489,12 +1489,45 @@ fn hash_object(root: &Path, bytes: &str) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
-/// Bar 3. `<root>/.git/objects` is not where the objects are when the file is
-/// in a linked worktree: `.git` is a *file* there and the store belongs to the
-/// main repository. Round 4's first draft printed the path unconditionally, so
-/// the note named a directory that does not exist.
+/// Bar 3. The note names the store git named, and the copy is in it. Round
+/// 4's first draft printed `<root>/.git/objects` unconditionally, which is a
+/// path that does not exist whenever `.git` is a file.
 #[test]
 fn the_note_names_the_object_store_that_actually_holds_the_copy() {
+    let f = repo();
+    f.write("keep.txt", "keep\n");
+    git(&f.root, &["add", "keep.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+
+    let prior = "draft one\ndraft two\n";
+    let p = f.write("draft.md", prior);
+
+    let note = assert_noted(
+        f.guard()
+            .assess(&p, "draft.md", prior, "draft two\n", Mode::Rewrite),
+    );
+    let oid = oid_in(&note);
+
+    let claimed = objects_dir_in(&note);
+    assert!(
+        Path::new(&claimed).is_dir(),
+        "the note names {claimed}, which is not a directory"
+    );
+    let loose = Path::new(&claimed).join(&oid[..2]).join(&oid[2..]);
+    let packed = Path::new(&claimed).join("pack");
+    assert!(
+        loose.exists() || packed.exists(),
+        "the note names {claimed}, and the copy is not in it"
+    );
+}
+
+/// And in a linked worktree there is no such store to name: `--git-path
+/// objects` resolves into the **main** repository, so a copy would leave the
+/// tree the user is working in entirely. Round 4 made that copy and told the
+/// user about it; round 5 refuses instead, because a copy whose exposure is
+/// not this tree's cannot be bounded from here.
+#[test]
+fn a_linked_worktree_refuses_rather_than_copying_into_the_main_repository() {
     let f = repo();
     f.write("keep.txt", "keep\n");
     git(&f.root, &["add", "keep.txt"]);
@@ -1514,30 +1547,21 @@ fn the_note_names_the_object_store_that_actually_holds_the_copy() {
          arm is testing an ordinary clone"
     );
 
-    let prior = "draft one\ndraft two\n";
+    let prior = "TOKEN=CANARY-WORKTREE-4242\ndraft two\n";
     let p = wt.join("draft.md");
     std::fs::write(&p, prior).unwrap();
 
-    let note = assert_noted(
+    let message = assert_refused(
         f.guard()
             .assess(&p, "draft.md", prior, "draft two\n", Mode::Rewrite),
     );
-    let oid = oid_in(&note);
-
-    let claimed = objects_dir_in(&note);
     assert!(
-        Path::new(&claimed).is_dir(),
-        "the note names {claimed}, which is not a directory"
-    );
-    let loose = Path::new(&claimed).join(&oid[..2]).join(&oid[2..]);
-    let packed = Path::new(&claimed).join("pack");
-    assert!(
-        loose.exists() || packed.exists(),
-        "the note names {claimed}, and the copy is not in it"
+        message.contains("outside the tree this file is in"),
+        "the refusal must name the reason: {message}"
     );
     assert!(
-        !note.contains(&format!("{}/.git/objects", wt.display())),
-        "the note still names the worktree's own .git, which is a file: {note}"
+        !object_store_contains(&f.root, "CANARY-WORKTREE-4242"),
+        "the bytes were filed into the main repository anyway"
     );
 }
 
