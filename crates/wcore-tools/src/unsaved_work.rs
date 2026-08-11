@@ -449,9 +449,14 @@ impl UnsavedWorkGuard {
 
         match self.object_store(&baseline, path) {
             Store::Owned(root) => match self.recoverable_copy(root, previous) {
-                Ok(oid) => {
-                    Verdict::ProceedWithNote(copy_note(dropped_total, mode, root, &oid, wholesale))
-                }
+                Ok(oid) => Verdict::ProceedWithNote(copy_note(
+                    dropped_total,
+                    mode,
+                    root,
+                    &oid,
+                    wholesale,
+                    objects_dir(root),
+                )),
                 Err(why) => Verdict::Refuse(format!(
                     "Refused to overwrite {display_path}: it holds {dropped_total} line(s) that \
                      are on disk and in no commit, and the copy that would make replacing them \
@@ -990,12 +995,23 @@ fn foreign_store_note(dropped_total: usize, root: &Path, dir: &str) -> String {
     )
 }
 
-fn copy_note(dropped_total: usize, mode: Mode, root: &Path, oid: &str, wholesale: bool) -> String {
+fn copy_note(
+    dropped_total: usize,
+    mode: Mode,
+    root: &Path,
+    oid: &str,
+    wholesale: bool,
+    objects: Option<String>,
+) -> String {
     let why = if wholesale && mode == Mode::Rewrite {
         " None of this file was in any commit, so the whole of it counted as unsaved work."
     } else {
         ""
     };
+    // Never `<root>/.git/objects`: in a linked worktree or a submodule `.git`
+    // is a *file* and the store belongs to the main repository, so that path
+    // names a directory that does not exist. Measured on git 2.43.0.
+    let store = objects.unwrap_or_else(|| "this repository's own object store".to_owned());
     format!(
         "\nNote: {dropped_total} line(s) that were on disk and in no commit are not in the new \
          content.{why} The previous contents were written to this repository's own object store \
@@ -1005,13 +1021,39 @@ fn copy_note(dropped_total: usize, mode: Mode, root: &Path, oid: &str, wholesale
          remove it — it moves it into a cruft pack and it stays readable. Disposing of it takes \
          `git -C {root} gc --prune=now`; an ordinary gc only prunes it once gc.pruneExpire (two \
          weeks by default) has passed, and `git gc --auto` will not fire for one object at all.\n\
-         Until then these bytes live in {root}/.git/objects, and they are in no commit, so that \
+         Until then these bytes live in {store}, and they are in no commit, so that \
          is the only place they exist — whether this file is gitignored, merely untracked, or \
          tracked and wholly rewritten. They travel with a filesystem copy of the repository \
          (cp -a, tar, rsync) and with `git clone` of this local path, and `git fsck --lost-found` \
          writes them out as a plaintext file; `git push` and `git bundle` do not carry them.",
         root = root.display(),
     )
+}
+
+/// Where this repository actually keeps its objects, asked of git rather than
+/// assumed from `root`.
+///
+/// `<root>/.git/objects` is wrong whenever `.git` is a file: a linked worktree
+/// and a submodule both keep their objects in the main repository's store, and
+/// naming the worktree's own `.git` sends the user to a path that is not a
+/// directory. `None` when git will not answer — the note then says "this
+/// repository's own object store" rather than a path that might be a lie.
+fn objects_dir(root: &Path) -> Option<String> {
+    let run = git_run(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ],
+        None,
+    )?;
+    if !run.ok() {
+        return None;
+    }
+    let text = run.stdout_text().trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// One `git` invocation, with enough of its result kept to classify it.

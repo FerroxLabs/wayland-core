@@ -1224,3 +1224,305 @@ fn a_subdirectory_the_repository_records_is_still_its_store() {
         );
     assert_eq!(f.recover(&note), prior);
 }
+
+// ---- round 4: every sentence in the note, measured against git -------------
+
+/// Bar 3. The note makes six checkable claims about where the recovery object
+/// goes and what carries it. Round 3 shipped a disposal sentence that was
+/// simply false, and the way that got through was that nothing ever executed
+/// it. Each claim here is exercised against real git, and the two negative
+/// claims (`git push`, `git bundle`) are what stop the arm being the vacuous
+/// "everything carries everything".
+#[test]
+fn every_travel_claim_the_note_makes_is_executed_against_git() {
+    let f = repo();
+    f.write("keep.txt", "keep\n");
+    git(&f.root, &["add", "keep.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    const CANARY: &str = "STRIPE_SECRET=sk_live_INV2R4CANARY";
+    let prior = format!("{CANARY}\nsecond line\n");
+    let p = f.write("notes.md", &prior);
+
+    let note =
+        assert_noted(
+            f.guard()
+                .assess(&p, "notes.md", &prior, "second line\n", Mode::Rewrite),
+        );
+    let oid = oid_in(&note);
+
+    let out = TempDir::new().unwrap();
+    let out = std::fs::canonicalize(out.path()).unwrap();
+
+    // The note says the bytes travel with a filesystem copy.
+    let cp = out.join("cp");
+    let st = Command::new("cp")
+        .args(["-a", f.root.to_str().unwrap(), cp.to_str().unwrap()])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    assert!(readable_in(&cp, &oid), "cp -a did not carry the copy");
+
+    let tarball = out.join("t.tar");
+    let untar = out.join("untar");
+    std::fs::create_dir_all(&untar).unwrap();
+    assert!(
+        Command::new("tar")
+            .args(["cf", tarball.to_str().unwrap(), "-C"])
+            .arg(f.root.parent().unwrap())
+            .arg(f.root.file_name().unwrap())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("tar")
+            .args([
+                "xf",
+                tarball.to_str().unwrap(),
+                "-C",
+                untar.to_str().unwrap()
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let untarred = untar.join(f.root.file_name().unwrap());
+    assert!(readable_in(&untarred, &oid), "tar did not carry the copy");
+
+    // And with `git clone` of the local path — the channel that matters most,
+    // because a clone is the one copy a user believes is filtered.
+    let cloned = out.join("clone");
+    assert!(
+        Command::new("git")
+            .args(["clone", "-q"])
+            .arg(&f.root)
+            .arg(&cloned)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        readable_in(&cloned, &oid),
+        "git clone of the local path did not carry the copy"
+    );
+
+    // `git fsck --lost-found` writes it out as plaintext, which is how it
+    // stops being a thing only git can read.
+    assert!(
+        Command::new("git")
+            .args(["fsck", "--lost-found", "--no-progress"])
+            .current_dir(&f.root)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let found = f.root.join(".git/lost-found/other").join(&oid);
+    let plaintext = std::fs::read_to_string(&found)
+        .unwrap_or_else(|e| panic!("lost-found did not materialise {}: {e}", found.display()));
+    assert!(
+        plaintext.contains(CANARY),
+        "the note claims fsck writes plaintext; it wrote {plaintext:?}"
+    );
+    std::fs::remove_dir_all(f.root.join(".git/lost-found")).unwrap();
+
+    // The negative half. Without these two the arm proves nothing: a test that
+    // only ever expects "yes" cannot fail for the right reason.
+    let bare = out.join("remote.git");
+    assert!(
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["push", "-q"])
+            .arg(&bare)
+            .arg("--all")
+            .current_dir(&f.root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        !readable_in(&bare, &oid),
+        "the note says push does not carry the copy, and it did"
+    );
+
+    let bundle = out.join("all.bundle");
+    assert!(
+        Command::new("git")
+            .args(["bundle", "create", "-q"])
+            .arg(&bundle)
+            .arg("--all")
+            .current_dir(&f.root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let from_bundle = out.join("from-bundle");
+    assert!(
+        Command::new("git")
+            .args(["clone", "-q"])
+            .arg(&bundle)
+            .arg(&from_bundle)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        !readable_in(&from_bundle, &oid),
+        "the note says a bundle does not carry the copy, and it did"
+    );
+}
+
+/// The other measured half of the disposal sentence: an *ordinary* gc does
+/// dispose of the copy once `gc.pruneExpire` has passed. Backdating the loose
+/// object is the only way to observe the two-week default inside a test, and
+/// without this arm the note's "two weeks" is an unexecuted claim.
+#[test]
+fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
+    let f = repo();
+    f.write("keep.txt", "keep\n");
+    git(&f.root, &["add", "keep.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let prior = "one\ntwo\n";
+    let p = f.write("notes.md", prior);
+    let note = assert_noted(
+        f.guard()
+            .assess(&p, "notes.md", prior, "two\n", Mode::Rewrite),
+    );
+    let oid = oid_in(&note);
+
+    let loose = f
+        .root
+        .join(format!(".git/objects/{}/{}", &oid[..2], &oid[2..]));
+    assert!(loose.exists(), "the copy is not a loose object: {loose:?}");
+
+    // The control travels in the same gc run: an object of identical shape
+    // whose only difference is its age. Without it, "gc removed it" would not
+    // distinguish the prune window from gc removing unreferenced objects
+    // outright — which is exactly what round 3 believed.
+    let fresh = hash_object(&f.root, "a fresh unreferenced object\n");
+    assert_ne!(fresh, oid);
+
+    assert!(
+        Command::new("touch")
+            .args(["-d", "3 weeks ago"])
+            .arg(&loose)
+            .status()
+            .unwrap()
+            .success()
+    );
+    git(&f.root, &["gc", "-q"]);
+    assert!(
+        f.blob_readable(&fresh),
+        "control failed: gc removed a fresh unreferenced object too, so this \
+         arm does not measure the prune window at all"
+    );
+    assert!(
+        !f.blob_readable(&oid),
+        "an ordinary gc did not prune a three-week-old copy, so the note's \
+         two-week window is wrong"
+    );
+}
+
+/// `git hash-object -w --stdin`, the way the guard itself makes the copy.
+fn hash_object(root: &Path, bytes: &str) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(bytes.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// Bar 3. `<root>/.git/objects` is not where the objects are when the file is
+/// in a linked worktree: `.git` is a *file* there and the store belongs to the
+/// main repository. Round 4's first draft printed the path unconditionally, so
+/// the note named a directory that does not exist.
+#[test]
+fn the_note_names_the_object_store_that_actually_holds_the_copy() {
+    let f = repo();
+    f.write("keep.txt", "keep\n");
+    git(&f.root, &["add", "keep.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+
+    let elsewhere = TempDir::new().unwrap();
+    let wt = std::fs::canonicalize(elsewhere.path())
+        .unwrap()
+        .join("linked-worktree");
+    git(
+        &f.root,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "wtb"],
+    );
+    assert!(
+        wt.join(".git").is_file(),
+        "positive control: a linked worktree's .git must be a file, or this \
+         arm is testing an ordinary clone"
+    );
+
+    let prior = "draft one\ndraft two\n";
+    let p = wt.join("draft.md");
+    std::fs::write(&p, prior).unwrap();
+
+    let note = assert_noted(
+        f.guard()
+            .assess(&p, "draft.md", prior, "draft two\n", Mode::Rewrite),
+    );
+    let oid = oid_in(&note);
+
+    let claimed = objects_dir_in(&note);
+    assert!(
+        Path::new(&claimed).is_dir(),
+        "the note names {claimed}, which is not a directory"
+    );
+    let loose = Path::new(&claimed).join(&oid[..2]).join(&oid[2..]);
+    let packed = Path::new(&claimed).join("pack");
+    assert!(
+        loose.exists() || packed.exists(),
+        "the note names {claimed}, and the copy is not in it"
+    );
+    assert!(
+        !note.contains(&format!("{}/.git/objects", wt.display())),
+        "the note still names the worktree's own .git, which is a file: {note}"
+    );
+}
+
+/// The directory the note tells the user their bytes are sitting in.
+fn objects_dir_in(note: &str) -> String {
+    let marker = "these bytes live in ";
+    let start = note.find(marker).expect("the note names an object store") + marker.len();
+    note[start..]
+        .split_whitespace()
+        .next()
+        .expect("the object store path is terminated")
+        .trim_end_matches(',')
+        .to_owned()
+}
+
+fn readable_in(root: &Path, oid: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "blob", oid])
+        .current_dir(root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
