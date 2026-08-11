@@ -1,0 +1,667 @@
+//! INV-2 round 5 — the round-4 adversarial probes, inverted.
+//!
+//! Every arm here was first run against round 4 in the shape that *asserted
+//! the defect*, and every one of them passed there. What is asserted now is
+//! the fixed behaviour, so a failure here is a regression to a measured harm
+//! rather than a hypothetical one. Each arm drives the REAL WriteTool /
+//! EditTool through `Tool::execute`.
+//!
+//! Deliberately no `std::env` mutation in this binary: the arms that need a
+//! process-global git variable live in `unsaved_work_git_env_test`, which is
+//! one test in its own binary for that reason.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+
+use serde_json::json;
+use tempfile::TempDir;
+use wcore_tools::Tool;
+use wcore_tools::unsaved_work::UnsavedWorkGuard;
+use wcore_tools::write::WriteTool;
+
+fn git(dir: &Path, args: &[&str]) {
+    let st = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(st.success(), "git {args:?} failed in {}", dir.display());
+}
+
+fn init(dir: &Path) {
+    git(dir, &["init", "-q"]);
+    git(dir, &["config", "user.email", "u@e.com"]);
+    git(dir, &["config", "user.name", "u"]);
+    git(dir, &["config", "commit.gpgsign", "false"]);
+}
+
+/// Is `needle` anywhere in this repository's object database? Exhaustive, so
+/// a copy cannot be missed by looking in the wrong place.
+fn object_store_contains(root: &Path, needle: &str) -> bool {
+    let out = Command::new("git")
+        .args(["cat-file", "--batch-all-objects", "--batch"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(needle)
+}
+
+/// Every object id in this repository's database.
+fn object_ids(root: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args([
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let mut ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    ids.sort();
+    ids
+}
+
+struct Ws {
+    dir: TempDir,
+    guard: Arc<UnsavedWorkGuard>,
+}
+impl Ws {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path());
+        Self {
+            dir,
+            guard: Arc::new(UnsavedWorkGuard::new_isolated()),
+        }
+    }
+    fn root(&self) -> PathBuf {
+        dunce::canonicalize(self.dir.path()).unwrap()
+    }
+    fn writer(&self) -> WriteTool {
+        WriteTool::new(None).with_unsaved_guard(self.guard.clone())
+    }
+}
+
+async fn write_via_tool(ws: &Ws, file: &Path, body: &str) -> (bool, String) {
+    let r = ws
+        .writer()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(), "content": body
+        }))
+        .await;
+    (r.is_error, r.content)
+}
+
+// ===========================================================================
+// ADV-1  core.bare on a real work tree: git succeeds and answers "false".
+//        Round 4 routed that to NoRepo and told the user the file was in no
+//        repository, about a repository whose HEAD records the file.
+// ===========================================================================
+#[tokio::test]
+async fn a_work_tree_git_calls_bare_is_not_reported_as_no_repository() {
+    let ws = Ws::new();
+    let root = ws.root();
+    let file = root.join("parser.py");
+    std::fs::write(&file, "def parse(t):\n    return t\n").unwrap();
+    git(&root, &["add", "parser.py"]);
+    git(&root, &["commit", "-qm", "init"]);
+    std::fs::write(&file, "def parse(t):\n    return t\n# USER-UNSAVED-LINE\n").unwrap();
+    git(&root, &["config", "core.bare", "true"]);
+
+    let (err, msg) = write_via_tool(&ws, &file, "def parse(t):\n    return t.strip()\n").await;
+    assert!(err, "still fail-closed: {msg}");
+
+    // The repository really does record this file, so "in no repository" is
+    // a false statement about it and a remedy that would not have helped.
+    let out = Command::new("git")
+        .args(["ls-tree", "--full-tree", "HEAD", "--", "parser.py"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !out.stdout.is_empty(),
+        "control: the commit must really record parser.py"
+    );
+    assert!(
+        !msg.contains("in no repository"),
+        "the refusal still calls a real repository no repository: {msg}"
+    );
+    assert!(
+        msg.contains("no work tree") && msg.contains("could not be established"),
+        "the refusal must name what git actually said: {msg}"
+    );
+}
+
+// ===========================================================================
+// ADV-2b  The ignored-file rule used to be decided by the mutable index, so
+//         one `git add -f` filed a gitignored secret into .git/objects.
+// ===========================================================================
+#[tokio::test]
+async fn one_git_add_f_cannot_file_a_gitignored_secret_into_the_repository() {
+    async fn arm(add_f: bool) -> (bool, String, PathBuf, Ws, bool) {
+        let ws = Ws::new();
+        let root = ws.root();
+        std::fs::write(root.join(".gitignore"), ".env\n").unwrap();
+        git(&root, &["add", ".gitignore"]);
+        git(&root, &["commit", "-qm", "init"]);
+        let file = root.join(".env");
+        std::fs::write(&file, "STRIPE=ADVCANARY-INDEX-9911\n").unwrap();
+        if add_f {
+            // `git add -f` writes the blob itself, so the object store cannot
+            // be the measure here — what must not change is what the GUARD
+            // adds to it.
+            git(&root, &["add", "-f", ".env"]);
+        }
+        let before = object_ids(&root);
+        let (err, msg) = write_via_tool(&ws, &file, "STRIPE=rotated\n").await;
+        let unchanged = object_ids(&root) == before;
+        (err, msg, root, ws, unchanged)
+    }
+
+    let (e0, m0, r0, _k0, still0) = arm(false).await;
+    assert!(e0, "control: a gitignored file must be refused: {m0}");
+    assert!(m0.contains("configured to ignore this file"), "{m0}");
+    assert!(!object_store_contains(&r0, "ADVCANARY-INDEX-9911"), "{m0}");
+    assert!(still0, "the guard added an object anyway");
+
+    let (e1, m1, r1, _k1, still1) = arm(true).await;
+    assert!(
+        e1 && m1.contains("configured to ignore this file"),
+        "`git add -f` disarmed the ignored-file rule again: {m1}"
+    );
+    assert!(
+        still1,
+        "the guard filed the gitignored secret into .git/objects: {m1}"
+    );
+    assert!(!m1.contains("cat-file blob"), "a copy was claimed: {m1}");
+    // Positive control: the index really was changed, so the arm is not
+    // vacuous — it is the *decision* that stopped depending on it.
+    let staged = Command::new("git")
+        .args(["ls-files", "--", ".env"])
+        .current_dir(&r1)
+        .output()
+        .unwrap();
+    assert!(
+        !staged.stdout.is_empty(),
+        "control: `git add -f` must really have staged the file"
+    );
+}
+
+// ===========================================================================
+// ADV-3  The partial refusal must not assert things about the file that are
+//        not true: that the rest of it is committed, or whose work it is.
+// ===========================================================================
+#[tokio::test]
+async fn the_partial_refusal_claims_nothing_about_the_lines_it_keeps() {
+    let ws = Ws::new();
+    let root = ws.root();
+    let file = root.join("notes.md");
+    std::fs::write(&file, "committed A\ncommitted B\n").unwrap();
+    git(&root, &["add", "notes.md"]);
+    git(&root, &["commit", "-qm", "init"]);
+    // TWO unsaved lines; the rewrite keeps one and drops the other, so "the
+    // rest of this file IS committed" is false of the kept one.
+    std::fs::write(
+        &file,
+        "committed A\ncommitted B\nunsaved KEPT\nunsaved DROPPED\n",
+    )
+    .unwrap();
+
+    let (err, msg) = write_via_tool(&ws, &file, "committed A\ncommitted B\nunsaved KEPT\n").await;
+    assert!(err, "{msg}");
+    assert!(msg.contains("unsaved DROPPED"), "{msg}");
+    assert!(
+        !msg.contains("The rest of this file IS committed"),
+        "the refusal still claims the kept lines are committed: {msg}"
+    );
+    assert!(
+        !msg.contains("their in-progress work"),
+        "the refusal still attributes the lines to the user: {msg}"
+    );
+}
+
+// ===========================================================================
+// ADV-4  Cry-wolf cost. `cargo fmt` runs on `just push`, so a formatter
+//        between two agent writes is routine. Round 4 expired attribution on
+//        byte inequality, so the agent's own next rewrite of its own file was
+//        hard refused and the message called those lines the user's.
+// ===========================================================================
+#[tokio::test]
+async fn a_formatter_between_two_agent_writes_does_not_refuse_the_agents_own_rewrite() {
+    let ws = Ws::new();
+    let root = ws.root();
+    let file = root.join("mod.py");
+    std::fs::write(&file, "import os\n").unwrap();
+    git(&root, &["add", "mod.py"]);
+    git(&root, &["commit", "-qm", "init"]);
+
+    let (e1, m1) = write_via_tool(
+        &ws,
+        &file,
+        "import os\ndef a():\n    return 1\ndef b():\n    return 2\n",
+    )
+    .await;
+    assert!(!e1, "first write must succeed: {m1}");
+
+    // A formatter reflows it. Every line of content is the agent's; only
+    // whitespace moved.
+    std::fs::write(
+        &file,
+        "import os\n\n\ndef a():\n    return 1\n\n\ndef b():\n    return 2\n",
+    )
+    .unwrap();
+
+    let (e2, m2) = write_via_tool(&ws, &file, "import os\ndef a():\n    return 1\n").await;
+    assert!(
+        !e2,
+        "the agent's own second write is refused after a reformat: {m2}"
+    );
+
+    // Control, so this is not a blanket disarm: a real content change by the
+    // user does still expire attribution, and the same drop is then refused.
+    let ws2 = Ws::new();
+    let root2 = ws2.root();
+    let file2 = root2.join("mod.py");
+    std::fs::write(&file2, "import os\n").unwrap();
+    git(&root2, &["add", "mod.py"]);
+    git(&root2, &["commit", "-qm", "init"]);
+    let (e3, m3) = write_via_tool(
+        &ws2,
+        &file2,
+        "import os\ndef a():\n    return 1\ndef b():\n    return 2\n",
+    )
+    .await;
+    assert!(!e3, "{m3}");
+    std::fs::write(
+        &file2,
+        "import os\ndef a():\n    return 1\ndef b():\n    return 2\n# USER WIP\n",
+    )
+    .unwrap();
+    let (e4, m4) = write_via_tool(
+        &ws2,
+        &file2,
+        "import os\ndef a():\n    return 1\n# USER WIP\n",
+    )
+    .await;
+    assert!(
+        e4 && m4.contains("def b():"),
+        "control: a user edit must still expire attribution: {m4}"
+    );
+}
+
+// ===========================================================================
+// ADV-5  A 0600 file's bytes must not become a 0444 object under a 0755
+//        directory. The copy is only made where it is provably no wider.
+// ===========================================================================
+#[cfg(unix)]
+#[tokio::test]
+async fn a_private_file_is_refused_rather_than_copied_into_a_wider_object() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let ws = Ws::new();
+    let root = ws.root();
+    std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+    git(&root, &["add", "keep.txt"]);
+    git(&root, &["commit", "-qm", "init"]);
+
+    let file = root.join("credentials");
+    let prior = "aws_secret_access_key = ADVCANARY0987654321\n";
+    std::fs::write(&file, prior).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (err, msg) = write_via_tool(&ws, &file, "aws_secret_access_key = ROTATED\n").await;
+    assert!(err, "a 0600 file's bytes were copied anyway: {msg}");
+    assert!(msg.contains("0444 object"), "{msg}");
+    assert!(
+        !object_store_contains(&root, "ADVCANARY0987654321"),
+        "the secret is in the object store: {msg}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        prior,
+        "a refusal must leave the file exactly as it was"
+    );
+    // Control: the same file, world-readable, IS copied — so this arm is
+    // measuring the permission comparison and not some other refusal.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (err2, msg2) = write_via_tool(&ws, &file, "aws_secret_access_key = ROTATED\n").await;
+    assert!(!err2, "control: a 0644 file must still be copied: {msg2}");
+    assert!(msg2.contains("cat-file blob"), "{msg2}");
+}
+
+// ===========================================================================
+// ADV-6  A linked worktree keeps its objects in the MAIN repository, so a
+//        copy would leave the tree the user is working in.
+// ===========================================================================
+#[tokio::test]
+async fn a_linked_worktree_refuses_rather_than_copying_out_of_the_tree() {
+    let outer = tempfile::tempdir().unwrap();
+    let main = dunce::canonicalize(outer.path()).unwrap().join("main");
+    std::fs::create_dir(&main).unwrap();
+    init(&main);
+    std::fs::write(main.join("keep.txt"), "keep\n").unwrap();
+    git(&main, &["add", "keep.txt"]);
+    git(&main, &["commit", "-qm", "init"]);
+    let wt = dunce::canonicalize(outer.path()).unwrap().join("wt");
+    git(
+        &main,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "b2"],
+    );
+    assert!(
+        !wt.join(".git").is_dir(),
+        "control: in a linked worktree .git is a FILE"
+    );
+
+    let guard = Arc::new(UnsavedWorkGuard::new_isolated());
+    let file = wt.join("private.env");
+    let prior = "TOKEN=ADVCANARY-WORKTREE-1234\n";
+    std::fs::write(&file, prior).unwrap();
+
+    let r = WriteTool::new(None)
+        .with_unsaved_guard(guard)
+        .execute(json!({
+            "file_path": file.to_str().unwrap(), "content": "TOKEN=rotated\n"
+        }))
+        .await;
+    assert!(r.is_error, "the copy left this work tree: {}", r.content);
+    assert!(
+        r.content.contains("outside the tree this file is in"),
+        "{}",
+        r.content
+    );
+    assert!(
+        !object_store_contains(&main, "ADVCANARY-WORKTREE-1234"),
+        "the bytes were filed into the main repository"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), prior);
+}
+
+// ===========================================================================
+// The submodule half of the same topology: `--git-path objects` resolves to
+// <super>/.git/modules/<name>/objects, outside the repository the user is in.
+// ===========================================================================
+#[tokio::test]
+async fn a_submodule_refuses_rather_than_filing_into_the_superproject() {
+    let outer = tempfile::tempdir().unwrap();
+    let base = dunce::canonicalize(outer.path()).unwrap();
+    let sub = base.join("sub");
+    let sup = base.join("super");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::create_dir(&sup).unwrap();
+    for d in [&sub, &sup] {
+        init(d);
+        std::fs::write(d.join("keep.txt"), "keep\n").unwrap();
+        git(d, &["add", "keep.txt"]);
+        git(d, &["commit", "-qm", "init"]);
+    }
+    git(
+        &sup,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git(&sup, &["commit", "-qm", "add submodule"]);
+    let inner = sup.join("sub");
+    assert!(
+        inner.join(".git").is_file(),
+        "control: a submodule's .git is a FILE pointing into the superproject"
+    );
+
+    let guard = Arc::new(UnsavedWorkGuard::new_isolated());
+    let file = inner.join("draft.env");
+    let prior = "TOKEN=ADVCANARY-SUBMODULE-7788\n";
+    std::fs::write(&file, prior).unwrap();
+
+    let r = WriteTool::new(None)
+        .with_unsaved_guard(guard)
+        .execute(json!({
+            "file_path": file.to_str().unwrap(), "content": "TOKEN=rotated\n"
+        }))
+        .await;
+    assert!(r.is_error, "the copy left the submodule: {}", r.content);
+    assert!(
+        !object_store_contains(&sup, "ADVCANARY-SUBMODULE-7788"),
+        "the bytes were filed into the superproject"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), prior);
+}
+
+// ===========================================================================
+// ADV-7  A save that lands inside the assessment window. 12/12 interleavings
+//        used to destroy it uncopied while the note claimed otherwise.
+// ===========================================================================
+#[tokio::test]
+async fn a_save_during_the_assessment_window_is_not_lost() {
+    let (lost, attempts, window) = interleave(true).await;
+    println!("[ADV-7] window {window:?}; {lost}/{attempts} saves destroyed");
+    assert_eq!(
+        lost, 0,
+        "a save that arrived during the assessment was destroyed uncopied"
+    );
+}
+
+/// The control. Without it the arm above would score the same on a harness
+/// whose canary never lands at all.
+#[tokio::test]
+async fn a_save_before_the_write_is_protected() {
+    let (lost, attempts, _) = interleave(false).await;
+    assert_eq!(
+        lost, 0,
+        "control is dirty, so the arm above measures the harness not the product"
+    );
+    assert_eq!(attempts, 12);
+}
+
+/// `during` = the user's editor saves inside the assessment window; otherwise
+/// it saves before the tool is called at all. Returns (lost, attempts, window).
+async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
+    // Measure the window on a throwaway repository first.
+    let warm = Ws::new();
+    let wroot = warm.root();
+    let wfile = wroot.join("draft.md");
+    std::fs::write(&wfile, "line one\nline two\n").unwrap();
+    let t0 = std::time::Instant::now();
+    let _ = write_via_tool(&warm, &wfile, "line one\nline two\nline three\n").await;
+    let window = t0.elapsed();
+
+    let attempts = 12;
+    let mut lost = 0;
+    for i in 0..attempts {
+        let ws = Ws::new();
+        let root = ws.root();
+        std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        git(&root, &["add", "keep.txt"]);
+        git(&root, &["commit", "-qm", "init"]);
+        let file = root.join("draft.md");
+        let canary = format!("USER-SAVE-{i}");
+        std::fs::write(&file, "draft body\n").unwrap();
+
+        let saver = if during {
+            let f2 = file.clone();
+            let c2 = canary.clone();
+            let delay = window / 3;
+            Some(std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                std::fs::write(&f2, format!("draft body\n{c2}\n")).unwrap();
+            }))
+        } else {
+            std::fs::write(&file, format!("draft body\n{canary}\n")).unwrap();
+            None
+        };
+        let (_e, msg) = write_via_tool(&ws, &file, "rewritten body\n").await;
+        if let Some(s) = saver {
+            s.join().unwrap();
+        }
+
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        let recoverable = msg
+            .split("cat-file blob ")
+            .nth(1)
+            .map(|s| s.split_whitespace().next().unwrap().to_owned())
+            .map(|oid| {
+                let o = Command::new("git")
+                    .args(["cat-file", "blob", &oid])
+                    .current_dir(&root)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            })
+            .unwrap_or_default();
+        if !on_disk.contains(&canary) && !recoverable.contains(&canary) {
+            lost += 1;
+        }
+    }
+    (lost, attempts, window)
+}
+
+// ===========================================================================
+// A9  git failing to resolve HEAD is not an unborn HEAD. Both land in a
+//     refusal for a file in a subdirectory, which is why round 4's suite
+//     could not tell them apart; at the repository root the unborn reading
+//     copies the file and WRITES.
+// ===========================================================================
+#[tokio::test]
+async fn git_failing_to_resolve_head_is_not_an_unborn_head() {
+    let ws = Ws::new();
+    let root = ws.root();
+    let file = root.join("notes.txt");
+    let prior = "one\ntwo\n";
+    std::fs::write(&file, prior).unwrap();
+    git(&root, &["add", "notes.txt"]);
+    git(&root, &["commit", "-qm", "init"]);
+    std::fs::write(root.join(".git/HEAD"), "not a ref at all\n").unwrap();
+
+    let (err, msg) = write_via_tool(&ws, &file, "one\n").await;
+    assert!(
+        err,
+        "a broken HEAD was read as a repository with no commits: {msg}"
+    );
+    assert!(msg.contains("could not be established"), "{msg}");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        prior,
+        "the file was overwritten on the strength of a HEAD git would not read"
+    );
+}
+
+// ===========================================================================
+// A7  A file name that looks like pathspec magic is taken literally, so the
+//     file is judged against its own recorded content.
+// ===========================================================================
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_named_like_pathspec_magic_is_judged_against_its_own_blob() {
+    let ws = Ws::new();
+    let root = ws.root();
+    let name = ":(glob)notes.txt";
+    let file = root.join(name);
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "init"]);
+
+    // Everything on disk is recorded, so dropping a line drops nothing
+    // unsaved: a plain Proceed, no refusal and no recovery note. Read as
+    // pathspec magic instead, the lookup matches nothing or errors, and every
+    // line becomes unsaved.
+    let (err, msg) = write_via_tool(&ws, &file, "one\n").await;
+    assert!(!err, "the file's own blob was not found: {msg}");
+    assert!(
+        !msg.contains("Note:"),
+        "lines that are in the commit were treated as unsaved: {msg}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+}
+
+// ===========================================================================
+// A12 / ADV-8, without needing a second uid: a pre-image that is not text.
+//      Round 4 turned it into an empty pre-image and skipped the guard.
+// ===========================================================================
+#[tokio::test]
+async fn a_pre_image_that_is_not_text_is_refused_unless_the_commit_holds_it() {
+    let ws = Ws::new();
+    let root = ws.root();
+    std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+    git(&root, &["add", "keep.txt"]);
+    git(&root, &["commit", "-qm", "init"]);
+
+    let file = root.join("blob.bin");
+    let bytes: &[u8] = &[0x53, 0x45, 0x43, 0x52, 0x45, 0x54, 0xff, 0xfe, 0x0a];
+    std::fs::write(&file, bytes).unwrap();
+    let (err, msg) = write_via_tool(&ws, &file, "clobbered\n").await;
+    assert!(err, "an unreadable pre-image was overwritten: {msg}");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        bytes,
+        "the refusal must leave the bytes alone"
+    );
+
+    // The one case that proves nothing is unsaved: the bytes on disk are
+    // exactly what the pinned commit records.
+    git(&root, &["add", "-f", "blob.bin"]);
+    git(&root, &["commit", "-qm", "record the binary"]);
+    let ws2 = Ws::new();
+    let file2 = ws2.root().join("blob.bin");
+    // A fresh guard, but the same repository shape, so the pin includes it.
+    std::fs::write(ws2.root().join("keep.txt"), "keep\n").unwrap();
+    std::fs::write(&file2, bytes).unwrap();
+    git(&ws2.root(), &["add", "-A"]);
+    git(&ws2.root(), &["commit", "-qm", "init"]);
+    let (err2, msg2) = write_via_tool(&ws2, &file2, "clobbered\n").await;
+    assert!(
+        !err2,
+        "bytes byte-for-byte identical to the pinned commit are not unsaved: {msg2}"
+    );
+    assert_eq!(std::fs::read_to_string(&file2).unwrap(), "clobbered\n");
+}
+
+// ===========================================================================
+// ADV-8  The original, still gated behind the setpriv fixture: a root-owned
+//        0600 file in a directory the agent uid can write.
+// ===========================================================================
+#[tokio::test]
+async fn an_unreadable_pre_image_is_refused_not_clobbered() {
+    let Ok(fixture) = std::env::var("ADV8_FIXTURE") else {
+        println!("[ADV-8] skipped: ADV8_FIXTURE unset (run under /root/r5-adv8.sh)");
+        return;
+    };
+    let root = PathBuf::from(&fixture);
+    let file = root.join("secret.txt");
+    println!("[ADV-8] running as uid={}", libc_getuid());
+    let read = std::fs::read_to_string(&file);
+    assert!(
+        read.is_err(),
+        "control: this uid must NOT be able to read the file"
+    );
+
+    let guard = Arc::new(UnsavedWorkGuard::new_isolated());
+    let r = WriteTool::new(None)
+        .with_unsaved_guard(guard)
+        .execute(json!({
+            "file_path": file.to_str().unwrap(), "content": "clobbered by the agent\n"
+        }))
+        .await;
+    println!("[ADV-8] is_error={}  result={}", r.is_error, r.content);
+    assert!(
+        r.is_error,
+        "a pre-image that could not be read was overwritten anyway"
+    );
+    assert!(r.content.contains("could not be read"), "{}", r.content);
+}
+
+unsafe extern "C" {
+    #[link_name = "getuid"]
+    safe fn libc_getuid() -> u32;
+}

@@ -310,9 +310,7 @@ impl Tool for EditTool {
         // ADV-7: the assessment above spends real time in `git`, and Edit's
         // own read is older still. A save that landed in between would be
         // overwritten by a replacement computed against bytes that are gone.
-        if let Err(why) =
-            crate::unsaved_work::pre_image_unchanged(path, Some(content.as_bytes()))
-        {
+        if let Err(why) = crate::unsaved_work::pre_image_unchanged(path, Some(content.as_bytes())) {
             return ToolResult {
                 content: crate::unsaved_work::changed_under_write(file_path, &why),
                 is_error: true,

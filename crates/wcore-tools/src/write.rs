@@ -243,14 +243,14 @@ impl Tool for WriteTool {
                 update_cache_after_write(cache_arc, path, content);
             }
             // Not `previous` when the pre-image was not text: claiming the file
-        // was empty would make every line of `content` agent-authored, and so
-        // exempt from this guard for the rest of the session.
-        let attribution_pre = if attributable {
-            previous.as_str()
-        } else {
-            content
-        };
-        self.unsaved.note_written(path, attribution_pre, content);
+            // was empty would make every line of `content` agent-authored, and so
+            // exempt from this guard for the rest of the session.
+            let attribution_pre = if attributable {
+                previous.as_str()
+            } else {
+                content
+            };
+            self.unsaved.note_written(path, attribution_pre, content);
 
             return ToolResult {
                 content: format!(

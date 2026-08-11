@@ -321,7 +321,10 @@ fn a_repository_git_refuses_to_open_refuses_the_rewrite() {
         Mode::Rewrite,
     ));
     assert!(msg.contains("could not be established"), "{msg}");
-    assert!(msg.contains("Reason: fatal:"), "git's own reason is missing: {msg}");
+    assert!(
+        msg.contains("Reason: fatal:"),
+        "git's own reason is missing: {msg}"
+    );
     assert!(!msg.contains("in no repository"), "{msg}");
 }
 
@@ -1499,6 +1502,58 @@ fn hash_object(root: &Path, bytes: &str) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
+/// A13. "read back byte-for-byte" is the flagship phrase of this module's
+/// guarantee, and until round 5 nothing exercised the comparison: swapping it
+/// for a length check survived the entire suite, because no live `git` will
+/// ever hand back the wrong bytes at the right length. The predicate is named
+/// so it can be handed exactly that.
+#[test]
+fn a_read_back_of_the_right_length_and_the_wrong_bytes_is_not_a_match() {
+    let original = b"aws_secret_access_key = AKIAREAL0000\n";
+    let same_length_different_bytes = b"aws_secret_access_key = AKIAFAKE0000\n";
+    assert_eq!(
+        original.len(),
+        same_length_different_bytes.len(),
+        "the fixture only means something if the lengths match"
+    );
+    assert!(read_back_matches(original, original));
+    assert!(
+        !read_back_matches(same_length_different_bytes, original),
+        "a length-only comparison would call these two the same bytes"
+    );
+    // Truncation is caught as well, and each is described for what it is.
+    assert!(!read_back_matches(b"aws", original));
+    let by_byte = read_back_mismatch(same_length_different_bytes, original);
+    assert!(by_byte.contains("differs at byte"), "{by_byte}");
+    let by_length = read_back_mismatch(b"aws", original);
+    assert!(by_length.contains("bytes rather than"), "{by_length}");
+}
+
+/// And end to end: whatever the file held is what comes back out of the
+/// object store, through the very command the note prints. Content chosen to
+/// break anything that normalises on the way through — CRLF, trailing
+/// whitespace, a lone CR, no final newline, and non-ASCII.
+#[test]
+fn the_recovered_copy_is_the_prior_file_byte_for_byte() {
+    let f = repo();
+    f.write("keep.txt", "keep\n");
+    git(&f.root, &["add", "keep.txt"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+
+    let prior = "first\r\nsecond   \ntabs\there\rcarriage\nnaïve — ünicode\nno final newline";
+    let p = f.write("draft.txt", prior);
+    let note = assert_noted(
+        f.guard()
+            .assess(&p, "draft.txt", prior, "replaced\n", Mode::Rewrite),
+    );
+    let recovered = f.recover(&note);
+    assert_eq!(
+        recovered.as_bytes(),
+        prior.as_bytes(),
+        "the recovery copy is not the prior file"
+    );
+}
+
 /// Bar 3. The note names the store git named, and the copy is in it. Round
 /// 4's first draft printed `<root>/.git/objects` unconditionally, which is a
 /// path that does not exist whenever `.git` is a file.
@@ -1561,10 +1616,11 @@ fn a_linked_worktree_refuses_rather_than_copying_into_the_main_repository() {
     let p = wt.join("draft.md");
     std::fs::write(&p, prior).unwrap();
 
-    let message = assert_refused(
-        f.guard()
-            .assess(&p, "draft.md", prior, "draft two\n", Mode::Rewrite),
-    );
+    let message =
+        assert_refused(
+            f.guard()
+                .assess(&p, "draft.md", prior, "draft two\n", Mode::Rewrite),
+        );
     assert!(
         message.contains("outside the tree this file is in"),
         "the refusal must name the reason: {message}"
