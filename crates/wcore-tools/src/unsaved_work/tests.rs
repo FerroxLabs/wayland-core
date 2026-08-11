@@ -321,7 +321,8 @@ fn a_repository_git_refuses_to_open_refuses_the_rewrite() {
         Mode::Rewrite,
     ));
     assert!(msg.contains("could not be established"), "{msg}");
-    assert!(msg.contains("git did not answer"), "{msg}");
+    assert!(msg.contains("Reason: fatal:"), "git's own reason is missing: {msg}");
+    assert!(!msg.contains("in no repository"), "{msg}");
 }
 
 #[test]
@@ -450,7 +451,8 @@ fn repairing_git_rearms_the_same_guard() {
         Mode::Rewrite,
     );
     let msg = assert_refused(broken);
-    assert!(msg.contains("git did not answer"), "{msg}");
+    assert!(msg.contains("could not be established"), "{msg}");
+    assert!(!msg.contains("in no repository"), "{msg}");
 
     f.repair_git();
     assert!(
@@ -1082,11 +1084,15 @@ fn initialising_a_repository_rearms_the_same_guard() {
     // Every line is now provably recorded, so nothing unsaved can be dropped.
     match g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite) {
         Verdict::Proceed => {}
-        other => panic!("the same guard is still latched to NoRepo: {other:?}"),
+        other => panic!("the same guard is still latched: {other:?}"),
     }
 }
 
-/// The other way into `NoRepo`: a work tree git reports as bare.
+/// A work tree git reports as bare. Round 4 routed this to `NoRepo` and so
+/// told the user "this file is in no repository, so nothing about it is
+/// recorded anywhere" about a repository whose HEAD records the file — fail
+/// closed, but false, with a remedy that would not have helped. It is now the
+/// unresolved state, and like every other unresolved state it must not latch.
 #[test]
 fn repairing_core_bare_rearms_the_same_guard() {
     let f = repo();
@@ -1098,7 +1104,11 @@ fn repairing_core_bare_rearms_the_same_guard() {
 
     git(&f.root, &["config", "core.bare", "true"]);
     let first = assert_refused(g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite));
-    assert!(first.contains("in no repository"), "{first}");
+    assert!(first.contains("no work tree"), "{first}");
+    assert!(
+        !first.contains("in no repository"),
+        "the repository is right there and its HEAD records this file: {first}"
+    );
 
     git(&f.root, &["config", "core.bare", "false"]);
     match g.assess(&p, "notes.txt", "one\ntwo\n", "one\n", Mode::Rewrite) {
@@ -1127,7 +1137,7 @@ fn a_subdirectory_of_a_repository_git_refuses_to_open_still_refuses_for_the_righ
         Mode::Rewrite,
     ));
     assert!(
-        msg.contains("git did not answer"),
+        msg.contains("could not be established") && !msg.contains("in no repository"),
         "a subdirectory of a broken repository read as no repository at all — B1: {msg}"
     );
 }

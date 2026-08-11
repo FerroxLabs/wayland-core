@@ -607,7 +607,7 @@ impl UnsavedWorkGuard {
         // were really there.
         let stale = match self.last_written.lock() {
             Ok(mut seen) => {
-                let moved = seen.get(path).map(String::as_str) != Some(previous);
+                let moved = !seen.get(path).is_some_and(|s| same_lines(s, previous));
                 seen.insert(path.to_path_buf(), written.to_owned());
                 moved
             }
@@ -653,7 +653,7 @@ impl UnsavedWorkGuard {
         let Ok(written) = self.last_written.lock() else {
             return HashMap::new();
         };
-        if written.get(path).map(String::as_str) != Some(on_disk) {
+        if !written.get(path).is_some_and(|s| same_lines(s, on_disk)) {
             return HashMap::new();
         }
         drop(written);
@@ -712,9 +712,20 @@ impl UnsavedWorkGuard {
             None => return unopenable("git could not be run".to_owned()),
             Some(run) if run.ok() => {
                 if run.stdout_text().trim() != "true" {
-                    // A bare repository or a path inside `.git`: no work tree,
-                    // so nothing here is tracked in the sense this guard means.
-                    return Baseline::NoRepo;
+                    // A bare repository, or a path inside `.git`. Round 4 read
+                    // this as "no repository", and then told the user "this
+                    // file is in no repository, so nothing about it is
+                    // recorded anywhere" about a repository whose HEAD
+                    // provably records the file — measured with a single
+                    // `git config core.bare true` on an ordinary work tree.
+                    // Fail-closed either way, so no data was at risk, but a
+                    // false statement and a wrong remedy. It is only "no
+                    // repository" when the filesystem says there is no marker.
+                    return unopenable(
+                        "git reports no work tree at this path, so what it records here cannot \
+                         be established"
+                            .to_owned(),
+                    );
                 }
             }
             Some(run) => return unopenable(run.why("git would not open this repository")),
@@ -990,12 +1001,8 @@ impl UnsavedWorkGuard {
         if !back.ok() {
             return Err(back.why("the copy could not be read back"));
         }
-        if back.stdout != bytes.as_bytes() {
-            return Err(format!(
-                "the copy read back as {} bytes rather than {}",
-                back.stdout.len(),
-                bytes.len()
-            ));
+        if !read_back_matches(&back.stdout, bytes.as_bytes()) {
+            return Err(read_back_mismatch(&back.stdout, bytes.as_bytes()));
         }
         Ok(oid)
     }
@@ -1075,6 +1082,39 @@ pub fn changed_under_write(display_path: &str, why: &str) -> String {
     )
 }
 
+/// Did the copy come back as the same bytes — every byte of them, not the
+/// same number of them?
+///
+/// "read back byte-for-byte" is the flagship phrase of this module's whole
+/// guarantee, and a length-only comparison satisfies it against every
+/// well-behaved `git` there is: swapping this for `back.len() == bytes.len()`
+/// survived a 27-test suite untouched. It is a named predicate so it can be
+/// exercised directly on a same-length, different-bytes read-back, which no
+/// live git will ever produce.
+fn read_back_matches(back: &[u8], original: &[u8]) -> bool {
+    back == original
+}
+
+/// Why a read-back was rejected, in terms of the first byte that differs.
+fn read_back_mismatch(back: &[u8], original: &[u8]) -> String {
+    if back.len() != original.len() {
+        return format!(
+            "the copy read back as {} bytes rather than {}",
+            back.len(),
+            original.len()
+        );
+    }
+    let at = back
+        .iter()
+        .zip(original)
+        .position(|(a, b)| a != b)
+        .unwrap_or(0);
+    format!(
+        "the copy read back as {} bytes as expected but differs at byte {at}",
+        original.len()
+    )
+}
+
 /// Is a repository plausibly present for `dir`, judged without asking git?
 ///
 /// Deliberately errs towards "yes": anything other than a definite "no such
@@ -1149,6 +1189,21 @@ fn repo_relative(root: &Path, path: &Path) -> Option<String> {
     Some(parts.join("/"))
 }
 
+/// Do two states of a file hold exactly the same trimmed, non-blank lines,
+/// the same number of times each?
+///
+/// This is what "the file is still what the tool last wrote" means, and it is
+/// deliberately not byte equality. The measured cost of byte equality: the
+/// agent writes a file, `cargo fmt` — which `just push` runs — reflows the
+/// blank lines, and the agent's own next rewrite of its own file is hard
+/// refused with a message calling those lines the user's. A reformat that
+/// only moves whitespace around leaves this comparison equal, so attribution
+/// survives it; anything that adds, removes or alters a line of content does
+/// not, which is the case the expiry exists for.
+fn same_lines(a: &str, b: &str) -> bool {
+    tally(a) == tally(b)
+}
+
 /// Trimmed, non-blank line counts.
 fn tally(text: &str) -> HashMap<&str, usize> {
     let mut counts = HashMap::new();
@@ -1210,6 +1265,13 @@ fn quote_dropped(previous: &str, dropped: &HashMap<&str, usize>, dropped_total: 
 
 /// The partial-rewrite refusal: the measured silent-loss shape.
 ///
+/// It states only what has been established. Round 4 asserted "The rest of
+/// this file IS committed", which is false whenever a *kept* line is also
+/// unrecorded — measured with two unsaved lines, one kept and one dropped —
+/// and called the dropped lines "their in-progress work", which is false
+/// whenever this tool wrote them a turn earlier and attribution has since
+/// expired.
+///
 /// It deliberately names no other tool — round 1 shipped a message
 /// recommending Edit, and the model took that route on the first refusal in
 /// both live adversarial arms — and it no longer says "reproduce those lines",
@@ -1227,8 +1289,8 @@ fn refusal_text(
          that are on disk but in no commit. That is unsaved work which exists nowhere else, so \
          losing it is irreversible.\n\
          Lines that would be lost:\n{quoted}\n\
-         The rest of this file IS committed, so this is not the whole-file replacement the user \
-         asked for — it is a partial rewrite that would silently drop their in-progress work. \
+         Part of this file IS in the commit, so this is not a whole-file replacement — it is a \
+         partial rewrite that would silently drop work recorded nowhere, whoever wrote it. \
          Read the file as it stands on disk now and carry those lines into the content you write \
          — in their changed form if what you are doing changes them. If the user genuinely asked \
          for those specific lines to go, they must be recorded somewhere first.",
@@ -1248,8 +1310,7 @@ fn unresolved_refusal(
     format!(
         "Refused to overwrite {display_path}: this content would delete {dropped_total} line(s) \
          that are on disk, and the last saved version of this file could not be established, so \
-         there is no way to tell whether any of them exist anywhere else. git did not answer: \
-         {why}\n\
+         there is no way to tell whether any of them exist anywhere else. Reason: {why}.\n\
          Lines that would be lost:\n{quoted}\n\
          Nothing was changed. Fix the reason git could not answer, or carry those lines into the \
          content you write. Writes that do not remove existing lines are unaffected.",
@@ -1260,8 +1321,8 @@ fn unresolved_refusal(
 fn unresolved_note(dropped_total: usize, why: &str) -> String {
     format!(
         "\nNote: {dropped_total} line(s) that were on disk are not in the new content, and the \
-         last saved version of this file could not be established (git did not answer: {why}), \
-         so it is not known whether they exist anywhere else. No recovery copy was made."
+         last saved version of this file could not be established ({why}), so it is not known \
+         whether they exist anywhere else. No recovery copy was made."
     )
 }
 
