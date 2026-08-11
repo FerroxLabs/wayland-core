@@ -693,7 +693,7 @@ async fn mcp_only_shape_media_tool_is_discoverable_and_callable() {
         .await
         .expect("connect to the media fixture");
 
-    let names: Vec<&str> = manager.all_tools().into_iter().map(|(n, _)| n).collect();
+    let names: Vec<String> = manager.all_tools().into_iter().map(|(n, _)| n).collect();
     assert!(
         manager.has_tool_name("mcp_image_generate"),
         "media tool not discovered; tools were {names:?}"
