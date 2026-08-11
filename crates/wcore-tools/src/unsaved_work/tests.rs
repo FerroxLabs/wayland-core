@@ -503,21 +503,6 @@ fn wholesale_rewrite_of_an_untracked_file_is_allowed_against_a_verified_copy() {
 }
 
 #[test]
-fn a_gitignored_file_is_allowed_against_a_verified_copy() {
-    let f = repo();
-    f.write(".gitignore", ".env\n");
-    git(&f.root, &["add", ".gitignore"]);
-    git(&f.root, &["commit", "-qm", "base"]);
-    let p = f.write(".env", "DB=postgres://u:p@h/db\nFEATURE=1\n");
-    let g = f.guard();
-    let note = assert_noted(g.assess(&p, ".env", &f.read(".env"), "FEATURE=2\n", Mode::Rewrite));
-    assert_eq!(f.recover(&note), "DB=postgres://u:p@h/db\nFEATURE=1\n");
-    // The one honest consequence of using the repository's own store, stated
-    // in the tool result rather than left quietly true.
-    assert!(note.contains("gitignored"), "{note}");
-}
-
-#[test]
 fn a_staged_but_never_committed_file_is_allowed_against_a_verified_copy() {
     let f = repo();
     f.write("seed", "x");
@@ -1525,4 +1510,156 @@ fn readable_in(root: &Path, oid: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+// ---- round 4: a file the repository is told to ignore is not its to hold ---
+
+/// Bar 4. A recovery copy is verbatim by construction — scrubbing it would
+/// make it not a recovery copy — so the only lever on secrets is *where* the
+/// bytes are allowed to go. `.gitignore` is the user saying, in the
+/// repository's own configuration, that this file does not belong in this
+/// repository. Filing its prior bytes into that repository's object store
+/// contradicts that instruction, and it is not a wash: the object then travels
+/// with `git clone <path>` (measured in
+/// `every_travel_claim_the_note_makes_is_executed_against_git`), which is the
+/// one copy a user believes their ignore rules filtered.
+///
+/// Round 3 shipped exactly this: the arm below found the key in the object
+/// store, unscrubbed, after a write that was allowed.
+#[test]
+fn a_file_the_repository_ignores_is_refused_rather_than_filed_into_it() {
+    const CANARY: &str = "STRIPE_SECRET=sk_live_INV2R4IGNORED";
+    let f = repo();
+    f.write(".gitignore", ".env\n");
+    git(&f.root, &["add", ".gitignore"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let prior = format!("{CANARY}\nFEATURE=1\n");
+    let p = f.write(".env", &prior);
+
+    // Positive control: git itself agrees this path is ignored, so the arm is
+    // not passing because the ignore rule never applied.
+    assert!(
+        check_ignore(&f.root, ".env"),
+        "control failed: git does not consider .env ignored here"
+    );
+
+    let message =
+        assert_refused(
+            f.guard()
+                .assess(&p, ".env", &prior, "FEATURE=2\n", Mode::Rewrite),
+        );
+    assert!(
+        message.contains("ignore"),
+        "the refusal must say why this repository is not the file's archive: {message}"
+    );
+    assert_eq!(f.read(".env"), prior, "a refusal changes nothing");
+    assert!(
+        !object_store_contains(&f.root, CANARY),
+        "the user's key was filed into a repository their own .gitignore \
+         says this file does not belong in"
+    );
+}
+
+/// The Edit half: never refused, but the bytes still do not go in, and it says
+/// so instead of claiming a recovery that would sit somewhere the user
+/// excluded.
+#[test]
+fn an_edit_to_an_ignored_file_makes_no_copy_and_says_so() {
+    const CANARY: &str = "AWS_SECRET_ACCESS_KEY=INV2R4EDITCANARY";
+    let f = repo();
+    f.write(".gitignore", "*.env\n");
+    f.write("secrets/keep", "x\n");
+    git(&f.root, &["add", ".gitignore", "secrets/keep"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    // The directory IS recorded, so nothing but the ignore rule can make this
+    // repository a non-archive. Without that the arm would pass for the armD
+    // reason and prove nothing about ignoring.
+    let prior = format!("{CANARY}\nkeep me\n");
+    let p = f.write("secrets/prod.env", &prior);
+
+    let note =
+        assert_noted(
+            f.guard()
+                .assess(&p, "secrets/prod.env", &prior, "keep me\n", Mode::Surgical),
+        );
+    assert!(note.contains("not recoverable"), "{note}");
+    assert!(
+        !note.contains("cat-file blob"),
+        "an Edit that made no copy must not print a recovery command: {note}"
+    );
+    assert!(!object_store_contains(&f.root, CANARY), "{note}");
+}
+
+/// The negative control for the rule above, and the reason it is `.gitignore`
+/// specifically rather than "untracked": a merely untracked file in a
+/// directory the repository records is one `git add` from being tracked, so
+/// the repository plainly is its archive and the copy still goes in.
+#[test]
+fn a_merely_untracked_file_is_still_copied_into_its_own_repository() {
+    let f = repo();
+    f.write(".gitignore", ".env\n");
+    git(&f.root, &["add", ".gitignore"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let prior = "# Deploy notes\nstep one\n";
+    let p = f.write("notes.md", prior);
+    assert!(!check_ignore(&f.root, "notes.md"));
+
+    let note = assert_noted(
+        f.guard()
+            .assess(&p, "notes.md", prior, "# Runbook\n", Mode::Rewrite),
+    );
+    assert_eq!(f.recover(&note), prior);
+}
+
+/// A tracked file is never "ignored" even when a rule would match it, so
+/// adding the ignore probe cannot start refusing writes to ordinary committed
+/// files. Measured: `git check-ignore` consults the index and exits 1 here.
+#[test]
+fn a_tracked_file_matched_by_an_ignore_rule_is_still_its_repositorys() {
+    let f = repo();
+    f.write("build.log", "line one\n");
+    git(&f.root, &["add", "-f", "build.log"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    f.write(".gitignore", "*.log\n");
+    git(&f.root, &["add", ".gitignore"]);
+    git(&f.root, &["commit", "-qm", "ignore logs"]);
+    let prior = "line one\nuncommitted line\n";
+    let p = f.write("build.log", prior);
+    assert!(
+        !check_ignore(&f.root, "build.log"),
+        "control failed: git calls a tracked file ignored, so this arm proves \
+         nothing about the tracked case"
+    );
+
+    // Tracked and partially committed: the ordinary partial-rewrite refusal,
+    // which quotes the line — not the ignore refusal.
+    let message =
+        assert_refused(
+            f.guard()
+                .assess(&p, "build.log", prior, "line one\n", Mode::Rewrite),
+        );
+    assert!(message.contains("uncommitted line"), "{message}");
+    assert!(!message.contains("ignore"), "{message}");
+}
+
+fn check_ignore(root: &Path, rel: &str) -> bool {
+    Command::new("git")
+        .args(["check-ignore", "-q", "--", rel])
+        .current_dir(root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.code() == Some(0))
+        .unwrap_or(false)
+}
+
+/// Is `needle` anywhere in this repository's object database? Exhaustive, so
+/// it cannot miss a copy by looking in the wrong place.
+fn object_store_contains(root: &Path, needle: &str) -> bool {
+    let out = Command::new("git")
+        .args(["cat-file", "--batch-all-objects", "--batch"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).contains(needle)
 }

@@ -86,6 +86,27 @@ can be made, the write is refused and nothing changes.
   remove existing lines are unaffected.
 - Outside any repository there is no object store, so a Write that would drop
   lines is refused for want of anywhere to put a recoverable copy.
+- **A file the repository is configured to ignore is not the repository's to
+  hold.** If `git check-ignore` says the path is ignored, a Write that would
+  drop lines is refused and **nothing is copied**; an Edit says no copy was
+  made. `.gitignore` is the user declaring that this file does not belong in
+  this repository, and filing its prior bytes into `.git/objects` anyway would
+  put a gitignored `.env`'s contents somewhere `git clone <path>` carries them
+  and `git fsck --lost-found` writes out as plaintext. A *tracked* file matched
+  by an ignore rule is unaffected — `check-ignore` consults the index and
+  reports it as not ignored.
+- **The recovery copy is never scrubbed, and nothing claims it is.** A copy
+  with the secret redacted is not a recovery copy — it is lost work wearing a
+  disguise. Placement is the only lever, and the two rules above are it. The
+  lines a *refusal* quotes back are a different surface and are scrubbed with
+  the engine's own `PIIScrubber`.
+- **The store's permissions are the user's own, on every platform.** This guard
+  creates no directory anywhere. Earlier rounds kept snapshots under the
+  profile home behind `restrict_dir`/`restrict_file` helpers that were no-ops
+  off Unix, so on Windows `%USERPROFILE%\.wayland` inherited
+  `CodexSandboxUsers:(OI)(CI)(RX)` and two AppContainer SIDs. That store is
+  gone; a recovery object is an ordinary object in `.git/objects` whose ACL is
+  byte-identical to every other object the user's own `git` writes.
 - **An enclosing repository is not automatically this file's archive.** If the
   session's commit records nothing under the file's own directory — measured
   live with `$HOME` as a dotfiles repository and the private file at

@@ -163,6 +163,41 @@
 //! would have gone *before* the write, which a tool-result note cannot do —
 //! the note is assembled after `fs::write` has already returned.
 //!
+//! # Secrets, and the one lever there is
+//!
+//! A recovery copy is **verbatim by construction**. Scrubbing it would make it
+//! not a recovery copy: the guarantee is that the user's bytes come back, and
+//! bytes that come back with the secret replaced are lost work wearing a
+//! disguise. So the copy is never scrubbed, and no claim is made that it is.
+//! (The *quoted* lines in a refusal are a different thing — those go into the
+//! model's context, not into a store, and they are scrubbed with the engine's
+//! own [`wcore_safety::PIIScrubber`]; see [`quote_dropped`].)
+//!
+//! What can be controlled is **where the bytes are allowed to go**, and there
+//! are two rules, both of which refuse rather than copy:
+//!
+//! * the armD rule above — a repository that records nothing under the file's
+//!   directory is not its archive;
+//! * **a file the repository is configured to ignore is not the repository's
+//!   to hold.** `.gitignore` is the user saying, in that repository's own
+//!   configuration, that this file does not belong in it. Round 3 filed a
+//!   gitignored `.env` into `.git/objects` anyway, and that is not a wash: the
+//!   object then travels with `git clone <path>` and `git fsck --lost-found`
+//!   materialises it as plaintext, so a copy the user believes their ignore
+//!   rules filtered carries the key. Now the `Write` is refused and the `Edit`
+//!   says no copy was made.
+//!
+//! The store's *permissions* are the user's own: there is no directory of this
+//! guard's making anywhere, on any platform. Round 2 kept snapshots under the
+//! profile home and tried to lock them down with `restrict_dir`/`restrict_file`
+//! helpers that were `#[cfg(not(unix))]` no-ops, so on Windows
+//! `%USERPROFILE%\.wayland` inherited `CodexSandboxUsers:(OI)(CI)(RX)` plus two
+//! AppContainer package SIDs and the agent's own sandbox could read the copy.
+//! Those helpers and that store are gone. A recovery object is an ordinary
+//! object in `.git/objects`, with byte-identical permissions to every other
+//! object the user's own `git` writes there — which is the same statement on
+//! Windows as on Unix, and is why nothing here is `#[cfg]`-ed.
+//!
 //! # Edit
 //!
 //! Edit is guarded too, but it never refuses. Two reasons, both measured:
@@ -251,10 +286,12 @@ enum Store<'a> {
     /// A repository that records the file's own directory, or that the file
     /// sits at the root of. This is the file's archive.
     Owned(&'a Path),
-    /// A repository encloses the file but records nothing under its directory
-    /// — measured: a `$HOME` dotfiles repository holding `~/work/env.local`.
-    /// Not this file's archive, so treated as no store at all.
-    Foreign { root: &'a Path, dir: String },
+    /// A repository encloses the file but is not its archive — it records
+    /// nothing under the file's directory (measured: a `$HOME` dotfiles
+    /// repository holding `~/work/env.local`), or its own configuration says
+    /// to ignore the file. Treated as no store at all. `why` completes the
+    /// sentence "that repository ...".
+    Foreign { root: &'a Path, why: String },
     /// No repository, so no object store.
     Absent,
 }
@@ -465,15 +502,15 @@ impl UnsavedWorkGuard {
             },
             // A repository encloses the file but is not its archive. Copying
             // into it is the armD harm, so it is treated as no store at all.
-            Store::Foreign { root, dir } => match mode {
+            Store::Foreign { root, why } => match mode {
                 Mode::Rewrite => Verdict::Refuse(foreign_store_refusal(
                     display_path,
                     dropped_total,
                     root,
-                    &dir,
+                    &why,
                 )),
                 Mode::Surgical => {
-                    Verdict::ProceedWithNote(foreign_store_note(dropped_total, root, &dir))
+                    Verdict::ProceedWithNote(foreign_store_note(dropped_total, root, &why))
                 }
             },
             // No repository, so no object store, so nowhere to put a copy.
@@ -682,10 +719,11 @@ impl UnsavedWorkGuard {
 
     /// Which object store, if any, may hold this file's prior bytes.
     ///
-    /// An enclosing repository qualifies only when the pinned commit records
-    /// something under the file's own directory, or the file sits at the
-    /// repository root. See the module docs for the measured armD shape this
-    /// exists to refuse.
+    /// An enclosing repository qualifies only when it is plainly this file's
+    /// archive: the file is not one the repository is configured to ignore,
+    /// and the pinned commit records something under the file's own directory
+    /// (or the file sits at the repository root). See the module docs for the
+    /// measured armD shape and the ignored-secret shape this exists to refuse.
     fn object_store<'a>(&self, baseline: &'a Baseline, path: &Path) -> Store<'a> {
         let Baseline::Repo { root, commit } = baseline else {
             return Store::Absent;
@@ -694,20 +732,30 @@ impl UnsavedWorkGuard {
         let Some(rel) = repo_relative(root, path) else {
             return Store::Foreign {
                 root,
-                dir: "this file's directory".to_owned(),
+                why: "cannot place this file inside itself".to_owned(),
             };
         };
+        // The user has already said, in this repository's own configuration,
+        // that this file does not belong in it. A recovery copy is verbatim by
+        // construction, so where it goes is the only lever there is.
+        if self.repository_ignores(root, &rel) {
+            return Store::Foreign {
+                root,
+                why: "is configured to ignore this file".to_owned(),
+            };
+        }
         let Some((dir, _)) = rel.rsplit_once('/') else {
             // At the repository root: unambiguously this repository's.
             return Store::Owned(root);
         };
+        let unrecorded = || Store::Foreign {
+            root,
+            why: format!("records nothing under {dir}"),
+        };
         // With no commit nothing is recorded anywhere, so nothing records this
         // subdirectory either.
         let Some(commit) = commit else {
-            return Store::Foreign {
-                root,
-                dir: dir.to_owned(),
-            };
+            return unrecorded();
         };
         let pathspec = format!("{dir}/");
         match git_run(
@@ -719,10 +767,37 @@ impl UnsavedWorkGuard {
             // git failing to answer is not proof, and lands in the safe
             // direction: no copy goes anywhere.
             Some(run) if run.ok() && !run.stdout.is_empty() => Store::Owned(root),
-            _ => Store::Foreign {
-                root,
-                dir: dir.to_owned(),
-            },
+            _ => unrecorded(),
+        }
+    }
+
+    /// Does this repository's configuration say to ignore `rel`?
+    ///
+    /// `check-ignore` exits 0 for ignored, 1 for not ignored, and something
+    /// else when it could not decide. Only a definite 1 is read as "not
+    /// ignored": anything else means the question is open, and an open
+    /// question must not end with the user's bytes inside the repository.
+    /// Measured on git 2.43.0: it consults the index, so a *tracked* file
+    /// matched by an ignore rule exits 1 and keeps its own repository.
+    ///
+    /// It is also the one command here that **rejects** `--literal-pathspecs`
+    /// ("pathspec magic not supported by this command: 'literal'", exit 128 —
+    /// measured, and it broke every arm of this suite on the first attempt).
+    /// The path therefore goes in through `--stdin -z`, which takes it as a
+    /// pathname rather than an option. A file whose own name looks like
+    /// pathspec magic still exits 128 there, which lands on "ignored" and so
+    /// on "no copy" — the safe direction.
+    fn repository_ignores(&self, root: &Path, rel: &str) -> bool {
+        let mut payload = rel.as_bytes().to_vec();
+        payload.push(0);
+        match git_invoke(
+            root,
+            Pathspecs::AsGitTakesThem,
+            &["check-ignore", "-q", "--stdin", "-z"],
+            Some(&payload),
+        ) {
+            Some(run) if run.code == Some(1) => false,
+            _ => true,
         }
     }
 
@@ -971,26 +1046,26 @@ fn foreign_store_refusal(
     display_path: &str,
     dropped_total: usize,
     root: &Path,
-    dir: &str,
+    why: &str,
 ) -> String {
     format!(
         "Refused to overwrite {display_path}: this content would delete {dropped_total} line(s) \
          that are on disk and in no commit. The only object store that could hold a recovery \
-         copy is the git repository at {root}, and that repository records nothing under {dir} \
-         — it encloses this file but is not its archive, so filing this file's private contents \
-         into it would put them somewhere the user does not think of as holding them. Nothing \
-         was changed and nothing was copied. Carry those lines into the content you write, or \
-         have this file recorded somewhere that does track it.",
+         copy is the git repository at {root}, and that repository {why} — it encloses this \
+         file but is not its archive, so filing this file's private contents into it would put \
+         them somewhere the user does not think of as holding them, and somewhere a later \
+         `git clone` of this path would carry them. Nothing was changed and nothing was copied. \
+         Carry those lines into the content you write, or have this file recorded somewhere \
+         that does track it.",
         root = root.display(),
     )
 }
 
-fn foreign_store_note(dropped_total: usize, root: &Path, dir: &str) -> String {
+fn foreign_store_note(dropped_total: usize, root: &Path, why: &str) -> String {
     format!(
         "\nNote: {dropped_total} line(s) that were on disk are not in the new content. The only \
-         repository enclosing this file is {root}, which records nothing under {dir}, so it is \
-         not this file's archive and no recovery copy was put there. Those lines are not \
-         recoverable.",
+         repository enclosing this file is {root}, which {why}, so it is not this file's \
+         archive and no recovery copy was put there. Those lines are not recoverable.",
         root = root.display(),
     )
 }
@@ -1130,9 +1205,30 @@ impl GitRun {
 /// spawns on a tokio worker — up to three at bootstrap for the eager pin —
 /// with no timeout on them. A timeout is a fair follow-up.
 fn git_run(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Option<GitRun> {
+    git_invoke(dir, Pathspecs::Literal, args, stdin)
+}
+
+/// Whether `--literal-pathspecs` can be passed to this command at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pathspecs {
+    /// The default, and what every path-taking command here uses.
+    Literal,
+    /// `check-ignore` rejects the option outright, so it takes its path on
+    /// stdin instead. Nothing in this mode may pass a path in argv.
+    AsGitTakesThem,
+}
+
+fn git_invoke(
+    dir: &Path,
+    pathspecs: Pathspecs,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Option<GitRun> {
     let mut cmd = Command::new("git");
-    cmd.arg("--literal-pathspecs")
-        .args(["-c", "core.fsmonitor=false"])
+    if pathspecs == Pathspecs::Literal {
+        cmd.arg("--literal-pathspecs");
+    }
+    cmd.args(["-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
