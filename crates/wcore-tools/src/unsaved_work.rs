@@ -35,12 +35,17 @@
 //!   for it. **`Bash` is covered for one shape only**:
 //!   a git command whose whole purpose is to throw the work tree away is
 //!   refused by [`shell_refusal`], from every `BashTool` entry point, before
-//!   any shell is spawned — see "The shell surface" below. Everything else a
-//!   shell can do to a file — `sed -i '2d'`, `>`, `rm` — still does not route
-//!   through here and cannot at this altitude; in the round-1 `adv-armB` arm
-//!   `sed -i`, not Edit, is what actually destroyed the line. A guarantee
-//!   described as holding "at the tool layer" without that carve-out would be
-//!   false.
+//!   any shell is spawned — see "The shell surface" below. `rm` is refused
+//!   there too, for the paths it would actually take. Everything else a shell
+//!   can do to a file — `sed -i '2d'`, `>`, `mv`, `truncate` — still does not
+//!   route through here and cannot at this altitude; in the round-1
+//!   `adv-armB` arm `sed -i`, not Edit, is what actually destroyed the line.
+//!   A guarantee described as holding "at the tool layer" without that
+//!   carve-out would be false.
+//! * **`GitTool` is covered as well**, by [`staging_verdict`] and
+//!   [`stash_refusal`] — see `unsaved_work::git_ops`. It has to be: under the
+//!   STRICT sandbox `git` cannot run from `Bash` at all, so the surface the
+//!   product routes the model onto was the unguarded one.
 //! * It is a guarantee about **dropped** lines, and this module cannot tell a
 //!   dropped line from a **modified** one. A whole-file transformation that
 //!   renames a symbol occurring on an unsaved line reads here as a drop and is
@@ -377,8 +382,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
+mod git_ops;
 mod shell;
 
+pub use git_ops::{Staging, staging_verdict, stash_refusal};
 pub use shell::shell_refusal;
 
 /// Most dropped lines quoted back in a refusal message.
@@ -629,6 +636,26 @@ impl UnsavedWorkGuard {
             // here, which is what keeps a broken-git environment usable for
             // every write that only adds.
             return Verdict::Proceed;
+        }
+
+        // A Surgical edit that puts nothing back is not a rename, a reflow or
+        // any of the modifications this module admits it cannot tell from a
+        // drop - it is a deletion, and Edit quoted every line it deletes from
+        // disk. Deleting the user's own unrecorded lines is the measured harm
+        // itself (job corpus row A-2, 2026-08-11: two Edits stripped the
+        // in-progress line out of `README.md` and `src/receipts/parser.py`,
+        // and a recovery copy is not what the guarantee asks for - the bytes
+        // have to still be where the user left them). So this one shape
+        // refuses. Every Edit that puts a line back keeps the never-refused
+        // property the module documentation argues for, which is what keeps
+        // Edit usable on a dirty tree.
+        if mode == Mode::Surgical && adds_nothing(previous, new_content) {
+            return Verdict::Refuse(deletion_refusal(
+                display_path,
+                previous,
+                &dropped,
+                dropped_total,
+            ));
         }
 
         // Fail closed. Without a baseline the partial/wholesale split is not
@@ -1649,6 +1676,50 @@ fn refusal_text(
          Read the file as it stands on disk now and carry those lines into the content you write \
          — in their changed form if what you are doing changes them. If the user genuinely asked \
          for those specific lines to go, they must be recorded somewhere first.",
+        quoted = quote_dropped(previous, dropped, dropped_total),
+    )
+}
+
+/// Whether `new_content` introduces no line that `previous` did not already
+/// hold at least as many copies of.
+///
+/// The discriminator between a deletion and a modification, for the one case
+/// where the difference decides a refusal. Counted rather than set-compared:
+/// turning two copies of a line into one introduces nothing. Blank lines and
+/// surrounding whitespace are outside the model here exactly as they are for
+/// every other tally in this file, so a pure re-indent also reads as
+/// introducing nothing - and a re-indent that additionally removes the user's
+/// unsaved line is a removal of it.
+fn adds_nothing(previous: &str, new_content: &str) -> bool {
+    let before = tally(previous);
+    tally(new_content)
+        .iter()
+        .all(|(line, now)| before.get(line).copied().unwrap_or(0) >= *now)
+}
+
+/// The delete-only refusal for Edit.
+///
+/// Names no other tool and offers no flag: round 1 shipped a refusal that
+/// recommended a different write surface, and the model took that route on
+/// the first refusal in both live adversarial arms. It says what an editor
+/// would do instead - leave the lines alone - and where the decision belongs
+/// when the lines really are meant to go.
+fn deletion_refusal(
+    display_path: &str,
+    previous: &str,
+    dropped: &HashMap<&str, usize>,
+    dropped_total: usize,
+) -> String {
+    format!(
+        "Refused to edit {display_path}: this edit only removes lines, and {dropped_total} of \
+         them are on disk but in no commit. That is unsaved work which exists nowhere else, so \
+         removing it is irreversible - and filing a recovery copy is not the same thing as \
+         leaving the work where the user put it.\n\
+         Lines that would be lost:\n{quoted}\n\
+         Nothing was changed. Edit around those lines and leave them where they are. If the \
+         user genuinely asked for exactly those lines to go, say what will be lost and let them \
+         confirm first. An edit that changes these lines rather than removing them is not \
+         affected by this.",
         quoted = quote_dropped(previous, dropped, dropped_total),
     )
 }

@@ -9,7 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{MAX_QUOTED_LINES, UnsavedWorkGuard, git_run, repository_marker_present};
+use super::git_ops::{files_under, ignored, quote_at_risk};
+use super::{UnsavedWorkGuard, git_run, repository_marker_present};
 
 /// Git subcommands that throw away uncommitted changes in the work tree.
 ///
@@ -17,6 +18,14 @@ use super::{MAX_QUOTED_LINES, UnsavedWorkGuard, git_run, repository_marker_prese
 /// discard, so a refusal cannot be mistaken for over-reach. `git commit`,
 /// `git add`, `git switch -c` and the rest are untouched.
 const DISCARDING_SUBCOMMANDS: [&str; 5] = ["checkout", "restore", "stash", "clean", "reset"];
+
+/// Most files one `rm` operand is expanded to before the walk gives up.
+///
+/// `rm -rf node_modules` must not turn one guard call into a walk of a
+/// hundred thousand files. Hitting the bound means the refusal may not fire
+/// for the rest of that operand, which is the direction this whole surface
+/// already chooses.
+const RM_WALK_BUDGET: usize = 4096;
 
 /// The refusal a shell caller should return, or `None` when nothing the
 /// command would discard is unsaved.
@@ -37,51 +46,111 @@ pub fn shell_refusal(command: &str, cwd: &Path) -> Option<String> {
     let guard = UnsavedWorkGuard::shared();
     let mut at_risk: Vec<(String, Vec<String>)> = Vec::new();
     for segment in shell_segments(command) {
-        let Some((dir, paths)) = discarding_git_paths(&segment, cwd) else {
-            continue;
-        };
-        let candidates = if paths.is_empty() {
-            unsaved_work_tree_paths(&dir)
-        } else {
-            paths
-        };
-        for rel in candidates {
-            if at_risk.iter().any(|(p, _)| *p == rel) {
-                continue;
+        if let Some((dir, paths)) = discarding_git_paths(&segment, cwd) {
+            let candidates = if paths.is_empty() {
+                unsaved_work_tree_paths(&dir)
+            } else {
+                paths
+            };
+            for rel in candidates {
+                if at_risk.iter().any(|(p, _)| *p == rel) {
+                    continue;
+                }
+                let lines = guard.unsaved_lines(&dir.join(&rel));
+                if !lines.is_empty() {
+                    at_risk.push((rel, lines));
+                }
             }
-            let lines = guard.unsaved_lines(&dir.join(&rel));
-            if !lines.is_empty() {
-                at_risk.push((rel, lines));
+            continue;
+        }
+        for operand in removing_operands(&segment) {
+            for file in files_under(&cwd.join(&operand), RM_WALK_BUDGET) {
+                let shown = file
+                    .strip_prefix(cwd)
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .into_owned();
+                if at_risk.iter().any(|(p, _)| *p == shown) {
+                    continue;
+                }
+                // Build output, caches and everything else the repository
+                // itself says does not belong in it are not the user's
+                // unsaved work, and refusing an `rm` of them would be the
+                // wrong-refusal this surface is written to avoid.
+                if ignored(&guard, &file) {
+                    continue;
+                }
+                let lines = guard.unsaved_lines(&file);
+                if !lines.is_empty() {
+                    at_risk.push((shown, lines));
+                }
             }
         }
     }
     if at_risk.is_empty() {
         return None;
     }
-    let mut detail = String::new();
-    for (path, lines) in &at_risk {
-        detail.push_str(&format!("\n  {path}\n"));
-        for line in lines.iter().take(MAX_QUOTED_LINES) {
-            // These go into the model's context, so they are scrubbed with the
-            // same scrubber the Write refusals use.
-            let shown = wcore_safety::PIIScrubber.scrub(line);
-            detail.push_str(&format!("    {shown}\n"));
-        }
-        let more = lines.len().saturating_sub(MAX_QUOTED_LINES);
-        if more > 0 {
-            detail.push_str(&format!("    ... and {more} more line(s)\n"));
-        }
-    }
     Some(format!(
-        "Refused to run this command: it discards uncommitted changes, and {n} file(s) below \
-         hold line(s) that are on disk but in no commit. That is unsaved work which exists \
-         nowhere else, so throwing it away is irreversible.\n\
+        "Refused to run this command: it destroys work-tree content, and {n} file(s) below hold \
+         line(s) that are on disk but in no commit. That is unsaved work which exists nowhere \
+         else, so throwing it away is irreversible.\n\
          At risk:{detail}\
          If you only need to undo your OWN change, revert just the part you changed with Edit. \
          If the user really does want these lines gone, say what will be lost and let them \
          confirm before you run it.",
         n = at_risk.len(),
+        detail = quote_at_risk(&at_risk),
     ))
+}
+
+/// The paths an `rm` in this segment would remove, relative to the shell's
+/// working directory.
+///
+/// Empty when the segment is not an `rm` at all. Deliberately covers exactly
+/// one command: `rm` is the shape the module documentation named as escaping
+/// this surface, and job corpus row A-2 (2026-08-11) is it arriving —
+/// `rm -rf ... .jobcorpus-user-work` took a file the user had written and
+/// never committed. `mv`, `truncate`, `sed -i` and shell redirection still
+/// route around this and still cannot be seen from here.
+///
+/// No glob expansion: a pattern reaches the filesystem as a literal here and
+/// resolves to nothing, so the refusal does not fire. That is the direction
+/// this surface takes everywhere else.
+fn removing_operands(segment: &str) -> Vec<String> {
+    let mut tokens = segment
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+        .filter(|t| !t.is_empty())
+        .peekable();
+
+    // Skip a leading `sudo` and any VAR=value assignments, exactly as the git
+    // detector above does.
+    while let Some(token) = tokens.peek() {
+        if *token == "sudo" || (token.contains('=') && !token.starts_with('-')) {
+            tokens.next();
+        } else {
+            break;
+        }
+    }
+    let Some(program) = tokens.next() else {
+        return Vec::new();
+    };
+    if program != "rm" && !program.ends_with("/rm") {
+        return Vec::new();
+    }
+    let mut operands = Vec::new();
+    let mut literal = false;
+    for token in tokens {
+        if !literal && token == "--" {
+            literal = true;
+            continue;
+        }
+        if !literal && token.starts_with('-') {
+            continue;
+        }
+        operands.push(token.to_owned());
+    }
+    operands
 }
 
 /// Split a command line into the segments a shell would run separately.

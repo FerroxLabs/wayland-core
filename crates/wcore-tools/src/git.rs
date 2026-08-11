@@ -15,6 +15,15 @@
 //! (add_*, commit, branch_checkout, stash_*) report `false` to keep them
 //! off the parallel-tool path in the agent loop.
 //!
+//! **The user's unsaved work is guarded here, not only in `Bash`.** The
+//! INV-2 guard (`unsaved_work`) refuses a `Bash` command that throws the work
+//! tree away, but this tool reaches the same `git` through a different door —
+//! and under the STRICT sandbox it is the ONLY door, so the guarded route is
+//! the one the model is told not to use. `add_all`, `add_paths`, `commit` and
+//! `stash_save` therefore ask the same question before they run; see
+//! `unsaved_work::git_ops` for exactly what refuses and what deliberately does
+//! not.
+//!
 //! No auto-commit. The `commit` op requires an explicit `message` field;
 //! the agent supplies one (potentially generated via
 //! `git_commit_message::commit_message_from_trace` — see T13).
@@ -36,6 +45,8 @@
 //! deny-list), so this tool is the ONLY route a contained session has to a
 //! branch, a push or a pull request.
 
+use std::path::PathBuf;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,6 +57,7 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
+use crate::unsaved_work::{Staging, staging_verdict, stash_refusal};
 
 /// Typed git op variants — not consumed directly by the LLM (the tool input
 /// is JSON with an `op` field), but useful for downstream introspection /
@@ -93,6 +105,32 @@ pub enum GitOp {
 }
 
 pub struct GitTool;
+
+/// The directory this op runs in, resolved so the unsaved-work guard and
+/// `git` are talking about the same tree.
+///
+/// `cwd` defaults to `"."`, and a relative path cannot be stripped against
+/// the absolute repository root the guard resolves, so a bare `"."` would
+/// leave every path un-attributable and the guard silent.
+fn resolved_cwd(cwd: &str) -> PathBuf {
+    std::fs::canonicalize(cwd).unwrap_or_else(|_| PathBuf::from(cwd))
+}
+
+/// Turn a guard refusal into the tool's error result.
+fn refused(why: String) -> ToolResult {
+    ToolResult {
+        content: why,
+        is_error: true,
+    }
+}
+
+/// Append a guard note to a result that succeeded.
+fn with_note(mut result: ToolResult, note: Option<String>) -> ToolResult {
+    if let (Some(note), false) = (note, result.is_error) {
+        result.content.push_str(&note);
+    }
+    result
+}
 
 /// Run `program` with arguments passed as separate argv entries and `cwd`
 /// as the working directory. No shell wrapping, so the input strings are
@@ -333,7 +371,15 @@ impl Tool for GitTool {
                 // `git blame -L <range> -- <path>` — argv mode, no shell.
                 run_git(cwd, &["blame", "-L", &range, "--", path]).await
             }
-            "add_all" => run_git(cwd, &["add", "-A"]).await,
+            "add_all" => {
+                // `add -A` stages files nobody named, which is how the user's
+                // untracked scratch file ends up in a commit.
+                let note = match staging_verdict(&resolved_cwd(cwd), Staging::Everything) {
+                    Ok(note) => note,
+                    Err(why) => return refused(why),
+                };
+                with_note(run_git(cwd, &["add", "-A"]).await, note)
+            }
             "add_paths" => {
                 let paths: Vec<String> = input
                     .get("paths")
@@ -350,13 +396,17 @@ impl Tool for GitTool {
                         is_error: true,
                     };
                 }
+                let note = match staging_verdict(&resolved_cwd(cwd), Staging::Named(&paths)) {
+                    Ok(note) => note,
+                    Err(why) => return refused(why),
+                };
                 // `git add -- <p1> <p2> ...` — `--` sentinel guards
                 // against paths beginning with `-`.
                 let mut args: Vec<&str> = vec!["add", "--"];
                 for p in &paths {
                     args.push(p.as_str());
                 }
-                run_git(cwd, &args).await
+                with_note(run_git(cwd, &args).await, note)
             }
             "commit" => {
                 let message = match input.get("message").and_then(|v| v.as_str()) {
@@ -395,10 +445,18 @@ impl Tool for GitTool {
                         is_error: true,
                     };
                 }
+                // Asked again on the index, not only at `add` time: the
+                // index can be staged from `Bash`, or by an earlier op whose
+                // note the model ignored, and the commit is the irreversible
+                // step.
+                let note = match staging_verdict(&resolved_cwd(cwd), Staging::Index) {
+                    Ok(note) => note,
+                    Err(why) => return refused(why),
+                };
                 // Message is a single argv entry — no quoting / escaping
                 // needed; shell metacharacters in the message body are
                 // never interpreted.
-                run_git(cwd, &["commit", "-m", message]).await
+                with_note(run_git(cwd, &["commit", "-m", message]).await, note)
             }
             "branch_current" => run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).await,
             "branch_list" => run_git(cwd, &["branch", "--format=%(refname:short)"]).await,
@@ -517,7 +575,12 @@ impl Tool for GitTool {
                 )
                 .await
             }
-            "stash_save" => run_git(cwd, &["stash", "push", "-m", "wcore-stash"]).await,
+            "stash_save" => {
+                if let Some(why) = stash_refusal(&resolved_cwd(cwd)) {
+                    return refused(why);
+                }
+                run_git(cwd, &["stash", "push", "-m", "wcore-stash"]).await
+            }
             "stash_pop" => run_git(cwd, &["stash", "pop"]).await,
             other => ToolResult {
                 content: format!("Git: unknown op '{other}'"),

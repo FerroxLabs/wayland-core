@@ -186,10 +186,17 @@ async fn a_preserved_copy_survives_git_gc_aggressive_prune_now() {
 }
 
 /// The Edit surface reaches the same file the Write refusal turned away, so a
-/// model that retries with Edit succeeds where Write failed. That is fine —
-/// Edit cannot be refused for a drop without becoming unusable on a dirty
-/// tree — but only if the path it reroutes onto preserves the bytes just as
-/// durably. Before anchoring it did not: Edit's copy was the expiring one.
+/// model that retries with Edit must not simply succeed where Write failed.
+///
+/// Two halves, because the answer is now different for the two shapes the
+/// reroute can take:
+///
+/// * A delete-only retry — the literal reroute, and job corpus row A-2's Edit
+///   — is refused outright and the line stays on disk.
+/// * A retry that rewrites the line rather than removing it still proceeds,
+///   because Edit cannot be refused for that without becoming unusable on a
+///   dirty tree. There the copy has to be just as durable as Write's: before
+///   anchoring it was not, it was the expiring one.
 #[tokio::test]
 async fn the_edit_path_a_refused_write_reroutes_to_is_no_weaker() {
     let ws = Ws::new();
@@ -211,8 +218,8 @@ async fn the_edit_path_a_refused_write_reroutes_to_is_no_weaker() {
         refused.content
     );
 
-    // The reroute. Same destruction, other tool.
-    let edited = ws
+    // The literal reroute: same destruction, other tool. Now closed.
+    let rerouted = ws
         .editor()
         .execute(json!({
             "file_path": file.to_str().unwrap(),
@@ -221,13 +228,33 @@ async fn the_edit_path_a_refused_write_reroutes_to_is_no_weaker() {
         }))
         .await;
     assert!(
+        rerouted.is_error,
+        "a delete-only reroute must be refused, not merely copied: {}",
+        rerouted.content
+    );
+    assert!(
+        std::fs::read_to_string(&file).unwrap().contains(UNSAVED),
+        "a refused edit must leave the line where the user put it"
+    );
+
+    // The shape Edit still has to allow, and the durability it owes when it
+    // does: rewriting the unsaved line rather than removing it.
+    let edited = ws
+        .editor()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(),
+            "old_string": UNSAVED,
+            "new_string": "# WIP, reworded by the agent",
+        }))
+        .await;
+    assert!(
         !edited.is_error,
-        "the edit should proceed: {}",
+        "rewriting an unsaved line must not be refused: {}",
         edited.content
     );
     assert!(
         !std::fs::read_to_string(&file).unwrap().contains(UNSAVED),
-        "the reroute did not actually drop the line, so this arm proves nothing"
+        "the rewrite did not actually replace the line, so this arm proves nothing"
     );
 
     let oid = recovery_oid(&edited.content);
@@ -236,7 +263,7 @@ async fn the_edit_path_a_refused_write_reroutes_to_is_no_weaker() {
     let back = recovered(&ws.root(), &oid);
     assert!(
         back.as_deref().is_some_and(|b| b.contains(UNSAVED)),
-        "the Write refusal routed the model onto Edit, and Edit's copy did not survive gc: {edited}",
+        "Edit proceeded and its copy did not survive gc: {edited}",
         edited = edited.content
     );
 }
