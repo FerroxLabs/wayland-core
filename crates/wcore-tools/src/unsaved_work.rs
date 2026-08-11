@@ -95,6 +95,15 @@ impl UnsavedWorkGuard {
         ))
     }
 
+    /// Record the baseline for `path` without judging any content.
+    ///
+    /// Called when Write is creating a file rather than replacing one: the
+    /// baseline of a file that does not exist yet is empty, and memoizing that
+    /// now is what keeps the agent's own later rewrites of its own file free.
+    pub fn observe(&self, path: &Path) {
+        let _ = self.baseline(path);
+    }
+
     /// Unsaved lines for `path`, computed once and memoized for the session.
     fn baseline(&self, path: &Path) -> Vec<String> {
         let key = path.to_path_buf();

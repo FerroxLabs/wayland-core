@@ -113,13 +113,19 @@ impl Tool for WriteTool {
         let existed = path.exists();
 
         // P2: never let a whole-file rewrite delete work the user has not
-        // saved. Checked before any disk mutation so a refusal leaves the
-        // file exactly as it was.
-        if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
-            return ToolResult {
-                content: refusal,
-                is_error: true,
-            };
+        // saved. Checked before any disk mutation so a refusal leaves the file
+        // exactly as it was. On a create there is nothing to lose, and
+        // recording the empty baseline now is what keeps the agent's own later
+        // rewrites of its own file free.
+        if existed {
+            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        } else {
+            self.unsaved.observe(path);
         }
 
         // Create parent directories
@@ -212,11 +218,18 @@ impl Tool for WriteTool {
         let existed = ctx.vfs.exists(path).await.unwrap_or(false);
 
         // P2: same unsaved-work refusal as the legacy path, before the write.
-        if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
-            return ToolResult {
-                content: refusal,
-                is_error: true,
-            };
+        // Existence comes from the VFS, so a path the sandbox would reject
+        // never reaches the guard's reader — the sandbox denial, not a message
+        // quoting that file's lines, is the right answer there.
+        if existed {
+            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        } else {
+            self.unsaved.observe(path);
         }
 
         // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
