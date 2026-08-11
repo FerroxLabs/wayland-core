@@ -269,10 +269,118 @@ pub fn mark_last_attempt_retrying() {
     });
 }
 
+/// Failure code for a connect-phase failure whose cause proves the configured
+/// endpoint cannot be reached, however long the caller keeps trying: the host
+/// name does not exist.
+pub const FAILURE_DNS: &str = "dns_failure";
+
+/// Failure code for a connect-phase failure where the host resolved and the
+/// port actively rejected the connection.
+pub const FAILURE_CONNECTION_REFUSED: &str = "connection_refused";
+
+/// Failure code for every other connect-phase failure — the ambiguous residue
+/// (network unreachable, connect reset, a resolver that answered "try again").
+pub const FAILURE_CONNECTION: &str = "connection";
+
+/// Split a connect-phase failure by whether another send can plausibly change
+/// the outcome.
+///
+/// `reqwest::Error::is_connect()` collapses three very different events into
+/// one code. A name that does not resolve is a PERMANENT property of the
+/// configuration — one typo in `base_url` and no number of re-sends will ever
+/// reach a different answer. A port that refuses is a property of the peer
+/// right now. A network that is momentarily unreachable is a property of the
+/// link. Only the last two can heal inside one turn.
+///
+/// That distinction was not available above this function, and the engine's
+/// unserved-outage window (`wcore_agent`'s `UNSERVED_OUTAGE_BUDGET`) admitted
+/// all three: a `base_url` typo cost a MEASURED 902 s and 36 sends before the
+/// run gave up, which a user cannot tell apart from a hang.
+///
+/// Classified from the error's own source chain rather than its `Display`,
+/// because the top-level text is the same `error sending request` for a DNS
+/// failure and for a peer that reset an established socket — measured on this
+/// tree, not assumed. The chain is only READ here; nothing from it is stored
+/// or surfaced, so the H-2 URL-stripping guarantee above is untouched.
+///
+/// Conservative in the same direction as [`is_http_4xx_error`]: an unrecognised
+/// chain returns [`FAILURE_CONNECTION`] and keeps the existing generous budget.
+/// The cost of a missed permanent failure is the old behaviour; the cost of a
+/// false positive is a transient outage that no longer heals.
+fn connect_failure_code(error: &reqwest::Error) -> &'static str {
+    let mut refused = false;
+    let mut chain = Vec::new();
+    let mut cursor: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    // Bounded so a self-referential chain (a `source()` cycle through a shared
+    // error) cannot spin here.
+    for _ in 0..16 {
+        let Some(current) = cursor else { break };
+        if let Some(io) = current.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            refused = true;
+        }
+        chain.push(current.to_string());
+        cursor = current.source();
+    }
+    classify_connect_chain(refused, &chain)
+}
+
+/// The decision half of [`connect_failure_code`], split out so it can be
+/// tested against the chains reqwest really produces.
+///
+/// The two shapes below were MEASURED on this tree (see
+/// `tests/connect_failure_classification.rs`), not imagined:
+///
+/// ```text
+/// dns:     error sending request … / client error (Connect) / dns error /
+///          failed to lookup address information: Name or service not known
+/// refused: error sending request … / client error (Connect) / tcp connect error /
+///          Connection refused (os error 111)        [io kind ConnectionRefused]
+/// ```
+///
+/// `chain_text[0]` is the top-level `Display`, which still carries the request
+/// URL. It is matched against and then dropped — nothing here is stored or
+/// surfaced, so the H-2 URL-stripping guarantee is untouched.
+fn classify_connect_chain(refused_io_kind: bool, chain_text: &[String]) -> &'static str {
+    let mut refused = refused_io_kind;
+    let mut name_lookup_failed = false;
+    let mut name_lookup_may_heal = false;
+    for text in chain_text {
+        let text = text.to_ascii_lowercase();
+        // hyper-util's connector labels the resolver leg `dns error`; std's
+        // `getaddrinfo` wrapper contributes the `failed to lookup address
+        // information: <gai_strerror>` detail underneath it.
+        if text.contains("dns error") || text.contains("failed to lookup address information") {
+            name_lookup_failed = true;
+        }
+        // EAI_AGAIN — the RESOLVER was unavailable, not the name absent. That
+        // is the transient case (a laptop between networks, a container whose
+        // DNS is not up yet) and it must keep the full outage budget.
+        if text.contains("temporary failure in name resolution") || text.contains("try again") {
+            name_lookup_may_heal = true;
+        }
+        // Text fallback for the refusal. The io ERROR KIND above is the
+        // primary signal and is locale-proof; this catches the path where all
+        // that survives is a rendered message (see `provider_failure_code`'s
+        // `Connection` arm, which has only a `String`).
+        if text.contains("connection refused") {
+            refused = true;
+        }
+    }
+    if name_lookup_failed && !name_lookup_may_heal {
+        return FAILURE_DNS;
+    }
+    if refused {
+        return FAILURE_CONNECTION_REFUSED;
+    }
+    FAILURE_CONNECTION
+}
+
 fn egress_failure_code(error: &EgressError) -> &'static str {
     match error {
         EgressError::Transport(error) if error.is_timeout() => "timeout",
-        EgressError::Transport(error) if error.is_connect() => "connection",
+        EgressError::Transport(error) if error.is_connect() => connect_failure_code(error),
         EgressError::Transport(error) if error.is_body() || error.is_decode() => "stream_body",
         EgressError::Transport(_) => "transport",
         EgressError::Denied(_) => "egress_denied",
@@ -305,7 +413,7 @@ fn provider_not_started_reason(error: &EgressError) -> ProviderAttemptNotStarted
 pub fn provider_failure_code(error: &ProviderError) -> String {
     match error {
         ProviderError::Http(error) if error.is_timeout() => "timeout".to_string(),
-        ProviderError::Http(error) if error.is_connect() => "connection".to_string(),
+        ProviderError::Http(error) if error.is_connect() => connect_failure_code(error).to_string(),
         ProviderError::Http(_) => "http_transport".to_string(),
         ProviderError::Egress(error) => egress_failure_code(error).to_string(),
         ProviderError::Api { status, .. } => format!("http_{status}"),
@@ -317,7 +425,11 @@ pub fn provider_failure_code(error: &ProviderError) -> String {
         {
             "timeout".to_string()
         }
-        ProviderError::Connection(_) => "connection".to_string(),
+        // Only a rendered message survives here; classify what it says. See
+        // `with_transport_cause` for why the message carries enough to do so.
+        ProviderError::Connection(message) => {
+            classify_connect_chain(false, std::slice::from_ref(message)).to_string()
+        }
         ProviderError::MissingApiKey => "missing_api_key".to_string(),
         ProviderError::NotAttempted { .. } => "provider_not_attempted".to_string(),
         ProviderError::PremiumLocked { .. } => "premium_locked".to_string(),
@@ -437,9 +549,44 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
         || is_broken_established_connection(&e);
     let e = e.without_url();
     if is_transient {
-        ProviderError::Connection(e.to_string())
+        ProviderError::Connection(with_transport_cause(&e))
     } else {
         ProviderError::Http(e)
+    }
+}
+
+/// Render a transport error together with its innermost cause.
+///
+/// Two reasons, and the first is the user-facing one. `reqwest`'s own
+/// `Display` for every connect-phase failure is the bare `error sending
+/// request` — measured identical for a host that does not exist and for a peer
+/// that reset an established socket — so the message the product printed
+/// during a 902 s retry storm told the operator nothing at all about why.
+///
+/// Second, it keeps the two failure-code paths in agreement.
+/// [`egress_failure_code`] classifies from the live source chain, but
+/// [`ProviderError::Connection`] carries only a `String`, so
+/// [`provider_failure_code`] can only classify what the string says. Without
+/// the cause, the same failure gets `dns_failure` down one path and
+/// `connection` down the other, and only one of them fails fast.
+///
+/// H-2: the cause is the innermost link, which for this class is an OS error
+/// (`getaddrinfo` / `connect(2)`) and cannot carry a URL. A link that
+/// nonetheless looks like one is dropped rather than trusted.
+fn with_transport_cause(error: &reqwest::Error) -> String {
+    let base = error.to_string();
+    let mut innermost: Option<String> = None;
+    let mut cursor = std::error::Error::source(error);
+    for _ in 0..16 {
+        let Some(current) = cursor else { break };
+        innermost = Some(current.to_string());
+        cursor = current.source();
+    }
+    match innermost {
+        Some(cause) if !cause.contains("://") && !base.contains(&cause) => {
+            format!("{base}: {cause}")
+        }
+        _ => base,
     }
 }
 
@@ -931,6 +1078,58 @@ mod tests {
 
     use serde_json::json;
     use wiremock::matchers::method;
+
+    /// The chains below are transcribed from a live run against a real
+    /// NXDOMAIN host and a real closed port — see the module doc on
+    /// `classify_connect_chain`. If reqwest/hyper-util reword them, the live
+    /// test in `tests/connect_failure_classification.rs` fails and these
+    /// fixtures must be re-measured, not adjusted to match the new guess.
+    #[test]
+    fn a_name_that_does_not_exist_is_permanent_and_a_resolver_outage_is_not() {
+        let nxdomain = [
+            "error sending request for url (https://unreachable.invalid.localdomain:9999/v1/chat/completions)".to_owned(),
+            "client error (Connect)".to_owned(),
+            "dns error".to_owned(),
+            "failed to lookup address information: Name or service not known".to_owned(),
+        ];
+        assert_eq!(classify_connect_chain(false, &nxdomain), FAILURE_DNS);
+
+        // EAI_AGAIN keeps the generous budget: the name may well exist, the
+        // resolver just could not say so yet.
+        let resolver_down = [
+            "error sending request for url (https://api.example.com/v1)".to_owned(),
+            "client error (Connect)".to_owned(),
+            "dns error".to_owned(),
+            "failed to lookup address information: Temporary failure in name resolution".to_owned(),
+        ];
+        assert_eq!(
+            classify_connect_chain(false, &resolver_down),
+            FAILURE_CONNECTION,
+            "a resolver outage is transient and must not be classified permanent"
+        );
+
+        let refused = [
+            "error sending request for url (http://127.0.0.1:1/v1/chat/completions)".to_owned(),
+            "client error (Connect)".to_owned(),
+            "tcp connect error".to_owned(),
+            "Connection refused (os error 111)".to_owned(),
+        ];
+        assert_eq!(
+            classify_connect_chain(true, &refused),
+            FAILURE_CONNECTION_REFUSED
+        );
+
+        // An unrecognised connect failure keeps the OLD behaviour. The cost of
+        // a miss is the status quo; the cost of a false positive is a
+        // transient outage that stops healing.
+        let unknown = [
+            "error sending request".to_owned(),
+            "client error (Connect)".to_owned(),
+            "Network is unreachable (os error 101)".to_owned(),
+        ];
+        assert_eq!(classify_connect_chain(false, &unknown), FAILURE_CONNECTION);
+    }
+
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
