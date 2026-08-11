@@ -318,14 +318,30 @@ pub fn dump_response_chunk(debug: &DebugConfig, chunk: &str) {
 /// E-H2: the returned provider is **always** wrapped in a
 /// [`ResilientProvider`] — circuit-breaking is on by default, not behind an
 /// opt-in flag. After `fail_threshold` consecutive provider-side failures
-/// the breaker opens and `stream()` fails fast for the cooldown window
-/// instead of hammering a wedged or rate-limited endpoint. The wrap is
-/// `LlmProvider`-transparent, so every caller (`AgentEngine::new`,
-/// `bootstrap`, sub-agents) gets resilience for free.
+/// the breaker opens instead of hammering a wedged or rate-limited endpoint.
+/// The wrap is `LlmProvider`-transparent, so every caller
+/// (`AgentEngine::new`, `bootstrap`, sub-agents) gets resilience for free.
 ///
-/// The wrap carries no fallback chain — a single configured provider has no
-/// alternate to fail over to — but circuit-breaking + fail-fast is the
-/// load-bearing half of resilience and is now live for every request.
+/// **This constructor always passes an EMPTY fallback chain**, and that
+/// changes what an open circuit does. E-H2 originally said the open circuit
+/// "fails fast for the cooldown window"; for this shape — which is every
+/// default install — that is no longer the whole truth, and the posture
+/// changed deliberately:
+///
+/// - Opened for a REJECTED request (auth, billing, unknown model, rate
+///   limit): unchanged. `stream()` refuses without sending for the cooldown
+///   window. Re-issuing cannot succeed and every attempt costs a call.
+/// - Opened for a MOMENTARY reason (timed out, overloaded): the circuit
+///   degrades from refusal to a single guarded probe. Failing fast is a way
+///   of getting to a fallback sooner, and with no fallback configured there
+///   is nowhere to get to — all it buys is that a recoverable outage becomes
+///   a lost run. The anti-hammering half is kept intact: the probe is taken
+///   under `CooldownTracker`'s single-flight lease, so however many sessions
+///   or sub-agents share the tracker, exactly one request is in flight
+///   against the open circuit and the rest are refused.
+///
+/// With a real fallback chain (`ResilientProvider::new` called with
+/// candidates) the original E-H2 behaviour is unchanged in both cases.
 pub fn create_provider(config: &Config) -> Arc<dyn LlmProvider> {
     let inner = create_native_provider(config);
     let cfg = resilient::CircuitConfig {

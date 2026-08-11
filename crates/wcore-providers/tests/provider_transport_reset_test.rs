@@ -21,7 +21,9 @@ use wcore_config::compat::ProviderCompat;
 use wcore_config::debug::DebugConfig;
 use wcore_providers::LlmProvider;
 use wcore_providers::openai::OpenAIProvider;
-use wcore_providers::retry::capture_provider_attempts;
+use wcore_providers::retry::{
+    BROKEN_CONNECTION_RETRY_WINDOW, DEFAULT_MAX_RETRIES, capture_provider_attempts,
+};
 use wcore_types::llm::LlmRequest;
 use wcore_types::message::{ContentBlock, Message, Role};
 
@@ -120,6 +122,55 @@ fn physical_attempts(evidence: &[wcore_providers::retry::ProviderAttemptEvidence
     evidence.iter().filter(|e| e.physical).count()
 }
 
+/// How many sends a peer that fails instantly can see inside
+/// `BROKEN_CONNECTION_RETRY_WINDOW`, given the ring's backoff schedule
+/// (250 ms, then x4 capped at 4 s). Derived from the constants rather than
+/// written down, so the test follows the window instead of pinning a literal
+/// nobody can re-derive — and so that changing the window cannot leave a
+/// green test asserting the old shape.
+fn sends_within_the_window() -> usize {
+    let mut elapsed = Duration::ZERO;
+    let mut backoff = Duration::from_millis(250);
+    let mut sends = 1;
+    while elapsed < BROKEN_CONNECTION_RETRY_WINDOW {
+        elapsed += backoff;
+        backoff = (backoff * 4).min(Duration::from_secs(4));
+        sends += 1;
+    }
+    sends
+}
+
+/// Assert a window-bounded retry: strictly more than the short default
+/// ceiling, no more than the schedule allows, and stopped by the clock.
+///
+/// The lower bound carries slack because every real attempt costs a few
+/// milliseconds of its own; enough of them can push the last admission past
+/// the deadline. The point being pinned is that the bound is the WINDOW —
+/// exactness would be pinning the arithmetic instead.
+fn assert_window_bounded(sends: usize, elapsed: Duration, shape: &str) {
+    let ceiling = sends_within_the_window();
+    assert!(
+        sends > DEFAULT_MAX_RETRIES as usize + 1,
+        "{shape}: a destroyed socket must outlast the default ceiling \
+         ({} sends), saw {sends}",
+        DEFAULT_MAX_RETRIES + 1
+    );
+    assert!(
+        sends <= ceiling && sends + 2 >= ceiling,
+        "{shape}: expected about {ceiling} sends inside \
+         {BROKEN_CONNECTION_RETRY_WINDOW:?}, saw {sends}"
+    );
+    assert!(
+        elapsed >= BROKEN_CONNECTION_RETRY_WINDOW,
+        "{shape}: gave up after {elapsed:?}, inside the window"
+    );
+    assert!(
+        elapsed <= BROKEN_CONNECTION_RETRY_WINDOW + Duration::from_secs(10),
+        "{shape}: ran {elapsed:?}, past the window plus one backoff — the \
+         deadline is not what stopped it"
+    );
+}
+
 /// RED before the fix: the reset is classified `ProviderError::Http`, which is
 /// not retryable, so the provider makes exactly one attempt and the job dies.
 #[tokio::test]
@@ -128,6 +179,7 @@ async fn connection_reset_mid_request_is_retried() {
     let base_url = spawn_resetting_provider(Arc::clone(&connections));
     let provider = provider(&base_url);
 
+    let started = std::time::Instant::now();
     let (result, evidence) =
         capture_provider_attempts(async { provider.stream(&make_request()).await }).await;
     let err = result.expect_err("a provider that resets every connection cannot succeed");
@@ -142,11 +194,7 @@ async fn connection_reset_mid_request_is_retried() {
         physical_attempts(&evidence),
         "every physical attempt must be one socket the server actually saw"
     );
-    assert_eq!(
-        sockets, 7,
-        "the reset must be ridden out for BROKEN_CONNECTION_MAX_RETRIES: expected \
-         7 attempts (1 initial + 6 retries), the server saw {sockets}"
-    );
+    assert_window_bounded(sockets, started.elapsed(), "reset");
 }
 
 /// Job corpus row B-2 `fault-timeout`: the provider hangs and then closes the
@@ -159,6 +207,7 @@ async fn orderly_close_before_a_response_is_retried() {
     let base_url = spawn_hanging_provider(Arc::clone(&connections));
     let provider = provider(&base_url);
 
+    let started = std::time::Instant::now();
     let (result, evidence) =
         capture_provider_attempts(async { provider.stream(&make_request()).await }).await;
     let err = result.expect_err("a provider that answers nothing cannot succeed");
@@ -172,10 +221,10 @@ async fn orderly_close_before_a_response_is_retried() {
         physical_attempts(&evidence),
         "every physical attempt must be one socket the server actually saw"
     );
-    assert_eq!(
+    assert_window_bounded(
         physical_attempts(&evidence),
-        7,
-        "a close before any response must be ridden out like a reset"
+        started.elapsed(),
+        "orderly close",
     );
 }
 
