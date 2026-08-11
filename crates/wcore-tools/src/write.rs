@@ -139,7 +139,39 @@ impl Tool for WriteTool {
         // "no such file" on an error it could not classify would otherwise
         // wave the overwrite straight through. If there are bytes there, they
         // are judged, whatever `exists` said.
-        let previous = std::fs::read_to_string(path).unwrap_or_default();
+        //
+        // ADV-8: and "there are bytes there" is decided by the read, not by
+        // the read succeeding. `unwrap_or_default()` turned every failure —
+        // a permission denied, a directory in the way, bytes that are not
+        // UTF-8 — into an empty pre-image, which the gate below then waved
+        // straight through. Measured as uid 65534 against a root-owned 0600
+        // file in a writable directory: no refusal, no note, no copy, and the
+        // file went `root:root 0600` -> `nobody:nogroup 0644`. Only a
+        // definite "no such file" may produce an empty pre-image.
+        let mut attributable = true;
+        let previous = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                let raw = std::fs::read(path).ok();
+                if let Verdict::Refuse(refusal) =
+                    self.unsaved
+                        .assess_opaque(path, file_path, raw.as_deref(), &e.to_string())
+                {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
+                // Proven byte-identical to the pinned commit, so nothing on
+                // disk is unsaved. Nothing may be claimed as agent-authored
+                // either — there is no line model for a pre-image that is not
+                // text — so the attribution record below is told this write
+                // introduced nothing.
+                attributable = false;
+                String::new()
+            }
+        };
         let mut unsaved_note = String::new();
         if !previous.is_empty() {
             match self
@@ -191,7 +223,15 @@ impl Tool for WriteTool {
             if let Some(cache_arc) = &self.file_cache {
                 update_cache_after_write(cache_arc, path, content);
             }
-            self.unsaved.note_written(path, &previous, content);
+            // Not `previous` when the pre-image was not text: claiming the file
+        // was empty would make every line of `content` agent-authored, and so
+        // exempt from this guard for the rest of the session.
+        let attribution_pre = if attributable {
+            previous.as_str()
+        } else {
+            content
+        };
+        self.unsaved.note_written(path, attribution_pre, content);
 
             return ToolResult {
                 content: format!(
@@ -205,7 +245,15 @@ impl Tool for WriteTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, content);
         }
-        self.unsaved.note_written(path, &previous, content);
+        // Not `previous` when the pre-image was not text: claiming the file
+        // was empty would make every line of `content` agent-authored, and so
+        // exempt from this guard for the rest of the session.
+        let attribution_pre = if attributable {
+            previous.as_str()
+        } else {
+            content
+        };
+        self.unsaved.note_written(path, attribution_pre, content);
 
         let line_count = content.lines().count();
         let action = if existed { "Updated" } else { "Created" };
@@ -255,13 +303,49 @@ impl Tool for WriteTool {
         // the sandbox would reject never reaches the guard at all — the
         // sandbox denial, not a message quoting that file's lines, is the
         // right answer there.
-        let previous = ctx
-            .vfs
-            .read(path)
-            .await
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok())
-            .unwrap_or_default();
+        // ADV-8, vfs side: the same fail-open in the same shape. A read that
+        // failed, and bytes that are not UTF-8, both became an empty
+        // pre-image that the gate below waved through. Only the vfs saying
+        // definitely "there is nothing here" may do that.
+        let mut attributable = true;
+        let previous = match ctx.vfs.read(path).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(e) => {
+                    let raw = e.into_bytes();
+                    if let Verdict::Refuse(refusal) = self.unsaved.assess_opaque(
+                        path,
+                        file_path,
+                        Some(&raw),
+                        "the bytes on disk are not valid UTF-8",
+                    ) {
+                        return ToolResult {
+                            content: refusal,
+                            is_error: true,
+                        };
+                    }
+                    attributable = false;
+                    String::new()
+                }
+            },
+            Err(e) => match ctx.vfs.exists(path).await {
+                // Definitely nothing there: an ordinary create.
+                Ok(false) => String::new(),
+                _ => {
+                    if let Verdict::Refuse(refusal) =
+                        self.unsaved
+                            .assess_opaque(path, file_path, None, &e.to_string())
+                    {
+                        return ToolResult {
+                            content: refusal,
+                            is_error: true,
+                        };
+                    }
+                    attributable = false;
+                    String::new()
+                }
+            },
+        };
         let mut unsaved_note = String::new();
         if !previous.is_empty() {
             match self
@@ -297,7 +381,15 @@ impl Tool for WriteTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, content);
         }
-        self.unsaved.note_written(path, &previous, content);
+        // Not `previous` when the pre-image was not text: claiming the file
+        // was empty would make every line of `content` agent-authored, and so
+        // exempt from this guard for the rest of the session.
+        let attribution_pre = if attributable {
+            previous.as_str()
+        } else {
+            content
+        };
+        self.unsaved.note_written(path, attribution_pre, content);
 
         let line_count = content.lines().count();
         let action = if existed { "Updated" } else { "Created" };

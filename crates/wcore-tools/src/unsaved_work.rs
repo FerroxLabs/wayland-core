@@ -549,6 +549,52 @@ impl UnsavedWorkGuard {
         }
     }
 
+    /// Judge replacing a file whose bytes on disk could not be read as text.
+    ///
+    /// Round 4 read *any* pre-image failure as an empty pre-image, and the
+    /// caller then skipped the guard because the pre-image was empty.
+    /// Measured as uid 65534 against a root-owned `0600` file in a writable
+    /// directory: no refusal, no note, no copy, and the file went
+    /// `root:root 0600` -> `nobody:nogroup 0644`.
+    ///
+    /// There is no line model for bytes that are not text, so almost nothing
+    /// can be proven here — except the one fact that settles it outright: the
+    /// bytes on disk are exactly the bytes the pinned commit records, so none
+    /// of them are unsaved and replacing them loses nothing. Every other case
+    /// is refused, including the one where the bytes could not be read at all.
+    pub fn assess_opaque(
+        &self,
+        path: &Path,
+        display_path: &str,
+        on_disk: Option<&[u8]>,
+        why: &str,
+    ) -> Verdict {
+        let refuse = || {
+            Verdict::Refuse(format!(
+                "Refused to overwrite {display_path}: its current contents could not be read as \
+                 text ({why}), so there is no way to tell whether any of them exist anywhere \
+                 else, and this write would destroy them. Nothing was changed."
+            ))
+        };
+        let Some(bytes) = on_disk else {
+            return refuse();
+        };
+        let Baseline::Repo {
+            root,
+            commit: Some(commit),
+        } = self.baseline_for(path)
+        else {
+            return refuse();
+        };
+        let Some(rel) = repo_relative(&root, path) else {
+            return refuse();
+        };
+        match recorded_raw(&root, &commit, &rel) {
+            Ok(Some(recorded)) if recorded == bytes => Verdict::Proceed,
+            _ => refuse(),
+        }
+    }
+
     /// Record what this tool just put on disk at `path`.
     ///
     /// Only the copies this tool actually introduced count as agent-authored.
@@ -737,30 +783,9 @@ impl UnsavedWorkGuard {
         {
             return Ok(hit.clone());
         }
-
-        // `ls-tree` reports "not in that commit" as exit 0 with no output, so
-        // an absent path never has to be told apart from a broken repository
-        // by its exit code. `git show <commit>:<path>` cannot do that: it
-        // exits 128 for both, which is the same conflation as B1.
-        let listing = git_run(
-            root,
-            &["ls-tree", "--full-tree", "-z", commit, "--", &rel],
-            None,
-        )
-        .ok_or_else(|| "git could not be run".to_owned())?;
-        if !listing.ok() {
-            return Err(listing.why("git would not read the pinned commit"));
-        }
-        let text = match blob_oid(&listing.stdout_text()) {
+        let text = match recorded_raw(root, commit, &rel)? {
             None => String::new(),
-            Some(oid) => {
-                let blob = git_run(root, &["cat-file", "blob", &oid], None)
-                    .ok_or_else(|| "git could not be run".to_owned())?;
-                if !blob.ok() {
-                    return Err(blob.why("git would not read the recorded contents"));
-                }
-                String::from_utf8_lossy(&blob.stdout).into_owned()
-            }
+            Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         };
         if let Ok(mut cache) = self.blobs.lock() {
             cache.insert(key, text.clone());
@@ -898,6 +923,38 @@ impl UnsavedWorkGuard {
         }
         Ok(oid)
     }
+}
+
+/// The file's exact recorded bytes in `commit`, or `Ok(None)` when that commit
+/// does not record it. `Err` only when git could not answer.
+///
+/// `ls-tree` reports "not in that commit" as exit 0 with no output, so an
+/// absent path never has to be told apart from a broken repository by its exit
+/// code. `git show <commit>:<path>` cannot do that: it exits 128 for both,
+/// which is the same conflation as B1.
+///
+/// Bytes rather than text, because [`UnsavedWorkGuard::assess_opaque`] has to
+/// compare a file that is *not* valid UTF-8 against what the commit holds, and
+/// a lossy conversion would make two different files compare equal.
+fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>, String> {
+    let listing = git_run(
+        root,
+        &["ls-tree", "--full-tree", "-z", commit, "--", rel],
+        None,
+    )
+    .ok_or_else(|| "git could not be run".to_owned())?;
+    if !listing.ok() {
+        return Err(listing.why("git would not read the pinned commit"));
+    }
+    let Some(oid) = blob_oid(&listing.stdout_text()) else {
+        return Ok(None);
+    };
+    let blob = git_run(root, &["cat-file", "blob", &oid], None)
+        .ok_or_else(|| "git could not be run".to_owned())?;
+    if !blob.ok() {
+        return Err(blob.why("git would not read the recorded contents"));
+    }
+    Ok(Some(blob.stdout))
 }
 
 /// Is a repository plausibly present for `dir`, judged without asking git?
