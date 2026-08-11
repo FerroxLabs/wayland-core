@@ -378,6 +378,14 @@ autocompact_buffer = 13000  # Buffer before autocompact triggers
 emergency_buffer = 3000     # Buffer before emergency block
 max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
+micro_pressure_fraction = 0.5
+                            # Microcompact's count trigger ("more than
+                            # micro_keep_recent * 2 tool results exist") only
+                            # fires once real input pressure reaches this share
+                            # of the autocompact threshold. Without the gate the
+                            # eleventh tool result of a session clears the
+                            # model's working set in an almost-empty window.
+                            # Set 0.0 to restore the ungated count trigger.
 ```
 
 ### Smart auto-compaction (#280)

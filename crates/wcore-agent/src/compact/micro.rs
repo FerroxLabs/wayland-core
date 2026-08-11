@@ -40,18 +40,67 @@ pub struct MicrocompactResult {
 
 // ── Trigger checks ──────────────────────────────────────────────────────────
 
+/// Real context pressure at the moment the trigger is evaluated.
+///
+/// Both fields come from the autocompact path so microcompact and autocompact
+/// can never disagree about how full the window is: `real_input_tokens` is
+/// `CompactState::last_real_input_tokens` (provider-reported billed input,
+/// local estimate only when the provider reports none) and
+/// `autocompact_threshold` is [`crate::compact::auto::autocompact_threshold`]
+/// for the POST-swap provider/model pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextPressure {
+    /// Real input tokens on the most recent turn.
+    pub real_input_tokens: u64,
+    /// Token count at which autocompact (LLM summarization) fires.
+    pub autocompact_threshold: usize,
+}
+
+impl ContextPressure {
+    /// Whether pressure is high enough to let the count trigger fire, given
+    /// `fraction` of the autocompact threshold. A zero (or negative) fraction
+    /// means "ungated" — the pre-fix behaviour, kept reachable by config. A
+    /// zero threshold is also ungated: it carries no information.
+    fn admits_count_trigger(self, fraction: f64) -> bool {
+        let f = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if f <= 0.0 || self.autocompact_threshold == 0 {
+            return true;
+        }
+        let gate = (self.autocompact_threshold as f64 * f).ceil();
+        self.real_input_tokens as f64 >= gate
+    }
+}
+
 /// Decide whether microcompact should run.
 ///
 /// Returns `true` if **either** trigger fires:
 /// - **Time**: the most recent assistant message is older than
 ///   `config.micro_gap_seconds`.
 /// - **Count**: total compactable (non-cleared) tool results exceed
-///   `config.micro_keep_recent * 2`.
-pub fn should_microcompact(messages: &[Message], config: &CompactConfig) -> bool {
+///   `config.micro_keep_recent * 2` **and** real context pressure has reached
+///   `config.micro_pressure_fraction` of the autocompact threshold.
+///
+/// The pressure conjunct is the A-6 fix. A count of tool results says nothing
+/// about how full the window is: without the conjunct the eleventh tool result
+/// of a session erases the model's working set no matter how much room is
+/// left, and a job that must hold a dozen files in mind can never assemble the
+/// edit it was asked for. Corpus row A-6 microcompacted 25 times in 60 turns,
+/// freeing ~2k tokens a time at ~10% window occupancy, and produced no edit.
+pub fn should_microcompact(
+    messages: &[Message],
+    config: &CompactConfig,
+    pressure: ContextPressure,
+) -> bool {
     if !config.enabled {
         return false;
     }
-    time_trigger(messages, config) || count_trigger(messages, config)
+    time_trigger(messages, config)
+        || (pressure.admits_count_trigger(config.micro_pressure_fraction)
+            && count_trigger(messages, config))
 }
 
 /// Time-based trigger: last assistant timestamp older than gap threshold.
@@ -900,6 +949,15 @@ mod tests {
 
     // ── should_microcompact ─────────────────────────────────────────────
 
+    /// Pressure well past any gate — the pre-A-6 behaviour of the count
+    /// trigger, so tests that are not about the gate keep their meaning.
+    fn saturated() -> ContextPressure {
+        ContextPressure {
+            real_input_tokens: u64::MAX,
+            autocompact_threshold: 167_000,
+        }
+    }
+
     #[test]
     fn should_returns_false_when_disabled() {
         let old_ts = Utc::now() - Duration::seconds(7200);
@@ -909,7 +967,7 @@ mod tests {
             micro_gap_seconds: 3600,
             ..default_config()
         };
-        assert!(!should_microcompact(&msgs, &config));
+        assert!(!should_microcompact(&msgs, &config, saturated()));
     }
 
     #[test]
