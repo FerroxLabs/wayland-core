@@ -694,8 +694,38 @@ fn pricing_turn_cost_usd(
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ResolvedTurnCost {
+    /// The USD figure for ADMISSION CONTROL. When `priced` is false but
+    /// `bounded` is true this is a deliberate over-estimate taken from a
+    /// per-PROVIDER preset list rate — safe to charge a cap against, false
+    /// as a statement of what the user spent.
     usd: f64,
+    /// True only when `usd` is a real price for THIS provider+model: an
+    /// exact catalog row, an operator-declared free endpoint, or rates the
+    /// USER supplied. A built-in preset rate is NOT a price for the model.
     priced: bool,
+    /// True when `usd` is a usable upper bound on spend. False means there is
+    /// no number at all, so a USD cap cannot be enforced for this call.
+    bounded: bool,
+}
+
+impl ResolvedTurnCost {
+    /// The figure that may be shown to the user as spend.
+    ///
+    /// A conservative preset ceiling is not spend, so it reports zero
+    /// alongside `priced = false` — which is exactly the wire shape
+    /// [`wcore_protocol::events::TurnCost`] already defines for "the price is
+    /// unknown, and this zero is not a claim that it was free".
+    fn reportable_usd(self) -> f64 {
+        if self.priced { self.usd } else { 0.0 }
+    }
+}
+
+/// A compat-row estimate plus whether every rate it consumed was
+/// user-supplied (see [`wcore_config::compat::CostRateProvenance`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CompatTurnCost {
+    usd: f64,
+    user_supplied: bool,
 }
 
 fn pricing_turn_cost_with_cache(
@@ -718,6 +748,9 @@ fn pricing_turn_cost_with_cache(
         Some(status) => Some(ResolvedTurnCost {
             usd: status.microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD,
             priced: status.priced,
+            // An explicitly-unpriced catalog row carries no number, so it
+            // bounds nothing either.
+            bounded: status.priced,
         }),
         None => {
             tracing::warn!(
@@ -741,9 +774,14 @@ fn compat_turn_cost_with_cache_usd(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
     compat: &wcore_config::compat::ProviderCompat,
-) -> Option<f64> {
+) -> Option<CompatTurnCost> {
     if compat.cost_is_known_free.unwrap_or(false) {
-        return Some(0.0);
+        return Some(CompatTurnCost {
+            usd: 0.0,
+            // An explicit known-free declaration is a statement about the
+            // ENDPOINT, not an inherited list price.
+            user_supplied: true,
+        });
     }
     let rates = [
         compat.cost_per_input_token,
@@ -760,15 +798,55 @@ fn compat_turn_cost_with_cache_usd(
     let needs_input_price = input_tokens > 0 || cache_read_tokens > 0 || cache_write_tokens > 0;
     let needs_output_price = output_tokens > 0;
     (valid && (!needs_input_price || input_is_priced) && (!needs_output_price || output_is_priced))
-        .then(|| {
-            estimate_turn_cost(
+        .then(|| CompatTurnCost {
+            usd: estimate_turn_cost(
                 input_tokens,
                 output_tokens,
                 cache_read_tokens,
                 cache_write_tokens,
                 compat,
-            )
+            ),
+            user_supplied: compat_rates_are_user_supplied(
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                compat,
+            ),
         })
+}
+
+/// Did every rate this turn's estimate actually CONSUMED come from the user?
+///
+/// Provenance is judged per axis and only for axes with tokens on them: a
+/// user who priced input and output has authoritatively priced a turn that
+/// used no cache, even though the preset's cache rows are still sitting in
+/// the profile unused.
+///
+/// The cache branches mirror `estimate_turn_cost`'s own rate selection
+/// exactly — it falls back to the INPUT rate when a cache row is absent or a
+/// zero sentinel, so on that path it is the input rate's provenance that
+/// governs. A mismatch here would certify a preset rate as user-supplied.
+fn compat_rates_are_user_supplied(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> bool {
+    let prov = compat.cost_rate_provenance;
+    let cache_axis = |rate: Option<f64>, own: bool| {
+        if rate.is_some_and(|rate| rate > 0.0) {
+            own
+        } else {
+            prov.input
+        }
+    };
+    (input_tokens == 0 || prov.input)
+        && (output_tokens == 0 || prov.output)
+        && (cache_read_tokens == 0 || cache_axis(compat.cost_per_cache_read_token, prov.cache_read))
+        && (cache_write_tokens == 0
+            || cache_axis(compat.cost_per_cache_write_token, prov.cache_write))
 }
 
 /// Resolve the USD cost for one turn: try the pricing catalog first (per-model
@@ -806,6 +884,7 @@ fn resolve_turn_cost(
         return ResolvedTurnCost {
             usd: 0.0,
             priced: true,
+            bounded: true,
         };
     }
 
@@ -827,10 +906,22 @@ fn resolve_turn_cost(
         cache_write_tokens,
         compat,
     ) {
-        Some(usd) => ResolvedTurnCost { usd, priced: true },
+        // MEASURED (all three sealed binaries): this fallback used to return
+        // `priced: true` unconditionally, so the per-PROVIDER preset list
+        // rate was reported to the user as the price of whatever model was
+        // actually called — `anthropic/claude-3-5-sonnet-20241022` came back
+        // as $90.00 against a true $18.00. The number is still taken (it is a
+        // conservative ceiling and the budget guardrail needs one), but only
+        // rates the USER supplied make it a PRICE.
+        Some(compat_cost) => ResolvedTurnCost {
+            usd: compat_cost.usd,
+            priced: compat_cost.user_supplied,
+            bounded: true,
+        },
         None => ResolvedTurnCost {
             usd: 0.0,
             priced: false,
+            bounded: false,
         },
     }
 }
@@ -857,6 +948,7 @@ fn resolve_conservative_reservation_cost(
             .map(|candidate| candidate.usd)
             .fold(0.0, f64::max),
         priced: candidates.iter().all(|candidate| candidate.priced),
+        bounded: candidates.iter().all(|candidate| candidate.bounded),
     }
 }
 
@@ -1938,7 +2030,7 @@ mod w7_pricing_budget_tests {
 
         let compat = wcore_config::compat::ProviderCompat::ollama_defaults();
         assert_eq!(
-            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat),
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat).map(|cost| cost.usd),
             Some(0.0),
             "a provider-neutral known-free declaration must preserve a real zero price"
         );
@@ -1978,10 +2070,168 @@ mod w7_pricing_budget_tests {
             free,
             ResolvedTurnCost {
                 usd: 0.0,
-                priced: true
+                priced: true,
+                bounded: true
             },
             "an explicit endpoint declaration must resolve to a known zero, not \
              the vendor list price for the model NAME"
+        );
+    }
+
+    /// The production shape for a user who configured no rates at all:
+    /// `merge(anthropic_defaults(), <empty>)`, then a model the bundled
+    /// catalog does not carry.
+    ///
+    /// MEASURED on the sealed binary before this split: the session_cost
+    /// frame said `cost_usd = 90.0, priced = true` for
+    /// `claude-3-5-sonnet-20241022` on 1M in / 1M out. The real price is
+    /// $18.00 — the $90 is the Opus row out of `anthropic_defaults()`,
+    /// applied to a model it says nothing about.
+    ///
+    /// The number is still produced (the budget guardrail needs a ceiling and
+    /// this one is conservative), but it is not a price, so it is not
+    /// reportable. All three assertions are on one call: a fix that drops the
+    /// ceiling fails the first, a fix that keeps calling it a price fails the
+    /// second, a fix that prints it anyway fails the third.
+    #[test]
+    fn a_preset_list_rate_bounds_admission_but_is_never_reported_as_spend() {
+        let compat = wcore_config::compat::ProviderCompat::merge(
+            wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            wcore_config::compat::ProviderCompat::default(),
+        );
+        let resolved = resolve_turn_cost(
+            "anthropic",
+            "claude-3-5-sonnet-20241022",
+            1_000_000,
+            1_000_000,
+            0,
+            0,
+            &compat,
+        );
+
+        assert!(
+            resolved.bounded && (resolved.usd - 90.0).abs() < 1e-9,
+            "the conservative ceiling must survive for admission control (got {resolved:?})"
+        );
+        assert!(
+            !resolved.priced,
+            "a per-PROVIDER preset row is not a price for claude-3-5-sonnet-20241022 \
+             (got {resolved:?})"
+        );
+        assert_eq!(
+            resolved.reportable_usd(),
+            0.0,
+            "an unpriced turn reports no spend; the $90 ceiling must not reach the user"
+        );
+    }
+
+    /// The other half of the same variable, so the fix cannot pass by calling
+    /// everything unpriced.
+    ///
+    /// Same provider, same catalog-MISS model, same tokens as the test above
+    /// — the ONLY difference is that the user stated the two rates this turn
+    /// consumes. That makes them authoritative, so the turn prices at the
+    /// user's $18.00 and reports it.
+    #[test]
+    fn user_supplied_rates_price_the_same_catalog_miss() {
+        let compat = wcore_config::compat::ProviderCompat::merge(
+            wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            wcore_config::compat::ProviderCompat {
+                cost_per_input_token: Some(0.000_003),
+                cost_per_output_token: Some(0.000_015),
+                ..Default::default()
+            },
+        );
+        let resolved = resolve_turn_cost(
+            "anthropic",
+            "claude-3-5-sonnet-20241022",
+            1_000_000,
+            1_000_000,
+            0,
+            0,
+            &compat,
+        );
+
+        assert!(
+            resolved.priced && resolved.bounded,
+            "rates the user supplied are authoritative (got {resolved:?})"
+        );
+        assert!(
+            (resolved.reportable_usd() - 18.0).abs() < 1e-9,
+            "expected the user's own $18.00, got {resolved:?}"
+        );
+    }
+
+    /// Provenance is judged per AXIS and only for axes the turn actually
+    /// spent on. The compat above priced input and output but inherited the
+    /// preset's cache rows; put tokens on a cache axis and the inherited row
+    /// is consumed, so the turn stops being priced.
+    ///
+    /// Without this the fix would launder a preset cache rate through a
+    /// user-priced profile.
+    #[test]
+    fn an_inherited_cache_rate_cannot_price_a_cache_read_turn() {
+        let compat = wcore_config::compat::ProviderCompat::merge(
+            wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            wcore_config::compat::ProviderCompat {
+                cost_per_input_token: Some(0.000_003),
+                cost_per_output_token: Some(0.000_015),
+                ..Default::default()
+            },
+        );
+
+        let no_cache = resolve_turn_cost(
+            "anthropic",
+            "claude-3-5-sonnet-20241022",
+            1_000_000,
+            1_000_000,
+            0,
+            0,
+            &compat,
+        );
+        let with_cache_read = resolve_turn_cost(
+            "anthropic",
+            "claude-3-5-sonnet-20241022",
+            0,
+            1_000_000,
+            1_000_000,
+            0,
+            &compat,
+        );
+
+        assert!(
+            no_cache.priced,
+            "control: the axes this turn uses are user-supplied (got {no_cache:?})"
+        );
+        assert!(
+            !with_cache_read.priced && with_cache_read.bounded,
+            "the preset cache-read row is spent here, so the turn is bounded but \
+             not priced (got {with_cache_read:?})"
+        );
+    }
+
+    /// The catalog is untouched by the provenance split: a model with a real
+    /// row still prices, on the same merged preset the miss above used.
+    #[test]
+    fn a_catalog_hit_still_prices_through_the_same_profile() {
+        let compat = wcore_config::compat::ProviderCompat::merge(
+            wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            wcore_config::compat::ProviderCompat::default(),
+        );
+        let resolved = resolve_turn_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            1_000_000,
+            1_000_000,
+            0,
+            0,
+            &compat,
+        );
+
+        assert!(resolved.priced && resolved.bounded, "got {resolved:?}");
+        assert!(
+            (resolved.reportable_usd() - 30.0).abs() < 1e-9,
+            "claude-opus-4-7 is $5/$25 per Mtok in the bundled catalog, got {resolved:?}"
         );
     }
 
@@ -10499,7 +10749,7 @@ impl AgentEngine {
                     || self.config.session_cap.as_ref().is_some_and(|cap| {
                         cap.max_cost_usd.is_some() || cap.max_daily_cost_usd.is_some()
                     });
-                if !reserved_cost.priced {
+                if !reserved_cost.bounded {
                     if monetary_cap_active && strict_monetary_cap {
                         self.output.emit_budget_exceeded(
                             "unpriced_provider",
@@ -10522,6 +10772,15 @@ impl AgentEngine {
                     self.output.emit_info(&format!(
                         "Pricing unavailable for {reservation_provider}/{effective_model}; \
                          the call remains bounded by the token envelope and cost is unpriced, not $0."
+                    ));
+                } else if !reserved_cost.priced {
+                    // Bounded but not priced: a preset list rate ceilings the
+                    // reservation. Say which, so nobody reads the cap
+                    // arithmetic as a quote for this model.
+                    self.output.emit_info(&format!(
+                        "No published price for {reservation_provider}/{effective_model}; the \
+                         pre-flight reservation uses the {reservation_provider} list rate as a \
+                         conservative ceiling. Spend is reported only where a real price is known."
                     ));
                 }
                 let reserved_cost = reserved_cost.usd;
@@ -10663,7 +10922,7 @@ impl AgentEngine {
                             reserved_output,
                             &fallback_compat,
                         );
-                        if !next_cost.priced && monetary_cap_active && strict_monetary_cap {
+                        if !next_cost.bounded && monetary_cap_active && strict_monetary_cap {
                             state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
                                 provider: next_provider.to_string(),
                                 model: next_model.to_string(),
@@ -10749,7 +11008,7 @@ impl AgentEngine {
                         state.current_provider = next_provider.to_string();
                         state.current_model = next_model.to_string();
                         Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
-                            estimated_microcents: next_cost.priced.then(|| {
+                            estimated_microcents: next_cost.bounded.then(|| {
                                 (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round()
                                     as u64
                             }),
@@ -11886,7 +12145,7 @@ impl AgentEngine {
                     // the pricing catalog first, then falls back to estimate_turn_cost.
                     // Previously estimate_turn_cost used compat rows directly — with
                     // openai_defaults() now at $0/$0 sentinel, that always returned $0.
-                    cost_usd: resolved_cost.usd,
+                    cost_usd: resolved_cost.reportable_usd(),
                     cost_priced: resolved_cost.priced,
                     tool_calls: vec![],
                     // Drain hook actions fired this turn into the trace.
@@ -12645,7 +12904,7 @@ impl AgentEngine {
                     turn_usage.cache_creation_tokens,
                 ),
                 // Fix(pricing-audit-2026-05-24): catalog-first cost resolution.
-                cost_usd: resolved_cost.usd,
+                cost_usd: resolved_cost.reportable_usd(),
                 cost_priced: resolved_cost.priced,
                 tool_calls: tool_call_traces,
                 // Drain hook actions fired this turn into the trace.
@@ -13613,7 +13872,7 @@ impl AgentEngine {
         .is_some()
         {
             CostSource::Catalog
-        } else if resolved.priced {
+        } else if resolved.bounded {
             CostSource::ProviderDefaults
         } else {
             CostSource::Unpriced

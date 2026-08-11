@@ -53,6 +53,30 @@ impl TierModels {
     }
 }
 
+/// Where each of the four `cost_per_*_token` rates in a resolved
+/// [`ProviderCompat`] came from.
+///
+/// `true` on an axis means the USER stated that rate (config file or the
+/// `/config` Expert tier), so it is an authoritative statement about the
+/// endpoint actually being called. `false` — the default, and the value
+/// after any deserialization — means the rate was inherited from a built-in
+/// per-PROVIDER preset.
+///
+/// A preset rate is the vendor's coarse list price (`anthropic_defaults()`
+/// carries the Opus row for EVERY Anthropic model). Applying it to an
+/// arbitrary model produces a number that is useful as a conservative
+/// admission ceiling and false as a report of spend, so the two uses are
+/// kept apart: the engine charges the budget with it and refuses to print
+/// it. Measured before this split: `anthropic/claude-3-5-sonnet-20241022`
+/// was reported to the user as `$90.00` where the real price is `$18.00`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CostRateProvenance {
+    pub input: bool,
+    pub output: bool,
+    pub cache_read: bool,
+    pub cache_write: bool,
+}
+
 /// Provider-level compatibility settings.
 /// Each field is Option — None means "use provider-type default".
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -152,6 +176,18 @@ pub struct ProviderCompat {
     /// unpriced. Catalog pricing still wins when an exact model row exists.
     /// Leave unset for zero-valued sentinels whose real price is unknown.
     pub cost_is_known_free: Option<bool>,
+
+    /// Provenance of the four `cost_per_*_token` rates above — see
+    /// [`CostRateProvenance`].
+    ///
+    /// Derived positionally by [`ProviderCompat::merge`], whose second
+    /// argument is by contract the user's overlay. Deliberately
+    /// `#[serde(skip)]`: a config file must not be able to ASSERT authority
+    /// (it earns authority by carrying the rate), and a serialization
+    /// round-trip must degrade to the fail-safe "not authoritative" rather
+    /// than to "trust the preset".
+    #[serde(skip)]
+    pub cost_rate_provenance: CostRateProvenance,
 
     /// Whether the destination endpoint optimizes request *input* server-side.
     ///
@@ -888,6 +924,44 @@ impl ProviderCompat {
 
     /// Merge user config over defaults (user wins on non-None fields)
     pub fn merge(defaults: Self, user: Self) -> Self {
+        // Per-axis cost-rate provenance. A rate the user states here is
+        // authoritative; a rate inherited from `defaults` is authoritative
+        // only if `defaults` itself was user-sourced (profile-over-profile
+        // merges), which a built-in preset never is.
+        let axis = |user_rate: Option<f64>, default_rate: Option<f64>, inherited: bool| {
+            match (user_rate, default_rate) {
+                (Some(_), _) => true,
+                (None, Some(_)) => inherited,
+                // No rate on this axis at all: nothing was fabricated, so the
+                // axis cannot taint the profile. Whether the *turn* can be
+                // priced without it is the cost helper's decision, not this
+                // one.
+                (None, None) => true,
+            }
+        };
+        let prior = defaults.cost_rate_provenance;
+        let cost_rate_provenance = CostRateProvenance {
+            input: axis(
+                user.cost_per_input_token,
+                defaults.cost_per_input_token,
+                prior.input,
+            ),
+            output: axis(
+                user.cost_per_output_token,
+                defaults.cost_per_output_token,
+                prior.output,
+            ),
+            cache_read: axis(
+                user.cost_per_cache_read_token,
+                defaults.cost_per_cache_read_token,
+                prior.cache_read,
+            ),
+            cache_write: axis(
+                user.cost_per_cache_write_token,
+                defaults.cost_per_cache_write_token,
+                prior.cache_write,
+            ),
+        };
         Self {
             max_tokens_field: user.max_tokens_field.or(defaults.max_tokens_field),
             read_timeout_ms: user.read_timeout_ms.or(defaults.read_timeout_ms),
@@ -922,6 +996,7 @@ impl ProviderCompat {
                 .cost_per_cache_write_token
                 .or(defaults.cost_per_cache_write_token),
             cost_is_known_free: user.cost_is_known_free.or(defaults.cost_is_known_free),
+            cost_rate_provenance,
             input_optimization: user.input_optimization.or(defaults.input_optimization),
             compact_bash: user.compact_bash.or(defaults.compact_bash),
             include_usage_in_stream: user
@@ -2180,5 +2255,111 @@ mod input_optimization_tests {
         // Control: an absent key stays None rather than defaulting to a value.
         let empty: ProviderCompat = toml::from_str("").expect("empty compat toml parses");
         assert_eq!(empty.image_model, None);
+    }
+}
+
+#[cfg(test)]
+mod cost_rate_provenance_tests {
+    use super::{CostRateProvenance, ProviderCompat};
+
+    /// A user who configures nothing inherits the whole preset row, and none
+    /// of it is theirs. `anthropic_defaults()` carries the Opus list price
+    /// for every Anthropic model, so treating it as authoritative is how a
+    /// $90 estimate got reported as an $18 model's spend.
+    #[test]
+    fn preset_rates_are_not_user_supplied() {
+        let merged = ProviderCompat::merge(
+            ProviderCompat::anthropic_defaults(),
+            ProviderCompat::default(),
+        );
+        assert!(merged.cost_per_input_token.unwrap_or(0.0) > 0.0, "control");
+        assert_eq!(merged.cost_rate_provenance, CostRateProvenance::default());
+    }
+
+    /// The user overrides two axes; those two become theirs and the two they
+    /// left alone stay the preset's. Per-axis, not per-profile — a profile
+    /// verdict would either forfeit the user's rates or launder the preset's.
+    #[test]
+    fn merge_records_provenance_per_axis() {
+        let merged = ProviderCompat::merge(
+            ProviderCompat::anthropic_defaults(),
+            ProviderCompat {
+                cost_per_input_token: Some(0.000_003),
+                cost_per_output_token: Some(0.000_015),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            merged.cost_rate_provenance,
+            CostRateProvenance {
+                input: true,
+                output: true,
+                cache_read: false,
+                cache_write: false,
+            }
+        );
+    }
+
+    /// An axis nobody priced cannot taint the profile: there is no fabricated
+    /// number on it to mistake for a price.
+    #[test]
+    fn an_absent_axis_is_not_a_fabrication() {
+        let merged = ProviderCompat::merge(
+            ProviderCompat::cohere_defaults(),
+            ProviderCompat {
+                cost_per_input_token: Some(0.000_003),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            merged.cost_rate_provenance,
+            CostRateProvenance {
+                input: true,
+                output: true,
+                cache_read: true,
+                cache_write: true,
+            },
+            "cohere_defaults() carries no rates, so nothing was inherited"
+        );
+    }
+
+    /// Provenance is EARNED by carrying the rate, never ASSERTED. A config
+    /// file that names the field must not be able to certify a preset row —
+    /// and a serialization round-trip must land on the fail-safe side.
+    #[test]
+    fn provenance_cannot_be_asserted_by_a_config_file() {
+        let user: ProviderCompat = toml::from_str(
+            "cost_rate_provenance = { input = true, output = true, \
+             cache_read = true, cache_write = true }\n",
+        )
+        .expect("unknown compat keys are ignored, not rejected");
+        assert_eq!(user.cost_rate_provenance, CostRateProvenance::default());
+
+        let merged = ProviderCompat::merge(ProviderCompat::anthropic_defaults(), user);
+        assert_eq!(
+            merged.cost_rate_provenance,
+            CostRateProvenance::default(),
+            "the preset row stays the preset's"
+        );
+
+        let authoritative = ProviderCompat::merge(
+            ProviderCompat::anthropic_defaults(),
+            ProviderCompat {
+                cost_per_input_token: Some(0.000_003),
+                ..Default::default()
+            },
+        );
+        assert!(
+            authoritative.cost_rate_provenance.input,
+            "control: this profile IS authoritative on the input axis"
+        );
+        let round_tripped: ProviderCompat =
+            serde_json::from_str(&serde_json::to_string(&authoritative).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(
+            round_tripped.cost_rate_provenance,
+            CostRateProvenance::default(),
+            "a round-trip must forget authority, never invent it"
+        );
     }
 }
