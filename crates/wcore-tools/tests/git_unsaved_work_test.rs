@@ -332,3 +332,158 @@ async fn stash_save_refuses_while_the_users_unsaved_work_is_in_the_tree() {
         "the user's line must still be on disk"
     );
 }
+
+/// Job corpus row A-8's own shape, and the wrong refusal it produced.
+///
+/// Mid-merge the pinned commit is `HEAD`, so every line the other side brings
+/// in is "on disk and in no commit" — including a whole file `HEAD` has never
+/// seen. Reading only the pin, the tool refused to stage the resolution and
+/// the row was left with an uncommitted merge in the work tree, which is
+/// exactly the failure the row grades. `MERGE_HEAD` has to count as recorded.
+#[tokio::test]
+async fn a_merge_resolution_is_stageable_even_though_head_has_never_seen_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "t@example.com"]);
+    git(&root, &["config", "user.name", "t"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(&root.join("retry.py"), "def fetch():\n    return 1\n").unwrap();
+    git(&root, &["add", "retry.py"]);
+    git(&root, &["commit", "-qm", "base"]);
+
+    // The other side adds a file main has never recorded, plus a line in one
+    // main does.
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_retry_after.py"),
+        "def test_header_is_obeyed():\n    assert True\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("retry.py"),
+        "def fetch():\n    honour_retry_after()\n    return 1\n",
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "feature work"]);
+    git(&root, &["checkout", "-q", "main"]);
+    std::fs::write(
+        root.join("retry.py"),
+        "def fetch():\n    back_off_with_jitter()\n    return 1\n",
+    )
+    .unwrap();
+    git(&root, &["add", "retry.py"]);
+    git(&root, &["commit", "-qm", "main work"]);
+
+    // The merge conflicts, as the row's does.
+    let merged = Command::new("git")
+        .args(["merge", "--no-commit", "feature"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        !merged.status.success(),
+        "the fixture must actually conflict, or this arm proves nothing"
+    );
+    // The resolution, written the way a resolution is written.
+    std::fs::write(
+        root.join("retry.py"),
+        "def fetch():\n    back_off_with_jitter()\n    honour_retry_after()\n    return 1\n",
+    )
+    .unwrap();
+
+    let staged_result = GitTool
+        .execute(json!({
+            "op": "add_paths",
+            "paths": ["retry.py", "tests/test_retry_after.py"],
+            "cwd": root.to_string_lossy(),
+        }))
+        .await;
+    assert!(
+        !staged_result.is_error,
+        "a merge resolution must be stageable: {}",
+        staged_result.content
+    );
+    assert!(
+        staged(&root).contains("tests/test_retry_after.py"),
+        "the incoming file must be in the index, found: {:?}",
+        staged(&root)
+    );
+
+    let committed = GitTool
+        .execute(json!({
+            "op": "commit",
+            "message": "Merge feature into main",
+            "allow_default_branch": true,
+            "cwd": root.to_string_lossy(),
+        }))
+        .await;
+    assert!(
+        !committed.is_error,
+        "the merge commit must land: {}",
+        committed.content
+    );
+    assert!(
+        !root.join(".git/MERGE_HEAD").exists(),
+        "the merge must not still be in progress"
+    );
+}
+
+/// The positive control for the arm above: mid-merge, a file that is the
+/// user's own unsaved work — recorded by neither side — is still refused.
+/// Without this, teaching the guard about `MERGE_HEAD` could have disarmed it
+/// for the whole duration of a merge and this suite would not have noticed.
+#[tokio::test]
+async fn a_merge_does_not_disarm_the_guard_for_the_users_own_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "user.email", "t@example.com"]);
+    git(&root, &["config", "user.name", "t"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("retry.py"), "def fetch():\n    return 1\n").unwrap();
+    git(&root, &["add", "retry.py"]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(root.join("retry.py"), "def fetch():\n    return 2\n").unwrap();
+    git(&root, &["add", "retry.py"]);
+    git(&root, &["commit", "-qm", "feature"]);
+    git(&root, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("retry.py"), "def fetch():\n    return 3\n").unwrap();
+    git(&root, &["add", "retry.py"]);
+    git(&root, &["commit", "-qm", "main"]);
+    let merged = Command::new("git")
+        .args(["merge", "--no-commit", "feature"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(!merged.status.success(), "the fixture must conflict");
+
+    // Neither side has ever heard of this; it is the user's.
+    std::fs::write(
+        root.join("scratch.md"),
+        "notes the user has not saved anywhere else\ncounter=41\n",
+    )
+    .unwrap();
+
+    let result = GitTool
+        .execute(json!({
+            "op": "add_paths",
+            "paths": ["scratch.md"],
+            "cwd": root.to_string_lossy(),
+        }))
+        .await;
+
+    assert!(
+        result.is_error,
+        "a merge must not disarm the guard: {}",
+        result.content
+    );
+    assert!(
+        !staged(&root).contains("scratch.md"),
+        "the user's file must not be in the index, found: {:?}",
+        staged(&root)
+    );
+}

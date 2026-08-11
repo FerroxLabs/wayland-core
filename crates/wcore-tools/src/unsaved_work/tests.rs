@@ -11,16 +11,38 @@ struct Fixture {
     root: PathBuf,
 }
 
+/// Run `git` in `dir` for a fixture.
+///
+/// The authority variables are stripped for the same reason production's
+/// [`git_invoke`] strips them, and for one more: `bash::tests`'
+/// `child_workspace_policy_strips_git_authority_env_and_denies_parent_roots`
+/// sets `GIT_DIR`, `GIT_COMMON_DIR` and `GIT_WORK_TREE` process-wide. It is
+/// `#[serial]`, which serialises it against other `#[serial]` tests and not
+/// against the ~1170 that are not — so during its window every bare `git`
+/// here pointed at an empty temporary directory and `init`, `config`, `add`
+/// and `commit` all failed. Measured: 4 of 11 whole-binary runs red, 0 of 11
+/// when run filtered. Its stderr also went to `Stdio::null()`, so the panic
+/// said only "git failed"; it is captured and quoted now.
 fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let out = Command::new("git")
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
         .expect("git must be available for these tests");
-    assert!(status.success(), "git {args:?} failed");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {dir:?}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
 }
 
 fn repo() -> Fixture {

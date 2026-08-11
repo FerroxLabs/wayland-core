@@ -49,6 +49,14 @@
 //!
 //! It fails towards not firing, in these named cases:
 //!
+//! * **content that a merge in progress brings in.** The pinned commit is
+//!   `HEAD`, so mid-merge every line the other side contributes reads as "on
+//!   disk, in no commit". Job corpus row A-8 measured exactly that: with the
+//!   merge-head blind spot the tool refused to stage `retry.py` and
+//!   `tests/test_retry_after.py`, and the conflict resolution was left
+//!   uncommitted in the work tree — the row's own failure. `MERGE_HEAD`,
+//!   `CHERRY_PICK_HEAD` and `REVERT_HEAD` are therefore read alongside the
+//!   pin, and anything they record is recorded;
 //! * a baseline git would not settle — nothing is proven, so nothing is
 //!   refused;
 //! * a repository with no commits yet — there is no saved state to compare
@@ -57,6 +65,7 @@
 //! * lines this session wrote through `Write` or `Edit` — attributed to the
 //!   tool, so they are not the user's unsaved work.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::{
@@ -90,6 +99,7 @@ pub fn staging_verdict(cwd: &Path, staging: Staging<'_>) -> Result<Option<String
         Staging::Index => index_paths(cwd),
     };
 
+    let incoming = incoming_heads(cwd);
     let mut refused: Vec<(String, Vec<String>)> = Vec::new();
     let mut noted: Vec<String> = Vec::new();
     for rel in candidates {
@@ -102,15 +112,19 @@ pub fn staging_verdict(cwd: &Path, staging: Staging<'_>) -> Result<Option<String
         if unsaved.is_empty() {
             continue;
         }
-        let Some(state) = state_of(&guard, &abs, unsaved.len()) else {
+        let Some(state) = state_of(&guard, &abs, &unsaved, &incoming) else {
             // Cannot be established, so nothing is claimed and nothing is
             // refused.
             continue;
         };
+        if state.remaining.is_empty() {
+            // Everything the pin did not record, a merge in progress does.
+            continue;
+        }
         if state.agent_also_changed || (!named && state.head_records_it) {
             noted.push(shown);
         } else {
-            refused.push((shown, unsaved));
+            refused.push((shown, state.remaining));
         }
     }
 
@@ -150,11 +164,22 @@ pub fn stash_refusal(cwd: &Path) -> Option<String> {
         return None;
     }
     let guard = UnsavedWorkGuard::shared();
+    let incoming = incoming_heads(cwd);
     let mut at_risk: Vec<(String, Vec<String>)> = Vec::new();
     for rel in work_tree_paths(cwd, false) {
-        let lines = guard.unsaved_lines(&cwd.join(&rel));
-        if !lines.is_empty() {
-            at_risk.push((rel.to_string_lossy().into_owned(), lines));
+        let abs = cwd.join(&rel);
+        let lines = guard.unsaved_lines(&abs);
+        if lines.is_empty() {
+            continue;
+        }
+        // Mid-merge, the other side's lines are recorded somewhere and a stash
+        // does not lose them.
+        let remaining = match state_of(&guard, &abs, &lines, &incoming) {
+            Some(state) => state.remaining,
+            None => lines,
+        };
+        if !remaining.is_empty() {
+            at_risk.push((rel.to_string_lossy().into_owned(), remaining));
         }
     }
     if at_risk.is_empty() {
@@ -172,23 +197,37 @@ pub fn stash_refusal(cwd: &Path) -> Option<String> {
     ))
 }
 
-/// What the pinned commit and the disk say about one candidate path.
+/// What the recorded state and the disk say about one candidate path.
 struct PathState {
-    /// The pinned commit records this path under some content of its own.
+    /// Some commit that is not this path's own work tree state records this
+    /// path — the pin, or a head a merge in progress is bringing in.
     head_records_it: bool,
-    /// Something other than the `unsaved` user lines was added to this file
-    /// since the pinned commit — so this session, or something the guard can
-    /// attribute to it, worked on the file.
+    /// Something other than `remaining` was added to this file since the
+    /// recorded state — so this session, or something the guard can attribute
+    /// to it, worked on the file.
     agent_also_changed: bool,
+    /// The unsaved lines that survive the merge-head check: on disk, and in no
+    /// commit anywhere this function can see.
+    remaining: Vec<String>,
 }
 
-/// Read `abs` against the pinned commit, or `None` when the commit cannot
+/// Read `abs` against everything already recorded, or `None` when nothing can
 /// answer for it.
 ///
-/// `agent_also_changed` compares the whole added-since-the-pinned-commit count
-/// against the count of unsaved user lines. Equal means the only thing this
-/// path would carry into a commit is the user's own work.
-fn state_of(guard: &UnsavedWorkGuard, abs: &Path, unsaved: usize) -> Option<PathState> {
+/// "Recorded" is the pinned commit plus each of `incoming` — the heads a merge,
+/// cherry-pick or revert in progress is bringing in. Without them the other
+/// side of a merge reads as the user's unsaved work, because it genuinely is
+/// not in `HEAD`.
+///
+/// `agent_also_changed` compares the whole added-since-recorded count against
+/// the count of remaining unsaved lines. Equal means the only thing this path
+/// would carry into a commit is the user's own work.
+fn state_of(
+    guard: &UnsavedWorkGuard,
+    abs: &Path,
+    unsaved: &[String],
+    incoming: &[String],
+) -> Option<PathState> {
     let disk = std::fs::read_to_string(abs).ok()?;
     let Baseline::Repo {
         root,
@@ -198,17 +237,73 @@ fn state_of(guard: &UnsavedWorkGuard, abs: &Path, unsaved: usize) -> Option<Path
         return None;
     };
     let rel = repo_relative(&root, abs)?;
-    let head_records_it = recorded_raw(&root, &commit, &rel).ok()?.is_some();
-    let recorded = guard.recorded_blob(abs, &root, &commit).ok()?;
-    let before = tally(&recorded);
+    let mut head_records_it = recorded_raw(&root, &commit, &rel).ok()?.is_some();
+    let mut recorded = tally_owned(&guard.recorded_blob(abs, &root, &commit).ok()?);
+    for head in incoming {
+        let Ok(Some(bytes)) = recorded_raw(&root, head, &rel) else {
+            continue;
+        };
+        head_records_it = true;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        for (line, count) in tally_owned(&text) {
+            let slot = recorded.entry(line).or_insert(0);
+            *slot = (*slot).max(count);
+        }
+    }
+
+    let mut budget: HashMap<&str, usize> = HashMap::new();
+    for (line, count) in &recorded {
+        budget.insert(line.as_str(), *count);
+    }
+    let mut remaining = Vec::new();
+    for line in unsaved {
+        let key = line.trim();
+        match budget.get_mut(key) {
+            Some(left) if *left > 0 => *left -= 1,
+            _ => remaining.push(line.clone()),
+        }
+    }
+
     let mut added = 0usize;
     for (line, now) in tally(&disk) {
-        added += now.saturating_sub(before.get(line).copied().unwrap_or(0));
+        added += now.saturating_sub(recorded.get(line).copied().unwrap_or(0));
     }
     Some(PathState {
         head_records_it,
-        agent_also_changed: added > unsaved,
+        agent_also_changed: added > remaining.len(),
+        remaining,
     })
+}
+
+/// The heads a merge, cherry-pick or revert in progress is bringing in.
+///
+/// Empty when none is in progress, which is the ordinary case and costs three
+/// `rev-parse` calls that fail fast.
+fn incoming_heads(dir: &Path) -> Vec<String> {
+    let mut heads = Vec::new();
+    for name in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+        let Some(run) = git_run(dir, &["rev-parse", "--verify", "--quiet", name], None) else {
+            continue;
+        };
+        if !run.ok() {
+            continue;
+        }
+        for line in run.stdout_text().lines() {
+            let id = line.trim();
+            if !id.is_empty() {
+                heads.push(id.to_owned());
+            }
+        }
+    }
+    heads
+}
+
+/// [`super::tally`] with owned keys, so two blobs can be merged into one map.
+fn tally_owned(text: &str) -> HashMap<String, usize> {
+    tally(text)
+        .into_iter()
+        .map(|(line, count)| (line.to_owned(), count))
+        .collect()
 }
 
 /// Every path `git add -A` would pick up under `dir`.
