@@ -6153,15 +6153,50 @@ mod tests {
              or the advice stopped naming any flag"
         );
 
+        // Every token the advice may name, pinned to the ONE clap argument it
+        // must bind to. A map, not a set: a token that exists but binds to
+        // something else still fails, so the `-p` trap above stays live --
+        // `-p` resolves to `provider`, is absent from this map, and is
+        // reported as not doing what the advice would be claiming.
+        let expected: &[(&str, &str)] = &[
+            // "Use --json-stream for headless/piped use".
+            ("--json-stream", "json_stream"),
+            // UAT-UXA2: `wayland-core --resume <id> "your next message"`.
+            // `--resume` is clap `resume: Option<String>` -- "Resume a
+            // previous session" -- and this second paragraph only prints when
+            // the user ALREADY passed `--resume`/`--continue`, so the sentence
+            // names the flag that does exactly what the sentence says.
+            ("--resume", "resume"),
+        ];
+
+        // The allow-map may not carry an entry the advice no longer names, or
+        // it silently pre-authorises a flag that nothing actually checks.
+        for (token, _) in expected {
+            assert!(
+                tokens.contains(token),
+                "`{token}` is allow-listed but the advice no longer names it"
+            );
+        }
+
         for token in tokens {
             let id = resolve(&cmd, token).unwrap_or_else(|| {
                 panic!("the advice names `{token}`, which is not an argument at all")
             });
+            let want = expected
+                .iter()
+                .find(|(t, _)| *t == token)
+                .map(|(_, want)| *want)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the advice names `{token}` (clap argument `{id}`), which this \
+                         message is not allowed to offer. The prompt is a trailing \
+                         positional: wayland-core \"your prompt\"."
+                    )
+                });
             assert_eq!(
-                id, "json_stream",
-                "the advice names `{token}`, which is clap argument `{id}` — \
-                 that is not a way to pass a prompt. The prompt is a trailing \
-                 positional: wayland-core \"your prompt\"."
+                id, want,
+                "the advice names `{token}`, which is clap argument `{id}`, not \
+                 `{want}` -- it does not do what the advice says"
             );
         }
     }

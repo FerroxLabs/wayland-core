@@ -572,10 +572,19 @@ mod tests {
         assert!(matches!(result.output, Err(ProviderError::Connection(_))));
         let finished = lifecycle.finished.lock().unwrap();
         assert_eq!(finished.len(), 1);
+        // The fixture binds a port and drops the listener, so the connect
+        // really is REFUSED -- not the ambiguous residue `FAILURE_CONNECTION`
+        // stands for. `connect_failure_code` now splits the two (that split is
+        // what takes a bad `base_url` from 902 s / 36 sends down to one send),
+        // so the precise code is the correct expectation here; the old
+        // `"connection"` was this test naming a class the fixture never was.
+        // The lifecycle invariant this test exists for -- exactly one `finish`,
+        // carrying a before-headers outcome, before the error escapes -- is
+        // asserted above and unchanged.
         assert!(matches!(
             &finished[0].1,
             ProviderAttemptHeaderOutcome::FailedBeforeHeaders { failure_code }
-                if failure_code == "connection"
+                if failure_code == crate::retry::FAILURE_CONNECTION_REFUSED
         ));
     }
 

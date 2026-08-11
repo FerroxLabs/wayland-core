@@ -550,7 +550,28 @@ async fn test_engine_api_error_handling() {
         .unwrap_err();
 
     match err {
-        AgentError::ApiError(msg) => assert_eq!(msg, "test error"),
-        other => panic!("expected ApiError(\"test error\"), got: {:?}", other),
+        // The payload is the SAME user-facing prose the engine emitted, not
+        // the bare provider reason. That is the convention the sibling refusal
+        // in this very function already used (the output-stall gate emits
+        // `gate_msg` and returns `ApiError(gate_msg)`); the retry-exhausted
+        // branch was the outlier. No consumer matches on the payload -- the
+        // only reads are `e.to_string()` for display and `ApiError(_)` variant
+        // checks -- so the richer string costs nothing and tells the user what
+        // actually happened and what to do next.
+        //
+        // Both halves are asserted. A payload that dropped the provider's own
+        // words, or one that dropped the retry-exhaustion framing, would each
+        // still satisfy a single `contains`.
+        AgentError::ApiError(msg) => {
+            assert!(
+                msg.contains("test error"),
+                "the provider's own words must survive into the payload, got: {msg}"
+            );
+            assert!(
+                msg.contains("Provider stream failed after retries"),
+                "the payload must say the retry budget was spent, got: {msg}"
+            );
+        }
+        other => panic!("expected ApiError, got: {:?}", other),
     }
 }
