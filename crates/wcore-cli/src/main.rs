@@ -4540,7 +4540,13 @@ async fn run_json_stream_mode(
             .with_advertised_capabilities(advertised_for_sink)
             // v0.9.4 W1.2 (F2): enable sub-agent event relay to the Desktop
             // host. Harmless when no sub-agents spawn (no-op emission path).
-            .with_sub_agent_traces(true),
+            .with_sub_agent_traces(true)
+            // The host reads the first stdout line as the handshake, so
+            // `ready` must be the first frame on every platform. Bootstrap
+            // emits diagnostics before `ready` exists (on Windows the
+            // `windows_job_object` local-shell notice does so on EVERY
+            // session); hold them until the handshake is out.
+            .deferring_info_until_ready(),
     );
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
