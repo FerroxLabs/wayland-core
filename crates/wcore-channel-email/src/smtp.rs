@@ -16,6 +16,12 @@ use lettre::message::{Attachment, Message, MultiPart, SinglePart, header::Conten
 use lettre::transport::smtp::AsyncSmtpTransport;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Certificate, Tls, TlsParameters};
+
+use crate::config::{MailSecurity, is_loopback_host};
+
+/// The conventional implicit-TLS ("SMTPS") port. `MailSecurity::Auto` treats
+/// this port, and only this port, as implicit TLS.
+const SMTPS_PORT: u16 = 465;
 use lettre::transport::smtp::response::Response;
 use lettre::{AsyncTransport, Tokio1Executor};
 use rustls_pki_types::CertificateDer;
@@ -94,18 +100,45 @@ impl LettreSender {
         username: String,
         password: String,
         tls_root_cert_path: Option<&str>,
+        security: MailSecurity,
     ) -> Result<Self, EmailError> {
         let creds = Credentials::new(username, password);
-        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
-            .map_err(|e| EmailError::Smtp(format!("build relay {host}: {e}")))?
-            .port(port)
-            .credentials(creds);
+        let resolved = security.resolve(host, port, SMTPS_PORT);
+        let mut builder = match resolved {
+            // `resolve` never returns Auto; matching it keeps the match total
+            // without an unreachable panic.
+            MailSecurity::Auto | MailSecurity::Starttls => {
+                AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+                    .map_err(|e| EmailError::Smtp(format!("build relay {host}: {e}")))?
+            }
+            MailSecurity::Implicit => AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+                .map_err(|e| EmailError::Smtp(format!("build relay {host}: {e}")))?,
+            MailSecurity::Plaintext => {
+                // Fail CLOSED: an unencrypted relay is only ever allowed to the
+                // local machine. Anywhere else this would put the SASL PLAIN
+                // credentials and the whole message body on the wire in clear
+                // text, which is not a mode an operator can opt into here.
+                if !is_loopback_host(host) {
+                    return Err(EmailError::Smtp(format!(
+                        "smtp security = \"plaintext\" refuses non-loopback host {host:?}: \
+                         credentials and message bodies would cross the network unencrypted"
+                    )));
+                }
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+            }
+        };
+        builder = builder.port(port).credentials(creds);
 
         if let Some(path) = tls_root_cert_path {
-            // `starttls_relay` has already installed
-            // `Tls::Required(TlsParameters::new(host))`, so an extra anchor can
-            // only be introduced by replacing those parameters wholesale.
-            builder = builder.tls(Tls::Required(build_tls_params(host, path)?));
+            // The TLS-bearing builders installed `Tls::Required`/`Tls::Wrapper`
+            // with default parameters, so an extra anchor can only be
+            // introduced by replacing those parameters wholesale.
+            let params = build_tls_params(host, path)?;
+            builder = match resolved {
+                MailSecurity::Implicit => builder.tls(Tls::Wrapper(params)),
+                MailSecurity::Plaintext => builder,
+                _ => builder.tls(Tls::Required(params)),
+            };
         }
 
         Ok(Self {
@@ -516,6 +549,158 @@ pub(crate) fn response_message_id(r: &Response) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- B-3: SMTP transport security -----
+    //
+    // `LettreSender::new` hardcoded `starttls_relay`, i.e. `Tls::Required`,
+    // on every host and port. A relay that does not offer STARTTLS — the B-3
+    // corpus row's hermetic host answers `454 TLS not available` — could
+    // therefore never be sent to, so the approval request the row exists to
+    // measure had no outbound path even once the channel resolved.
+
+    /// A minimal plaintext ESMTP relay on a loopback socket. Deliberately
+    /// does NOT advertise STARTTLS, exactly like the corpus's mail host.
+    /// Returns the port and a receiver that yields the full session
+    /// transcript once the client disconnects.
+    fn plaintext_smtp_relay() -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((sock, _)) = listener.accept() else {
+                return;
+            };
+            let _ = sock.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+            let mut out = sock.try_clone().expect("clone sock");
+            let mut reader = BufReader::new(sock);
+            let mut transcript = String::new();
+            let _ = out.write_all(b"220 fixture.local ESMTP test\r\n");
+            let mut in_data = false;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                transcript.push_str(&line);
+                if in_data {
+                    if line == ".\r\n" {
+                        in_data = false;
+                        let _ = out.write_all(b"250 2.0.0 queued as TESTID\r\n");
+                    }
+                    continue;
+                }
+                let up = line.trim_end().to_uppercase();
+                let reply: &[u8] = if up.starts_with("EHLO") {
+                    // No STARTTLS on this relay, on purpose.
+                    b"250-fixture.local\r\n250-AUTH PLAIN LOGIN\r\n250 SMTPUTF8\r\n"
+                } else if up.starts_with("HELO") {
+                    b"250 fixture.local\r\n"
+                } else if up.starts_with("AUTH") {
+                    b"235 2.7.0 authenticated\r\n"
+                } else if up.starts_with("MAIL FROM") || up.starts_with("RCPT TO") {
+                    b"250 2.1.0 ok\r\n"
+                } else if up.starts_with("DATA") {
+                    in_data = true;
+                    b"354 end with <CRLF>.<CRLF>\r\n"
+                } else if up.starts_with("QUIT") {
+                    let _ = out.write_all(b"221 2.0.0 bye\r\n");
+                    break;
+                } else {
+                    b"250 2.0.0 ok\r\n"
+                };
+                if let Err(_e) = out.write_all(reply) {
+                    break;
+                }
+            }
+            let _ = tx.send(transcript);
+        });
+        (port, rx)
+    }
+
+    /// The B-3 regression, outbound half. The approval request must actually
+    /// leave the machine when the relay is a plaintext loopback host.
+    ///
+    /// Pre-fix this fails at `send`: `starttls_relay` installs
+    /// `Tls::Required`, the relay advertises no STARTTLS, and lettre aborts
+    /// the session before `MAIL FROM`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plaintext_loopback_relay_accepts_the_message() {
+        let (port, rx) = plaintext_smtp_relay();
+        // `Auto`: the corpus config sets no security mode.
+        let sender = LettreSender::new(
+            "127.0.0.1",
+            port,
+            "agent".to_string(),
+            "pw".to_string(),
+            None,
+            MailSecurity::Auto,
+        )
+        .expect("build plaintext loopback sender");
+
+        let msg = Message::builder()
+            .from("agent@fixture.local".parse().expect("from"))
+            .to("oncall@fixture.local".parse().expect("to"))
+            .subject("approval needed: moneykit 2.0.0")
+            .body("Requesting approval to pin moneykit==2.0.0.".to_string())
+            .expect("build message");
+
+        sender.send(msg).await.expect("the relay must accept it");
+
+        let transcript = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("relay transcript");
+        let up = transcript.to_uppercase();
+        assert!(up.contains("MAIL FROM"), "no MAIL FROM in: {transcript}");
+        assert!(
+            up.contains("RCPT TO:<ONCALL@FIXTURE.LOCAL>"),
+            "the on-call was never an envelope recipient: {transcript}"
+        );
+        assert!(
+            transcript.contains("approval needed: moneykit 2.0.0"),
+            "the message body never reached the relay: {transcript}"
+        );
+        assert!(
+            !up.contains("STARTTLS"),
+            "the client tried to upgrade a relay that offers no STARTTLS: {transcript}"
+        );
+    }
+
+    /// Fail-closed: `plaintext` toward a host that is not provably local is
+    /// refused at construction, before any socket exists.
+    #[test]
+    fn plaintext_is_refused_for_a_non_loopback_relay() {
+        let err = LettreSender::new(
+            "smtp.example.com",
+            25,
+            "u".to_string(),
+            "p".to_string(),
+            None,
+            MailSecurity::Plaintext,
+        );
+        let Err(err) = err else {
+            panic!("plaintext to a remote relay must be refused, but a sender was built");
+        };
+        assert!(
+            err.to_string().contains("refuses non-loopback host"),
+            "expected the fail-closed refusal, got: {err}"
+        );
+    }
+
+    /// A remote relay keeps demanding TLS. The loopback exemption must not
+    /// have widened into "plaintext whenever it is convenient".
+    #[test]
+    fn remote_relay_auto_still_requires_tls() {
+        assert_eq!(
+            MailSecurity::Auto.resolve("smtp.example.com", 587, SMTPS_PORT),
+            MailSecurity::Starttls
+        );
+        assert_eq!(
+            MailSecurity::Auto.resolve("smtp.example.com", SMTPS_PORT, SMTPS_PORT),
+            MailSecurity::Implicit
+        );
+    }
     use std::sync::Mutex;
 
     /// A misconfigured anchor path must be a loud error, not a silent fallback

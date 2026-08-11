@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, watch};
 use wcore_channels::event::{Attachment, ChannelEvent, ChatType, IncomingMessage, MediaKind};
 
+use crate::config::{MailSecurity, is_loopback_host};
 use crate::error::EmailError;
 use crate::smtp::ReplyContext;
 use crate::uid_store;
@@ -25,6 +26,10 @@ pub(crate) type ReplyIndex = Arc<StdMutex<HashMap<String, ReplyContext>>>;
 /// means a later reply falls back to a single-id `References` chain (still
 /// correctly threaded via `In-Reply-To`), never an error.
 pub(crate) const REPLY_INDEX_CAP: usize = 4096;
+
+/// The conventional implicit-TLS ("IMAPS") port. `MailSecurity::Auto` treats
+/// this port, and only this port, as implicit TLS.
+const IMAPS_PORT: u16 = 993;
 
 /// Insert one reply-threading entry, enforcing `REPLY_INDEX_CAP`. A
 /// synthesized `uid:N` id (no real Message-ID) is still recorded so a
@@ -51,6 +56,8 @@ pub(crate) fn record_reply_context(index: &ReplyIndex, id: String, ctx: ReplyCon
 pub(crate) struct ImapPollArgs {
     pub host: String,
     pub port: u16,
+    /// Transport security for the IMAP socket. See [`MailSecurity`].
+    pub security: MailSecurity,
     pub user: String,
     pub pass: String,
     pub mailbox: String,
@@ -89,6 +96,7 @@ pub(crate) fn imap_poll_blocking(args: ImapPollArgs) {
     let ImapPollArgs {
         host,
         port,
+        security,
         user,
         pass,
         mailbox,
@@ -133,6 +141,7 @@ pub(crate) fn imap_poll_blocking(args: ImapPollArgs) {
         match poll_once(
             &host,
             port,
+            security,
             &user,
             &pass,
             &mailbox,
@@ -200,12 +209,26 @@ fn new_uids(uids: std::collections::HashSet<u32>, seen_through: u32) -> Vec<u32>
     out
 }
 
+/// Open the IMAP socket in whichever transport mode `security` resolves to,
+/// then run one poll over it.
+///
+/// This function exists because the mode is a runtime decision but the stream
+/// type is a compile-time one: implicit TLS and STARTTLS both yield
+/// `Client<TlsStream<TcpStream>>` while plaintext yields `Client<TcpStream>`,
+/// so the three arms cannot share a binding. Each arm therefore hands its own
+/// concrete client to the stream-generic [`poll_with_client`].
+///
+/// Previously this was one unconditional `imap::connect`, i.e. implicit TLS on
+/// every port. Against a STARTTLS-only or plaintext server that put a TLS
+/// ClientHello onto a cleartext port on every single poll — the connection was
+/// reset each time, and the loop retried forever without ever reading mail.
 // imap poll loop accepts host/port/user/pass/mailbox/inbox/uid/runtime;
 // refactoring into a struct is needless ceremony for a sub-driver helper.
 #[allow(clippy::too_many_arguments)]
 fn poll_once(
     host: &str,
     port: u16,
+    security: MailSecurity,
     user: &str,
     pass: &str,
     mailbox: &str,
@@ -218,10 +241,103 @@ fn poll_once(
     runtime_handle: &tokio::runtime::Handle,
     seeded: &mut bool,
 ) -> Result<(), EmailError> {
-    let tls =
-        native_tls::TlsConnector::new().map_err(|e| EmailError::Imap(format!("tls init: {e}")))?;
-    let client = imap::connect((host, port), host, &tls)
-        .map_err(|e| EmailError::Imap(format!("connect {host}:{port}: {e}")))?;
+    match security.resolve(host, port, IMAPS_PORT) {
+        MailSecurity::Plaintext => {
+            // Fail CLOSED: an unencrypted IMAP session is only ever allowed to
+            // the local machine. Anywhere else the LOGIN password and every
+            // fetched message body would cross the network in clear text.
+            if !is_loopback_host(host) {
+                return Err(EmailError::Imap(format!(
+                    "imap security = \"plaintext\" refuses non-loopback host {host:?}: \
+                     the login password and message bodies would cross the network unencrypted"
+                )));
+            }
+            let stream = std::net::TcpStream::connect((host, port))
+                .map_err(|e| EmailError::Imap(format!("connect {host}:{port}: {e}")))?;
+            let mut client = imap::Client::new(stream);
+            client
+                .read_greeting()
+                .map_err(|e| EmailError::Imap(format!("greeting {host}:{port}: {e}")))?;
+            poll_with_client(
+                client,
+                user,
+                pass,
+                mailbox,
+                host,
+                allow_set,
+                own_addresses,
+                sent_ids,
+                inbox,
+                last_seen_uid,
+                reply_index,
+                runtime_handle,
+                seeded,
+            )
+        }
+        MailSecurity::Starttls => {
+            let tls = native_tls::TlsConnector::new()
+                .map_err(|e| EmailError::Imap(format!("tls init: {e}")))?;
+            let client = imap::connect_starttls((host, port), host, &tls)
+                .map_err(|e| EmailError::Imap(format!("starttls {host}:{port}: {e}")))?;
+            poll_with_client(
+                client,
+                user,
+                pass,
+                mailbox,
+                host,
+                allow_set,
+                own_addresses,
+                sent_ids,
+                inbox,
+                last_seen_uid,
+                reply_index,
+                runtime_handle,
+                seeded,
+            )
+        }
+        // `resolve` never returns Auto; folding it in with Implicit keeps the
+        // match total and preserves the historical default on port 993.
+        MailSecurity::Implicit | MailSecurity::Auto => {
+            let tls = native_tls::TlsConnector::new()
+                .map_err(|e| EmailError::Imap(format!("tls init: {e}")))?;
+            let client = imap::connect((host, port), host, &tls)
+                .map_err(|e| EmailError::Imap(format!("connect {host}:{port}: {e}")))?;
+            poll_with_client(
+                client,
+                user,
+                pass,
+                mailbox,
+                host,
+                allow_set,
+                own_addresses,
+                sent_ids,
+                inbox,
+                last_seen_uid,
+                reply_index,
+                runtime_handle,
+                seeded,
+            )
+        }
+    }
+}
+
+/// One poll over an already-connected IMAP client, whatever its stream type.
+#[allow(clippy::too_many_arguments)]
+fn poll_with_client<T: std::io::Read + std::io::Write>(
+    client: imap::Client<T>,
+    user: &str,
+    pass: &str,
+    mailbox: &str,
+    host: &str,
+    allow_set: Option<&std::collections::HashSet<String>>,
+    own_addresses: &[String],
+    sent_ids: &crate::sent_index::SentIdIndex,
+    inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>,
+    last_seen_uid: &Arc<StdMutex<u32>>,
+    reply_index: &ReplyIndex,
+    runtime_handle: &tokio::runtime::Handle,
+    seeded: &mut bool,
+) -> Result<(), EmailError> {
     let mut session = client
         .login(user, pass)
         .map_err(|(e, _)| EmailError::Auth(format!("imap login: {e}")))?;
@@ -1212,6 +1328,139 @@ fn parse_rfc2822_to_epoch(s: String) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- B-3: IMAP transport security -----
+    //
+    // Measured defect, corpus row B-3 on two platforms: `poll_once` opened
+    // every connection with `imap::connect`, i.e. implicit TLS, on whatever
+    // port it was given. Against the row's hermetic plaintext mail host the
+    // mail server logged 358 (Linux) / 179 (Windows) TLS ClientHellos on its
+    // cleartext IMAP port and served not one IMAP command, for the whole
+    // 30-minute run. These tests assert on the BYTES the server receives,
+    // which is the same third-party observation the corpus grades from.
+
+    /// The first byte of a TLS record of type `handshake`. The corpus counts
+    /// these to prove the client spoke TLS where it should have spoken IMAP.
+    const TLS_HANDSHAKE_BYTE: u8 = 0x16;
+
+    /// Accept one connection, send an IMAP greeting, and return the first
+    /// line the client sends back.
+    fn imap_listener_capturing_first_line() -> (u16, std::sync::mpsc::Receiver<Vec<u8>>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
+        let port = listener.local_addr().expect("local addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(10)));
+            // Server speaks first, exactly like a real IMAP host.
+            let _ = sock.write_all(b"* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN LOGIN] ready\r\n");
+            let _ = sock.flush();
+            let mut reader = BufReader::new(sock.try_clone().expect("clone sock"));
+            let mut line = Vec::new();
+            let _ = reader.read_until(b'\n', &mut line);
+            let _ = tx.send(line);
+            // Refuse, so the poll ends promptly; the assertion is on the bytes.
+            let _ = sock.write_all(b"* BYE closing\r\n");
+        });
+        (port, rx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn poll_once_against(host: &str, port: u16, security: MailSecurity) -> Result<(), EmailError> {
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let last_seen = Arc::new(StdMutex::new(0u32));
+        let reply_index: ReplyIndex = Arc::new(StdMutex::new(HashMap::new()));
+        let sent_ids = crate::sent_index::new_index();
+        let mut seeded = true;
+        poll_once(
+            host,
+            port,
+            security,
+            "agent",
+            "pw",
+            "INBOX",
+            None,
+            &[],
+            &sent_ids,
+            &inbox,
+            &last_seen,
+            &reply_index,
+            &tokio::runtime::Handle::current(),
+            &mut seeded,
+        )
+    }
+
+    /// The B-3 regression. A plaintext IMAP host on a loopback socket must be
+    /// spoken to in IMAP, not TLS.
+    ///
+    /// Pre-fix this test fails on the FIRST assertion: the captured line
+    /// begins with 0x16 (a TLS ClientHello) and contains no IMAP command at
+    /// all, because `imap::connect` was unconditional.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plaintext_loopback_imap_speaks_imap_not_tls() {
+        let (port, rx) = imap_listener_capturing_first_line();
+        // `Auto` is what the corpus config produces: it names no security mode
+        // at all, so the default has to be the one that works here.
+        let _ = tokio::task::spawn_blocking(move || {
+            poll_once_against("127.0.0.1", port, MailSecurity::Auto)
+        })
+        .await;
+
+        let first = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("the server must have received something");
+        assert!(
+            !first.is_empty(),
+            "the server received no bytes at all from the client"
+        );
+        assert_ne!(
+            first[0], TLS_HANDSHAKE_BYTE,
+            "the client opened with a TLS ClientHello on a plaintext IMAP port; \
+             captured {first:?}"
+        );
+        let text = String::from_utf8_lossy(&first).to_uppercase();
+        assert!(
+            text.contains("LOGIN"),
+            "the client must authenticate in cleartext IMAP; captured {text:?}"
+        );
+    }
+
+    /// The other direction, and the one that keeps the fix from being a
+    /// weakening: an explicit `plaintext` toward a host that is not provably
+    /// the local machine is REFUSED, and no socket is opened to it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plaintext_is_refused_for_a_non_loopback_host() {
+        let err = tokio::task::spawn_blocking(|| {
+            // Port 1 so that if the guard ever regressed, the connect would
+            // fail with a connection error rather than reach anything.
+            poll_once_against("imap.example.com", 1, MailSecurity::Plaintext)
+        })
+        .await
+        .expect("join")
+        .expect_err("plaintext to a remote host must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refuses non-loopback host"),
+            "expected the fail-closed refusal, got: {msg}"
+        );
+    }
+
+    /// Port 993 keeps its historical implicit-TLS behaviour off the loopback:
+    /// the fix must not turn an IMAPS deployment into a cleartext one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_default_port_still_resolves_to_implicit_tls() {
+        assert_eq!(
+            MailSecurity::Auto.resolve("imap.example.com", IMAPS_PORT, IMAPS_PORT),
+            MailSecurity::Implicit
+        );
+        assert_eq!(
+            MailSecurity::Auto.resolve("imap.example.com", 143, IMAPS_PORT),
+            MailSecurity::Starttls
+        );
+    }
 
     // ----- F24-C3: steady-state UID selection -----
     //
