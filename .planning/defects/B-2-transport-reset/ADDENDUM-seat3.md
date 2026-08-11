@@ -174,6 +174,43 @@ P3C is the one the brief asked for specifically: it proves the message cannot si
 sentence emitted on every turn. P3B proves the count is checked for accuracy, not mere presence
 — the test asserts the reported number equals the physical sends the provider actually saw.
 
+### And it was proven live, not only in unit tests
+
+Unit tests prove the logic; they do not prove a user ever sees the sentence. Release binary
+`46b7750a…` built from this branch, run through the real corpus fixture against the real
+provider and the real fault proxy:
+
+| arm | window retries | product exit | disclosure lines |
+|-----|----------------|--------------|------------------|
+| control | 0 | 0 | **0** |
+| fault-reset | 6 | 0 | **1** |
+
+read verbatim out of the product's own stdout:
+
+> `6 provider requests never returned a response. Each were dispatched, so the provider may
+> have served and billed it; that spend is not included in any cost or token figure shown here.`
+
+The count `6` matches the six window retries the same run logged, and both directions hold on
+real hardware: absent on the clean arm, present and accurate on the faulted one.
+
+The important detail is `exit=0`. The turn **succeeded** — `B-2.fault-reset` graded PASS — and
+the disclosure still fired. That is precisely the case where the spend would otherwise be
+invisible: the user gets their work, sees a normal successful result, and would never learn
+that six billable requests were also sent. A disclosure that only appeared on failed turns
+would have missed it.
+
+Two honest notes. First, that capture shows **"Each were dispatched"** — a real copy defect I
+introduced ("each" is singular whatever the count). Found by reading the live output rather
+than the test, because the tests assert on the count and the keywords, not on grammar. Fixed in
+`9beb8c70`; the capture above predates the fix and is left as-run rather than doctored.
+
+Second, the first live attempt **failed** with `Session persistence authority unavailable: …
+the configured store rejected this profile's recovery key`, before any provider call. It is a
+transient environment fault, not a regression: the control arm of that same run opened the
+vault and exited 0 with the same binary, and the second sample — same binary, same env, same
+script — ran clean. I could not reproduce it a second time, so I cannot fully explain it, and
+I am recording it rather than dismissing it.
+
 ## A separate defect found on the way: `wcore-agent --lib` is flaky under parallelism
 
 Not part of the B-2 brief, found while checking my own change for regressions, and it needs an
