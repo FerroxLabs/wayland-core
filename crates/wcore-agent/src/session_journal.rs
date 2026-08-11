@@ -981,11 +981,10 @@ pub fn write_snapshot(
     path: impl AsRef<Path>,
     snapshot: &SessionSnapshot,
 ) -> Result<(), JournalError> {
-    let file = snapshot::write_snapshot(path, snapshot)?;
     // The published inode is locked by `write_snapshot`. This entry point
-    // grants no durable authority, so release it explicitly rather than
+    // grants no durable authority, so the guard releases it here rather than
     // leaving it to `close(2)` - see [`lease::unlock_data_file`].
-    lease::unlock_data_file(&file);
+    drop(snapshot::write_snapshot(path, snapshot)?);
     Ok(())
 }
 
@@ -1641,7 +1640,14 @@ impl JournalWriter {
         })();
         let snapshot_file = match publication {
             Ok((file, snapshot_file)) => {
-                self.file = file;
+                // The outgoing handle names the pre-compaction inode, which the
+                // rename has already displaced. Release its lock rather than
+                // letting the handle close: a subprocess forked while it was
+                // open still references the locked open file description, and
+                // `close(2)` cannot reach a duplicate. `JournalWriter::drop`
+                // then owns the incoming handle's lock.
+                lease::unlock_data_file(&self.file);
+                self.file = file.into_locked_inner();
                 snapshot_file
             }
             Err(error) => {

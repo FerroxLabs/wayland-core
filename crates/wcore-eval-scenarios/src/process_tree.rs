@@ -1091,8 +1091,61 @@ mod linux {
         path: PathBuf,
         procs: File,
         identity: CandidateIdentity,
-        _identity_lock: File,
+        _identity_lock: IdentityLock,
         removed: bool,
+    }
+
+    /// An exclusive claim on one candidate identity, released EXPLICITLY.
+    ///
+    /// `flock` binds to the OPEN FILE DESCRIPTION, not the descriptor, so
+    /// `close(2)` releases it only when the LAST descriptor referring to that
+    /// description goes away. This evaluator forks the candidate process tree
+    /// while the identity lock is held, and `fork(2)` duplicates the descriptor
+    /// table - so every such child keeps the description, and the lock, alive
+    /// until it execs (`O_CLOEXEC`) or exits. A candidate that forks a helper
+    /// which never execs pins the identity for that helper's whole lifetime,
+    /// and the NEXT evaluator then spins for 30 s and fails with "candidate
+    /// identity remained assigned to another evaluator" against an identity
+    /// nobody is using. `LOCK_UN` reaches the duplicates `close` cannot.
+    #[derive(Debug)]
+    pub(super) struct IdentityLock(File);
+
+    impl IdentityLock {
+        /// Take the exclusive claim on `file`, waiting for a previous evaluator
+        /// to release it. Separated from `acquire_exclusive_lock` so the
+        /// release contract can be exercised without a delegated cgroup, a
+        /// root-owned `/run` sentinel and a candidate identity in the
+        /// environment - the release contract depends on none of them.
+        pub(super) fn claim(file: File) -> io::Result<Self> {
+            let fd = file.as_raw_fd();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                // SAFETY: flock applies to the open file description retained
+                // by Cgroup for the complete authoritative run.
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "candidate identity remained assigned to another evaluator for 30 seconds",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(Self(file))
+        }
+    }
+
+    impl Drop for IdentityLock {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` owns a valid descriptor for the call's duration.
+            unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1169,7 +1222,7 @@ mod linux {
             Ok(())
         }
 
-        fn acquire_exclusive_lock(self) -> io::Result<File> {
+        fn acquire_exclusive_lock(self) -> io::Result<IdentityLock> {
             let path = CString::new(format!(
                 "/run/wayland-eval-identity-{}-{}.lock",
                 self.uid, self.gid
@@ -1206,27 +1259,9 @@ mod linux {
                     "candidate identity lock was not a root-owned private regular file",
                 ));
             }
-            let deadline = Instant::now() + Duration::from_secs(30);
-            loop {
-                // SAFETY: flock applies to the open file description retained
-                // by Cgroup for the complete authoritative run.
-                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                    break;
-                }
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::WouldBlock {
-                    return Err(error);
-                }
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "candidate identity remained assigned to another evaluator for 30 seconds",
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            let lock = IdentityLock::claim(file)?;
             ensure_identity_inactive(self)?;
-            Ok(file)
+            Ok(lock)
         }
     }
 
@@ -2281,6 +2316,99 @@ mod linux {
                 .check_failures()
                 .expect_err("persistent cleanup failure must fail closed");
             assert!(error.to_string().contains("fixture cleanup failure"));
+        }
+    }
+    /// The identity lock's release contract, graded against `/proc/locks`.
+    ///
+    /// `IdentityLock::claim` is the production acquisition and `Drop for
+    /// IdentityLock` the production release; only the sentinel path is a
+    /// tempfile, because the release contract depends on neither `/run`, root
+    /// ownership, nor a delegated cgroup.
+    #[cfg(test)]
+    mod identity_lock_release {
+        use super::IdentityLock;
+        use std::fs::File;
+        use std::path::Path;
+
+        fn kernel_flocks_on(path: &Path) -> Vec<String> {
+            use std::os::unix::fs::MetadataExt;
+            let meta = std::fs::metadata(path).expect("sentinel must exist");
+            // `fs/locks.c` prints `MAJOR:MINOR:INODE`, the device in two hex
+            // digits and the inode in decimal. Match the whole token: an inode
+            // substring would collide with the pid column.
+            let token = format!(
+                "{:02x}:{:02x}:{}",
+                libc::major(meta.dev()),
+                libc::minor(meta.dev()),
+                meta.ino()
+            );
+            std::fs::read_to_string("/proc/locks")
+                .expect("/proc/locks must be readable")
+                .lines()
+                .filter(|line| {
+                    let mut fields = line.split_whitespace();
+                    fields.any(|field| field == "FLOCK") && fields.any(|field| field == token)
+                })
+                .map(str::to_owned)
+                .collect()
+        }
+
+        #[test]
+        fn releasing_an_identity_frees_it_even_when_a_forked_child_never_execs() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("identity.lock");
+            let sentinel = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .expect("sentinel");
+            let held = IdentityLock::claim(sentinel).expect("claim");
+
+            let mut fds = [0i32; 2];
+            // SAFETY: `fds` is a live two-element array, pipe(2)'s only argument.
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe");
+            let (read_fd, write_fd) = (fds[0], fds[1]);
+            // SAFETY: the child calls only close/read/_exit, all
+            // async-signal-safe, and runs no Rust destructor. It stands in for
+            // any helper the candidate tree forks and never execs.
+            let child = unsafe { libc::fork() };
+            assert!(child >= 0, "fork");
+            if child == 0 {
+                unsafe {
+                    libc::close(write_fd);
+                    let mut byte = 0u8;
+                    while libc::read(read_fd, std::ptr::addr_of_mut!(byte).cast(), 1) == -1 {}
+                    libc::_exit(0);
+                }
+            }
+
+            assert!(
+                !kernel_flocks_on(&path).is_empty(),
+                "positive control: a claimed identity must appear in /proc/locks, \
+                 or this test cannot observe the defect it exists to catch"
+            );
+
+            drop(held);
+            let after = kernel_flocks_on(&path);
+
+            // SAFETY: descriptors owned by this process; `child` is our child.
+            unsafe {
+                libc::close(write_fd);
+                let mut status = 0i32;
+                libc::waitpid(child, &mut status, 0);
+                libc::close(read_fd);
+            }
+
+            assert!(
+                after.is_empty(),
+                "releasing an identity must leave no lock in the kernel; a forked \
+                 child still references the open file description and {} record(s) \
+                 survived, which strands the next evaluator for 30 s against an \
+                 identity nobody is using: {after:?}",
+                after.len()
+            );
         }
     }
 }

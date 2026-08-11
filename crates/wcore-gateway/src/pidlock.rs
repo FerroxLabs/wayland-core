@@ -82,14 +82,23 @@ pub struct PidRecord {
 
 /// An owned, exclusive claim on one gateway home.
 ///
-/// The claim lives for as long as the `File` inside is open: both `flock`
-/// and `LockFileEx` release when the descriptor/handle closes, including on
-/// abnormal termination. That is what makes a crashed holder's home
+/// An UNCLEAN death still frees the home: the kernel tears the process's
+/// descriptor table down and the last reference to the locked open file
+/// description goes with it. That is what makes a crashed holder's home
 /// reclaimable without a timeout heuristic.
+///
+/// A CLEAN release must not rely on the same mechanism. `flock` binds to the
+/// OPEN FILE DESCRIPTION, not the descriptor and not the process, and `close`
+/// releases the lock only when the LAST descriptor referring to that
+/// description goes away. `fork(2)` duplicates the descriptor table, so every
+/// subprocess spawned while the sentinel is open keeps that description - and
+/// its lock - alive until the child execs (O_CLOEXEC) or exits. The gateway
+/// hosts an agent that spawns subprocesses constantly, so [`Drop`] releases
+/// the lock explicitly; see the note there.
 #[derive(Debug)]
 pub struct PidLock {
     home: PathBuf,
-    _sentinel: File,
+    sentinel: File,
 }
 
 impl PidLock {
@@ -154,10 +163,7 @@ impl PidLock {
         };
         write_record(&home, &record).map_err(PidLockError::Record)?;
 
-        Ok(Self {
-            home,
-            _sentinel: sentinel,
-        })
+        Ok(Self { home, sentinel })
     }
 
     /// Read the status record without taking the lock and without being
@@ -193,9 +199,16 @@ impl PidLock {
 impl Drop for PidLock {
     fn drop(&mut self) {
         // A clean release removes the record so a later status read reports
-        // "not running" rather than naming a process that has exited. The
-        // OS releases the lock itself when `_sentinel` closes.
+        // "not running" rather than naming a process that has exited.
         let _ = std::fs::remove_file(self.home.join(RECORD_FILE));
+        // Then release the OS lock EXPLICITLY. Leaving it to `close(2)` is not
+        // equivalent: the lock belongs to the open file description, and any
+        // subprocess forked while this sentinel was open still references that
+        // description. Such a child pins the lock until it execs or exits, so a
+        // gateway that has already stopped can refuse the next `gateway start`
+        // with `AlreadyHeld`, naming a pid that is gone. `LOCK_UN` reaches
+        // every duplicate of the description, which `close` cannot.
+        unlock(&self.sentinel);
     }
 }
 
@@ -332,6 +345,19 @@ fn try_lock_exclusive(file: &File) -> std::io::Result<bool> {
     }
 }
 
+/// Release the lock taken by [`try_lock_exclusive`].
+///
+/// Best effort: the only failure modes are a closed descriptor and a kernel
+/// refusal, and neither leaves a caller anything useful to do at drop time.
+/// Silence here is strictly better than the pre-fix behaviour, which was not
+/// to unlock at all.
+#[cfg(unix)]
+fn unlock(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `file` owns a valid descriptor for the duration of the call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+}
+
 #[cfg(windows)]
 fn try_lock_exclusive(file: &File) -> std::io::Result<bool> {
     use std::os::windows::io::AsRawHandle;
@@ -366,6 +392,23 @@ fn try_lock_exclusive(file: &File) -> std::io::Result<bool> {
     match err.raw_os_error() {
         Some(ERROR_LOCK_VIOLATION) | Some(ERROR_IO_PENDING) => Ok(false),
         _ => Err(err),
+    }
+}
+
+/// Release the lock taken by [`try_lock_exclusive`]. Same one-byte range at
+/// offset zero the claim covers.
+#[cfg(windows)]
+fn unlock(file: &File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    // SAFETY: a zeroed OVERLAPPED is the documented initial state for a
+    // synchronous UnlockFileEx call.
+    let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+    // SAFETY: Win32 FFI over a handle `file` owns for the call's duration.
+    unsafe {
+        UnlockFileEx(file.as_raw_handle() as _, 0, 1, 0, &mut ov);
     }
 }
 
