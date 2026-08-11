@@ -203,11 +203,11 @@ impl LlmProvider for CapturingProvider {
 /// a mid-run stage failure surfaces partial results.
 ///
 /// The failure must be persistent, not a single call: the engine's stream-retry
-/// loop (`MAX_STREAM_RETRIES`) correctly retries a transient
-/// `ProviderError::Connection`, so a one-shot failure at `fail_at` would be
-/// recovered on the next attempt and the stage would (rightly) succeed. Failing
-/// from `fail_at` onward exhausts the retries and produces a genuine stage
-/// failure — the `StageFailed` path this test exercises.
+/// loop (`MAX_STREAM_RETRIES`) correctly retries a transient provider error, so
+/// a one-shot failure at `fail_at` would be recovered on the next attempt and
+/// the stage would (rightly) succeed. Failing from `fail_at` onward exhausts the
+/// retries and produces a genuine stage failure — the `StageFailed` path this
+/// test exercises.
 struct FailAtProvider {
     fail_at: usize,
     turn: Mutex<usize>,
@@ -226,7 +226,16 @@ impl LlmProvider for FailAtProvider {
             v
         };
         if n >= self.fail_at {
-            return Err(ProviderError::Connection("boom".into()));
+            // A SERVED failure, deliberately. `ProviderError::Connection` classifies as
+            // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
+            // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
+            // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
+            // provider outage; an HTTP 500 is persistent, is retried the bounded number of
+            // times, and reaches the same failure path in ~1.5 s.
+            return Err(ProviderError::Api {
+                status: 500,
+                message: "boom".into(),
+            });
         }
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -896,7 +905,16 @@ impl LlmProvider for FailNamedProvider {
             v
         };
         if format!("{request:?}").contains(&self.needle) {
-            return Err(ProviderError::Connection("boom".into()));
+            // A SERVED failure, deliberately. `ProviderError::Connection` classifies as
+            // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
+            // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
+            // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
+            // provider outage; an HTTP 500 is persistent, is retried the bounded number of
+            // times, and reaches the same failure path in ~1.5 s.
+            return Err(ProviderError::Api {
+                status: 500,
+                message: "boom".into(),
+            });
         }
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
