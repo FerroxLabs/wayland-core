@@ -24681,6 +24681,60 @@ mod audit_2026_05_22_tests {
         }
     }
 
+    /// `http_529` had no fixture anywhere in the tree. The only thing asserting
+    /// it was `is_unserved_request_failure("http_529")` — a predicate agreeing
+    /// with itself, which says nothing about whether a real 529 ever reaches
+    /// that predicate. Drive the whole path instead: a provider that answers
+    /// every request with HTTP 529 must be ridden out on the outage WINDOW,
+    /// not on the small served-failure count.
+    ///
+    /// 529 is the status Anthropic and OpenAI use for "overloaded". It means
+    /// the provider explicitly did not do the work, so re-sending is free and
+    /// the window is the right budget — but only if the classification wiring
+    /// actually carries the status that far, which is what this measures.
+    #[tokio::test(start_paused = true)]
+    async fn an_http_529_outage_is_ridden_out_on_the_window() {
+        struct Overloaded {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for Overloaded {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProviderError::Api {
+                    status: 529,
+                    message: "overloaded".into(),
+                })
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = engine_with(Arc::new(Overloaded {
+            calls: Arc::clone(&calls),
+        }));
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "a permanent 529 outage must still fail the turn, got {result:?}"
+        );
+
+        let sends = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            sends > 3,
+            "a 529 was bounded by the served-failure count ({sends} sends; \
+             MAX_STREAM_RETRIES is 2, so 3 total attempts) — the status never \
+             reached the unserved classifier"
+        );
+        assert_eq!(
+            sends,
+            sends_the_window_admits(std::time::Duration::ZERO),
+            "a 529 outage must fit exactly the sends the window admits"
+        );
+    }
+
     /// An engine whose emitted events can be read back.
     fn engine_and_events(
         provider: Arc<dyn LlmProvider>,
