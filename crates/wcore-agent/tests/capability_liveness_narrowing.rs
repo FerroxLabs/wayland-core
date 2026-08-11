@@ -34,32 +34,58 @@ use wcore_agent::output::protocol_sink::PluginCapabilitySet;
 use wcore_browser::liveness::BrowserLiveness;
 use wcore_cua::liveness::CuaLiveness;
 
-/// Point the browser probe at a program that cannot exist and a loopback port
-/// nothing listens on, so "no backend can start" is the true state of the world
-/// rather than an assumption.
+/// A loopback port that is reserved and never served. Planted as the sidecar
+/// base URL so the healthcheck arm of the probe is provably dead.
+const DEAD_SIDECAR_URL: &str = "http://127.0.0.1:1";
+
+/// Point the browser probe at a program that cannot exist **and** at a sidecar
+/// URL nothing answers, so "no backend can start" is the true state of the
+/// world rather than an assumption.
+///
+/// Both facts have to be planted, because the probe deliberately mirrors
+/// `BrowserSupervisor::ensure_ready`'s TWO real startup paths: a resolvable
+/// sidecar program, or an externally managed sidecar already answering
+/// `/health`. This guard used to plant only the first and let the second fall
+/// through to `CamoufoxBackend::default_url()`, an ambient fact it does not
+/// control. On any host actually running a Camoufox sidecar on the default
+/// port — a supported deployment, and the standing state of the Linux build
+/// box — that second path stayed live, the probe correctly answered `Ready`,
+/// and this test failed against a product that was telling the truth. The
+/// oracle below then compared a `probe(127.0.0.1:1)` verdict against a
+/// `narrowed_to_live()` that had probed port 9377: two different experiments.
 struct NoBackend {
-    prior: Option<std::ffi::OsString>,
+    prior_bin: Option<std::ffi::OsString>,
+    prior_url: Option<std::ffi::OsString>,
 }
 
 impl NoBackend {
     fn install() -> Self {
-        let prior = std::env::var_os("WAYLAND_CAMOUFOX_BIN");
+        let prior_bin = std::env::var_os("WAYLAND_CAMOUFOX_BIN");
+        let prior_url = std::env::var_os("WAYLAND_CAMOUFOX_URL");
         unsafe {
             std::env::set_var(
                 "WAYLAND_CAMOUFOX_BIN",
                 "wcore-agent-liveness-guard-no-such-program",
-            )
+            );
+            std::env::set_var("WAYLAND_CAMOUFOX_URL", DEAD_SIDECAR_URL);
         };
-        Self { prior }
+        Self {
+            prior_bin,
+            prior_url,
+        }
     }
 }
 
 impl Drop for NoBackend {
     fn drop(&mut self) {
         unsafe {
-            match self.prior.take() {
+            match self.prior_bin.take() {
                 Some(v) => std::env::set_var("WAYLAND_CAMOUFOX_BIN", v),
                 None => std::env::remove_var("WAYLAND_CAMOUFOX_BIN"),
+            }
+            match self.prior_url.take() {
+                Some(v) => std::env::set_var("WAYLAND_CAMOUFOX_URL", v),
+                None => std::env::remove_var("WAYLAND_CAMOUFOX_URL"),
             }
         }
     }
@@ -94,7 +120,10 @@ async fn never_widens_a_capability_the_identity_check_refused() {
 async fn narrows_when_no_backend_can_start() {
     let _guard = NoBackend::install();
 
-    let browser_verdict = wcore_browser::liveness::probe("http://127.0.0.1:1").await;
+    // Same URL the guard planted, so the oracle and `narrowed_to_live` below
+    // are the same experiment. The URL is a fact this test PLANTS, not one it
+    // reads back out of the probe.
+    let browser_verdict = wcore_browser::liveness::probe(DEAD_SIDECAR_URL).await;
     let cua_verdict = wcore_cua::liveness::probe();
 
     let advertised = PluginCapabilitySet {

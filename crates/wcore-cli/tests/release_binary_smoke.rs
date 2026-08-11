@@ -193,6 +193,23 @@ fn apply_backend_env(cmd: &mut Command, backends: Backends) {
     cmd.env_remove("BROWSERBASE_API_KEY");
     cmd.env_remove("BROWSERBASE_PROJECT_ID");
 
+    // The browser probe mirrors `ensure_ready`'s TWO real startup paths: a
+    // resolvable sidecar program, OR an externally managed sidecar already
+    // answering `/health` at the configured base URL. Only the first was ever
+    // planted here; the second fell through to the shipped default
+    // (`http://localhost:9377`), an ambient fact this test does not own. On a
+    // host actually running a Camoufox sidecar there — a supported deployment,
+    // and the standing state of the Linux build box — the Dead leg was not
+    // dead, the probe correctly answered `Ready`, and the leg failed against a
+    // product that was telling the truth.
+    //
+    // Pinned to a reserved loopback port in BOTH legs, so the only inputs that
+    // move between them are the sidecar binary and the display. That makes the
+    // Live leg a statement about the binary path specifically: if binary
+    // resolution rots, Live goes red instead of being propped up by whatever
+    // happens to be listening on 9377.
+    cmd.env("WAYLAND_CAMOUFOX_URL", "http://127.0.0.1:1");
+
     match backends {
         Backends::Live => {
             // Resolved with `which`, which accepts an absolute path as given and

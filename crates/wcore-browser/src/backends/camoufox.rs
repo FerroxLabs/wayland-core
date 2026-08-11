@@ -51,6 +51,34 @@ impl CamoufoxBackend {
         "http://localhost:9377"
     }
 
+    /// The sidecar base URL **this host is configured to use**.
+    ///
+    /// `WAYLAND_CAMOUFOX_URL` is the operator override, exactly symmetric with
+    /// the `WAYLAND_CAMOUFOX_BIN` override `SupervisorConfig::local_camoufox`
+    /// already honours. The supervisor documents an externally managed sidecar
+    /// as a first-class deployment — `ensure_ready` reuses a healthy one and
+    /// spawns nothing — but until now there was no way to tell Core where that
+    /// sidecar listens, so "externally managed" silently meant "on port 9377".
+    ///
+    /// Every production consumer resolves the URL through THIS function: the
+    /// provider the tool talks to, the supervisor that healthchecks and spawns
+    /// it, and the `27-C2(b)` liveness probe that decides whether to advertise
+    /// `capabilities.browser_suite`. That is the same single-source-of-truth
+    /// discipline `liveness::camoufox_program` applies to the sidecar *program*,
+    /// and for the same reason: a probe that predicts a sidecar the engine does
+    /// not use publishes a flag about a service nobody contacts, which is
+    /// `27-C2(b)` in both directions.
+    ///
+    /// An empty or whitespace-only value is treated as unset rather than as the
+    /// empty URL, so `WAYLAND_CAMOUFOX_URL=` cannot silently point the engine at
+    /// `"/health"`.
+    pub fn configured_url() -> String {
+        match std::env::var("WAYLAND_CAMOUFOX_URL") {
+            Ok(url) if !url.trim().is_empty() => url,
+            _ => Self::default_url().to_string(),
+        }
+    }
+
     pub fn new(base_url: impl Into<String>) -> Self {
         Self::build(base_url.into(), None, camoufox_access_key())
     }
@@ -579,6 +607,74 @@ fn sidecar_snapshot(snapshot_id: u32, url: &str, text: &str) -> AriaSnapshot {
         title: String::new(),
         nodes,
         text: normalized,
+    }
+}
+
+#[cfg(test)]
+mod configured_url_tests {
+    use super::CamoufoxBackend;
+
+    const KEY: &str = "WAYLAND_CAMOUFOX_URL";
+
+    struct EnvGuard(Option<std::ffi::OsString>);
+    impl EnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let prior = std::env::var_os(KEY);
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(KEY, v),
+                    None => std::env::remove_var(KEY),
+                }
+            }
+            Self(prior)
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(v) => std::env::set_var(KEY, v),
+                    None => std::env::remove_var(KEY),
+                }
+            }
+        }
+    }
+
+    /// Both directions in one test: an override that is honoured and a default
+    /// that is returned when there is none. A resolver stuck on either answer
+    /// fails one of these, which a single-direction pair of tests would not
+    /// catch if they were ever split across binaries.
+    #[test]
+    #[serial_test::serial(camoufox_url_env)]
+    fn the_override_is_honoured_and_the_default_is_the_fallback() {
+        let _g = EnvGuard::set(Some("http://127.0.0.1:29377"));
+        assert_eq!(
+            CamoufoxBackend::configured_url(),
+            "http://127.0.0.1:29377",
+            "WAYLAND_CAMOUFOX_URL was ignored — an operator running the sidecar on a \
+             non-default port would be probed and contacted at 9377 instead"
+        );
+
+        let _g = EnvGuard::set(None);
+        assert_eq!(
+            CamoufoxBackend::configured_url(),
+            CamoufoxBackend::default_url(),
+            "with no override set the resolver must return the shipped default"
+        );
+    }
+
+    /// `WAYLAND_CAMOUFOX_URL=` (exported empty, the classic CI shell accident)
+    /// must not become the empty base URL — that would make the supervisor
+    /// healthcheck `"/health"`, which resolves nowhere, and withdraw a working
+    /// capability.
+    #[test]
+    #[serial_test::serial(camoufox_url_env)]
+    fn an_empty_override_is_treated_as_unset() {
+        let _g = EnvGuard::set(Some("   "));
+        assert_eq!(
+            CamoufoxBackend::configured_url(),
+            CamoufoxBackend::default_url()
+        );
     }
 }
 

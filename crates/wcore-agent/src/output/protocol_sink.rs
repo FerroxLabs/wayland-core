@@ -236,7 +236,7 @@ impl PluginCapabilitySet {
 
         if out.browser_suite {
             let probe = wcore_browser::liveness::probe(
-                wcore_browser::backends::CamoufoxBackend::default_url(),
+                &wcore_browser::backends::CamoufoxBackend::configured_url(),
             )
             .await;
             if let Some(u) = probe.unavailable() {
