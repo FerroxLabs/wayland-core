@@ -1282,6 +1282,30 @@ mod output_sizing_tests {
 /// the retry loop fires as before. The cost of a missed 4xx is one
 /// extra retry; the cost of a false-positive 4xx is no retry on a
 /// transient failure. Bias toward the latter.
+/// True for the provider failure classes that mean NOTHING was served: the
+/// socket was refused, or it was established and then destroyed before a
+/// response head arrived.
+///
+/// These are the cheapest failures to retry — the provider answered nothing,
+/// so re-issuing the request re-sends context that was never consumed — and
+/// the most ordinary: a reset is what a proxy, a load balancer or a flaky link
+/// produces all day. Job corpus row B-2 breaks the provider for six
+/// consecutive requests; `MAX_STREAM_RETRIES` spans 1.5 s and cannot outlast
+/// even a short blip, so this class gets its own larger budget.
+///
+/// Every other failure keeps `MAX_STREAM_RETRIES`: a 5xx, a truncated stream
+/// or an in-band error frame all followed a response the provider served and
+/// billed, so re-sending the whole context has a real cost.
+///
+/// The codes come from `wcore_providers::retry::provider_failure_code` /
+/// `egress_failure_code`, not from message text: `connection` is a failure to
+/// establish, `transport` is a send-phase failure with no response. `timeout`
+/// and `stream_body` are deliberately excluded — a timeout may have been
+/// served slowly and `stream_body` means the body had already started.
+fn is_pre_response_transport_failure(failure_code: &str) -> bool {
+    matches!(failure_code, "connection" | "transport")
+}
+
 fn is_http_4xx_error(reason: &str) -> bool {
     /// Returns true if the first 3 bytes of `s` are ASCII digits and
     /// the first digit is `4` — i.e. `s` starts with a literal 4xx
@@ -1677,6 +1701,23 @@ mod v0911_engine_recovery_tests {
             "provider stream closed before a Done event (truncated response)"
         ));
         assert!(!is_http_4xx_error("connection reset by peer"));
+    }
+
+    #[test]
+    fn only_pre_response_transport_failures_get_the_larger_retry_budget() {
+        // Nothing was served: the cheapest class to retry, and the one row
+        // B-2 measured the product losing a whole job to.
+        assert!(is_pre_response_transport_failure("connection"));
+        assert!(is_pre_response_transport_failure("transport"));
+        // Served, or partly served, or not a transport failure at all —
+        // these keep MAX_STREAM_RETRIES because a re-send has a real cost.
+        assert!(!is_pre_response_transport_failure("stream_body"));
+        assert!(!is_pre_response_transport_failure("timeout"));
+        assert!(!is_pre_response_transport_failure("stream_truncated"));
+        assert!(!is_pre_response_transport_failure("http_500"));
+        assert!(!is_pre_response_transport_failure("http_429"));
+        assert!(!is_pre_response_transport_failure("egress_denied"));
+        assert!(!is_pre_response_transport_failure(""));
     }
 
     #[test]
@@ -10261,6 +10302,10 @@ impl AgentEngine {
             // verdict (not the old silent "successful empty turn" that
             // poisoned the SkillRouter / auto-skill learning).
             const MAX_STREAM_RETRIES: u32 = 2;
+            // Failures that never received a response head get a larger
+            // budget — see `is_pre_response_transport_failure`. Linear
+            // backoff makes seven attempts span ~10.5 s.
+            const MAX_PRE_RESPONSE_STREAM_RETRIES: u32 = 6;
             let mut assistant_text = String::new();
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
@@ -11490,7 +11535,12 @@ impl AgentEngine {
                 // above runs under `scope_max_retries(0)`, so one engine
                 // attempt is exactly one physical send and one reservation.
                 // Keep the complete bounded engine retry budget here.
-                if !is_client_error && stream_attempt < MAX_STREAM_RETRIES {
+                let stream_retry_budget = if is_pre_response_transport_failure(&failure_code) {
+                    MAX_PRE_RESPONSE_STREAM_RETRIES
+                } else {
+                    MAX_STREAM_RETRIES
+                };
+                if !is_client_error && stream_attempt < stream_retry_budget {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
                     // carries FAILED tool results, that context is
@@ -11560,7 +11610,7 @@ impl AgentEngine {
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying \
-                         (attempt {stream_attempt}/{MAX_STREAM_RETRIES})…"
+                         (attempt {stream_attempt}/{stream_retry_budget})…"
                     ));
                     let backoff_cancel = self.cancel_token.clone();
                     tokio::select! {
