@@ -76,10 +76,11 @@ impl Tool for WriteTool {
          file's last commit is refused: that is unsaved user work. Carry those lines \
          into the content you write — in their changed form if what you are doing \
          changes them.\n\
-         - Never route a rewrite around that refusal. A write made through Bash \
-         (`sed -i`, `>`, `rm`) is not checked by anything and destroys unsaved work \
-         irreversibly; using one to apply a change this tool refused is the single \
-         worst thing you can do to the user's file."
+         - Never route a rewrite around that refusal. Bash refuses a git command \
+         that would throw the work tree away, but a write made through Bash (`sed -i`, \
+         `>`, `rm`) is not checked by anything and destroys unsaved work irreversibly; \
+         using one to apply a change this tool refused is the single worst thing you \
+         can do to the user's file."
     }
 
     fn input_schema(&self) -> JsonSchema {

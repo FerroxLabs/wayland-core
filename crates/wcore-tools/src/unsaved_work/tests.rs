@@ -2041,3 +2041,202 @@ fn a_second_directory_of_the_same_repository_inherits_the_original_pin() {
         Verdict::Proceed
     ));
 }
+
+// ---- P2b: the same work discarded through the shell ----------------------
+//
+// `shell_refusal` reads the process-wide guard by design — that sharing is the
+// whole mechanism by which Bash sees what Write recorded — so these arms use
+// it rather than an isolated one. Every fixture is its own tempdir, so the
+// per-path state they touch is disjoint.
+
+/// A repo with `file.py` committed, then an extra uncommitted line on disk.
+fn shell_fixture() -> Fixture {
+    let f = repo();
+    f.write("file.py", "def a():\n    return 1\n");
+    git(&f.root, &["add", "file.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    f.write("file.py", "def a():\n    return 1\n# WIP do not touch\n");
+    f
+}
+
+/// The measured B-1 defect, exactly: the job is done, the agent tidies up with
+/// `git checkout --` on a file that also carries the user's uncommitted line,
+/// and the line is gone. The refusal must fire and must name the line, because
+/// a refusal that does not say what is at risk teaches nothing.
+#[test]
+fn shell_refusal_blocks_git_checkout_of_a_file_holding_unsaved_work() {
+    let f = shell_fixture();
+    let refusal = shell_refusal("git checkout -- file.py", &f.root)
+        .expect("reverting a file with an uncommitted line must be refused");
+    assert!(refusal.contains("file.py"), "must name the file: {refusal}");
+    assert!(
+        refusal.contains("# WIP do not touch"),
+        "must quote the line at risk: {refusal}"
+    );
+}
+
+/// The same command reaching the whole tree by naming no path at all.
+#[test]
+fn shell_refusal_blocks_whole_tree_discards() {
+    for command in [
+        "git checkout -- .",
+        "git reset --hard",
+        "git stash",
+        "git restore .",
+    ] {
+        let f = shell_fixture();
+        assert!(
+            shell_refusal(command, &f.root).is_some(),
+            "{command:?} discards the whole work tree and must be refused"
+        );
+    }
+}
+
+/// Found after a `&&`, and with git reached by absolute path — the two dodges
+/// a single-token check would miss.
+#[test]
+fn shell_refusal_sees_past_chaining_and_an_absolute_git() {
+    let f = shell_fixture();
+    assert!(
+        shell_refusal("echo hi && git checkout -- file.py", &f.root).is_some(),
+        "a discard after && must still be refused"
+    );
+    assert!(
+        shell_refusal("/usr/bin/git checkout -- file.py", &f.root).is_some(),
+        "an absolute git path must still be refused"
+    );
+}
+
+/// `-C` moves the tree the command acts on, so it must move the tree the guard
+/// asks about. Judging the shell's own directory instead is how a guard
+/// produces a refusal that is simply wrong.
+#[test]
+fn shell_refusal_follows_dash_c_to_the_tree_it_names() {
+    let outer = shell_fixture();
+    let inner = shell_fixture();
+    let inner_path = inner.root.display().to_string();
+    let refusal = shell_refusal(
+        &format!("git -C {inner_path} checkout -- file.py"),
+        &outer.root,
+    )
+    .expect("the tree named by -C holds unsaved work and must be defended");
+    assert!(refusal.contains("# WIP do not touch"), "{refusal}");
+
+    // And the converse: a clean tree named by `-C` is not condemned by the
+    // dirty tree the shell happens to be standing in.
+    let clean = repo();
+    clean.write("file.py", "def a():\n    return 1\n");
+    git(&clean.root, &["add", "file.py"]);
+    git(&clean.root, &["commit", "-qm", "base"]);
+    let clean_path = clean.root.display().to_string();
+    assert!(
+        shell_refusal(
+            &format!("git -C {clean_path} checkout -- file.py"),
+            &outer.root
+        )
+        .is_none(),
+        "the guard must judge the tree -C names, not the one it stands in"
+    );
+}
+
+/// The guard must not become a general git ban. Every command here either
+/// keeps the work tree or does not touch it, and blocking one would make the
+/// refusal noise rather than signal.
+#[test]
+fn shell_refusal_leaves_non_discarding_git_alone() {
+    let f = shell_fixture();
+    for command in [
+        "git status",
+        "git add file.py",
+        "git commit -m x",
+        "git checkout -b feature",
+        "git reset HEAD file.py",
+        "git reset --soft HEAD~1",
+        "git stash list",
+        "git stash pop",
+        "git log --oneline",
+        "git diff",
+    ] {
+        assert!(
+            shell_refusal(command, &f.root).is_none(),
+            "{command:?} does not discard the work tree and must be allowed"
+        );
+    }
+}
+
+/// A discard aimed at a different file is not the user's problem.
+#[test]
+fn shell_refusal_ignores_a_path_with_nothing_unsaved() {
+    let f = shell_fixture();
+    f.write("clean.py", "x = 1\n");
+    git(&f.root, &["add", "clean.py"]);
+    git(&f.root, &["commit", "-qm", "clean"]);
+    assert!(
+        shell_refusal("git checkout -- clean.py", &f.root).is_none(),
+        "a file with no uncommitted line has nothing to lose"
+    );
+}
+
+/// Outside a work tree git refuses the command anyway, so nothing is claimed.
+#[test]
+fn shell_refusal_stands_down_outside_a_git_work_tree() {
+    let dir = TempDir::new().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::write(root.join("file.py"), "line\n").unwrap();
+    assert!(
+        shell_refusal("git checkout -- file.py", &root).is_none(),
+        "with no repository the guard must not guess"
+    );
+}
+
+/// The carve-out that keeps the guard usable: the agent creates a file this
+/// session and must stay free to revert it. Recorded through
+/// [`UnsavedWorkGuard::shared`] and read back through `shell_refusal`, which
+/// looks it up independently — so this also measures that the two surfaces
+/// really do hold one instance.
+#[test]
+fn the_agent_may_revert_a_file_it_wrote_itself() {
+    let f = repo();
+    let path = f.write("agent.py", "generated = 1\nalso_generated = 2\n");
+    UnsavedWorkGuard::shared().note_written(&path, "", "generated = 1\nalso_generated = 2\n");
+    assert!(
+        shell_refusal("git checkout -- agent.py", &f.root).is_none(),
+        "a file this tool wrote itself holds no unsaved user work"
+    );
+    // Control: the identical untracked file with no such record IS defended,
+    // so the arm above measures the shared attribution and not a blanket pass
+    // for untracked files.
+    let control = repo();
+    control.write("agent.py", "generated = 1\nalso_generated = 2\n");
+    assert!(
+        shell_refusal("git checkout -- agent.py", &control.root).is_some(),
+        "an untracked file the tool did not write is still the user's"
+    );
+}
+
+/// And the carve-out must not open in the other direction: a user line living
+/// in a file the agent also wrote to is still the user's.
+#[test]
+fn the_agents_own_lines_do_not_shelter_the_users() {
+    let f = repo();
+    f.write("mixed.py", "x = 1\n");
+    git(&f.root, &["add", "mixed.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    // The user adds a line of their own, uncommitted.
+    let path = f.write("mixed.py", "x = 1\n# USER WIP\n");
+    let before = f.read("mixed.py");
+    // Then the agent rewrites the file, keeping the user line and adding one.
+    let after = "x = 1\n# USER WIP\ny = agent()\n";
+    f.write("mixed.py", after);
+    UnsavedWorkGuard::shared().note_written(&path, &before, after);
+    let refusal = shell_refusal("git checkout -- mixed.py", &f.root)
+        .expect("the user's own uncommitted line is still at risk");
+    assert!(
+        refusal.contains("# USER WIP"),
+        "must quote the user's line: {refusal}"
+    );
+    assert!(
+        !refusal.contains("y = agent()"),
+        "must not claim the agent's own line as the user's work: {refusal}"
+    );
+}

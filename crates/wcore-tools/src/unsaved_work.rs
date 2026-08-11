@@ -25,13 +25,17 @@
 //! nothing in it is claimed when it has not been checked. Three limits are part
 //! of the statement, not footnotes to it:
 //!
-//! * It covers **two of the three write surfaces**. `Write` is refused-or-
-//!   copied as above. `Edit` is never refused (see below) but never claims a
-//!   copy it did not make. **`Bash` is not covered at all** — `sed -i '2d'`,
-//!   `>` and `rm` do not route through here and cannot at this altitude. In
-//!   the round-1 `adv-armB` arm `sed -i`, not Edit, is what actually destroyed
-//!   the line. A guarantee described as holding "at the tool layer" without
-//!   that carve-out would be false.
+//! * It covers **all three write surfaces, but not equally**. `Write` is
+//!   refused-or-copied as above. `Edit` is never refused (see below) but never
+//!   claims a copy it did not make. **`Bash` is covered for one shape only**:
+//!   a git command whose whole purpose is to throw the work tree away is
+//!   refused by [`shell_refusal`], from every `BashTool` entry point, before
+//!   any shell is spawned — see "The shell surface" below. Everything else a
+//!   shell can do to a file — `sed -i '2d'`, `>`, `rm` — still does not route
+//!   through here and cannot at this altitude; in the round-1 `adv-armB` arm
+//!   `sed -i`, not Edit, is what actually destroyed the line. A guarantee
+//!   described as holding "at the tool layer" without that carve-out would be
+//!   false.
 //! * It is a guarantee about **dropped** lines, and this module cannot tell a
 //!   dropped line from a **modified** one. A whole-file transformation that
 //!   renames a symbol occurring on an unsaved line reads here as a drop and is
@@ -238,6 +242,50 @@
 //! So an Edit that removes unrecorded content copies first where it can, and
 //! where it cannot it says so instead of pretending otherwise.
 //!
+//! # The shell surface
+//!
+//! Measured defect (job corpus row B-1, 2026-08-11, case `k5-after`): the
+//! agent finished the job, noticed it had touched `SHIPPING-API.md`, and
+//! tidied up with `git checkout -- SHIPPING-API.md`. That file also carried a
+//! line the user had never committed anywhere, and the revert took it. The
+//! Write guard above saw nothing, because Write was never called.
+//!
+//! So the same question — *would this destroy a line that exists nowhere
+//! else?* — is asked of the command itself, by [`shell_refusal`], before the
+//! shell is spawned. It reads the same pinned baseline, the same recorded
+//! blobs and the same agent-authored tallies as Write, because both surfaces
+//! hold the one [`UnsavedWorkGuard::shared`] instance. That sharing is also
+//! what keeps the agent free to revert a file it wrote itself this session:
+//! those lines are attributed to the tool, so the file holds no unsaved *user*
+//! work and there is nothing to refuse. The attribution is per line and per
+//! copy, so a user line sitting in a file the agent also wrote to is still the
+//! user's and is still defended.
+//!
+//! The scope is deliberately narrow, and stated as plainly as the rest:
+//!
+//! * Only five git subcommands are inspected — `checkout`, `restore`,
+//!   `stash`, `clean` and `reset` — and `reset` only in its `--hard` form,
+//!   because a mixed or soft reset keeps the work tree. `git commit`,
+//!   `git add`, `git switch -c` and every other git command are untouched: a
+//!   guard that reads as a general git ban is noise rather than signal.
+//! * A discarding command that names paths is judged on those paths. One that
+//!   names none (`git checkout -- .`, `git stash`, `git reset --hard`) reaches
+//!   the whole work tree and is judged on every tracked path git reports as
+//!   modified.
+//! * **`git clean` is the gap.** It is the one discard whose victims are
+//!   *untracked* files, and its bare `git clean -fd` form names no path, so
+//!   there is nothing to enumerate and nothing is refused. A `clean` that
+//!   names an existing path is checked like any other discard.
+//! * The segmenter finds a `git` after `&&`, `||`, `;`, `|` or a newline and
+//!   honours `-C`, but it is not a shell parser and does not try to be. A
+//!   discard it fails to see is a refusal that does not fire; it is never a
+//!   refusal that fires wrongly. That is the direction the error has to fall
+//!   for something sitting in front of every Bash call.
+//! * When the shell's own directory is in no work tree, git would refuse the
+//!   command anyway, so nothing is claimed and nothing is blocked. As
+//!   everywhere else here, that is answered from the `.git` marker on the
+//!   filesystem and never from a git exit code.
+//!
 //! # Other limits, stated
 //!
 //! * **A repository first touched mid-session** pins at that moment rather
@@ -277,6 +325,10 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+
+mod shell;
+
+pub use shell::shell_refusal;
 
 /// Most dropped lines quoted back in a refusal message.
 const MAX_QUOTED_LINES: usize = 5;
@@ -615,6 +667,64 @@ impl UnsavedWorkGuard {
             Ok(Some(recorded)) if recorded == bytes => Verdict::Proceed,
             _ => refuse(),
         }
+    }
+
+    /// Lines of unsaved user work in `path` — the lines a wholesale revert of
+    /// that path would destroy.
+    ///
+    /// The question [`Self::assess`] asks, put against replacement content
+    /// that keeps nothing, which is exactly what `git checkout --`,
+    /// `git restore`, `git stash` and `git clean` do to a path. It reads the
+    /// same pinned baseline and subtracts the same agent-authored tally, so a
+    /// line this tool wrote itself this session is not the user's unsaved work
+    /// and does not appear here.
+    ///
+    /// Fails closed in the same direction as `assess`: a repository git will
+    /// not open, or one with no commits yet, proves nothing recorded, so every
+    /// line on disk counts. Bytes that are not UTF-8 text have no line model
+    /// at all, and a refusal needs a line to quote, so nothing is claimed
+    /// about them.
+    pub fn unsaved_lines(&self, path: &Path) -> Vec<String> {
+        let Ok(disk) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let authored = self.authored_lines(path, &disk);
+        let on_disk = tally_excluding(&disk, &authored);
+        if on_disk.is_empty() {
+            return Vec::new();
+        }
+        let saved = match self.baseline_for(path) {
+            Baseline::Repo {
+                root,
+                commit: Some(commit),
+            } => self.recorded_blob(path, &root, &commit).unwrap_or_default(),
+            // No commits yet, no repository, or a repository git would not
+            // open: nothing about this file is *proven* recorded.
+            _ => String::new(),
+        };
+        let recorded = tally(&saved);
+        let mut budget: HashMap<&str, usize> = HashMap::new();
+        for (text, on_disk_copies) in &on_disk {
+            let short = on_disk_copies.saturating_sub(recorded.get(*text).copied().unwrap_or(0));
+            if short > 0 {
+                budget.insert(text, short);
+            }
+        }
+        if budget.is_empty() {
+            return Vec::new();
+        }
+        // Emitted in file order, once per unrecorded copy, so a refusal reads
+        // like the file the user is about to lose.
+        let mut unsaved = Vec::new();
+        for line in disk.lines() {
+            if let Some(left) = budget.get_mut(line.trim())
+                && *left > 0
+            {
+                *left -= 1;
+                unsaved.push(line.trim_end().to_owned());
+            }
+        }
+        unsaved
     }
 
     /// Record what this tool just put on disk at `path`.
