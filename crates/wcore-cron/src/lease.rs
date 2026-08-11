@@ -370,11 +370,22 @@ impl ScheduleLease {
 impl Drop for ScheduleLease {
     fn drop(&mut self) {
         self.handle.revoke();
+        // Release the lock EXPLICITLY rather than leaving it to the close of
+        // `_sentinel`. `flock` is owned by the open file description, and
+        // `close` frees it only when the last descriptor referring to that
+        // description goes away — but `fork(2)` duplicates the descriptor
+        // table, so any subprocess spawned while this lease was held keeps the
+        // description (and therefore the lock) alive until it execs or exits.
+        // A child that never execs pins the lease for its whole lifetime, and
+        // for the channel poll lease that means inbound polling stays dark:
+        // "a released lease must be reclaimable, or loss becomes
+        // unavailability". `LOCK_UN` reaches the duplicates `close` cannot.
+        //
+        // An UNCLEAN death (SIGKILL, panic, power loss) still frees the lease
+        // without this running, on the same last-close rule.
+        unlock(&self._sentinel);
         // A clean release removes the record so a later read reports no owner
-        // rather than naming a process that has exited. The OS releases the
-        // lock itself when `_sentinel` closes — which is also why an UNCLEAN
-        // death (SIGKILL, panic, power loss) still frees the lease: nothing
-        // here has to run for the next process to acquire it.
+        // rather than naming a process that has exited.
         let _ = std::fs::remove_file(self.dir.join(&self.record_file));
     }
 }
@@ -410,6 +421,7 @@ mod sys {
     // `flock` operation constants. Identical on Linux, macOS and the BSDs.
     const LOCK_EX: i32 = 2;
     const LOCK_NB: i32 = 4;
+    const LOCK_UN: i32 = 8;
     // `EWOULDBLOCK` is `EAGAIN` on Linux (11) and is 35 on macOS/BSD. Both are
     // checked because both mean "another open file description holds it",
     // which is contention rather than a failure.
@@ -436,6 +448,13 @@ mod sys {
             Some(code) if code == EAGAIN_LINUX || code == EWOULDBLOCK_BSD => Ok(false),
             _ => Err(err),
         }
+    }
+
+    /// Release the lock taken by [`try_lock_exclusive`].
+    pub(super) fn unlock(file: &File) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: same contract as `try_lock_exclusive` above.
+        unsafe { libc_flock(file.as_raw_fd(), LOCK_UN) };
     }
 }
 
@@ -468,6 +487,14 @@ mod sys {
             dw_reserved: u32,
             n_number_of_bytes_to_lock_low: u32,
             n_number_of_bytes_to_lock_high: u32,
+            lp_overlapped: *mut Overlapped,
+        ) -> i32;
+
+        fn UnlockFileEx(
+            h_file: *mut c_void,
+            dw_reserved: u32,
+            n_number_of_bytes_to_unlock_low: u32,
+            n_number_of_bytes_to_unlock_high: u32,
             lp_overlapped: *mut Overlapped,
         ) -> i32;
     }
@@ -507,6 +534,23 @@ mod sys {
             _ => Err(err),
         }
     }
+
+    /// Release the lock taken by [`try_lock_exclusive`].
+    pub(super) fn unlock(file: &File) {
+        use std::os::windows::io::AsRawHandle;
+
+        let mut ov = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: 0,
+            offset_high: 0,
+            h_event: std::ptr::null_mut(),
+        };
+        // SAFETY: same contract as `try_lock_exclusive` above.
+        unsafe {
+            UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut ov);
+        }
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -522,9 +566,12 @@ mod sys {
             "no file-locking primitive on this target; schedule ownership cannot be proved",
         ))
     }
+
+    /// Nothing was ever locked on this target, so nothing needs releasing.
+    pub(super) fn unlock(_file: &File) {}
 }
 
-use sys::try_lock_exclusive;
+use sys::{try_lock_exclusive, unlock};
 
 /// Resolve the default schedule directory: the parent of the default job
 /// store, i.e. `$WAYLAND_HOME/cron` or `~/.wayland/cron`.
