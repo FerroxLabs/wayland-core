@@ -256,6 +256,49 @@ impl WriterLease {
         match try_lock_authority(&file) {
             Ok(AuthorityLock::Acquired) => {}
             Ok(AuthorityLock::Contended) => {
+                #[cfg(all(test, target_os = "linux"))]
+                {
+                    let me = std::process::id();
+                    let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    let mut mine = Vec::new();
+                    if let Ok(rd) = std::fs::read_dir("/proc/self/fd") {
+                        for e in rd.flatten() {
+                            if let Ok(link) = std::fs::read_link(e.path()) {
+                                if link == target {
+                                    mine.push(e.file_name().to_string_lossy().into_owned());
+                                }
+                            }
+                        }
+                    }
+                    let owner_bytes = std::fs::read(&path).unwrap_or_default();
+                    let mut holders = Vec::new();
+                    if let Ok(rd) = std::fs::read_dir("/proc") {
+                        for e in rd.flatten() {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            if !name.chars().all(|c| c.is_ascii_digit()) { continue; }
+                            let fdd = format!("/proc/{name}/fd");
+                            if let Ok(fds) = std::fs::read_dir(&fdd) {
+                                for f in fds.flatten() {
+                                    if let Ok(link) = std::fs::read_link(f.path()) {
+                                        if link == target {
+                                            let comm = std::fs::read_to_string(format!("/proc/{name}/comm")).unwrap_or_default();
+                                            holders.push(format!("{name}({})", comm.trim()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "LEASEDIAG path={} self_pid={} thread={:?} self_fds_on_file={:?} owner_record={:?} all_holders={:?}",
+                        path.display(),
+                        me,
+                        std::thread::current().name().unwrap_or("?"),
+                        mine,
+                        String::from_utf8_lossy(&owner_bytes),
+                        holders
+                    );
+                }
                 return Err(JournalError::AlreadyOwned { lease_path: path });
             }
             Err(source) => return Err(JournalError::Io { path, source }),
@@ -502,9 +545,50 @@ fn configure_reparse_safe(_options: &mut OpenOptions) {}
 pub(super) fn lock_data_file(file: &File, path: &Path) -> Result<(), JournalError> {
     match try_lock_authority(file) {
         Ok(AuthorityLock::Acquired) => Ok(()),
-        Ok(AuthorityLock::Contended) => Err(JournalError::AlreadyOwned {
-            lease_path: path.to_path_buf(),
-        }),
+        Ok(AuthorityLock::Contended) => {
+            #[cfg(all(test, target_os = "linux"))]
+            {
+                let locks_now = std::fs::read_to_string("/proc/locks").unwrap_or_default();
+                let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+                let ino = std::fs::metadata(&target).ok().map(|m| {
+                    use std::os::unix::fs::MetadataExt as _;
+                    m.ino()
+                });
+                let mut matching: Vec<String> = Vec::new();
+                if let Some(ino) = ino {
+                    for line in locks_now.lines() {
+                        if line.split_whitespace().any(|t| t.ends_with(&format!(":{ino}"))) {
+                            matching.push(line.to_owned());
+                        }
+                    }
+                }
+                let start = std::time::Instant::now();
+                let mut attempts = 0u32;
+                let mut freed_after = None;
+                while start.elapsed() < std::time::Duration::from_millis(3000) {
+                    attempts += 1;
+                    match try_lock_authority(file) {
+                        Ok(AuthorityLock::Acquired) => {
+                            let _ = unlock_authority(file);
+                            freed_after = Some(start.elapsed());
+                            break;
+                        }
+                        _ => std::thread::sleep(std::time::Duration::from_millis(1)),
+                    }
+                }
+                eprintln!(
+                    "DATADIAG2 path={} thread={:?} lock_lines_for_inode={:?} freed_after={:?} attempts={}",
+                    path.display(),
+                    std::thread::current().name().unwrap_or("?"),
+                    matching,
+                    freed_after,
+                    attempts
+                );
+            }
+            Err(JournalError::AlreadyOwned {
+                lease_path: path.to_path_buf(),
+            })
+        }
         Err(source) => Err(JournalError::Io {
             path: path.to_path_buf(),
             source,
