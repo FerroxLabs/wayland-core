@@ -44,6 +44,105 @@ pub enum RecoveryDisposition {
     },
 }
 
+/// Reconciler identity recorded when an INTERRUPTION, not an observation,
+/// decided a tool effect. The receipt it writes is `Failed` with
+/// [`INTERRUPTED_EFFECT_UNOBSERVED`]: the effect may or may not have landed
+/// and nothing claims either way.
+pub const INTERRUPTION_ADMISSION_RECONCILER: &str = "interruption-admission";
+
+/// The error text on an interrupted tool effect's terminal receipt. It says
+/// what is true — the outcome was never observed — rather than choosing
+/// between "it happened" and "it did not", both of which would be inventions.
+pub const INTERRUPTED_EFFECT_UNOBSERVED: &str = "the process was killed before this tool call's outcome was observed; the effect may or may \
+     not have landed";
+
+/// The tool result a resumed conversation carries for a call the crash cut off.
+///
+/// It replaces `"Turn cancelled before this tool ran."` — which for an
+/// interrupted call is simply FALSE, and measurably expensive: shown that
+/// sentence for a `curl -X POST /register` that had already booked a shipment,
+/// the model re-ran the command verbatim and the customer was billed twice.
+/// Losing the work and duplicating it are the same defect seen from two sides,
+/// and both are cured by telling the truth about what is unknown.
+pub const INTERRUPTED_TOOL_RESULT: &str = "INTERRUPTED: this tool call was cut off by a crash and its outcome was never observed. It \
+     may have run in full, in part, or not at all. Do NOT re-run it until you have checked the \
+     current state of everything it could have changed, and then act only on what that check \
+     shows.";
+
+/// What a crash left in flight, in terms an operator and a model can both act
+/// on.
+///
+/// Produced before recovery terminalizes anything: afterwards the journal
+/// records only that an outcome is unknown, not which operation it is unknown
+/// about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedTurnReport {
+    /// The turn the interruption caught.
+    pub turn_id: String,
+    /// The message that started it.
+    pub user_message: String,
+    /// One line per effect whose outcome nobody observed. Empty when the turn
+    /// was interrupted between effects — the turn still has to be closed, but
+    /// nothing is in doubt.
+    pub unobserved: Vec<String>,
+}
+
+impl InterruptedTurnReport {
+    /// The account handed to the model on the next turn.
+    ///
+    /// It is deliberately an instruction to VERIFY, not to redo and not to
+    /// skip. Redoing duplicates a billed effect; skipping loses one. Only the
+    /// world can say which happened, so the next turn is told to go and look.
+    #[must_use]
+    pub fn briefing(&self) -> String {
+        let mut briefing = String::from(
+            "[recovered session] Your previous turn did not finish: the process was killed \
+             part-way through it. The work you were asked to do is NOT complete just because \
+             this session has history of you starting it.",
+        );
+        if !self.unobserved.is_empty() {
+            briefing.push_str(
+                "\n\nThese operations were in flight when it died, and nothing observed how they \
+                 ended:",
+            );
+            for item in &self.unobserved {
+                briefing.push_str("\n  - ");
+                briefing.push_str(item);
+            }
+        }
+        briefing.push_str(
+            "\n\nDo not assume any of them succeeded, and do not assume any of them failed. \
+             Your FIRST action must be a read-only check of the current state of everything the \
+             interrupted work could have changed — and it must be a fresh check now, not a \
+             result you already have from before the crash, because the crash landed after it. \
+             Issue no request that creates, books, sends, charges or writes anything until that \
+             check has come back, then act only on what it shows. Then finish every remaining \
+             part of the original task, including any file you were asked to write and any \
+             commit you were asked to make.",
+        );
+        briefing
+    }
+}
+
+/// A bounded, redaction-safe rendering of a durable tool input, for naming an
+/// interrupted call in a report. Returns an empty string when the journal kept
+/// no summary — the digest alone tells a reader nothing.
+#[must_use]
+pub(crate) fn stored_input_summary(input: &crate::session_journal::StoredToolInput) -> String {
+    let crate::session_journal::StoredToolInput::Redacted {
+        summary: Some(summary),
+        ..
+    } = input
+    else {
+        return String::new();
+    };
+    let mut rendered = summary.to_string();
+    if rendered.chars().count() > 200 {
+        rendered = rendered.chars().take(200).collect::<String>() + "…";
+    }
+    format!(" {rendered}")
+}
+
 pub(crate) const RECOVERY_CHECKPOINT_VERSION: u64 = 4;
 pub(crate) const TOOL_HOOK_RECOVERY_AUTHORITY_VERSION: u64 = 1;
 
