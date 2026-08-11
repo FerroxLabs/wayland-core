@@ -11,9 +11,13 @@ use crate::Tool;
 use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 use crate::path_validation::validate_user_path;
+use crate::unsaved_work::UnsavedWorkGuard;
 
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    /// P2: session-scoped record of the user's unsaved work, so a
+    /// whole-file overwrite can never silently delete it.
+    unsaved: UnsavedWorkGuard,
 }
 
 impl WriteTool {
@@ -25,9 +29,18 @@ impl WriteTool {
     /// No "must Read first" guard: Write is intended for creating new files
     /// or complete rewrites.
     ///
+    /// P2: a complete rewrite still may not destroy work the user has not
+    /// saved. Every overwrite is checked against
+    /// [`crate::unsaved_work::UnsavedWorkGuard`] and refused when it would
+    /// drop a line that is on disk but in no commit. This guard is always
+    /// on — it needs no cache and no wiring.
+    ///
     /// Pass `None` to disable cache integration (legacy behavior).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self {
+            file_cache,
+            unsaved: UnsavedWorkGuard::new(),
+        }
     }
 }
 
@@ -43,7 +56,10 @@ impl Tool for WriteTool {
          - This tool overwrites the existing file completely (not append).\n\
          - If the file already exists, you must use Read first to see its current content.\n\
          - Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n\
-         - Use Write only for creating new files or complete rewrites."
+         - Use Write only for creating new files or complete rewrites.\n\
+         - A rewrite that would delete a line present on disk but absent from the \
+         file's last commit is refused: that is unsaved user work. Keep those lines \
+         or use Edit."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -95,6 +111,22 @@ impl Tool for WriteTool {
         };
         let path = validated.as_path();
         let existed = path.exists();
+
+        // P2: never let a whole-file rewrite delete work the user has not
+        // saved. Checked before any disk mutation so a refusal leaves the file
+        // exactly as it was. On a create there is nothing to lose, and
+        // recording the empty baseline now is what keeps the agent's own later
+        // rewrites of its own file free.
+        if existed {
+            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        } else {
+            self.unsaved.observe(path);
+        }
 
         // Create parent directories
         if let Some(parent) = path.parent().filter(|p| !p.exists()) {
@@ -184,6 +216,21 @@ impl Tool for WriteTool {
         };
         let path = validated.as_path();
         let existed = ctx.vfs.exists(path).await.unwrap_or(false);
+
+        // P2: same unsaved-work refusal as the legacy path, before the write.
+        // Existence comes from the VFS, so a path the sandbox would reject
+        // never reaches the guard's reader — the sandbox denial, not a message
+        // quoting that file's lines, is the right answer there.
+        if existed {
+            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        } else {
+            self.unsaved.observe(path);
+        }
 
         // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
         // actual write so an upstream FileWatcher can debounce its own
