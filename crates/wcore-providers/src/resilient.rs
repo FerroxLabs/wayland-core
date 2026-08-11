@@ -67,6 +67,21 @@ fn is_request_fatal(err: &ProviderError) -> bool {
     matches!(err, ProviderError::Api { status: 400, .. })
 }
 
+/// True when the circuit was opened because the provider was momentarily
+/// unavailable — it timed out, or it said it was overloaded.
+///
+/// Deliberately narrow. A cooldown entered because the request was REJECTED
+/// (bad credential, billing, unknown model) must keep refusing without
+/// sending: re-issuing it cannot succeed and every attempt costs a call. Only
+/// the "come back in a moment" reasons are worth an unprotected probe.
+fn cooldown_is_momentary(state: CooldownState) -> bool {
+    let reason = match state {
+        CooldownState::Cooling { reason, .. } | CooldownState::HalfOpen { reason } => reason,
+        CooldownState::Ready => return false,
+    };
+    matches!(reason, FailoverReason::Timeout | FailoverReason::Overloaded)
+}
+
 fn classify_error(err: &ProviderError) -> FailoverReason {
     let status = match err {
         ProviderError::Api { status, .. } => Some(*status),
@@ -365,7 +380,41 @@ impl LlmProvider for ResilientProvider {
         let mut receipt;
 
         let primary_state = self.health.state();
-        if let Some(permit) = self.health.try_acquire() {
+        let mut admission = self.health.try_acquire();
+        // An open circuit does two separable things: it stops traffic
+        // HAMMERING a failing endpoint, and it FAILS FAST so the caller can go
+        // somewhere else. With an empty fallback chain the second one has no
+        // meaning — there is nowhere else — and failing fast only converts a
+        // transient outage into a guaranteed failure that the caller's own
+        // bounded budget never gets to test. The first one keeps all of its
+        // meaning and is preserved here: the probe is taken under the SAME
+        // single-flight lease `try_acquire` uses, so at most one request is in
+        // flight against the open circuit and every concurrent caller is still
+        // refused. Rate remains bounded by the caller's own backoff.
+        //
+        // Narrow on purpose. This degrades refusal to probing only when ALL of
+        // (a) there is no fallback to route to, (b) the cooldown was entered
+        // for a momentary reason, and (c) no other probe holds the lease. A
+        // rejected request (auth, billing, unknown model, rate limit) keeps
+        // hard refusal, because re-issuing it cannot succeed.
+        let mut unprotected_probe = false;
+        if admission.is_none() && self.fallbacks.is_empty() && cooldown_is_momentary(primary_state)
+        {
+            admission = self.health.try_acquire_unprotected_probe();
+            unprotected_probe = admission.is_some();
+        }
+        if unprotected_probe {
+            self.reporter.report(
+                &self.primary_name,
+                None,
+                CircuitState::Open,
+                Some(
+                    "circuit open with no fallback configured; sending a single guarded probe \
+                     to the primary",
+                ),
+            );
+        }
+        if let Some(permit) = admission {
             match crate::attempt_lifecycle::scope_provider_attempt_identity(
                 self.primary_name.clone(),
                 request.model.clone(),
@@ -1177,8 +1226,186 @@ mod tests {
         }
     }
 
+    /// Fail-fast direction, 429. A rate limit is a REJECTED request, not a
+    /// momentary outage, so the open circuit still refuses without sending
+    /// even though there is no fallback: re-issuing burns the same quota that
+    /// is already exhausted.
     #[tokio::test]
-    async fn open_circuit_without_fallback_reports_that_no_request_was_attempted() {
+    async fn open_circuit_without_fallback_refuses_a_rate_limited_request() {
+        struct AlwaysRateLimited;
+        #[async_trait]
+        impl LlmProvider for AlwaysRateLimited {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::RateLimited {
+                    retry_after_ms: 60_000,
+                })
+            }
+        }
+
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysRateLimited),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::RateLimited { .. })
+        ));
+        assert!(
+            matches!(
+                resilient.stream(&dummy_request()).await,
+                Err(ProviderError::NotAttempted { .. })
+            ),
+            "a rate limit must keep hard fail-fast even with no fallback"
+        );
+    }
+
+    /// Finding 3, round 2. The probe an open circuit allows when there is no
+    /// fallback is SINGLE-FLIGHT: a second caller arriving while it is in the
+    /// air is refused. This is the anti-hammering half of E-H2, and it is the
+    /// half that has to survive dropping the fail-fast half.
+    #[tokio::test]
+    async fn an_open_circuit_probe_is_single_flight_across_concurrent_callers() {
+        struct GatedFail {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl LlmProvider for GatedFail {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n > 0 {
+                    // Park inside the provider so the probe is provably still
+                    // in flight while the second caller asks for admission.
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Err(ProviderError::Connection("primary is down".into()))
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let resilient = Arc::new(ResilientProvider::new(
+            "primary",
+            Arc::new(GatedFail {
+                calls: Arc::clone(&calls),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        ));
+
+        // One failure opens the circuit for a momentary reason.
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::Connection(_))
+        ));
+
+        let probing = {
+            let resilient = Arc::clone(&resilient);
+            tokio::spawn(async move { resilient.stream(&dummy_request()).await })
+        };
+        entered.notified().await;
+
+        // Bounded: without the lease the second caller ALSO reaches the parked
+        // provider and never returns, and an unbounded await would turn that
+        // into a harness timeout instead of a legible failure.
+        let concurrent =
+            tokio::time::timeout(Duration::from_secs(5), resilient.stream(&dummy_request()))
+                .await
+                .expect(
+                    "a second caller must be refused immediately, not queued behind the \
+             probe inside the provider",
+                );
+        assert!(
+            matches!(concurrent, Err(ProviderError::NotAttempted { .. })),
+            "a second caller must be refused while the single probe is in \
+             flight, got {concurrent:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the concurrent caller must not have reached the provider"
+        );
+
+        release.notify_one();
+        assert!(matches!(
+            probing.await.expect("probe task joins"),
+            Err(ProviderError::Connection(_))
+        ));
+    }
+
+    /// A rejected request still refuses without sending once the circuit is
+    /// open: retrying a 403 cannot succeed and every attempt costs a call.
+    /// This is the guarantee the open circuit exists to provide when there is
+    /// no fallback, and it is unchanged.
+    #[tokio::test]
+    async fn open_circuit_without_fallback_refuses_a_rejected_request() {
+        struct AlwaysForbidden;
+        #[async_trait]
+        impl LlmProvider for AlwaysForbidden {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Api {
+                    status: 403,
+                    message: "forbidden".into(),
+                })
+            }
+        }
+
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysForbidden),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::Api { status: 403, .. })
+        ));
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::NotAttempted { .. })
+        ));
+    }
+
+    /// Job corpus row B-2: three connection resets tripped the breaker, and
+    /// every later attempt came back "not attempted" while the provider had
+    /// already healed — a momentary outage became a lost job. With no fallback
+    /// there is nowhere to route, so refusing protects nothing: send, and let
+    /// the caller's own bounded budget decide when to stop.
+    #[tokio::test]
+    async fn open_circuit_without_fallback_still_sends_after_a_momentary_outage() {
         let resilient = ResilientProvider::new(
             "primary",
             Arc::new(AlwaysFail),
@@ -1195,9 +1422,11 @@ mod tests {
             resilient.stream(&dummy_request()).await,
             Err(ProviderError::Connection(_))
         ));
+        // The circuit is open now. The second call must still reach the
+        // provider — the primary's own error, not a refusal to try.
         assert!(matches!(
             resilient.stream(&dummy_request()).await,
-            Err(ProviderError::NotAttempted { .. })
+            Err(ProviderError::Connection(_))
         ));
     }
 

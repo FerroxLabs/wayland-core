@@ -1374,6 +1374,141 @@ mod output_sizing_tests {
 /// the retry loop fires as before. The cost of a missed 4xx is one
 /// extra retry; the cost of a false-positive 4xx is no retry on a
 /// transient failure. Bias toward the latter.
+/// True for the provider failure classes that mean the request was never
+/// served: the socket was refused, or established and then destroyed before a
+/// response head arrived, or the provider answered "unavailable / overloaded"
+/// without running the model.
+///
+/// These are the cheapest failures to retry — the provider answered nothing,
+/// so re-issuing the request re-sends context that was never consumed — and
+/// the most ordinary: a reset is what a proxy, a load balancer or a flaky link
+/// produces all day. "Cheapest", not "free": see the cost note on
+/// [`UNSERVED_OUTAGE_BUDGET`] for the one code in this set (`transport`)
+/// whose billing status is UNVERIFIED rather than known. `MAX_STREAM_RETRIES` spans 1.5 s,
+/// which is shorter than a single TCP re-establishment, so this class is
+/// bounded by an outage WINDOW instead — see [`UNSERVED_OUTAGE_BUDGET`].
+///
+/// Every other failure keeps `MAX_STREAM_RETRIES`: a 5xx, a truncated stream
+/// or an in-band error frame all followed a response the provider served and
+/// billed, so re-sending the whole context has a real cost.
+///
+/// The codes come from `wcore_providers::retry::provider_failure_code` /
+/// `egress_failure_code`, not from message text: `connection` is a failure to
+/// establish, `transport` is a send-phase failure with no response, and
+/// `http_503` / `http_529` are the two statuses that mean "I did not do this
+/// work, come back in a moment".
+///
+/// Deliberately excluded: `timeout` (the provider may have been serving it
+/// slowly), `stream_body` (the body had already started), `http_429` (a rate
+/// limit carries its own `Retry-After` and is handled by that path), and every
+/// other 5xx (a 500 can follow partial generation that was billed).
+fn is_unserved_request_failure(failure_code: &str) -> bool {
+    matches!(
+        failure_code,
+        "connection" | "transport" | "http_503" | "http_529"
+    )
+}
+
+/// Wall-clock window over which the engine keeps re-issuing a request the
+/// provider never served (see [`is_unserved_request_failure`]).
+///
+/// A request COUNT is the wrong unit. What is being ridden out is a
+/// provider-side outage, and an outage has a duration; the number of sends
+/// that fit inside it is an artefact of how fast each one fails, so any count
+/// is a guess about the shape of the next outage rather than a bound on it.
+/// Two runs against the same provider, one failing on a refused connection in
+/// 3 ms and one on a hang of 90 s, would get retry budgets differing by four
+/// orders of magnitude in wall-clock terms while looking identical in the
+/// source.
+///
+/// ## How 900 s was actually chosen — read this before moving it
+///
+/// Honestly: it was chosen against the job corpus, and then checked against
+/// two constants the product already commits to. Both halves matter, and an
+/// earlier revision of this comment stated only the second, which made a
+/// fixture-fitted number look like a derivation. The record:
+///
+/// - A budget of ONE `READ_TIMEOUT` (300 s) was tried first. It failed the
+///   B-2 out-of-corpus probe at `--fault-requests 32`: the run gave up after
+///   25 sends at 316.8 s with the job unfinished. It is also wrong for a
+///   reason independent of that probe — it makes the retry loop weaker than
+///   the single request it wraps, so a provider that hangs 90 s per attempt
+///   gets barely four tries, fewer than the product will spend waiting on one
+///   healthy call.
+/// - 3 x `READ_TIMEOUT` is the smallest multiple that cleared that probe
+///   (853.8 s against a 900 s budget — a 5% margin), and it coincides with
+///   [`DEFAULT_FAILURE_THRESHOLD`], the number of consecutive failures the
+///   breaker already requires before calling a provider broken. Three full
+///   silent requests is the product's own existing standard of evidence that
+///   a provider is gone.
+///
+/// So the arithmetic is defensible and the trigger was a fixture. Anyone
+/// moving this number should know both, and should re-run the out-of-corpus
+/// probe rather than trusting the story.
+///
+/// The measured boundary is roughly 35 sends / 900 s: `r2-probe-48` fails at
+/// 36 faults and 918.3 s. Past it the turn fails SAFELY — session written to
+/// disk, exit 1, and the product claims nothing it did not do (graded by the
+/// corpus Tier 0, INV-5.completion PASS).
+///
+/// ## Cost of holding the window open — MEASURED, and it is not free
+///
+/// A `connection` failure never established a socket, and `http_503`/`http_529`
+/// are the provider saying it did not do the work; those re-sends really are
+/// free. `transport` is not, and this is measured rather than assumed.
+///
+/// A `transport` failure means the socket was established, the request WAS
+/// dispatched, and the peer destroyed the connection before a response head
+/// came back. Put a proxy in the middle that forwards upstream and then resets
+/// the CLIENT leg — an ordinary load balancer failure — and the client raises
+/// exactly this error while the provider completes the request normally:
+/// status 200, 102 completion tokens, `cost_usd` 0.001189 reported in the
+/// response the client never received. Reproducer and full output:
+/// `scripts/b2_transport_billing_probe.py`.
+///
+/// So the class is MIXED. A break before the provider receives the request
+/// costs a socket; a break after it does not, and the product cannot tell the
+/// two apart from the client side — that is what "no response head" means.
+///
+/// Size the risk accordingly: this window admits ~35 re-sends where the
+/// previous count admitted 6, so a `transport` outage of the billed shape is a
+/// ~6x cost amplification against the old behaviour, it is invisible to the
+/// product (the usage block is in the response that never arrives), and there
+/// is no spend ceiling behind it. That is a deliberate trade — a lost job also
+/// costs money — but it must be made with the real number, not with "nothing
+/// was billed".
+///
+/// The job corpus cannot see any of this: its B-2 fault proxy returns before
+/// relaying upstream, so a faulted request never reaches the provider at all
+/// (advp-WA: proxy ledger relay=4 fault=10, recorder captured exactly 4).
+/// Anything that widens this window needs the probe above, not a corpus run.
+const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(
+    wcore_providers::http_client::READ_TIMEOUT.as_secs()
+        * wcore_config::config::DEFAULT_FAILURE_THRESHOLD as u64,
+);
+
+/// Ceiling on the gap between two re-sends of an unserved request, and so also
+/// the worst-case delay between the provider healing and the run noticing.
+///
+/// Bound to [`DEFAULT_RECOVERY_TIMEOUT_SECS`] (30 s) — the breaker's own
+/// cooldown base — so the engine never probes a wedged endpoint faster than
+/// the component whose job is to protect it would. Bound rather than copied:
+/// a bare `30` here could drift from the breaker it claims to pace.
+const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration =
+    std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
+
+/// Backoff before re-issuing a request the provider never served: doubling
+/// from 500 ms, capped at [`UNSERVED_RETRY_BACKOFF_CAP`]. `attempt` is 1-based.
+///
+/// Doubling rather than the linear step used for served failures because this
+/// schedule has to cover a window three orders of magnitude longer than the
+/// first interval without turning it into a send loop.
+fn unserved_retry_backoff(attempt: u32) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(20);
+    std::time::Duration::from_millis(500u64.saturating_mul(1u64 << shift))
+        .min(UNSERVED_RETRY_BACKOFF_CAP)
+}
+
 fn is_http_4xx_error(reason: &str) -> bool {
     /// Returns true if the first 3 bytes of `s` are ASCII digits and
     /// the first digit is `4` — i.e. `s` starts with a literal 4xx
@@ -1769,6 +1904,43 @@ mod v0911_engine_recovery_tests {
             "provider stream closed before a Done event (truncated response)"
         ));
         assert!(!is_http_4xx_error("connection reset by peer"));
+    }
+
+    #[test]
+    fn only_unserved_requests_get_the_larger_retry_budget() {
+        // The provider never did the work: the cheapest class to retry, and
+        // the one row B-2 measured the product losing whole jobs to.
+        assert!(is_unserved_request_failure("connection"));
+        assert!(is_unserved_request_failure("transport"));
+        assert!(is_unserved_request_failure("http_503"));
+        assert!(is_unserved_request_failure("http_529"));
+        // Served, or partly served, or handled by another path — these keep
+        // MAX_STREAM_RETRIES because a re-send has a real cost.
+        assert!(!is_unserved_request_failure("stream_body"));
+        assert!(!is_unserved_request_failure("timeout"));
+        assert!(!is_unserved_request_failure("stream_truncated"));
+        assert!(!is_unserved_request_failure("http_500"));
+        assert!(!is_unserved_request_failure("http_502"));
+        assert!(!is_unserved_request_failure("http_429"));
+        assert!(!is_unserved_request_failure("egress_denied"));
+        assert!(!is_unserved_request_failure(""));
+    }
+
+    #[test]
+    fn unserved_retry_backoff_doubles_from_half_a_second_then_holds_the_cap() {
+        use super::{UNSERVED_RETRY_BACKOFF_CAP, unserved_retry_backoff};
+        let ms = |attempt| unserved_retry_backoff(attempt).as_millis();
+        assert_eq!(ms(1), 500);
+        assert_eq!(ms(2), 1_000);
+        assert_eq!(ms(3), 2_000);
+        assert_eq!(ms(4), 4_000);
+        assert_eq!(ms(5), 8_000);
+        assert_eq!(ms(6), 16_000);
+        // Capped from here on: the window is long, the send rate must not be.
+        assert_eq!(ms(7), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
+        assert_eq!(ms(50), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
+        // No overflow panic however deep the outage goes.
+        assert_eq!(ms(u32::MAX), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
     }
 
     #[test]
@@ -3009,6 +3181,10 @@ pub struct AgentEngine {
     /// F10 production monitor instance. It is constructed with the engine so
     /// startup activation can truthfully report readiness, then reset to the
     /// current run's budget at each `run()` boundary.
+    /// Physical sends this turn that the provider never returned a response
+    /// to (see `is_unserved_request_failure`). Reset at every turn entry and
+    /// disclosed at every turn exit by `report_unserved_resends`.
+    unserved_resends: u32,
     midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
@@ -3555,6 +3731,7 @@ impl AgentEngine {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -3827,6 +4004,7 @@ impl AgentEngine {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -9764,7 +9942,63 @@ impl AgentEngine {
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that
     /// owns durable session authority.
+    /// Tell the user how many requests this turn sent that never came back.
+    ///
+    /// A request the provider never served can still have been billed. The
+    /// socket was established and the request dispatched; only the response
+    /// was lost, and the usage block that would have priced it rides in that
+    /// lost response. So the cost is genuinely unknowable from this side while
+    /// the COUNT is not — and the product already prefers saying "unpriced" to
+    /// implying zero. Say the knowable half rather than letting the spend be
+    /// silent, and state plainly that no figure shown includes it.
+    ///
+    /// Emitted only when the turn actually had unserved re-sends. A sentence
+    /// printed on every turn is a sentence users stop reading.
+    fn report_unserved_resends(&self) {
+        let sent = self.unserved_resends;
+        if sent == 0 {
+            return;
+        }
+        let subject = if sent == 1 { "request" } else { "requests" };
+        // "Each" is singular whatever `sent` is, so the verb never varies with it.
+        self.output.emit_info(&format!(
+            "{sent} provider {subject} never returned a response. Each was \
+             dispatched, so the provider may have served and billed it; that \
+             spend is not included in any cost or token figure shown here."
+        ));
+    }
+
+    /// One user turn, wrapped so unserved re-sends are counted from zero and
+    /// disclosed exactly once however the turn exits.
+    ///
+    /// Every turn entry funnels through here — `run_with_content` for a fresh
+    /// turn, `resume_interrupted_turn` for a recovered one — so no early
+    /// return deep inside the stream loop can skip the disclosure.
     async fn run_inner(
+        &mut self,
+        user_turn: UserTurnInput<'_>,
+        msg_id: &str,
+        journal_turn_id: Option<&str>,
+        resume_checkpoint: Option<crate::recovery::RecoveryCheckpoint>,
+        prepared_recovery_request: Option<LlmRequest>,
+        recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
+    ) -> Result<AgentResult, AgentError> {
+        self.unserved_resends = 0;
+        let result = self
+            .run_inner_impl(
+                user_turn,
+                msg_id,
+                journal_turn_id,
+                resume_checkpoint,
+                prepared_recovery_request,
+                recovered_provider_round,
+            )
+            .await;
+        self.report_unserved_resends();
+        result
+    }
+
+    async fn run_inner_impl(
         &mut self,
         user_turn: UserTurnInput<'_>,
         msg_id: &str,
@@ -10075,6 +10309,12 @@ impl AgentEngine {
             let mut stream_attempt = first_recovery_checkpoint
                 .as_ref()
                 .map_or(0, |checkpoint| checkpoint.stream_attempt);
+            // Deadline for re-issuing requests the provider never served. Armed
+            // on the FIRST such failure of this turn, so a turn that never sees
+            // one pays nothing, and a turn that recovers and later fails again
+            // is not charged for the earlier outage. `tokio::time::Instant` so
+            // the bound is observable under a paused test clock.
+            let mut unserved_deadline: Option<tokio::time::Instant> = None;
             let mut overflow_retried = first_recovery_checkpoint
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.overflow_retried);
@@ -12081,7 +12321,25 @@ impl AgentEngine {
                 // above runs under `scope_max_retries(0)`, so one engine
                 // attempt is exactly one physical send and one reservation.
                 // Keep the complete bounded engine retry budget here.
-                if !is_client_error && stream_attempt < MAX_STREAM_RETRIES {
+                // An unserved request is bounded by an outage WINDOW, not by
+                // a request count — see `UNSERVED_OUTAGE_BUDGET`. Everything
+                // else keeps the small fixed count: those attempts were served
+                // and billed, so each re-send has a real price and the number
+                // of them is exactly the right thing to cap.
+                let unserved = is_unserved_request_failure(&failure_code);
+                if unserved {
+                    // One physical send that produced no response head.
+                    self.unserved_resends = self.unserved_resends.saturating_add(1);
+                }
+                let retry_admitted = if unserved {
+                    let deadline = *unserved_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + UNSERVED_OUTAGE_BUDGET
+                    });
+                    tokio::time::Instant::now() < deadline
+                } else {
+                    stream_attempt < MAX_STREAM_RETRIES
+                };
+                if !is_client_error && retry_admitted {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
                     // carries FAILED tool results, that context is
@@ -12147,11 +12405,26 @@ impl AgentEngine {
                     }
                     stream_attempt += 1;
                     self.output.emit_provider_retry(Some(failure_code.as_str()));
-                    // Linear backoff: 500ms, 1000ms.
-                    let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
+                    // Served failures: linear 500 ms, 1000 ms across the two
+                    // permitted retries. Unserved failures: exponential to
+                    // `UNSERVED_RETRY_BACKOFF_CAP`, so a long window costs few
+                    // sends and a healed provider is noticed within one cap.
+                    let backoff = if unserved {
+                        unserved_retry_backoff(stream_attempt)
+                    } else {
+                        std::time::Duration::from_millis(500 * stream_attempt as u64)
+                    };
+                    let progress = match unserved_deadline.filter(|_| unserved) {
+                        Some(deadline) => format!(
+                            "attempt {stream_attempt}, {}s of outage budget left",
+                            deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .as_secs()
+                        ),
+                        None => format!("attempt {stream_attempt}/{MAX_STREAM_RETRIES}"),
+                    };
                     self.output.emit_info(&format!(
-                        "Provider stream failed ({reason}); retrying \
-                         (attempt {stream_attempt}/{MAX_STREAM_RETRIES})…"
+                        "Provider stream failed ({reason}); retrying ({progress})…"
                     ));
                     let backoff_cancel = self.cancel_token.clone();
                     tokio::select! {
@@ -12172,8 +12445,35 @@ impl AgentEngine {
                 // billed nothing usable; surface a hard error so the
                 // host (and the SkillRouter / auto-skill observers)
                 // record a FAILURE, not a silent empty success.
+                //
+                // Fail SAFELY first. Everything this run has already done —
+                // the instructions the user gave once at the start, every tool
+                // result, the assistant turns that produced the files now
+                // sitting in the workspace — lives in `self.messages` and is
+                // only durable once written. Returning the error without
+                // writing discards it, the next run starts from nothing, and a
+                // provider outage the user could have resumed past becomes
+                // work that has to be redone from scratch. The cancellation
+                // arm above persists for exactly this reason; an exhausted
+                // provider is the same event with a different trigger.
+                //
+                // Persist failures are logged, never propagated: they must not
+                // replace the API error that is the real cause of the stop.
+                if journal_turn_id.is_none()
+                    && let Err(persist_error) = self.prepare_durable_conversation().await
+                {
+                    tracing::warn!(
+                        error = %persist_error,
+                        "could not prepare the conversation for a durable write after the \
+                         provider retry budget was exhausted"
+                    );
+                }
+                self.save_session_mirror();
                 self.output.emit_error(
-                    &format!("Provider stream failed after retries: {reason}"),
+                    &format!(
+                        "Provider stream failed after retries: {reason}. The session has been \
+                         saved — resume it to continue from here rather than starting over."
+                    ),
                     !is_client_error,
                 );
                 return Err(AgentError::ApiError(reason));
@@ -17120,6 +17420,7 @@ mod set_config_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -18935,6 +19236,7 @@ mod phase6_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -19255,6 +19557,7 @@ mod compact_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -20861,6 +21164,7 @@ mod plan_mode_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -21314,6 +21618,7 @@ mod hook_integration_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -22454,6 +22759,7 @@ mod approval_bridge_engine_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -23510,6 +23816,7 @@ mod user_model_writeback_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -24831,23 +25138,380 @@ mod audit_2026_05_22_tests {
         }
     }
 
+    /// A provider that fails only after a fixed delay, so a test can vary how
+    /// long each unserved attempt takes while changing nothing else.
+    struct SlowStreamErrProvider {
+        delay: std::time::Duration,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait]
+    impl LlmProvider for SlowStreamErrProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            Err(ProviderError::Connection("physical send failed".into()))
+        }
+    }
+
+    /// Drive one turn against a provider that never serves anything and whose
+    /// every attempt takes `delay`. Returns the physical sends the provider
+    /// saw and the wall clock the turn consumed.
+    async fn unserved_outage(delay: std::time::Duration) -> (usize, std::time::Duration) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(SlowStreamErrProvider {
+            delay,
+            calls: Arc::clone(&calls),
+        });
+        let mut engine = engine_with(provider);
+        let started = tokio::time::Instant::now();
+        let result = engine.run("task", "m-1").await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "an outage longer than the budget must still fail the turn, got {result:?}"
+        );
+        (calls.load(std::sync::atomic::Ordering::SeqCst), elapsed)
+    }
+
+    /// The headline of round 2. The budget for a request the provider never
+    /// served is an outage WINDOW, not a send count.
+    ///
+    /// The discriminating measurement is the pair: the same code, the same
+    /// budget, two outages that differ only in how fast each attempt fails.
+    /// A count-bounded budget gives both arms the identical number of sends
+    /// and wildly different wall clocks; a window-bounded budget does the
+    /// opposite, which is what "ride out an outage" actually means. Any
+    /// reversion to a fixed count collapses the two arms together and fails
+    /// here.
+    ///
+    /// Runs on a paused clock, so the 300 s window costs no real time.
+    #[tokio::test(start_paused = true)]
+    async fn an_unserved_outage_is_bounded_by_wall_clock_not_by_a_send_count() {
+        let (fast_sends, fast_elapsed) = unserved_outage(std::time::Duration::ZERO).await;
+        let (slow_sends, slow_elapsed) = unserved_outage(std::time::Duration::from_secs(60)).await;
+
+        // Both arms are held open for the whole window and then stop. Without
+        // a deadline this loop never ends; with the old count it stopped in
+        // ~10 s of wall clock however long the outage actually lasted.
+        for (label, elapsed) in [("fast", fast_elapsed), ("slow", slow_elapsed)] {
+            assert!(
+                elapsed >= super::UNSERVED_OUTAGE_BUDGET,
+                "the {label} outage gave up after {elapsed:?}, inside the budget"
+            );
+            assert!(
+                elapsed
+                    <= super::UNSERVED_OUTAGE_BUDGET
+                        + super::UNSERVED_RETRY_BACKOFF_CAP
+                        + std::time::Duration::from_secs(120),
+                "the {label} outage ran {elapsed:?}, well past the budget — the \
+                 deadline is not bounding the loop"
+            );
+        }
+
+        // Both are far past the served-failure budget.
+        assert!(
+            fast_sends > 3 && slow_sends > 3,
+            "an unserved failure must outlast MAX_STREAM_RETRIES: fast={fast_sends} \
+             slow={slow_sends}"
+        );
+        // A fixed COUNT would make these equal. Time does not — and the
+        // strong form of that claim is not a multiplier between the arms but
+        // an EXACT prediction for each arm, computed from the same two
+        // constants the loop uses. A count bound cannot satisfy both.
+        for (label, delay, observed) in [
+            ("fast", std::time::Duration::ZERO, fast_sends),
+            ("slow", std::time::Duration::from_secs(60), slow_sends),
+        ] {
+            let predicted = sends_the_window_admits(delay);
+            assert_eq!(
+                observed, predicted,
+                "the {label} arm must fit exactly the sends the window admits \
+                 at {delay:?} per attempt: predicted {predicted}, saw {observed}"
+            );
+        }
+        // And the two arms must genuinely differ, which is the part a count
+        // bound fails outright.
+        assert!(
+            fast_sends > slow_sends,
+            "a fast-failing outage must fit more sends into the same window \
+             than a slow-failing one (fast={fast_sends} slow={slow_sends}); \
+             equal counts mean the bound is still a count"
+        );
+    }
+
+    /// How many sends [`super::UNSERVED_OUTAGE_BUDGET`] admits when every
+    /// attempt fails after `delay`, walking the real backoff schedule.
+    ///
+    /// This replaces two hand-tuned numbers that used to guard this test: a
+    /// `fast_sends > slow_sends * 3` ratio and a `budget / cap + 12` ceiling.
+    /// Both had to be loosened when the budget grew, which is exactly the
+    /// wrong direction for a control — and the ratio is now arithmetically
+    /// false (36 vs 13 sends is 2.8x, not 3x), so restoring it would only
+    /// make the suite red. A prediction derived from the constants needs no
+    /// tuning when they move, and is strictly tighter than either bound it
+    /// replaces.
+    fn sends_the_window_admits(delay: std::time::Duration) -> usize {
+        // The deadline is armed on the FIRST failure, so the window starts at
+        // the end of send 1 and each retry is admitted on the clock reading
+        // taken when it fails.
+        let deadline = delay + super::UNSERVED_OUTAGE_BUDGET;
+        let mut sends = 1usize;
+        let mut elapsed = delay;
+        loop {
+            if elapsed >= deadline {
+                return sends;
+            }
+            elapsed += super::unserved_retry_backoff(sends as u32) + delay;
+            sends += 1;
+        }
+    }
+
+    /// `http_529` had no fixture anywhere in the tree. The only thing asserting
+    /// it was `is_unserved_request_failure("http_529")` — a predicate agreeing
+    /// with itself, which says nothing about whether a real 529 ever reaches
+    /// that predicate. Drive the whole path instead: a provider that answers
+    /// every request with HTTP 529 must be ridden out on the outage WINDOW,
+    /// not on the small served-failure count.
+    ///
+    /// 529 is the status Anthropic and OpenAI use for "overloaded". It means
+    /// the provider explicitly did not do the work, so re-sending is free and
+    /// the window is the right budget — but only if the classification wiring
+    /// actually carries the status that far, which is what this measures.
+    #[tokio::test(start_paused = true)]
+    async fn an_http_529_outage_is_ridden_out_on_the_window() {
+        struct Overloaded {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for Overloaded {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProviderError::Api {
+                    status: 529,
+                    message: "overloaded".into(),
+                })
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut engine = engine_with(Arc::new(Overloaded {
+            calls: Arc::clone(&calls),
+        }));
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "a permanent 529 outage must still fail the turn, got {result:?}"
+        );
+
+        let sends = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            sends > 3,
+            "a 529 was bounded by the served-failure count ({sends} sends; \
+             MAX_STREAM_RETRIES is 2, so 3 total attempts) — the status never \
+             reached the unserved classifier"
+        );
+        assert_eq!(
+            sends,
+            sends_the_window_admits(std::time::Duration::ZERO),
+            "a 529 outage must fit exactly the sends the window admits"
+        );
+    }
+
+    /// An engine whose emitted events can be read back.
+    fn engine_and_events(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (super::AgentEngine, crate::test_utils::TestSinkHandle) {
+        let sink = crate::test_utils::TestSink::new();
+        let handle = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(20);
+        (engine, handle)
+    }
+
+    /// Every `info` message a turn emitted.
+    fn info_messages(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("info"))
+            .filter_map(|e| e["message"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn unreturned_disclosures(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
+        info_messages(handle)
+            .into_iter()
+            .filter(|m| m.contains("never returned a response"))
+            .collect()
+    }
+
+    /// A turn that ends after requests the provider never answered must say how
+    /// many it sent, and must say that spend is not in any figure it showed.
+    ///
+    /// The window deliberately admits ~35 re-sends where the old count admitted
+    /// 6, and a `transport` failure CAN be billed — measured, see
+    /// `scripts/b2_transport_billing_probe.py`. The request was dispatched and
+    /// only the response was lost, so the usage block that would price it never
+    /// arrives: the cost is unknowable while the COUNT is not. Pin the knowable
+    /// half EXACTLY, against the same derivation the loop uses. A message
+    /// saying "some requests" would satisfy a weaker test and tell the user
+    /// nothing they could act on.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_reports_how_many_requests_never_returned_a_response() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut engine, events) = engine_and_events(Arc::new(SlowStreamErrProvider {
+            delay: std::time::Duration::ZERO,
+            calls: Arc::clone(&calls),
+        }));
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "the outage must still fail the turn, got {result:?}"
+        );
+
+        let sent = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            sent,
+            sends_the_window_admits(std::time::Duration::ZERO),
+            "precondition: the outage must have run the window out"
+        );
+
+        let disclosures = unreturned_disclosures(&events);
+        assert_eq!(
+            disclosures.len(),
+            1,
+            "the disclosure must be emitted exactly once per turn, got {disclosures:?}"
+        );
+        let msg = &disclosures[0];
+        // ACCURATE, not merely present: the reported count must equal the
+        // physical sends the provider actually saw.
+        assert!(
+            msg.starts_with(&format!("{sent} provider requests")),
+            "the disclosure must lead with the true send count {sent}: {msg}"
+        );
+        assert!(
+            msg.contains("billed") && msg.contains("not included"),
+            "the disclosure must say the spend may be real and is not in any \
+             figure shown: {msg}"
+        );
+    }
+
+    /// The control. The disclosure must NOT be a sentence the product always
+    /// prints: a warning shown on every turn is one the user learns to skip,
+    /// and it would be false on a turn that had no unanswered sends.
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_turn_says_nothing_about_unreturned_requests() {
+        let (mut engine, events) = engine_and_events(Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("done".into()),
+            done_endturn(),
+        ]])));
+        let result = engine.run("task", "m-1").await;
+        assert!(result.is_ok(), "the control turn must succeed: {result:?}");
+        let noise = unreturned_disclosures(&events);
+        assert!(
+            noise.is_empty(),
+            "a turn with no unserved re-sends must not mention them: {noise:?}"
+        );
+    }
+
+    /// Finding 4, and an honest label. A turn whose provider budget runs out
+    /// must leave a session that can be resumed, so the work already on disk
+    /// is continued rather than redone.
+    ///
+    /// This is a REGRESSION GUARD, not a demonstration of a repair. Mutation
+    /// M2 (round 2) deleted the persistence the exhaustion arm now performs
+    /// and this test still passed: in this scenario the brief was already
+    /// durable by the time the provider was called, so the added write is
+    /// defence-in-depth against the arm drifting apart from the cancellation
+    /// arm beside it, not a measured fix. What actually loses the work in the
+    /// B-2 shape is the workspace files being uncommitted, which lives outside
+    /// the engine.
+    ///
+    /// Graded by re-reading the session from disk through a FRESH manager,
+    /// never from the engine's own in-memory state.
+    #[tokio::test(start_paused = true)]
+    async fn an_exhausted_provider_budget_leaves_a_loadable_session_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("anthropic", "m-1", "/tmp", Some("b2b2b2b2b2b2"))
+            .unwrap();
+        let session_id = active.session.id.clone();
+
+        let mut engine = engine_with(Arc::new(StreamErrProvider::new(usize::MAX)));
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+
+        let brief = "stamp every row with account code LC-7731";
+        let result = engine.run(brief, "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "the turn must still fail, got {result:?}"
+        );
+
+        let reloaded = crate::session::SessionManager::new(dir.path().to_path_buf(), 10)
+            .load(&session_id)
+            .expect("the session must still be on disk after the provider gave up");
+        let persisted = format!("{:?}", reloaded.messages);
+        assert!(
+            persisted.contains("LC-7731"),
+            "the brief the user gave once must survive an exhausted provider — \
+             persisted history was {persisted}"
+        );
+    }
+
+    /// Control for the budget split: a failure that arrives AFTER the provider
+    /// began serving the stream keeps `MAX_STREAM_RETRIES`. Re-sending that one
+    /// costs a full context the provider already billed, so the larger budget
+    /// must not leak onto it.
     #[tokio::test]
-    async fn retryable_stream_err_uses_the_bounded_engine_retry_budget() {
-        // The provider ring is disabled for production engine calls. A
-        // permanent retryable failure therefore gets exactly three physical
-        // sends: the initial attempt plus two engine-owned retries.
-        let provider = Arc::new(StreamErrProvider::new(usize::MAX)); // always fails
-        let counter = provider.call_counter();
+    async fn served_stream_err_keeps_the_default_retry_budget() {
+        struct MidStreamErrProvider {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for MidStreamErrProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (tx, rx) = tokio::sync::mpsc::channel(16);
+                tokio::spawn(async move {
+                    let _ = tx
+                        .send(LlmEvent::Error("upstream died mid-stream".into()))
+                        .await;
+                });
+                Ok(rx)
+            }
+        }
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = Arc::new(MidStreamErrProvider {
+            calls: Arc::clone(&calls),
+        });
         let mut engine = engine_with(provider);
         let result = engine.run("task", "m-1").await;
         assert!(
             matches!(result, Err(super::AgentError::ApiError(_))),
-            "a permanent HTTP-exhausted failure must fail the turn, got {result:?}"
+            "a permanent mid-stream failure must fail the turn, got {result:?}"
         );
         assert_eq!(
-            counter.load(std::sync::atomic::Ordering::SeqCst),
+            calls.load(std::sync::atomic::Ordering::SeqCst),
             3,
-            "the engine must make 1 initial send plus 2 bounded retries"
+            "a served stream keeps 1 initial send plus 2 bounded retries"
         );
     }
 

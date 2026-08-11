@@ -665,7 +665,12 @@ mod tests {
 
     #[tokio::test]
     async fn open_circuit_does_not_report_a_false_physical_start() {
-        let server = status_server(503).await;
+        // 403 is a REJECTED request: the open circuit keeps refusing without
+        // sending, so no second physical start may be journalled. (A 503 —
+        // momentary unavailability — is deliberately different now: with no
+        // fallback the provider is probed again, and that start is real. See
+        // `open_circuit_without_fallback_still_sends_after_a_momentary_outage`.)
+        let server = status_server(403).await;
         let resilient = ResilientProvider::new(
             "primary-provider",
             Arc::new(HttpStatusProvider { url: server.uri() }),
@@ -690,7 +695,7 @@ mod tests {
         .await;
 
         let (first, second, after_first, after_second) = result.output;
-        assert!(matches!(first, Err(ProviderError::Api { status: 503, .. })));
+        assert!(matches!(first, Err(ProviderError::Api { status: 403, .. })));
         assert!(matches!(second, Err(ProviderError::NotAttempted { .. })));
         assert_eq!(after_first, 1);
         assert_eq!(after_second, after_first);

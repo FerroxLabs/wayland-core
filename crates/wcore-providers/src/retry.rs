@@ -15,6 +15,30 @@ use crate::attempt_lifecycle::{
 pub const DEFAULT_MAX_RETRIES: u32 = 2; // 1 initial + 2 retries = 3 total attempts
 pub const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Wall-clock window over which a connection that was established and then
+/// destroyed before any response head arrived (peer reset / abort / broken
+/// pipe) keeps being re-sent.
+///
+/// A request COUNT is the wrong unit. What is being ridden out is an interval
+/// during which the peer will not complete a request, and an interval has a
+/// duration; how many sends fit inside it is an artefact of how fast each one
+/// fails, not a property of the failure. Any count is therefore a guess about
+/// the shape of the next outage.
+///
+/// This is the INNER of two bounds and owns only the smallest failure: a
+/// single physical send losing its socket — a proxy recycling a worker, a load
+/// balancer dropping connections through a rollover, a keep-alive raced to
+/// close. The window has to contain at least one full re-establishment of the
+/// connection, and the product already states how long that may take:
+/// [`crate::http_client::CONNECT_TIMEOUT`] is 30 s. Anything longer than one
+/// re-establishment is not a blip and belongs to the OUTER bound — the
+/// engine's per-turn unserved-request budget, which is an order of magnitude
+/// longer and rebuilds the whole request.
+///
+/// Holding the window open is cheap: nothing was served on these attempts and
+/// nothing was billed, so a re-send costs a socket rather than tokens.
+pub const BROKEN_CONNECTION_RETRY_WINDOW: Duration = Duration::from_secs(30);
+
 /// One physical provider HTTP attempt observed by the retry ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAttemptEvidence {
@@ -402,15 +426,64 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
     // `is_body()`/`is_decode()` cover "error decoding response body" — almost
     // always a half-closed pooled connection dropped mid-body under bursty
     // load, which is transient and succeeds on a fresh connection. Treat them
-    // as retryable alongside timeout/connect. `is_request()` stays excluded
-    // (invalid URL/header — permanent, must not retry).
-    let is_transient = e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode();
+    // as retryable alongside timeout/connect. A bare `is_request()` stays
+    // excluded (invalid URL/header — permanent, must not retry); only the
+    // request-phase errors that carry a transport I/O cause are admitted, via
+    // `is_broken_established_connection`.
+    let is_transient = e.is_timeout()
+        || e.is_connect()
+        || e.is_body()
+        || e.is_decode()
+        || is_broken_established_connection(&e);
     let e = e.without_url();
     if is_transient {
         ProviderError::Connection(e.to_string())
     } else {
         ProviderError::Http(e)
     }
+}
+
+/// True when a reqwest error means the request was dispatched onto an
+/// established connection and the transport then failed before a response
+/// head arrived.
+///
+/// `reqwest::Error::is_connect()` covers only a failure to ESTABLISH the
+/// connection. A peer that accepts the request and then destroys the socket —
+/// with a TCP RST, or with an orderly close after hanging — reports neither
+/// `is_connect()` nor `is_timeout()` nor `is_body()` nor `is_decode()`: it
+/// reports `kind: Request`. Job corpus row B-2 measured the consequence twice.
+/// `fault-reset` broke one request mid-task and `fault-timeout` hung one and
+/// then closed it; both were classified as the terminal `ProviderError::Http`,
+/// neither cost a single retry, and both runs exited 1 with the month-end
+/// report unwritten.
+///
+/// `is_request()` is the base signal, and the exclusion this code used to
+/// carry ("`is_request()` covers invalid URL / invalid header value") is not
+/// true of this reqwest: both of those are BUILDER errors (`is_builder()`,
+/// `is_request() == false`), verified against the linked version in
+/// `tests/provider_transport_reset_test.rs`.
+///
+/// Two request-phase shapes are subtracted so the classification matches what
+/// this doc claims:
+///
+/// - `is_connect()` — the host was never reached. Keeping it on
+///   [`DEFAULT_MAX_RETRIES`] lets a provider chain with a fallback fail over
+///   promptly instead of waiting out the window.
+/// - `is_timeout()` — in the pinned reqwest a client-side timeout is ALSO
+///   reported as `Kind::Request` (the total-timeout path constructs
+///   `error::request(error::TimedOut)`). A request that ran out of clock is
+///   not a destroyed socket: the peer may well have been serving it, so it
+///   keeps [`DEFAULT_MAX_RETRIES`] like every other served-or-maybe-served
+///   outcome. It is still retryable — `is_timeout()` is admitted by
+///   `is_transient` above — only not on the longer window.
+fn is_broken_established_connection(e: &reqwest::Error) -> bool {
+    e.is_request() && !e.is_connect() && !e.is_timeout()
+}
+
+/// True when an [`EgressError`] is a destroyed-mid-request transport failure.
+/// Read before the error is consumed by [`provider_error_from_egress`].
+fn egress_is_broken_established_connection(e: &EgressError) -> bool {
+    matches!(e, EgressError::Transport(inner) if is_broken_established_connection(inner))
 }
 
 /// Map an [`EgressError`] from the chokepoint to a `ProviderError`.
@@ -505,9 +578,17 @@ pub async fn builder_send_with_retry(
     builder: EgressRequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
     let max_retries = effective_max_retries(DEFAULT_MAX_RETRIES);
+    // A destroyed-mid-request connection is bounded by wall clock, not by a
+    // request count — see `BROKEN_CONNECTION_RETRY_WINDOW`. A caller that
+    // pinned the ceiling for this scope (`scope_max_retries`, which the engine
+    // uses to make one engine attempt exactly one physical send) still wins:
+    // asking for `u32::MAX` yields the scoped value when one is set, and "no
+    // count bound" when none is.
+    let broken_connection_attempt_cap = effective_max_retries(u32::MAX);
+    let broken_connection_deadline = tokio::time::Instant::now() + BROKEN_CONNECTION_RETRY_WINDOW;
     let mut backoff = INITIAL_BACKOFF;
     let mut last_err: Option<ProviderError> = None;
-    for attempt in 0..=max_retries {
+    for attempt in 0u32.. {
         // M2: a non-cloneable body cannot be retried — send the original
         // builder exactly once instead of failing with a misleading
         // "Connection" error. `try_clone()` is deterministic, so it fails
@@ -631,6 +712,9 @@ pub async fn builder_send_with_retry(
                 return Err(provider_error_from_egress(e));
             }
             Err(e) => {
+                // Classify before `provider_error_from_egress` consumes it: a
+                // socket destroyed mid-request earns the longer ceiling.
+                let broken_connection = egress_is_broken_established_connection(&e);
                 let failure_code = egress_failure_code(&e).to_string();
                 finish_physical_attempt(
                     lifecycle_attempt.as_ref(),
@@ -648,22 +732,33 @@ pub async fn builder_send_with_retry(
                     // exactly as before — only now URL-stripped.
                     other => return Err(other),
                 };
-                if attempt < max_retries {
+                let retrying = if broken_connection {
+                    attempt < broken_connection_attempt_cap
+                        && tokio::time::Instant::now() < broken_connection_deadline
+                } else {
+                    attempt < max_retries
+                };
+                if retrying {
                     record_attempt(Some(failure_code.clone()), true);
-                    // M3 fix: 1-based attempt over total attempts.
+                    // M3 fix: 1-based attempt. A broken connection has no
+                    // total to report — its bound is the window, not a count.
                     tracing::warn!(
                         attempt = attempt + 1,
-                        total = max_retries + 1,
+                        bound = if broken_connection {
+                            "outage_window"
+                        } else {
+                            "max_retries"
+                        },
                         error = %provider_err,
                         "connection error; retrying"
                     );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 4).min(Duration::from_secs(4));
+                    last_err = Some(provider_err);
+                    continue;
                 }
-                if attempt == max_retries {
-                    record_attempt(Some(failure_code), false);
-                }
-                last_err = Some(provider_err);
+                record_attempt(Some(failure_code), false);
+                return Err(provider_err);
             }
         }
     }
@@ -1182,6 +1277,70 @@ mod tests {
             !formatted.contains("SUPER_SECRET_KEY"),
             "formatted ProviderError must not contain the secret value: {formatted} (raw was: {raw})"
         );
+    }
+
+    /// Finding 5, round 2. In the pinned reqwest a client-side TOTAL timeout
+    /// is ALSO reported as `Kind::Request`, so `is_request()` alone matches
+    /// it. It has to be subtracted: a request that ran out of clock is not a
+    /// destroyed socket — the peer may have been serving it — and the doc on
+    /// `BROKEN_CONNECTION_RETRY_WINDOW` promises it keeps the short ceiling.
+    /// It stays retryable either way; only the bound differs.
+    ///
+    /// A bare reqwest client is the point of the test: it pins how reqwest
+    /// itself shapes the error, then checks our classifier against that.
+    #[allow(clippy::disallowed_methods)]
+    #[tokio::test]
+    async fn a_client_side_request_timeout_is_not_a_destroyed_socket() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        // Accept, read the request, then hold the socket open answering
+        // nothing — so the client's own total timeout is what fires, not a
+        // close and not a connect failure.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let mut sink = [0u8; 8192];
+                let mut handle = &stream;
+                let _ = handle.read(&mut sink);
+                held.push(stream);
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .expect("client builds");
+        let err = client
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .body("{}")
+            .send()
+            .await
+            .expect_err("a server that never answers cannot complete the request");
+
+        // The premise — this is exactly what makes it a trap.
+        assert!(
+            err.is_request(),
+            "a total timeout must be `Kind::Request` in the pinned reqwest; \
+             got {err:?}"
+        );
+        assert!(!err.is_connect(), "the connection was established");
+        assert!(err.is_timeout(), "it is a timeout; got {err:?}");
+
+        // The classification that actually matters.
+        assert!(
+            !super::is_broken_established_connection(&err),
+            "a client-side timeout must NOT earn the broken-connection window"
+        );
+        // ...and it is still retryable, on the default ceiling.
+        assert!(matches!(
+            super::provider_error_from_reqwest(err),
+            ProviderError::Connection(_)
+        ));
     }
 
     #[test]

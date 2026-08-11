@@ -699,11 +699,25 @@ pub struct ProviderRoutingPolicyConfig {
     pub require_priced: bool,
 }
 
+/// Consecutive provider-side failures the circuit breaker requires before it
+/// will call a provider broken.
+///
+/// Exported as a named constant because another crate now DERIVES a bound from
+/// it (`wcore_agent`'s unserved-outage budget). A bare literal there and a bare
+/// literal here can drift apart silently; a shared constant cannot.
+pub const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
+
+/// Base cooldown, in seconds, before an open breaker will probe again.
+///
+/// Exported for the same reason as [`DEFAULT_FAILURE_THRESHOLD`]: it is the
+/// recovery cadence `wcore_agent` paces its unserved-retry backoff to.
+pub const DEFAULT_RECOVERY_TIMEOUT_SECS: u64 = 30;
+
 fn default_failure_threshold() -> u32 {
-    3
+    DEFAULT_FAILURE_THRESHOLD
 }
 fn default_recovery_timeout_secs() -> u64 {
-    30
+    DEFAULT_RECOVERY_TIMEOUT_SECS
 }
 
 /// Engine observability toggles. Most are off by default (opt-in via
