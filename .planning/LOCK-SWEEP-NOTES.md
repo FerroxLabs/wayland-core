@@ -163,9 +163,14 @@ Probe: `crates/wcore-agent/tests/snapshot_lock_probe.rs`, production APIs only
 `/proc/locks`.
 
 The probe samples three files per iteration — the journal, its `.snapshot` and
-its `.authority` head. The journal itself never appears in the red arm's leaked
-set: the previous lane's fix holds, and it doubles as an in-probe control that
-the sampler is not simply flagging everything.
+its `.authority` head — 72 files in all, so it also carries a built-in control
+that the sampler is not simply flagging everything. Every red-arm count is at
+or below 48, the ceiling reachable if only the two snapshot companions can
+leak, and no `.journal` path appears in any of the samples the assertion
+printed. That is consistent with the previous lane's journal fix holding; it
+is weaker than an exhaustive per-suffix breakdown, which I did not take,
+because re-running the mutated arm would have rebuilt the library out from
+under the five suite runs in flight.
 
 **On severity.** On Unix this one is a lock leak with no reachable *refusal*:
 each publication replaces the inode, so nothing re-locks a published snapshot,
