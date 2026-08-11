@@ -1582,6 +1582,7 @@ impl AgentBootstrap {
             crate::tool_backends::video_analyze::build_video_analyze_backend_with_accounting(
                 &self.config,
                 &media_accounting,
+                Some(std::path::Path::new(&self.workspace)),
             )
             .await
         {

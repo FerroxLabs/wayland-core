@@ -379,6 +379,148 @@ async fn test_engine_max_turns_returns_ok() {
 }
 
 // ---------------------------------------------------------------------------
+// a_turn_capped_run_admits_it_on_the_answer_stream
+//
+// A-10 (job-corpus survey 432c9a0f, video sub-case): the run died on the turn
+// cap one step before it had the answer. The cap notice goes to `emit_info`,
+// which is STDERR, and `AgentResult.text` is empty on this path — so the
+// stdout a `-p` consumer reads ended mid-work and was scored as a WRONG
+// ANSWER rather than as no answer.
+//
+// The admission has to travel on the same stream the answer travelled on.
+// This asserts the text-delta stream carries it, and names the reason.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn a_turn_capped_run_admits_it_on_the_answer_stream() {
+    let tool_use_turn = || {
+        vec![
+            LlmEvent::ToolUse {
+                id: "tool-1".to_string(),
+                name: "mock_tool".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                    StopReason::ToolUse,
+                ),
+                usage: TokenUsage::default(),
+            },
+        ]
+    };
+    let provider = Arc::new(MockLlmProvider::with_turns(vec![
+        tool_use_turn(),
+        tool_use_turn(),
+    ]));
+    let mut config = test_config();
+    config.max_turns = Some(1);
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("mock_tool", "result", false)));
+
+    let sink = Arc::new(wcore_agent::test_utils::TestSink::new());
+    let handle = sink.handle();
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, sink);
+    let result = engine
+        .run("Keep calling tools", "")
+        .await
+        .expect("a turn-cap exit is a clean termination");
+    assert_eq!(result.stop_reason, StopReason::MaxTurns);
+
+    let answer_stream: String = handle
+        .snapshot()
+        .iter()
+        .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("text_delta"))
+        .filter_map(|e| e.get("text").and_then(|t| t.as_str()).map(str::to_owned))
+        .collect();
+    assert!(
+        answer_stream.contains("[stopped early]"),
+        "the answer stream must carry the admission, got: {answer_stream:?}"
+    );
+    assert!(
+        answer_stream.contains("turn limit of 1"),
+        "the admission must name the turn cap as the reason, got: {answer_stream:?}"
+    );
+    assert!(
+        answer_stream.contains("not an answer"),
+        "the admission must say the partial work is not an answer, got: {answer_stream:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// a_guard_stop_is_not_reported_as_the_turn_cap
+//
+// `StopReason::MaxTurns` is shared by the turn cap, the runaway-loop breaker,
+// the consecutive-failure breaker and the pre-send budget denial. Measured on
+// A-10 (green3): the failure-loop breaker stopped a run at turn 6 of a
+// 20-turn budget and the first cut of the admission announced "hit its turn
+// limit after 6 turns" - a manufactured explanation, in the one sentence
+// whose whole job is to stop the product manufacturing things.
+//
+// With no turn cap configured at all, the admission must still arrive and
+// must NOT claim a turn limit.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn a_guard_stop_is_not_reported_as_the_turn_cap() {
+    let failing_turn = || {
+        vec![
+            LlmEvent::ToolUse {
+                id: "tool-1".to_string(),
+                name: "always_fails".to_string(),
+                input: json!({}),
+                extra: None,
+            },
+            LlmEvent::Done {
+                stop_reason: StopReason::ToolUse,
+                finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                    StopReason::ToolUse,
+                ),
+                usage: TokenUsage::default(),
+            },
+        ]
+    };
+    let provider = Arc::new(MockLlmProvider::with_turns(
+        (0..40).map(|_| failing_turn()).collect::<Vec<_>>(),
+    ));
+    let mut config = test_config();
+    config.max_turns = None;
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("always_fails", "boom", true)));
+
+    let sink = Arc::new(wcore_agent::test_utils::TestSink::new());
+    let handle = sink.handle();
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, sink);
+    let result = engine
+        .run("Keep calling the broken tool", "")
+        .await
+        .expect("a guard stop is a clean termination");
+    assert_eq!(
+        result.stop_reason,
+        StopReason::MaxTurns,
+        "the guards share the MaxTurns verdict - that sharing is the hazard under test"
+    );
+
+    let answer_stream: String = handle
+        .snapshot()
+        .iter()
+        .filter(|e| e.get("type").and_then(|t| t.as_str()) == Some("text_delta"))
+        .filter_map(|e| e.get("text").and_then(|t| t.as_str()).map(str::to_owned))
+        .collect();
+    assert!(
+        answer_stream.contains("[stopped early]"),
+        "a guard stop must still admit itself, got: {answer_stream:?}"
+    );
+    assert!(
+        !answer_stream.contains("turn limit"),
+        "a guard stop must NOT be reported as the turn cap, got: {answer_stream:?}"
+    );
+    assert!(
+        answer_stream.contains("a run guard stopped it"),
+        "the admission must say a guard stopped it, got: {answer_stream:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // test_engine_api_error_handling
 //
 // AUDIT E-C2 — a mid-stream `LlmEvent::Error` is now a RETRYABLE failure,
