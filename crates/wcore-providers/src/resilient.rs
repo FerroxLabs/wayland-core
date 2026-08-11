@@ -1329,7 +1329,16 @@ mod tests {
         };
         entered.notified().await;
 
-        let concurrent = resilient.stream(&dummy_request()).await;
+        // Bounded: without the lease the second caller ALSO reaches the parked
+        // provider and never returns, and an unbounded await would turn that
+        // into a harness timeout instead of a legible failure.
+        let concurrent =
+            tokio::time::timeout(Duration::from_secs(5), resilient.stream(&dummy_request()))
+                .await
+                .expect(
+                    "a second caller must be refused immediately, not queued behind the \
+             probe inside the provider",
+                );
         assert!(
             matches!(concurrent, Err(ProviderError::NotAttempted { .. })),
             "a second caller must be refused while the single probe is in \

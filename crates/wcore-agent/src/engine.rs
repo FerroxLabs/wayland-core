@@ -24508,15 +24508,23 @@ mod audit_2026_05_22_tests {
         );
     }
 
-    /// Finding 4: when the budget runs out, the work already done must not
-    /// evaporate. The turn still fails — the provider is gone — but the
-    /// conversation that produced whatever is already on disk has to be
-    /// written, so the run is resumable instead of restartable.
+    /// Finding 4, and an honest label. A turn whose provider budget runs out
+    /// must leave a session that can be resumed, so the work already on disk
+    /// is continued rather than redone.
+    ///
+    /// This is a REGRESSION GUARD, not a demonstration of a repair. Mutation
+    /// M2 (round 2) deleted the persistence the exhaustion arm now performs
+    /// and this test still passed: in this scenario the brief was already
+    /// durable by the time the provider was called, so the added write is
+    /// defence-in-depth against the arm drifting apart from the cancellation
+    /// arm beside it, not a measured fix. What actually loses the work in the
+    /// B-2 shape is the workspace files being uncommitted, which lives outside
+    /// the engine.
     ///
     /// Graded by re-reading the session from disk through a FRESH manager,
     /// never from the engine's own in-memory state.
     #[tokio::test(start_paused = true)]
-    async fn an_exhausted_provider_budget_still_leaves_a_resumable_session_on_disk() {
+    async fn an_exhausted_provider_budget_leaves_a_loadable_session_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
