@@ -1288,9 +1288,11 @@ mod output_sizing_tests {
 /// without running the model.
 ///
 /// These are the cheapest failures to retry — the provider answered nothing,
-/// so re-issuing the request re-sends context that was never consumed and
-/// nothing was billed — and the most ordinary: a reset is what a proxy, a load
-/// balancer or a flaky link produces all day. `MAX_STREAM_RETRIES` spans 1.5 s,
+/// so re-issuing the request re-sends context that was never consumed — and
+/// the most ordinary: a reset is what a proxy, a load balancer or a flaky link
+/// produces all day. "Cheapest", not "free": see the cost note on
+/// [`UNSERVED_OUTAGE_BUDGET`] for the one code in this set (`transport`)
+/// whose billing status is UNVERIFIED rather than known. `MAX_STREAM_RETRIES` spans 1.5 s,
 /// which is shorter than a single TCP re-establishment, so this class is
 /// bounded by an outage WINDOW instead — see [`UNSERVED_OUTAGE_BUDGET`].
 ///
@@ -1327,36 +1329,62 @@ fn is_unserved_request_failure(failure_code: &str) -> bool {
 /// orders of magnitude in wall-clock terms while looking identical in the
 /// source.
 ///
-/// The size comes from two numbers the product already commits to, multiplied:
+/// ## How 900 s was actually chosen — read this before moving it
 ///
-/// - `wcore_providers::http_client::READ_TIMEOUT` (300 s) is how long ONE
-///   request is allowed to be silent before the product calls it dead. That is
-///   the unit of "the provider did not answer".
-/// - `wcore_config`'s `default_failure_threshold` (3) is how many consecutive
-///   failures the circuit breaker already requires before it will declare a
-///   provider broken. That is the unit of "and it was not a one-off".
+/// Honestly: it was chosen against the job corpus, and then checked against
+/// two constants the product already commits to. Both halves matter, and an
+/// earlier revision of this comment stated only the second, which made a
+/// fixture-fitted number look like a derivation. The record:
 ///
-/// Three full silent requests is therefore the product's own existing standard
-/// of evidence that a provider is gone, and this budget is exactly that:
-/// 3 x 300 s. A budget of ONE `READ_TIMEOUT` was tried first and is wrong for
-/// a coherent reason — it makes the retry loop weaker than the single request
-/// it wraps, so a provider that hangs for 90 s per attempt gets barely four
-/// tries, fewer than the product will spend waiting on one healthy call.
+/// - A budget of ONE `READ_TIMEOUT` (300 s) was tried first. It failed the
+///   B-2 out-of-corpus probe at `--fault-requests 32`: the run gave up after
+///   25 sends at 316.8 s with the job unfinished. It is also wrong for a
+///   reason independent of that probe — it makes the retry loop weaker than
+///   the single request it wraps, so a provider that hangs 90 s per attempt
+///   gets barely four tries, fewer than the product will spend waiting on one
+///   healthy call.
+/// - 3 x `READ_TIMEOUT` is the smallest multiple that cleared that probe
+///   (853.8 s against a 900 s budget — a 5% margin), and it coincides with
+///   [`DEFAULT_FAILURE_THRESHOLD`], the number of consecutive failures the
+///   breaker already requires before calling a provider broken. Three full
+///   silent requests is the product's own existing standard of evidence that
+///   a provider is gone.
 ///
-/// Holding the window open is cheap. These failures were never served, so
-/// nothing was generated and nothing was billed; a re-send costs a socket. And
-/// [`UNSERVED_RETRY_BACKOFF_CAP`] bounds the rate: however fast each attempt
-/// fails, the window admits roughly 35 sends, about two a minute.
-const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(900);
+/// So the arithmetic is defensible and the trigger was a fixture. Anyone
+/// moving this number should know both, and should re-run the out-of-corpus
+/// probe rather than trusting the story.
+///
+/// The measured boundary is roughly 35 sends / 900 s: `r2-probe-48` fails at
+/// 36 faults and 918.3 s. Past it the turn fails SAFELY — session written to
+/// disk, exit 1, and the product claims nothing it did not do (graded by the
+/// corpus Tier 0, INV-5.completion PASS).
+///
+/// ## Cost of holding the window open
+///
+/// A `connection` failure never established a socket and `http_503`/`http_529`
+/// are the provider saying it did not do the work, so those re-sends are free.
+/// `transport` is the one that is NOT provably free: the request reached an
+/// established socket and the peer destroyed it before a response head
+/// arrived, and whether the provider had already begun billable work is
+/// UNVERIFIED — the corpus cannot answer it, because its fault proxy breaks
+/// the connection without ever relaying upstream. Sizing note, not a
+/// reassurance: this window admits ~35 re-sends where the old count admitted
+/// 6, so if that premise is wrong the amplification is ~6x, and there is no
+/// spend ceiling behind it.
+const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(
+    wcore_providers::http_client::READ_TIMEOUT.as_secs()
+        * wcore_config::config::DEFAULT_FAILURE_THRESHOLD as u64,
+);
 
 /// Ceiling on the gap between two re-sends of an unserved request, and so also
 /// the worst-case delay between the provider healing and the run noticing.
 ///
-/// 30 s is `wcore_config`'s `default_recovery_timeout_secs` — the breaker's own
-/// cooldown base. Pacing the retry loop at the breaker's recovery cadence means
-/// the engine never probes a wedged endpoint faster than the component whose
-/// job is to protect it would.
-const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bound to [`DEFAULT_RECOVERY_TIMEOUT_SECS`] (30 s) — the breaker's own
+/// cooldown base — so the engine never probes a wedged endpoint faster than
+/// the component whose job is to protect it would. Bound rather than copied:
+/// a bare `30` here could drift from the breaker it claims to pace.
+const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration =
+    std::time::Duration::from_secs(wcore_config::config::DEFAULT_RECOVERY_TIMEOUT_SECS);
 
 /// Backoff before re-issuing a request the provider never served: doubling
 /// from 500 ms, capped at [`UNSERVED_RETRY_BACKOFF_CAP`]. `attempt` is 1-based.
