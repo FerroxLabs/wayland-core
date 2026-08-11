@@ -224,3 +224,75 @@ Test: `process_tree::linux::identity_lock_release`.
   correct for the pinned version and were read from the vendored source, not
   assumed from the crate's documentation. A major-version bump should re-check
   `sys/*/write_guard.rs`.
+
+---
+
+## 4. Gates and the five-run suite
+
+On the committed tree (`43380205`), all four gates clean, no `error` lines:
+
+| Gate | Result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo check --workspace --all-targets` | Finished, 0 errors |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Finished, 0 errors |
+| `cargo clippy --target x86_64-pc-windows-gnu -p wcore-agent -p wcore-gateway -p wcore-eval-scenarios --all-targets -- -D warnings` | Finished, 0 errors |
+
+The Windows gate earned its place: it caught an unused import that Linux
+clippy could not see, because the whole probe is `#![cfg(unix)]`.
+
+`cargo test -p wcore-agent` (the lib, 173 integration binaries and the doc
+tests) at default parallelism, five consecutive runs:
+
+| run | failing tests | which |
+|---|---|---|
+| 1 | 2 | `replay_accepts_read_only_authority_files`, `read_only_authority_replay_subprocess` |
+| 2 | 2 | same |
+| 3 | 2 | same |
+| 4 | 2 | same |
+| 5 | 2 | same |
+
+Identical every run, and nothing else fails in any of them.
+
+## 5. Two pre-existing failures found on the way, and how I graded them
+
+Neither is mine, and "predates my change" is a claim I had to earn, so each was
+A/B'd inside THIS worktree at THIS base — not against an older binary lying
+around, which is what I reached for first and which would have been the wrong
+instrument (the convenient prebuilt binary was 8.5 h older than my base commit
+and disagreed with it).
+
+Method for both: `git checkout 8d69d402 -- <the two files I changed>`, `touch`,
+rebuild, run; then restore, `touch`, rebuild, run.
+
+**A. `session_journal_test::replay_accepts_read_only_authority_files` (and its
+`read_only_authority_replay_subprocess` child).** The child drops to
+`nobody` and calls `SessionJournal::recovered_state` against a 0400 fixture,
+and gets `PermissionDenied` on the journal path.
+
+| arm | runs | result |
+|---|---|---|
+| control (base sources) | 3 | 3 FAILED |
+| treatment (my sources) | 3 | 3 FAILED |
+
+Pre-existing. I did not chase it further: `recovered_state`'s read path
+(`read_journal_if_present` → `lease::open_existing_nofollow`, which opens with
+`write(false)`) is untouched by this lane, so the `EACCES` is coming from
+somewhere else in the recovery path and finding it is a separate job. **It
+needs an owner** — it is a real red on a real host, and this note is the only
+place it is currently written down.
+
+**B. `pipeline_test::one_stage_failure_drops_exactly_one_item_to_null_preserving_order`
+takes ~15 minutes.** It is what made a single suite run take ~25 minutes. It is
+not a deadlock — it completes — but it is three orders of magnitude off its
+siblings.
+
+| arm | runs | result |
+|---|---|---|
+| control (base sources) | 3 | 3 × still running past 240 s |
+| treatment (my sources) | 3 | 3 × still running past 240 s |
+
+Pre-existing, and it is NOT the same thing as the older prebuilt binary
+passing this test in 11 s: that binary predates my base by 8.5 h, so something
+landed in between. **That regression window is `01:37`-to-`10:11` on
+2026-08-11, and it also needs an owner.**
