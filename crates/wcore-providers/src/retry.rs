@@ -438,41 +438,29 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
     }
 }
 
-/// True when a reqwest error means the socket was open and then destroyed
-/// before a response head arrived.
+/// True when a reqwest error means the request was dispatched onto an
+/// established connection and the transport then failed before a response
+/// head arrived.
 ///
-/// `reqwest::Error::is_connect()` covers only a failure to establish the
-/// connection; a peer that accepts the request and then answers with a TCP RST
-/// produces `kind: Request` with an `io::ErrorKind::ConnectionReset` cause,
-/// which `is_timeout()`, `is_connect()`, `is_body()` and `is_decode()` all
-/// miss. Job corpus row B-2 measured the consequence: the provider proxy reset
-/// one request mid-task, the reset was classified `ProviderError::Http`
-/// (terminal), zero retries were attempted, and the job exited 1 with the
-/// month-end report unwritten.
+/// `reqwest::Error::is_connect()` covers only a failure to ESTABLISH the
+/// connection. A peer that accepts the request and then destroys the socket —
+/// with a TCP RST, or with an orderly close after hanging — reports neither
+/// `is_connect()` nor `is_timeout()` nor `is_body()` nor `is_decode()`: it
+/// reports `kind: Request`. Job corpus row B-2 measured the consequence twice.
+/// `fault-reset` broke one request mid-task and `fault-timeout` hung one and
+/// then closed it; both were classified as the terminal `ProviderError::Http`,
+/// neither cost a single retry, and both runs exited 1 with the month-end
+/// report unwritten.
 ///
-/// The `is_request()` guard keeps builder-side failures (invalid URL, invalid
-/// header value) out — those are permanent and must never be retried.
+/// `is_request()` is the whole signal, and the exclusion this code used to
+/// carry ("`is_request()` covers invalid URL / invalid header value") is not
+/// true of this reqwest: both of those are BUILDER errors (`is_builder()`,
+/// `is_request() == false`), verified against the linked version in
+/// `tests/provider_transport_reset_test.rs`. `is_connect()` is subtracted here
+/// only to keep an unreachable host on the short ceiling, so a provider chain
+/// with a fallback still fails over promptly.
 fn is_broken_established_connection(e: &reqwest::Error) -> bool {
-    use std::io::ErrorKind;
-    if !e.is_request() {
-        return false;
-    }
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(e);
-    while let Some(current) = source {
-        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
-            return matches!(
-                io_error.kind(),
-                ErrorKind::ConnectionReset
-                    | ErrorKind::ConnectionAborted
-                    | ErrorKind::BrokenPipe
-                    | ErrorKind::NotConnected
-                    | ErrorKind::UnexpectedEof
-                    | ErrorKind::TimedOut
-            );
-        }
-        source = current.source();
-    }
-    false
+    e.is_request() && !e.is_connect()
 }
 
 /// True when an [`EgressError`] is a destroyed-mid-request transport failure.

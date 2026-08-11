@@ -79,6 +79,35 @@ fn spawn_resetting_provider(connections: Arc<AtomicUsize>) -> String {
     format!("http://{addr}")
 }
 
+/// Accept every connection, read the whole request, hang briefly, then close
+/// the socket cleanly with no response at all. This is the `fault-timeout`
+/// shape from the B-2 fixture: no RST, no io error — hyper reports
+/// "connection closed before message completed", which carries no
+/// `io::Error` cause and so is invisible to any classifier that walks the
+/// source chain looking for one.
+fn spawn_hanging_provider(connections: Arc<AtomicUsize>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { break };
+            connections.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+            // Drain the request so nothing is left unread and the close is an
+            // orderly FIN rather than a reset.
+            let mut sink = [0u8; 8192];
+            let mut handle = &stream;
+            while let Ok(n) = handle.read(&mut sink) {
+                if n == 0 {
+                    break;
+                }
+            }
+            drop(stream);
+        }
+    });
+    format!("http://{addr}")
+}
+
 /// A port nothing is listening on: every connect is refused.
 fn dead_port_url() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
@@ -117,6 +146,75 @@ async fn connection_reset_mid_request_is_retried() {
         sockets, 7,
         "the reset must be ridden out for BROKEN_CONNECTION_MAX_RETRIES: expected \
          7 attempts (1 initial + 6 retries), the server saw {sockets}"
+    );
+}
+
+/// Job corpus row B-2 `fault-timeout`: the provider hangs and then closes the
+/// connection with no response. Measured on the sealed binary as the identical
+/// `HTTP error: error sending request` the reset produced, with the identical
+/// consequence — one attempt, then the job died.
+#[tokio::test]
+async fn orderly_close_before_a_response_is_retried() {
+    let connections = Arc::new(AtomicUsize::new(0));
+    let base_url = spawn_hanging_provider(Arc::clone(&connections));
+    let provider = provider(&base_url);
+
+    let (result, evidence) =
+        capture_provider_attempts(async { provider.stream(&make_request()).await }).await;
+    let err = result.expect_err("a provider that answers nothing cannot succeed");
+
+    assert!(
+        err.is_retryable(),
+        "a connection closed before the response is transient, got: {err:?}"
+    );
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        physical_attempts(&evidence),
+        "every physical attempt must be one socket the server actually saw"
+    );
+    assert_eq!(
+        physical_attempts(&evidence),
+        7,
+        "a close before any response must be ridden out like a reset"
+    );
+}
+
+/// The premise the old classifier rested on, checked against the linked
+/// reqwest rather than assumed: a malformed URL and a malformed header value
+/// are BUILDER errors, so `is_request()` never fires for them and using it as
+/// the transport signal cannot retry a permanent client-side mistake.
+// A bare reqwest client is the point of this test: it asserts how reqwest
+// itself classifies two malformed requests. Nothing is dispatched (both fail
+// in the builder), so the egress chokepoint has nothing to police here.
+#[allow(clippy::disallowed_methods)]
+#[tokio::test]
+async fn client_side_mistakes_are_builder_errors_not_request_errors() {
+    let client = reqwest::Client::new();
+
+    let bad_url = client
+        .post("not a url")
+        .send()
+        .await
+        .expect_err("a relative URL cannot be sent");
+    assert!(bad_url.is_builder(), "bad URL must be a builder error");
+    assert!(
+        !bad_url.is_request(),
+        "bad URL must not look like transport"
+    );
+
+    let bad_header = client
+        .post("http://127.0.0.1:1/")
+        .header("x-test", "bad\nvalue")
+        .send()
+        .await
+        .expect_err("an invalid header value cannot be sent");
+    assert!(
+        bad_header.is_builder(),
+        "invalid header must be a builder error"
+    );
+    assert!(
+        !bad_header.is_request(),
+        "invalid header must not look like transport"
     );
 }
 
