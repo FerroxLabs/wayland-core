@@ -291,7 +291,7 @@ fn discarding_git_paths(segment: &str, cwd: &Path) -> Option<Vec<String>> {
 
     let rest: Vec<&str> = tokens.collect();
     // A reset that keeps the work tree discards nothing on disk.
-    if subcommand == "reset" && !rest.iter().any(|t| *t == "--hard") {
+    if subcommand == "reset" && !rest.contains(&"--hard") {
         return None;
     }
     // `git stash list|show|pop|apply|drop` reads or restores; only a push
