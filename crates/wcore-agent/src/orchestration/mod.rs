@@ -31,6 +31,10 @@ fn tool_dispatch_timeout(category: ToolCategory) -> Duration {
 /// The `not_started` policy label journalled for a `[default] read_only`
 /// refusal. Stable — the journal reducer and the acceptance tests key on it.
 pub(crate) const READ_ONLY_POLICY: &str = "read_only";
+/// The `not_started` policy label journalled when the unreachable-human
+/// freeze refuses a call (row B-3). Stable, for the same reason
+/// `READ_ONLY_POLICY` is: the journal reducer keys on it.
+pub(crate) const HUMAN_UNREACHABLE_POLICY: &str = "human_unreachable";
 
 /// The refusal a read-only session returns instead of running `tool`.
 ///
@@ -47,6 +51,24 @@ pub(crate) fn read_only_refusal(tool: &str) -> String {
          here — that is Read, Grep and Glob; every other tool, including Skill \
          (whose body can embed shell), is refused. Clear `read_only` in \
          config.toml to lift this."
+    )
+}
+
+/// Refusal text for the human-unreachable freeze (corpus row B-3).
+///
+/// Says the two things the model has to act on: nothing that changes the
+/// world will run, and the one call that lifts the freeze is a delivered
+/// message. It must not read as advice — the previous behaviour WAS advice
+/// (POLICY.md, read by the model), and it held in only half the runs.
+pub(crate) fn human_unreachable_refusal(tool: &str) -> String {
+    format!(
+        "Refused: the last attempt to reach a human failed and no message has \
+         been delivered since, so this session has no supervision. `{tool}` \
+         changes state, so it was not run and no PreToolUse hook fired for it. \
+         Read-only tools still work. Get a message delivered — fix the target \
+         or the channel and send again — and the session resumes; if you \
+         cannot, stop and report that you could not reach anyone rather than \
+         acting without them."
     )
 }
 
@@ -100,6 +122,8 @@ pub mod workflow;
 mod d1_refusal_terminal_tests;
 #[cfg(test)]
 mod f13_durability_tests;
+#[cfg(test)]
+mod human_unreachable_gate_tests;
 #[cfg(test)]
 mod read_only_gate_tests;
 
@@ -1458,6 +1482,60 @@ async fn execute_single_with_streaming(
         return (block, None, crate::hooks::HookOutcome::default(), false);
     }
 
+    // Corpus row B-3 — the unreachable-human freeze.
+    //
+    // Sits directly behind the read-only gate and borrows its shape on
+    // purpose: same default-deny predicate (`Tool::read_only_safe`), same
+    // position ahead of PreToolUse hooks, so a refused call still fires no
+    // operator shell.
+    //
+    // What it enforces: while the last word from the outbound human-contact
+    // route is a FAILURE, nothing that changes the world may run. There was
+    // no product-side notion of this at all — `confirm.rs` and the protocol
+    // approval manager gate tool calls against a permission policy, and
+    // nothing mapped "I could not reach anyone" onto a gate. Every refusal
+    // ever observed on this row was the model reading POLICY.md and choosing
+    // to stop, which is a model behaviour and measured at roughly a coin
+    // flip: with the approval mail undeliverable, one of two graded runs
+    // rewrote the dependency pin on disk with no approval on record.
+    //
+    // Two carve-outs, both load-bearing:
+    //  * read-only tools still run, so the agent can diagnose and report;
+    //  * the human-contact surface itself still runs, because it is the only
+    //    call that can clear the latch. Freezing it would deadlock the
+    //    session into the failure it is trying to escape.
+    if registry.human_unreachable()
+        && !registry
+            .get(name)
+            .is_some_and(|tool| tool.read_only_safe(input) || tool.reaches_a_human())
+    {
+        let durable = record_tool_not_started(
+            effect_scope,
+            id,
+            ordinal,
+            name,
+            input,
+            input,
+            registry
+                .get(name)
+                .map(|tool| tool.effect_contract(input))
+                .unwrap_or_default(),
+            ToolNotStartedReason::PolicyDenied {
+                policy: HUMAN_UNREACHABLE_POLICY.to_string(),
+            },
+            None,
+        );
+        let block = durable.map_or_else(
+            |error| journal_authority_failure(id, error),
+            |()| ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: human_unreachable_refusal(name),
+                is_error: true,
+            },
+        );
+        return (block, None, crate::hooks::HookOutcome::default(), false);
+    }
+
     // Run pre-tool-use hooks. A crash-proven retry reuses the pre-hook
     // authority from its original attempt: rerunning hooks could mutate the
     // input differently or repeat an external hook effect.
@@ -1741,7 +1819,18 @@ async fn execute_single_with_streaming(
             // every turn — pairs with the B-1 timeout so a flaky MCP
             // server is both bounded per-call AND backed off across
             // calls.
-            if registry.breaker_is_open(name) {
+            //
+            // Row B-3 exemption: NEVER back off the outbound route to a
+            // human. The breaker's job is to stop hammering a flaky backend;
+            // applied to the human-contact surface it instead deletes the
+            // session's only supervision and hands the model the same string
+            // it gets for a real delivery failure. Measured: three refused
+            // sends in one window opened the breaker, and the fourth attempt —
+            // the one the mail host recorded as DELIVERED in the green run —
+            // was refused locally and never reached the wire. A retry here is
+            // one cheap socket; the loop is still bounded by LoopGuard and the
+            // consecutive-failure cap.
+            if registry.breaker_is_open(name) && !tool.reaches_a_human() {
                 if let Err(error) = record_tool_attempt_not_started(
                     effect_scope,
                     id,
@@ -2404,6 +2493,11 @@ async fn execute_single_with_streaming(
             // wedging eventually trips the breaker and is short-circuited
             // on the next turn.
             registry.record_breaker_outcome(name, r.is_error);
+            // Row B-3: same dispatch outcome, against the human-contact
+            // latch. A failed send arms the freeze above; a delivered one
+            // lifts it. No-op for every tool that is not the outbound
+            // messaging surface.
+            registry.record_human_reach_outcome(name, r.is_error);
             // _budget_guard drops here, recording elapsed runtime.
             let modifier = if r.is_error {
                 None
