@@ -1359,18 +1359,37 @@ fn is_unserved_request_failure(failure_code: &str) -> bool {
 /// disk, exit 1, and the product claims nothing it did not do (graded by the
 /// corpus Tier 0, INV-5.completion PASS).
 ///
-/// ## Cost of holding the window open
+/// ## Cost of holding the window open — MEASURED, and it is not free
 ///
-/// A `connection` failure never established a socket and `http_503`/`http_529`
-/// are the provider saying it did not do the work, so those re-sends are free.
-/// `transport` is the one that is NOT provably free: the request reached an
-/// established socket and the peer destroyed it before a response head
-/// arrived, and whether the provider had already begun billable work is
-/// UNVERIFIED — the corpus cannot answer it, because its fault proxy breaks
-/// the connection without ever relaying upstream. Sizing note, not a
-/// reassurance: this window admits ~35 re-sends where the old count admitted
-/// 6, so if that premise is wrong the amplification is ~6x, and there is no
-/// spend ceiling behind it.
+/// A `connection` failure never established a socket, and `http_503`/`http_529`
+/// are the provider saying it did not do the work; those re-sends really are
+/// free. `transport` is not, and this is measured rather than assumed.
+///
+/// A `transport` failure means the socket was established, the request WAS
+/// dispatched, and the peer destroyed the connection before a response head
+/// came back. Put a proxy in the middle that forwards upstream and then resets
+/// the CLIENT leg — an ordinary load balancer failure — and the client raises
+/// exactly this error while the provider completes the request normally:
+/// status 200, 102 completion tokens, `cost_usd` 0.001189 reported in the
+/// response the client never received. Reproducer and full output:
+/// `scripts/b2_transport_billing_probe.py`.
+///
+/// So the class is MIXED. A break before the provider receives the request
+/// costs a socket; a break after it does not, and the product cannot tell the
+/// two apart from the client side — that is what "no response head" means.
+///
+/// Size the risk accordingly: this window admits ~35 re-sends where the
+/// previous count admitted 6, so a `transport` outage of the billed shape is a
+/// ~6x cost amplification against the old behaviour, it is invisible to the
+/// product (the usage block is in the response that never arrives), and there
+/// is no spend ceiling behind it. That is a deliberate trade — a lost job also
+/// costs money — but it must be made with the real number, not with "nothing
+/// was billed".
+///
+/// The job corpus cannot see any of this: its B-2 fault proxy returns before
+/// relaying upstream, so a faulted request never reaches the provider at all
+/// (advp-WA: proxy ledger relay=4 fault=10, recorder captured exactly 4).
+/// Anything that widens this window needs the probe above, not a corpus run.
 const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(
     wcore_providers::http_client::READ_TIMEOUT.as_secs()
         * wcore_config::config::DEFAULT_FAILURE_THRESHOLD as u64,
