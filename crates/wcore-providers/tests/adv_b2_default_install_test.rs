@@ -23,7 +23,12 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn request() -> LlmRequest {
     LlmRequest {
-        messages: vec![Message::now(Role::User, vec![ContentBlock::Text { text: "hi".to_string() }])],
+        messages: vec![Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }],
+        )],
         ..Default::default()
     }
 }
