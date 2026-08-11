@@ -1821,15 +1821,22 @@ async fn run() -> anyhow::Result<ExitCode> {
             session_dir_config.session.max_sessions,
         );
         let sessions = session_mgr.list()?;
+        // The session table is this flag's ANSWER, not a diagnostic, so it goes
+        // to STDOUT. It used to go to stderr, which left
+        // `wayland-core --list-sessions | grep <id>` silently matching nothing
+        // while the table scrolled past on the terminal. `--list-agents` above
+        // already prints its answer to stdout, and so does the
+        // `session list` subcommand, whose doc comment recorded this flag as
+        // the outlier; it no longer is.
         if sessions.is_empty() {
-            eprintln!("No saved sessions.");
+            println!("No saved sessions.");
         } else {
-            eprintln!(
+            println!(
                 "{:<8} {:<12} {:<30} {:>5}  Summary",
                 "ID", "Date", "Model", "Msgs"
             );
             for s in &sessions {
-                eprintln!(
+                println!(
                     "{:<8} {:<12} {:<30} {:>5}  {}",
                     s.id,
                     s.created_at.format("%Y-%m-%d"),

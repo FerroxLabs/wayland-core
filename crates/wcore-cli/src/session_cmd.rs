@@ -19,13 +19,12 @@
 //! | `4`  | refused by session authority (e.g. a destination outside the workspace root) |
 //! | `5`  | the operation is blocked by outstanding reconcile items |
 //!
-//! ## Divergence from `--list-sessions`
+//! ## Stream discipline, shared with `--list-sessions`
 //!
-//! The pre-existing root `--list-sessions` flag prints its table to STDERR
-//! (`main.rs:1510-1525`). This subcommand prints to STDOUT. The divergence is
-//! deliberate: a driver must be able to capture the result with `> log`, and
-//! changing the older flag would break anything already parsing its stderr.
-//! Recorded as backlog item 23B-M1.
+//! Every verb here writes its answer to STDOUT and its diagnostics to STDERR.
+//! The root `--list-sessions` flag used to invert that and print its table to
+//! stderr; backlog item 23B-M1 closed it, so the two surfaces now agree and
+//! `wayland-core --list-sessions | grep <id>` works.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -66,7 +65,7 @@ pub struct SessionArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SessionCmd {
-    /// List saved sessions (STDOUT, unlike the root `--list-sessions` flag).
+    /// List saved sessions to STDOUT, as the root `--list-sessions` flag does.
     List,
     /// Full-text search across saved sessions.
     Search {
