@@ -269,7 +269,7 @@ impl PluginCapabilitySet {
 
 /// JSON stream protocol output sink
 pub struct ProtocolSink {
-    writer: Arc<ProtocolWriter>,
+    writer: Arc<dyn ProtocolEmitter>,
     structured_traces_enabled: bool,
     /// W7 F2: gates `ProtocolEvent::SubAgentEvent` emission.
     /// Off by default (W0 host-decoder contract: byte-identical wire shape
@@ -311,10 +311,34 @@ pub struct ProtocolSink {
     /// Core session identity advertised to the host and reused by producer
     /// contracts such as Anvil receipts.
     session_id: Arc<RwLock<Option<String>>>,
+    /// Pre-`ready` `Info` holding pen. `None` is the default and means
+    /// pass-through; `Some(_)` means [`Self::deferring_info_until_ready`]
+    /// armed the gate and no handshake frame has gone out yet.
+    ///
+    /// A JSON-stream host reads the FIRST line as the handshake — the release
+    /// smoke test does, and the Desktop contract implies it. Bootstrap can
+    /// legitimately emit diagnostics before `ready` exists (the Windows
+    /// `windows_job_object` local-shell notice is the one that shipped, and
+    /// the `AgentBusObserver` can race one out at any moment on any
+    /// platform), so ordering cannot be guaranteed by discipline at each
+    /// emission site. It is guaranteed here, once, at the funnel: `Info` is
+    /// diagnostic and has no ordering claim, so it waits for the handshake
+    /// and is replayed immediately after it, in order.
+    pre_ready_info: Arc<parking_lot::Mutex<Option<Vec<ProtocolEvent>>>>,
 }
 
 impl ProtocolSink {
     pub fn new(writer: Arc<ProtocolWriter>) -> Self {
+        Self::with_emitter(writer)
+    }
+
+    /// Construct over any [`ProtocolEmitter`].
+    ///
+    /// The production path passes a [`ProtocolWriter`] via [`Self::new`]; a
+    /// test passes a recorder, which is the only way the ORDER of the frames
+    /// this sink writes can be asserted without a subprocess. The frame-order
+    /// invariant (`ready` first) is not observable any other way.
+    pub fn with_emitter(writer: Arc<dyn ProtocolEmitter>) -> Self {
         Self {
             writer,
             structured_traces_enabled: false,
@@ -327,6 +351,31 @@ impl ProtocolSink {
             token_redactor: ActiveTokenRedactor::new(),
             current_msg_id: Arc::new(RwLock::new(String::new())),
             session_id: Arc::new(RwLock::new(None)),
+            pre_ready_info: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    /// Hold `Info` frames until the handshake frame has been written.
+    ///
+    /// Opt-in, because a sink that never emits `ready` (sub-agent sinks,
+    /// unit-test sinks) would otherwise buffer diagnostics forever. The
+    /// json-stream entry point arms it; every other construction keeps the
+    /// historical pass-through behaviour byte-for-byte.
+    pub fn deferring_info_until_ready(self) -> Self {
+        *self.pre_ready_info.lock() = Some(Vec::new());
+        self
+    }
+
+    /// Disarm the gate and write anything it is holding, in arrival order.
+    ///
+    /// Called after `ready` (the success path) and after a startup `error`
+    /// (the failure path, where no `ready` will ever come). Between them the
+    /// buffer cannot be stranded: the first frame the host sees is always
+    /// `ready` or `error`, never a diagnostic.
+    fn release_pre_ready_info(&self) {
+        let held = self.pre_ready_info.lock().take();
+        for event in held.into_iter().flatten() {
+            let _ = self.writer.emit(&event);
         }
     }
 
@@ -535,6 +584,9 @@ impl ProtocolSink {
             contract: Some(wcore_protocol::contract::producer_contract_descriptor()),
             execution_policy,
         });
+        // The handshake is on the wire; anything bootstrap wanted to say can
+        // follow it now.
+        self.release_pre_ready_info();
     }
 
     /// Emit a config_changed event after set_config or set_mode updates
@@ -580,7 +632,7 @@ impl ProtocolSink {
     }
 
     /// Access the underlying writer for custom events
-    pub fn writer(&self) -> &Arc<ProtocolWriter> {
+    pub fn writer(&self) -> &Arc<dyn ProtocolEmitter> {
         &self.writer
     }
 
@@ -840,6 +892,11 @@ impl OutputSink for ProtocolSink {
                 retryable,
             },
         });
+        // A startup failure means `ready` is never coming. Release the holding
+        // pen AFTER the error so the first frame stays a handshake-class frame,
+        // but release it — dropping boot diagnostics on the one path where they
+        // explain the failure is worse than emitting them late.
+        self.release_pre_ready_info();
     }
 
     fn emit_info(&self, msg: &str) {
@@ -851,10 +908,17 @@ impl OutputSink for ProtocolSink {
         // info events to the message that triggered them. Empty string on
         // out-of-turn info (e.g. session-level diagnostics at boot).
         let msg_id = self.current_msg_id.read().clone();
-        let _ = self.writer.emit(&ProtocolEvent::Info {
+        let event = ProtocolEvent::Info {
             msg_id,
             message: redacted,
-        });
+        };
+        // Ordering guard: while the gate is armed the handshake has not been
+        // written, so this diagnostic waits rather than claiming first frame.
+        if let Some(held) = self.pre_ready_info.lock().as_mut() {
+            held.push(event);
+            return;
+        }
+        let _ = self.writer.emit(&event);
     }
 
     fn emit_trace(&self, msg_id: &str, trace_json: &serde_json::Value) {
@@ -1282,6 +1346,134 @@ fn message_carries_status(msg: &str, code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records the exact sequence of frames the sink wrote.
+    #[derive(Default)]
+    struct RecordingEmitter {
+        events: parking_lot::Mutex<Vec<ProtocolEvent>>,
+    }
+
+    impl ProtocolEmitter for RecordingEmitter {
+        fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
+            self.events.lock().push(event.clone());
+            Ok(())
+        }
+    }
+
+    impl RecordingEmitter {
+        /// The wire `type` tag of each frame, in emission order.
+        fn kinds(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .iter()
+                .map(|e| {
+                    serde_json::to_value(e).expect("event serializes")["type"]
+                        .as_str()
+                        .expect("every event has a string type tag")
+                        .to_string()
+                })
+                .collect()
+        }
+
+        fn info_messages(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .iter()
+                .filter_map(|e| match e {
+                    ProtocolEvent::Info { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn emit_a_ready(sink: &ProtocolSink) {
+        sink.emit_ready(
+            &ProviderCompat::default(),
+            false,
+            Some("sess-1".to_string()),
+            "default",
+            false,
+            &AdvertisedCapabilitiesConfig::default(),
+        );
+    }
+
+    /// THE handshake invariant: `ready` is the first frame, whatever bootstrap
+    /// said first.
+    ///
+    /// A JSON-stream host reads line 1 as the handshake. On Windows the
+    /// `windows_job_object` local-shell notice reached `emit_info` before
+    /// `ready` existed on EVERY session, so line 1 was an `info` frame and
+    /// three separate release tests read a diagnostic as their handshake.
+    ///
+    /// This asserts the ORDER, not the presence, and it is the assertion that
+    /// goes red if the gate is removed: without it the first tag here is
+    /// `info`. It is also platform-independent — the Windows-only part was the
+    /// notice that happened to trip it, not the ordering defect, which any
+    /// pre-`ready` `emit_info` reaches (the `AgentBusObserver` forwards
+    /// sub-agent lifecycle to `emit_info` from a spawned task on every
+    /// platform).
+    #[test]
+    fn ready_is_the_first_frame_even_when_bootstrap_speaks_first() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone()).deferring_info_until_ready();
+
+        sink.emit_info("bootstrap diagnostic one");
+        sink.emit_info("bootstrap diagnostic two");
+        emit_a_ready(&sink);
+        sink.emit_info("post-handshake diagnostic");
+
+        assert_eq!(
+            emitter.kinds().first().map(String::as_str),
+            Some("ready"),
+            "the host reads frame 1 as the handshake; got {:?}",
+            emitter.kinds()
+        );
+        assert_eq!(
+            emitter.kinds(),
+            vec!["ready", "info", "info", "info"],
+            "deferred diagnostics must follow the handshake in arrival order"
+        );
+        // Deferral must not become deletion: every diagnostic still reaches the
+        // host, and in the order it was produced.
+        assert_eq!(
+            emitter.info_messages(),
+            vec![
+                "bootstrap diagnostic one",
+                "bootstrap diagnostic two",
+                "post-handshake diagnostic"
+            ],
+        );
+    }
+
+    /// The gate is opt-in, so every sink that never emits `ready` (sub-agent
+    /// sinks, unit-test sinks) keeps its historical pass-through behaviour and
+    /// cannot strand a diagnostic in a buffer nobody flushes.
+    #[test]
+    fn an_unarmed_sink_still_writes_info_immediately() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+
+        sink.emit_info("no handshake is coming");
+
+        assert_eq!(emitter.kinds(), vec!["info"]);
+    }
+
+    /// A startup failure means `ready` never comes. The buffer must still be
+    /// released — dropping boot diagnostics on the one path where they explain
+    /// the failure would trade a frame-order bug for a silent-loss bug — but
+    /// the error keeps frame 1, so the host's first line is never a diagnostic.
+    #[test]
+    fn a_startup_error_releases_the_held_diagnostics_after_itself() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone()).deferring_info_until_ready();
+
+        sink.emit_info("why bootstrap was unhappy");
+        sink.emit_error("Engine failed to start during init", false);
+
+        assert_eq!(emitter.kinds(), vec!["error", "info"]);
+        assert_eq!(emitter.info_messages(), vec!["why bootstrap was unhappy"]);
+    }
 
     /// The whole mapping, including the arm nobody can reach on a developer
     /// machine.
