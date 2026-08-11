@@ -269,3 +269,90 @@ async fn an_untracked_file_in_a_healthy_repo_allows_a_verified_copy() {
     report("untracked-in-repo", &outcome, &detail);
     assert_eq!(outcome, Outcome::AllowedCopyVerified);
 }
+
+// --- arm 8: the enumeration ---------------------------------------------
+
+/// Bar 1. The three arms above name the git failures round 2 was measured on.
+/// This one exists because "the failures we thought of" is not the same set as
+/// "the failures", and a guard that is fail-closed only on an enumerated list
+/// is fail-open on everything else. Every way of breaking a repository that
+/// still leaves `.git` on the filesystem lands here, and the assertion is the
+/// property rather than the message: the file is not touched, and the tool
+/// never says "no repository" about a repository that is plainly there.
+#[tokio::test]
+async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
+    // (name, how to break it)
+    let breaks: Vec<(&str, fn(&Path))> = vec![
+        ("dangling-worktree-gitdir", |root| {
+            // An abandoned linked worktree: `.git` is a file pointing at a
+            // gitdir that no longer exists. Extremely ordinary — it is what a
+            // worktree becomes when its main repository is deleted or moved.
+            std::fs::remove_dir_all(root.join(".git")).unwrap();
+            std::fs::write(
+                root.join(".git"),
+                "gitdir: /nonexistent/main/.git/worktrees/gone\n",
+            )
+            .unwrap();
+        }),
+        ("garbage-head", |root| {
+            std::fs::write(root.join(".git/HEAD"), "not a ref at all\n").unwrap();
+        }),
+        ("head-points-at-a-missing-object", |root| {
+            std::fs::write(
+                root.join(".git/HEAD"),
+                "0123456789abcdef0123456789abcdef01234567\n",
+            )
+            .unwrap();
+        }),
+        ("no-object-database", |root| {
+            std::fs::remove_dir_all(root.join(".git/objects")).unwrap();
+        }),
+        ("unreadable-global-config", |root| {
+            // The shape a broken `$HOME` gives every command in the process.
+            std::fs::write(root.join("bad-global"), "[[[not a config\n").unwrap();
+            // SAFETY: set for the duration of one probe in a single-threaded
+            // async test; every arm here runs on the same thread.
+            unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", root.join("bad-global")) };
+        }),
+    ];
+
+    for (name, apply) in breaks {
+        let (dir, file) = corpus_repo();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        apply(&root);
+
+        let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
+        report(name, &outcome, &detail);
+        unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") };
+
+        assert_eq!(
+            outcome,
+            Outcome::Refused,
+            "[{name}] a broken repository must refuse, not allow: {detail}"
+        );
+        assert!(
+            !detail.contains("in no repository"),
+            "[{name}] `.git` is right there on the filesystem: {detail}"
+        );
+        assert!(
+            !detail.contains("None of this file was in any commit"),
+            "[{name}] round 2's false claim is back: {detail}"
+        );
+    }
+
+    // The control for the whole table: the same probe on an unbroken
+    // repository must reach a different verdict for a different reason, or
+    // every row above is passing because the harness always refuses.
+    let (dir, _) = corpus_repo();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    let notes = root.join("notes.md");
+    std::fs::write(&notes, "# Deploy notes\nstep one\n").unwrap();
+    let (outcome, detail) = probe(&root, &notes, "# Runbook\n").await;
+    report("control-healthy-allows", &outcome, &detail);
+    assert_eq!(
+        outcome,
+        Outcome::AllowedCopyVerified,
+        "control failed: the harness refuses everything, so the table proves \
+         nothing: {detail}"
+    );
+}
