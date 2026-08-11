@@ -109,3 +109,64 @@ fn journal_reopen_races_subprocess_spawn_on_the_production_path() {
         refusals.iter().take(5).collect::<Vec<_>>()
     );
 }
+
+/// The case a bounded retry cannot cover: a child that never `exec`s.
+///
+/// `O_CLOEXEC` closes an inherited descriptor at `exec`, which is why the
+/// production race is measured in milliseconds. A child that forks and then
+/// never execs — the shape of any daemonised helper — keeps the parent's open
+/// file description alive for its whole lifetime. `close(2)` in the parent
+/// cannot release an `flock` held on a description a child still references,
+/// so without an explicit `LOCK_UN` the journal is pinned indefinitely.
+#[test]
+#[cfg(unix)]
+fn dropping_a_journal_releases_it_even_when_a_forked_child_never_execs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pinned.journal");
+
+    let (read_fd, write_fd) = {
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a live two-element array, the only argument pipe(2) reads.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        (fds[0], fds[1])
+    };
+
+    let journal = SessionJournal::open(&path, "fork-pin").unwrap();
+
+    // SAFETY: the child touches nothing but `read`/`_exit`, both async-signal-safe.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork failed");
+    if child == 0 {
+        // Child: inherits the journal's descriptor and never execs. Block until
+        // the parent closes the write end, then leave without running Rust
+        // destructors.
+        unsafe {
+            libc::close(write_fd);
+            let mut byte = 0u8;
+            while libc::read(read_fd, std::ptr::addr_of_mut!(byte).cast(), 1) == -1 {}
+            libc::_exit(0);
+        }
+    }
+
+    // Parent: drop the journal. The child still holds a duplicate of the open
+    // file description, so `close(2)` alone cannot release the lock.
+    drop(journal);
+
+    let reopened = SessionJournal::open(&path, "fork-pin");
+
+    // Release the child regardless of the assertion outcome.
+    // SAFETY: both descriptors are owned by this process and still open.
+    unsafe {
+        libc::close(write_fd);
+        let mut status = 0i32;
+        libc::waitpid(child, &mut status, 0);
+        libc::close(read_fd);
+    }
+
+    assert!(
+        reopened.is_ok(),
+        "dropping a journal must release its data-file lock even while a forked \
+         child still holds the open file description: {:?}",
+        reopened.err()
+    );
+}
