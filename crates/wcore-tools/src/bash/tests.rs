@@ -1694,3 +1694,83 @@ fn sandbox_denial_does_not_fabricate_a_denial_for_a_symlink_into_a_system_root()
         result.content
     );
 }
+
+// ── P5 / corpus row A-2: a local file denial is not a network failure ───────
+//
+// Measured on the sealed Linux binary, row A-2. The session ran
+// `git remote get-url origin` to find out where to push its branch. The OS
+// sandbox denied `<root>/.git/config` (it is on the secret deny-list), git
+// printed `warning: unable to access '.git/config': Permission denied`, and
+// the product told the model "this command's own output reports a network
+// failure — that is why it failed". The model concluded the remote was
+// unreachable, gave up on pushing, committed to `main` and opened no pull
+// request. Two of A-2's checks failed off the back of a wrong diagnosis.
+
+/// The exact stderr the sealed binary produced in `/root/jc-seal-run/A-2`.
+const A2_GIT_CONFIG_DENIAL: &str = "Exit code: 128\nSTDOUT:\n\
+     warning: unable to access '.git/config': Permission denied\n\
+     warning: unable to access '.git/config': Permission denied\n\
+     fatal: unknown error occurred while reading the configuration files\n\nSTDERR:\n";
+
+#[test]
+fn a_denied_git_config_is_not_reported_as_a_network_failure() {
+    let r = annotate_network_block(
+        "cd /w/repo && git remote get-url origin 2>&1",
+        NetworkPolicy::Deny,
+        failed(A2_GIT_CONFIG_DENIAL),
+    );
+    assert!(
+        !r.content.contains(EGRESS_CLAIM),
+        "a local permission denial must never be asserted as an egress failure; got:\n{}",
+        r.content
+    );
+    assert!(
+        r.content.contains("Permission denied"),
+        "the real cause must be quoted back instead; got:\n{}",
+        r.content
+    );
+}
+
+/// POSITIVE CONTROL for the narrowed needle: git's URL-bearing form is still
+/// egress, including when its only other clue is the URL itself.
+#[test]
+fn git_naming_a_url_it_could_not_reach_is_still_egress() {
+    for body in [
+        "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+         fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n",
+        "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+         fatal: unable to access 'https://github.com/o/r/': Empty reply from server\n",
+    ] {
+        let r = annotate_network_block("git push origin HEAD", NetworkPolicy::Deny, failed(body));
+        assert!(
+            r.content.contains("network egress is OFF") && r.content.contains(EGRESS_CLAIM),
+            "a real remote failure must still be named as egress; body was:\n{body}\ngot:\n{}",
+            r.content
+        );
+    }
+}
+
+/// The sandbox advisory said "NO git command can succeed here". The `Git` tool
+/// is not sandboxed and succeeded throughout the very run that produced this
+/// message — an overstatement that told the model to stop trying.
+#[test]
+fn the_sandbox_advisory_names_the_git_surface_that_still_works() {
+    let result = super::policy::annotate_sandbox_denial(
+        &b1_scope(),
+        ToolResult {
+            content: "Exit code: 128\nSTDOUT:\n\nSTDERR:\n\
+                      fatal: unable to access '.git/config': Operation not permitted\n"
+                .to_string(),
+            is_error: true,
+        },
+    );
+    let advisory = advisory_of(&result.content);
+    assert!(
+        advisory.contains("`Git` TOOL") && advisory.contains("pr_create"),
+        "the advisory must point at the surface that still works; got:\n{advisory}"
+    );
+    assert!(
+        !advisory.contains("NO git command can succeed"),
+        "the advisory must not overstate the blast radius; got:\n{advisory}"
+    );
+}
