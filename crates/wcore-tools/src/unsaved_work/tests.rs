@@ -1251,6 +1251,7 @@ fn a_subdirectory_the_repository_records_is_still_its_store() {
 /// it. Each claim here is exercised against real git, and the two negative
 /// claims (`git push`, `git bundle`) are what stop the arm being the vacuous
 /// "everything carries everything".
+#[cfg(unix)] // cp / tar / touch
 #[test]
 fn every_travel_claim_the_note_makes_is_executed_against_git() {
     let f = repo();
@@ -1401,6 +1402,7 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
 /// dispose of the copy once `gc.pruneExpire` has passed. Backdating the loose
 /// object is the only way to observe the two-week default inside a test, and
 /// without this arm the note's "two weeks" is an unexecuted claim.
+#[cfg(unix)] // cp / tar / touch
 #[test]
 fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
     let f = repo();
@@ -1786,4 +1788,57 @@ fn a_later_tool_write_re_establishes_attribution_from_the_disk() {
         Mode::Rewrite,
     ));
     assert!(msg.contains("log('start')"), "{msg}");
+}
+
+/// P2b. The pin is per *repository root*, and `dirs` memoizes per directory,
+/// so the only way a re-pin is observable is a second directory of the same
+/// repository resolving for the first time after a mid-session commit. The
+/// existing pin arm judges a second *file* in the same directory, which the
+/// directory memo answers without ever re-entering the pin — so switching the
+/// pin from `or_insert_with` to `insert` survived the whole suite.
+#[test]
+fn a_second_directory_of_the_same_repository_inherits_the_original_pin() {
+    let f = repo();
+    f.write("a/seed.py", "seed\n");
+    f.write("b/other.py", "def b():\n    return 1\n");
+    git(&f.root, &["add", "a/seed.py", "b/other.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let g = f.guard();
+
+    // Session start pins the repository, through a directory that is not the
+    // one under test.
+    let seed = f.root.join("a/seed.py");
+    g.assess(&seed, "a/seed.py", "seed\n", "seed\n", Mode::Rewrite);
+
+    // The user's unsaved line, and the agent's habit of committing it.
+    let p = f.write("b/other.py", "def b():\n    return 1\n# WIP do not touch\n");
+    git(&f.root, &["add", "b/other.py"]);
+    git(&f.root, &["commit", "-qm", "wip"]);
+
+    // `b/` has never been resolved before, so this goes through the pin map
+    // rather than the directory memo. Judged against the pinned commit, the
+    // line is still unsaved work.
+    let msg = assert_refused(g.assess(
+        &p,
+        "b/other.py",
+        &f.read("b/other.py"),
+        "def b():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("# WIP do not touch"), "{msg}");
+
+    // Control: a guard that starts *after* the commit sees the same line as
+    // recorded and proceeds, so the arm above is measuring the pin and not
+    // some blanket refusal.
+    let fresh = f.guard();
+    assert!(matches!(
+        fresh.assess(
+            &p,
+            "b/other.py",
+            &f.read("b/other.py"),
+            "def b():\n    return 2\n",
+            Mode::Rewrite
+        ),
+        Verdict::Proceed
+    ));
 }
