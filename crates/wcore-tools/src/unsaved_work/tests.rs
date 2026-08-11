@@ -1450,6 +1450,8 @@ fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
     );
 }
 
+// Only the unix-gated prune-window arm needs this.
+#[cfg(unix)]
 /// `git hash-object -w --stdin`, the way the guard itself makes the copy.
 fn hash_object(root: &Path, bytes: &str) -> String {
     use std::io::Write as _;
@@ -1536,6 +1538,8 @@ fn objects_dir_in(note: &str) -> String {
         .to_owned()
 }
 
+// Only the unix-gated travel arm needs this.
+#[cfg(unix)]
 fn readable_in(root: &Path, oid: &str) -> bool {
     Command::new("git")
         .args(["cat-file", "blob", oid])
