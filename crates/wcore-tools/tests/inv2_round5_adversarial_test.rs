@@ -337,6 +337,84 @@ async fn a_private_file_is_refused_rather_than_copied_into_a_wider_object() {
 }
 
 // ===========================================================================
+// The other half of the permission proof: a file whose *directory* is more
+// private than the object store. Mode alone would pass this one.
+// ===========================================================================
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_in_a_private_directory_is_not_copied_into_a_reachable_store() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Under a world-searchable base, because the comparison is an
+    // intersection down the whole chain: a private ancestor above the fixture
+    // makes file and store equally unreachable and the arm vacuous. (This
+    // build host keeps /tmp at 0700, which is exactly that case.)
+    let base = Path::new("/var/tmp");
+    let base_mode = std::fs::metadata(base).unwrap().permissions().mode();
+    assert!(
+        base_mode & 0o001 != 0,
+        "{} is not world-searchable, so this arm cannot measure reachability",
+        base.display()
+    );
+    let dir = tempfile::TempDir::new_in(base).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
+    init(&root);
+    // An ordinary umask-022 checkout. This host runs umask 077, which would
+    // otherwise leave .git/objects owner-only and the comparison vacuous.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let private = root.join("private");
+    std::fs::create_dir(&private).unwrap();
+    std::fs::write(private.join("keep.txt"), "keep\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "init"]);
+    for d in [root.join(".git"), root.join(".git/objects")] {
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // ...but this directory is the user's own, and nobody else can enter it.
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let file = private.join("notes.env");
+    let prior = "TOKEN=ADVCANARY-PRIVATE-DIR-55\n";
+    std::fs::write(&file, prior).unwrap();
+    // World-readable mode, so only the directory makes it private: the mode
+    // comparison on its own would let this copy through.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let tool =
+        || WriteTool::new(None).with_unsaved_guard(Arc::new(UnsavedWorkGuard::new_isolated()));
+    let r = tool()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(), "content": "TOKEN=rotated\n"
+        }))
+        .await;
+    assert!(
+        r.is_error,
+        "a file only its owner can reach was copied: {}",
+        r.content
+    );
+    assert!(r.content.contains("can reach it"), "{}", r.content);
+    assert!(
+        !object_store_contains(&root, "ADVCANARY-PRIVATE-DIR-55"),
+        "the bytes are in a store more people can reach than the file"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), prior);
+
+    // Control: the same file in a directory as reachable as the store IS
+    // copied, so this arm measures reachability and not some other refusal.
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let r2 = tool()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(), "content": "TOKEN=rotated\n"
+        }))
+        .await;
+    assert!(
+        !r2.is_error,
+        "control: an ordinary directory must still copy: {}",
+        r2.content
+    );
+    assert!(r2.content.contains("cat-file blob"), "{}", r2.content);
+}
+
+// ===========================================================================
 // ADV-6  A linked worktree keeps its objects in the MAIN repository, so a
 //        copy would leave the tree the user is working in.
 // ===========================================================================
