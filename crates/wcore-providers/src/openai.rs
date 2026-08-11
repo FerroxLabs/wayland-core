@@ -3280,8 +3280,7 @@ mod tests {
              that did arrive; got {cut:?}"
         );
         assert!(
-            !cut
-                .iter()
+            !cut.iter()
                 .any(|event| matches!(event, LlmEvent::ToolUse { .. })),
             "a call missing half its arguments must NEVER be handed to the \
              engine as runnable; got {cut:?}"

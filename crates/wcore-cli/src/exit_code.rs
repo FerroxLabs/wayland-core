@@ -128,7 +128,10 @@ mod tests {
     /// not that its deliverable might be half-written.
     #[test]
     fn an_output_cap_truncation_is_not_the_turn_cap() {
-        assert_eq!(for_run_outcome(StopReason::MaxTokens, false), OUTPUT_TRUNCATED);
+        assert_eq!(
+            for_run_outcome(StopReason::MaxTokens, false),
+            OUTPUT_TRUNCATED
+        );
         assert_eq!(
             for_run_outcome(StopReason::MaxTokens, true),
             OUTPUT_TRUNCATED,
