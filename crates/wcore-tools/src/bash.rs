@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use wcore_config::shell::bash_shell_argv_prefix;
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
-    NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
-    backends::SandboxBackend, default_for_platform,
+    NetworkPolicy, SandboxChunk, SandboxCommand, SandboxError, SandboxManifest, SandboxOutput,
+    SyscallPolicy, backends::SandboxBackend, default_for_platform,
 };
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
@@ -241,6 +241,32 @@ pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
 /// `wcore_sandbox::backends::sandbox_exec::build_profile`). The filter deleted
 /// the only evidence of the defect it was masking, so no stderr line may be
 /// suppressed here again — a profile gap must be fixed in the profile.
+/// Prefix on every BashTool result that describes a child which ran to
+/// completion, whatever its exit status.
+///
+/// Owned here and matched by [`BashTool::error_is_tool_fault`] through this
+/// same constant, so the producer and the classifier cannot drift apart.
+pub(crate) const COMPLETED_CHILD_PREFIX: &str = "Exit code: ";
+
+/// Prefix on every BashTool result describing a command the sandbox refused
+/// before starting any child. Says plainly that nothing ran, which
+/// "Failed to execute command" did not.
+pub(crate) const REFUSED_PREFIX: &str = "Command refused, nothing ran: ";
+
+/// Render a backend error, keeping a deterministic refusal (no child started,
+/// caller-fixable by reshaping the command) distinguishable from a genuine
+/// execution failure (the spawn or the wait broke).
+fn exec_error_to_result(e: &SandboxError) -> ToolResult {
+    let content = match e {
+        SandboxError::RequestRefused(detail) => format!("{REFUSED_PREFIX}{detail}"),
+        other => format!("Failed to execute command: {other}"),
+    };
+    ToolResult {
+        content,
+        is_error: true,
+    }
+}
+
 fn output_to_result(output: SandboxOutput) -> ToolResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -261,6 +287,18 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "Bash"
+    }
+
+    /// A shell is not sick because the command it was handed failed.
+    ///
+    /// Two shapes are the caller's request failing, not this tool's
+    /// machinery, and neither may count toward the Bash circuit breaker:
+    /// a child that ran to completion with a non-zero status, and a request
+    /// the transport refused before starting any child. A timeout, a
+    /// cancellation or a broken spawn still counts — those are the wedging
+    /// the breaker exists for.
+    fn error_is_tool_fault(&self, content: &str) -> bool {
+        !(content.starts_with(COMPLETED_CHILD_PREFIX) || content.starts_with(REFUSED_PREFIX))
     }
 
     fn description(&self) -> &str {
@@ -351,10 +389,7 @@ impl Tool for BashTool {
                 default_bash_network_policy(),
                 output_to_result(output),
             ),
-            Ok(Err(e)) => ToolResult {
-                content: format!("Failed to execute command: {}", e),
-                is_error: true,
-            },
+            Ok(Err(e)) => exec_error_to_result(&e),
             Err(_) => ToolResult {
                 content: format!("Command timed out after {}ms", timeout_ms),
                 is_error: true,
@@ -407,10 +442,7 @@ impl Tool for BashTool {
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
             Err(e) => {
-                return ToolResult {
-                    content: format!("Failed to execute command: {}", e),
-                    is_error: true,
-                };
+                return exec_error_to_result(&e);
             }
         };
 
@@ -557,7 +589,7 @@ impl Tool for BashTool {
                     &scope,
                     annotate_network_block(command, net, output_to_result(output)),
                 ),
-                Ok(Err(e)) => ToolResult { content: format!("Failed to execute command: {e}"), is_error: true },
+                Ok(Err(e)) => exec_error_to_result(&e),
                 Err(_) => ToolResult { content: format!("Command timed out after {timeout_ms}ms"), is_error: true },
             },
         }
@@ -637,10 +669,7 @@ impl Tool for BashTool {
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
             Err(e) => {
-                return ToolResult {
-                    content: format!("Failed to execute command: {}", e),
-                    is_error: true,
-                };
+                return exec_error_to_result(&e);
             }
         };
 
@@ -734,6 +763,81 @@ impl Tool for BashTool {
     fn describe(&self, input: &Value) -> String {
         let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
         format!("Execute: {}", crate::truncate_utf8(cmd, 80))
+    }
+}
+
+#[cfg(test)]
+mod health_classification_tests {
+    use super::*;
+
+    /// A command the transport refused is rendered as "nothing ran" and is
+    /// NOT a tool fault.
+    ///
+    /// This is the Windows A-4 chain end to end, minus the OS: the sandbox
+    /// refuses a `cmd /C` payload carrying a line break (proven to produce
+    /// `SandboxError::RequestRefused` by the windows_cmdline unit test),
+    /// BashTool renders it, and the classifier must say the shell is fine.
+    /// Graded as a fault, three of these in thirty seconds removed Bash from
+    /// the agent for a cooldown and the run ended with no work delivered.
+    #[test]
+    fn a_refused_request_is_not_evidence_the_shell_is_unhealthy() {
+        let refused = SandboxError::RequestRefused(
+            "a Windows `cmd /C` command line cannot carry a line break.".to_string(),
+        );
+        let result = exec_error_to_result(&refused);
+        assert!(result.is_error, "the caller still has to see a failure");
+        assert!(
+            result.content.starts_with(REFUSED_PREFIX),
+            "a refusal must say nothing ran: {}",
+            result.content
+        );
+        assert!(
+            !BashTool.error_is_tool_fault(&result.content),
+            "a refused request must not count toward the Bash circuit \
+             breaker: {}",
+            result.content
+        );
+    }
+
+    /// A child that ran and exited non-zero is the caller's command failing.
+    /// `grep` with no match must never cost the agent its shell.
+    #[test]
+    fn a_non_zero_exit_is_not_evidence_the_shell_is_unhealthy() {
+        let result = output_to_result(SandboxOutput {
+            stdout: Vec::new(),
+            stderr: b"no such file\n".to_vec(),
+            exit_code: 2,
+            resource_limits: wcore_sandbox::ResourceLimitEnforcement::None,
+        });
+        assert!(result.is_error, "exit 2 is still an error to the caller");
+        assert!(
+            !BashTool.error_is_tool_fault(&result.content),
+            "a completed child is a working shell: {}",
+            result.content
+        );
+    }
+
+    /// The control, and the reason this classifier is not just `false`: the
+    /// failures the breaker exists for still count. If this ever passes
+    /// alongside the two above by returning a constant, the guard is dead.
+    #[test]
+    fn a_broken_spawn_or_a_timeout_still_counts_as_a_tool_fault() {
+        let broken = exec_error_to_result(&SandboxError::ExecFailed(
+            "child stdout was not piped".to_string(),
+        ));
+        assert!(
+            BashTool.error_is_tool_fault(&broken.content),
+            "a spawn that broke is exactly what the breaker is for: {}",
+            broken.content
+        );
+        assert!(
+            BashTool.error_is_tool_fault("Command timed out after 120000ms"),
+            "a wedged child must still trip the breaker"
+        );
+        assert!(
+            BashTool.error_is_tool_fault("Bash command cancelled by cancellation token"),
+            "a cancellation is not a completed child"
+        );
     }
 }
 

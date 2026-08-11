@@ -2403,7 +2403,7 @@ async fn execute_single_with_streaming(
             // `is_error: true` results above), so a tool that keeps
             // wedging eventually trips the breaker and is short-circuited
             // on the next turn.
-            registry.record_breaker_outcome(name, r.is_error);
+            registry.record_dispatch_outcome(name, &r);
             // _budget_guard drops here, recording elapsed runtime.
             let modifier = if r.is_error {
                 None

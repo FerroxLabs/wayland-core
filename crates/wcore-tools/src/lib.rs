@@ -366,6 +366,28 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Whether an errored [`ToolResult`] from this tool is evidence that the
+    /// TOOL is unhealthy — the only thing a circuit breaker may act on.
+    ///
+    /// The per-tool breaker exists to stop hammering a wedged MCP server or a
+    /// backend that keeps timing out. It must not fire because a tool
+    /// faithfully reported that the CALLER's request failed. A shell that
+    /// returns `exit 1` for a grep with no match, or that refuses a command it
+    /// can prove it cannot deliver intact, is working exactly as designed;
+    /// three of those in thirty seconds used to remove the shell from the
+    /// agent for a full sixty-second cooldown and take the agent's own
+    /// corrective retries down with it.
+    ///
+    /// Returning `false` makes the outcome NEUTRAL, not a success: it leaves
+    /// the breaker's failure window untouched rather than clearing it, so a
+    /// genuinely flaky tool is still caught.
+    ///
+    /// Default `true` — every tool that does not override this keeps the
+    /// previous behaviour.
+    fn error_is_tool_fault(&self, _content: &str) -> bool {
+        true
+    }
+
     /// Execute the tool
     async fn execute(&self, input: Value) -> ToolResult;
 

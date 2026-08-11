@@ -210,7 +210,10 @@ impl Tool for GitTool {
         "Read or mutate git state in the current repo, and open a pull request for it. Pass an \
          `op` field naming the operation (status | diff | log | blame | add_all | add_paths | \
          commit | branch_current | branch_list | branch_checkout | push | pr_create | stash_save | \
-         stash_pop). Read-only ops are safe to run in parallel. Commit requires a non-empty \
+         stash_pop). Read-only ops are safe to run in parallel. `diff` takes an optional `rev` \
+         naming a revision or a range — `rev: \"main\"`, `rev: \"main...HEAD\"` (what a pull \
+         request changed), `rev: \"<sha>\"` — and an optional `path` that is ALWAYS a pathspec, \
+         never a revision; with neither it diffs the working tree. Commit requires a non-empty \
          `message`. Work that is meant to be reviewed goes on its own branch: \
          `branch_checkout` with `create: true` (staged changes come with you), then `commit`, then \
          `push`, then `pr_create` — committing onto the repository's default branch is REFUSED \
@@ -226,6 +229,7 @@ impl Tool for GitTool {
             "properties": {
                 "op": { "type": "string" },
                 "path": { "type": "string" },
+                "rev": { "type": "string" },
                 "staged": { "type": "boolean" },
                 "limit": { "type": "integer" },
                 "line": { "type": "integer" },
@@ -272,17 +276,36 @@ impl Tool for GitTool {
             "status" => run_git(cwd, &["status", "--porcelain=v1", "--branch"]).await,
             "diff" => {
                 let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let rev = input.get("rev").and_then(|v| v.as_str()).unwrap_or("");
                 let staged = input
                     .get("staged")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                // Build argv: `git diff [--staged] [-- <path>]`. Each
+                if !rev.is_empty()
+                    && let Some(err) = reject_option_shaped("revision", rev)
+                {
+                    return err;
+                }
+                // Build argv: `git diff [--staged] [<rev>] [-- <path>]`. Each
                 // element is a separate process arg; the `--` sentinel
                 // makes `git` treat any subsequent values as paths even
                 // if they begin with `-`.
+                //
+                // `rev` is the difference between reviewing a branch and
+                // guessing at it. Without it this op could only ever diff the
+                // WORKING TREE, and a revision handed to `path` landed after
+                // the `--` as a pathspec — `git diff -- main` matches no file
+                // and exits 0 with empty output, so the caller was told the
+                // branch changed nothing. Under the STRICT sandbox this tool
+                // is the only git surface there is (see the module docs), so
+                // that silent empty diff left a "review this PR" job with no
+                // way to see the pull request at all.
                 let mut args: Vec<&str> = vec!["diff"];
                 if staged {
                     args.push("--staged");
+                }
+                if !rev.is_empty() {
+                    args.push(rev);
                 }
                 if !path.is_empty() {
                     args.push("--");

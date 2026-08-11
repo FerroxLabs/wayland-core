@@ -123,8 +123,8 @@ pub(crate) fn reject_undeliverable_cmd_payload(payload: &str) -> Result<()> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    Err(SandboxError::ExecFailed(format!(
-        "refused: a Windows `cmd /C` command line cannot carry a line break. \
+    Err(SandboxError::RequestRefused(format!(
+        "a Windows `cmd /C` command line cannot carry a line break. \
          cmd.exe stops reading at the first CR/LF, so only `{}` would have run \
          and the remaining {skipped} line(s) would have been skipped silently \
          while the shell still reported success. Rewrite this as a single line \
@@ -226,6 +226,15 @@ mod tests {
         ] {
             let error = reject_undeliverable_cmd_payload(payload)
                 .expect_err("a multi-line cmd payload must be refused");
+            // The VARIANT is load-bearing, not just the text: `RequestRefused`
+            // is what tells a tool-health tracker that nothing ran and the
+            // host is fine. Graded as `ExecFailed` this refusal counted as a
+            // sick shell and took the Bash tool out for a full cooldown.
+            assert!(
+                matches!(error, SandboxError::RequestRefused(_)),
+                "a payload this transport cannot carry is a refusal, not an \
+                 execution failure: {error:?}"
+            );
             let text = error.to_string();
             assert!(
                 text.contains("echo one>a.txt"),

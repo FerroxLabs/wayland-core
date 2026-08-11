@@ -267,3 +267,132 @@ async fn reset_all_breakers_clears_open_breaker() {
     reg.dispatch("err_tool", input()).await;
     assert_eq!(reg.breaker_state("err_tool"), Some(BreakerState::Closed));
 }
+
+// ── A-4: the caller's command failing is not the tool failing ───────────────
+
+/// A real `BashTool`, dispatched through the real registry, running commands
+/// that exit non-zero. The shell is healthy the whole time and must stay
+/// available.
+///
+/// The measured failure this pins: three errored Bash results in thirty
+/// seconds opened the Bash breaker for sixty seconds, so every later call —
+/// including the correctly reshaped ones the agent pivoted to — came back
+/// `circuit open`, the mid-flight monitor read that as the same error
+/// repeating, and the run was terminated having delivered nothing.
+///
+/// Guarded against measuring nothing: the test asserts each call actually
+/// reached a child (`Exit code: 7`). If the sandbox refuses or breaks in this
+/// environment the assertion fails loudly rather than passing vacuously on a
+/// breaker that was never exercised.
+#[tokio::test]
+async fn a_shell_reporting_a_failed_command_keeps_its_circuit_closed() {
+    use wcore_tools::bash::BashTool;
+
+    let mut reg = ToolRegistry::new();
+    reg.register(Box::new(BashTool));
+
+    let call = serde_json::json!({"command": "exit 7"});
+    for attempt in 1..=5 {
+        let r = reg.dispatch("Bash", call.clone()).await;
+        assert!(
+            !r.content.contains("circuit open"),
+            "attempt {attempt}: the shell was taken away from the agent for \
+             reporting that the command it was handed failed: {}",
+            r.content
+        );
+        assert!(
+            r.content.starts_with("Exit code: 7"),
+            "attempt {attempt}: this test only means something if a child \
+             really ran and really exited 7; got: {}",
+            r.content
+        );
+        assert!(
+            r.is_error,
+            "attempt {attempt}: exit 7 is an error to the caller"
+        );
+    }
+
+    assert_eq!(
+        reg.breaker_state("Bash"),
+        Some(BreakerState::Closed),
+        "five failed commands are five failed commands, not a sick shell"
+    );
+}
+
+/// The control for the test above, and the reason the classifier cannot just
+/// return `false`: a tool whose errors are its OWN machinery failing still
+/// trips at the threshold and is still short-circuited.
+///
+/// `ErrTool` returns content matching neither the completed-child nor the
+/// refused prefix, so it is graded a tool fault exactly as before.
+#[tokio::test]
+async fn a_genuinely_failing_tool_still_opens_its_circuit() {
+    let mut reg = ToolRegistry::new();
+    reg.register(Box::new(ErrTool));
+
+    for _ in 0..3 {
+        let r = reg.dispatch("err_tool", input()).await;
+        assert!(!r.content.contains("circuit open"));
+    }
+    assert_eq!(
+        reg.breaker_state("err_tool"),
+        Some(BreakerState::Open),
+        "exempting the caller's failures must not disarm the breaker"
+    );
+    let blocked = reg.dispatch("err_tool", input()).await;
+    assert!(
+        blocked.content.contains("circuit open"),
+        "a tool that keeps breaking must still be backed off; got: {}",
+        blocked.content
+    );
+}
+
+/// The path the agent's own tool loop actually uses.
+///
+/// `wcore_agent::orchestration` calls `get()` + `execute_with_ctx()` directly
+/// and reports the outcome with `record_dispatch_outcome`, so a fix that only
+/// covered `ToolDispatcher::dispatch` would not have reached the run that
+/// failed. Both halves are pinned here.
+#[tokio::test]
+async fn the_agent_dispatch_recorder_ignores_the_callers_failed_command() {
+    use wcore_tools::bash::BashTool;
+    use wcore_types::tool::ToolResult;
+
+    let mut reg = ToolRegistry::new();
+    reg.register(Box::new(BashTool));
+
+    let completed = ToolResult {
+        content: "Exit code: 7\nSTDOUT:\n\nSTDERR:\n".to_string(),
+        is_error: true,
+    };
+    let refused = ToolResult {
+        content: "Command refused, nothing ran: a Windows `cmd /C` command \
+                  line cannot carry a line break."
+            .to_string(),
+        is_error: true,
+    };
+    for _ in 0..3 {
+        reg.record_dispatch_outcome("Bash", &completed);
+        reg.record_dispatch_outcome("Bash", &refused);
+    }
+    assert_eq!(
+        reg.breaker_state("Bash"),
+        Some(BreakerState::Closed),
+        "six of the caller's own failures must leave the shell available"
+    );
+
+    // Control: the failures the breaker exists for still reach it through the
+    // same recorder, so this exemption cannot be hiding a dead guard.
+    let wedged = ToolResult {
+        content: "Command timed out after 120000ms".to_string(),
+        is_error: true,
+    };
+    for _ in 0..3 {
+        reg.record_dispatch_outcome("Bash", &wedged);
+    }
+    assert_eq!(
+        reg.breaker_state("Bash"),
+        Some(BreakerState::Open),
+        "three wedged children must still open the breaker"
+    );
+}

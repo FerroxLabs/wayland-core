@@ -296,6 +296,24 @@ impl ToolRegistry {
         }
     }
 
+    /// Record a dispatch outcome, skipping errors the tool itself attributes
+    /// to the caller's request rather than to its own machinery.
+    ///
+    /// See [`Tool::error_is_tool_fault`]. Such an outcome is NEUTRAL — the
+    /// breaker's failure window is left exactly as it was, so a genuinely
+    /// flaky tool is still caught while a shell reporting `exit 1` (or
+    /// refusing a command it cannot deliver) no longer removes itself from
+    /// the agent for a cooldown.
+    pub fn record_dispatch_outcome(&self, name: &str, result: &ToolResult) {
+        if result.is_error
+            && let Some(tool) = self.get(name)
+            && !tool.error_is_tool_fault(&result.content)
+        {
+            return;
+        }
+        self.record_breaker_outcome(name, result.is_error);
+    }
+
     /// #403 — clear every tool circuit breaker back to Closed. Called at the
     /// start of each new user turn so transient per-turn failures (a flaky
     /// `web`/`WebFetch` burst that opened the breaker) don't leave tools wedged
@@ -571,10 +589,18 @@ impl ToolDispatcher for ToolRegistry {
             }
         };
 
-        // Record outcome.
+        // Record outcome. An errored result that the tool itself says is the
+        // caller's request failing (see `Tool::error_is_tool_fault`) is
+        // NEUTRAL: it neither records a failure nor clears the window.
+        let counts = result.is_error
+            && self
+                .get(tool)
+                .is_none_or(|t| t.error_is_tool_fault(&result.content));
         if let Some(breaker) = self.breakers.read().get(tool) {
             if result.is_error {
-                breaker.record_failure();
+                if counts {
+                    breaker.record_failure();
+                }
             } else {
                 breaker.record_success();
             }
@@ -614,10 +640,18 @@ impl ToolDispatcher for ToolRegistry {
             }
         };
 
-        // Record outcome.
+        // Record outcome. An errored result that the tool itself says is the
+        // caller's request failing (see `Tool::error_is_tool_fault`) is
+        // NEUTRAL: it neither records a failure nor clears the window.
+        let counts = result.is_error
+            && self
+                .get(tool)
+                .is_none_or(|t| t.error_is_tool_fault(&result.content));
         if let Some(breaker) = self.breakers.read().get(tool) {
             if result.is_error {
-                breaker.record_failure();
+                if counts {
+                    breaker.record_failure();
+                }
             } else {
                 breaker.record_success();
             }
