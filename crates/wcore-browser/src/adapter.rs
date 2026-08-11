@@ -40,11 +40,15 @@ pub struct BrowserToolSpec {
 /// rules as the tool-layer pre-check (closes BLOCKER #3 from
 /// SECURITY-v0.2.0.md).
 pub fn from_spec(spec: BrowserToolSpec) -> Arc<BrowserTool> {
-    let camoufox_url = crate::backends::CamoufoxBackend::default_url().to_string();
+    // One resolution, handed to BOTH the provider and the supervisor. Passing
+    // `None` here used to leave `select_provider` to re-derive the URL from its
+    // own `default_url()` fallback — harmless while the value was a constant,
+    // and a split brain the moment it became configurable.
+    let camoufox_url = crate::backends::CamoufoxBackend::configured_url();
     let provider: Arc<dyn BrowserProvider> = select_provider(SelectionInputs {
         hint: spec.preferred_provider,
         allow_cloud: spec.allow_cloud,
-        camoufox_url: None,
+        camoufox_url: Some(camoufox_url.clone()),
         policy: Some(spec.policy.clone()),
     });
     let supervisor = if provider.backend_name() == "camoufox" {
