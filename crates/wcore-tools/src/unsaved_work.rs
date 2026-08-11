@@ -242,9 +242,10 @@
 //!   same text the user typed, so the whole file is the user's again until the
 //!   tool writes once more.
 //! * **The ambient git environment is removed, not inherited.** `GIT_DIR`,
-//!   `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_OBJECT_DIRECTORY`,
-//!   `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_QUARANTINE_PATH` are cleared
-//!   for every invocation; see [`git_run`] for what each of them broke.
+//!   `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+//!   `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and
+//!   `GIT_QUARANTINE_PATH` are cleared for every invocation; see [`git_run`]
+//!   for what each of them broke.
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -854,8 +855,18 @@ impl UnsavedWorkGuard {
     /// else when it could not decide. Only a definite 1 is read as "not
     /// ignored": anything else means the question is open, and an open
     /// question must not end with the user's bytes inside the repository.
-    /// Measured on git 2.43.0: it consults the index, so a *tracked* file
-    /// matched by an ignore rule exits 1 and keeps its own repository.
+    ///
+    /// `--no-index` is load-bearing. Without it `check-ignore` consults the
+    /// **index**, which is mutable during the session and which the agent can
+    /// write: measured on git 2.43.0, one `git add -f .env` flips a
+    /// gitignored secret from "ignored" to "not ignored" and files it
+    /// straight into `.git/objects` — the exact harm the ignore rule exists
+    /// to refuse, reopened by an ordinary command. An inherited
+    /// `GIT_INDEX_FILE` flips the same decision from the other side. The
+    /// question asked here is therefore only ever about the *ignore rules*,
+    /// which are committed configuration, and a tracked file matched by a
+    /// rule now reads as ignored: that is the refusing direction, so it costs
+    /// a refusal rather than a copy.
     ///
     /// It is also the one command here that **rejects** `--literal-pathspecs`
     /// ("pathspec magic not supported by this command: 'literal'", exit 128 —
@@ -871,7 +882,7 @@ impl UnsavedWorkGuard {
             git_invoke(
                 root,
                 Pathspecs::AsGitTakesThem,
-                &["check-ignore", "-q", "--stdin", "-z"],
+                &["check-ignore", "-q", "--no-index", "--stdin", "-z"],
                 Some(&payload),
             ),
             Some(run) if run.code == Some(1)
@@ -1343,7 +1354,10 @@ impl GitRun {
 /// prior bytes land in an unrelated repository. `GIT_COMMON_DIR`,
 /// `GIT_WORK_TREE` and `GIT_ALTERNATE_OBJECT_DIRECTORIES` are the same two
 /// failures by another name, and `GIT_QUARANTINE_PATH` is how the object
-/// variables usually arrive.
+/// variables usually arrive. `GIT_INDEX_FILE` — which git exports to every
+/// hook — decides `check-ignore`'s answer, and so decides whether a
+/// gitignored secret is filed into the object store; it was the one variable
+/// round 4 did not clear.
 ///
 /// Declared deviation: this is `std::process::Command`, not
 /// `wcore_config::shell::shell_command_argv`. The injection property is
@@ -1388,6 +1402,7 @@ fn git_invoke(
         .env_remove("GIT_DIR")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_OBJECT_DIRECTORY")
         .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
         .env_remove("GIT_QUARANTINE_PATH")
