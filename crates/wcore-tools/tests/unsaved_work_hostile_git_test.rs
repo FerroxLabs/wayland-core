@@ -240,6 +240,9 @@ async fn no_repository_at_all_refuses_because_no_copy_is_possible() {
 
 // --- arm 6: a repository whose HEAD has no commits ----------------------
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn an_unborn_head_is_a_real_answer_and_allows_a_verified_copy() {
     // `rev-parse --verify --quiet HEAD` exits 1 here and 128 when git is
@@ -258,6 +261,9 @@ async fn an_unborn_head_is_a_real_answer_and_allows_a_verified_copy() {
 
 // --- arm 7: untracked file in a healthy repo ----------------------------
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn an_untracked_file_in_a_healthy_repo_allows_a_verified_copy() {
     let (dir, _) = corpus_repo();
@@ -279,6 +285,9 @@ async fn an_untracked_file_in_a_healthy_repo_allows_a_verified_copy() {
 /// still leaves `.git` on the filesystem lands here, and the assertion is the
 /// property rather than the message: the file is not touched, and the tool
 /// never says "no repository" about a repository that is plainly there.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
     /// One way of breaking a repository while leaving `.git` on disk.
@@ -374,6 +383,9 @@ async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
 /// Driven through `WriteTool::execute`, not through `assess`, because that is
 /// the surface that actually ran in the live arm — and the verdict is taken
 /// from the object database rather than from the sentence the tool printed.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn the_armd_dotfiles_shape_refuses_and_files_nothing() {
     const STRIPE: &str = "STRIPE_SECRET_KEY=sk_live_ARMD_CANARY_0001";

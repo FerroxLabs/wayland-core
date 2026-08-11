@@ -46,6 +46,7 @@ impl Fixture {
         p
     }
     /// Can this object still be read out of the repository?
+    #[cfg(unix)] // only the copy arms use this, and they are unix-only
     fn blob_readable(&self, oid: &str) -> bool {
         Command::new("git")
             .args(["cat-file", "blob", oid])
@@ -76,6 +77,7 @@ impl Fixture {
     }
     /// Recover the bytes a note says are recoverable, exactly as the note's
     /// own instructions say to.
+    #[cfg(unix)] // only the copy arms use this, and they are unix-only
     fn recover(&self, note: &str) -> String {
         let oid = oid_in(note);
         let out = Command::new("git")
@@ -115,6 +117,7 @@ fn assert_noted(v: Verdict) -> String {
     }
 }
 
+#[cfg(unix)] // only the copy arms use this, and they are unix-only
 fn oid_in(note: &str) -> String {
     let marker = "cat-file blob ";
     let start = note.find(marker).expect("note names a recovery object") + marker.len();
@@ -489,6 +492,9 @@ fn a_failed_resolution_is_never_memoized() {
 
 // ---- residual 3: the over-refusal, and its replacement -----------------
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn wholesale_rewrite_of_an_untracked_file_is_allowed_against_a_verified_copy() {
     let f = repo();
@@ -507,6 +513,9 @@ fn wholesale_rewrite_of_an_untracked_file_is_allowed_against_a_verified_copy() {
     assert_eq!(f.recover(&note), "# Deploy notes\nold step 1\nold step 2\n");
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_staged_but_never_committed_file_is_allowed_against_a_verified_copy() {
     let f = repo();
@@ -520,6 +529,9 @@ fn a_staged_but_never_committed_file_is_allowed_against_a_verified_copy() {
     assert_eq!(f.recover(&note), "a\nb\nc\n");
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_repository_with_no_commits_yet_is_allowed_against_a_verified_copy() {
     let f = repo();
@@ -651,6 +663,9 @@ fn the_agents_own_file_is_never_protected_from_the_agent() {
     ));
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn carrying_a_user_line_through_does_not_launder_it_into_agent_authored() {
     let f = repo();
@@ -704,6 +719,9 @@ fn dropping_one_of_several_identical_unsaved_lines_is_caught() {
 
 // ---- B3: recoverability is verified, never asserted --------------------
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn the_recovery_copy_is_read_back_before_it_is_claimed() {
     let f = repo();
@@ -722,6 +740,9 @@ fn the_recovery_copy_is_read_back_before_it_is_claimed() {
     assert_eq!(f.recover(&note), "line one\nline two\n");
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_copy_that_cannot_be_written_refuses_rather_than_proceeding() {
     let f = repo();
@@ -761,6 +782,9 @@ fn a_copy_that_cannot_be_written_refuses_rather_than_proceeding() {
     );
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_file_too_large_to_copy_refuses_rather_than_proceeding() {
     // The guarantee has no size exemption: past the limit the answer is a
@@ -774,6 +798,9 @@ fn a_file_too_large_to_copy_refuses_rather_than_proceeding() {
     assert!(msg.contains("could not be made"), "{msg}");
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn nothing_is_ever_written_outside_the_repository() {
     // Round 2 created `~/.wayland/unsaved-work/<session>` from the tool layer
@@ -798,6 +825,9 @@ fn nothing_is_ever_written_outside_the_repository() {
     );
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn identical_prior_states_reuse_one_object() {
     let f = repo();
@@ -882,6 +912,9 @@ fn the_refusal_does_not_tell_a_transformation_to_undo_itself() {
 
 // ---- residual 1: Edit ---------------------------------------------------
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_surgical_edit_that_removes_unsaved_work_copies_it() {
     let (f, p) = parser_fixture();
@@ -936,6 +969,9 @@ fn a_surgical_edit_that_touches_nothing_unsaved_is_silent() {
 /// The disposal sentence round 3 shipped was measurably false, and this pins
 /// the replacement against git rather than against itself: `gc` does not
 /// remove the copy, `gc --prune=now` does.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn the_note_names_the_command_that_actually_disposes_of_the_copy() {
     let f = repo();
@@ -1148,6 +1184,9 @@ fn a_subdirectory_of_a_repository_git_refuses_to_open_still_refuses_for_the_righ
 /// S3. The erring-to-present rule is what stops a probe failure becoming a
 /// fail-open. Both directions, plus a real filesystem error that is not
 /// `NotFound`.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn only_a_definite_not_found_is_read_as_no_marker() {
     use std::io::{Error, ErrorKind};
@@ -1239,6 +1278,9 @@ fn an_edit_in_a_repository_that_is_not_this_files_archive_makes_no_copy() {
 
 /// The negative control for the rule above: a subdirectory the repository does
 /// record is still its own, so an untracked file there is copied as before.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_subdirectory_the_repository_records_is_still_its_store() {
     let f = repo();
@@ -1533,6 +1575,9 @@ fn a_read_back_of_the_right_length_and_the_wrong_bytes_is_not_a_match() {
 /// object store, through the very command the note prints. Content chosen to
 /// break anything that normalises on the way through — CRLF, trailing
 /// whitespace, a lone CR, no final newline, and non-ASCII.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn the_recovered_copy_is_the_prior_file_byte_for_byte() {
     let f = repo();
@@ -1592,6 +1637,9 @@ fn the_pre_write_re_read_compares_bytes_and_not_lengths() {
 /// Bar 3. The note names the store git named, and the copy is in it. Round
 /// 4's first draft printed `<root>/.git/objects` unconditionally, which is a
 /// path that does not exist whenever `.git` is a file.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn the_note_names_the_object_store_that_actually_holds_the_copy() {
     let f = repo();
@@ -1626,6 +1674,9 @@ fn the_note_names_the_object_store_that_actually_holds_the_copy() {
 /// tree the user is working in entirely. Round 4 made that copy and told the
 /// user about it; round 5 refuses instead, because a copy whose exposure is
 /// not this tree's cannot be bounded from here.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_linked_worktree_refuses_rather_than_copying_into_the_main_repository() {
     let f = repo();
@@ -1667,6 +1718,7 @@ fn a_linked_worktree_refuses_rather_than_copying_into_the_main_repository() {
 }
 
 /// The directory the note tells the user their bytes are sitting in.
+#[cfg(unix)] // only the copy arms use this, and they are unix-only
 fn objects_dir_in(note: &str) -> String {
     let marker = "these bytes live in ";
     let start = note.find(marker).expect("the note names an object store") + marker.len();
@@ -1773,6 +1825,9 @@ fn an_edit_to_an_ignored_file_makes_no_copy_and_says_so() {
 /// specifically rather than "untracked": a merely untracked file in a
 /// directory the repository records is one `git add` from being tracked, so
 /// the repository plainly is its archive and the copy still goes in.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[test]
 fn a_merely_untracked_file_is_still_copied_into_its_own_repository() {
     let f = repo();

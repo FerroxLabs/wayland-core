@@ -94,6 +94,7 @@ fn workspace_with_unsaved_work() -> (Ws, PathBuf) {
 /// Recover the bytes a tool result claims are recoverable, by running the
 /// result's own recovery command. A test that only matched the sentence would
 /// have passed against round 2's false snapshot claim.
+#[cfg(unix)] // only the copy arms use this, and they are unix-only
 fn recovered(repo: &Path, result: &str) -> String {
     let marker = "cat-file blob ";
     let start = result
@@ -329,6 +330,9 @@ async fn the_refusal_does_not_teach_the_caller_another_tool_to_use() {
     );
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn editing_out_the_line_a_write_refusal_named_preserves_it_elsewhere() {
     let (ws, file) = workspace_with_unsaved_work();
@@ -408,6 +412,9 @@ async fn an_edit_to_the_users_own_uncommitted_line_is_never_refused() {
 // Residual 3 — the over-refusal, and what replaces it.
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn rewriting_a_pre_existing_untracked_file_completes_and_is_recoverable() {
     // `/root/adv-armB`: "rewrite notes.md as a runbook". Round 1 refused this
@@ -438,6 +445,9 @@ async fn rewriting_a_pre_existing_untracked_file_completes_and_is_recoverable() 
     );
 }
 
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn the_recovery_copy_is_not_written_into_the_users_work_tree() {
     let ws = Ws::new();
@@ -468,6 +478,9 @@ async fn the_recovery_copy_is_not_written_into_the_users_work_tree() {
 /// bytes in clear, hardened by a `#[cfg(not(unix))]` no-op on Windows, and
 /// never garbage collected. Running the test suite alone left 6 session
 /// directories and 21 plaintext files on the build host.
+#[cfg(unix)]
+// the copy is only made where it is provably no wider,
+// and Windows has no comparison to make: see object_store
 #[tokio::test]
 async fn the_shipped_guard_creates_no_store_of_its_own() {
     let legacy = wcore_config::config::profile_home().join("unsaved-work");

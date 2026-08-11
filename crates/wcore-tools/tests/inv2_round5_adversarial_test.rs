@@ -876,9 +876,71 @@ async fn a_pre_image_that_is_not_text_is_refused_unless_the_commit_holds_it() {
 }
 
 // ===========================================================================
+// Windows: there is no ACL comparison here, so no copy can be bounded, so no
+// copy is made. Measured on SeanDesktop (git 2.54.0.windows.1): every copy
+// path refuses, naming the platform. This arm pins that the refusal is total
+// — nothing enters the object store and the file is untouched — because the
+// failure that would matter is a copy made anyway with the claim omitted.
+// ===========================================================================
+#[cfg(windows)]
+#[tokio::test]
+async fn on_windows_a_copy_that_cannot_be_bounded_is_never_made() {
+    let ws = Ws::new();
+    let root = ws.root();
+    std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+    git(&root, &["add", "keep.txt"]);
+    git(&root, &["commit", "-qm", "init"]);
+
+    let file = root.join("notes.env");
+    let prior = "TOKEN=WINCANARY-77\nsecond line\n";
+    std::fs::write(&file, prior).unwrap();
+    let before = object_ids(&root);
+
+    let (err, msg) = write_via_tool(&ws, &file, "TOKEN=rotated\n").await;
+    assert!(err, "a copy nobody can bound was made anyway: {msg}");
+    assert!(msg.contains("cannot be bounded"), "{msg}");
+    assert!(
+        !msg.contains("cat-file blob"),
+        "a copy was advertised: {msg}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        prior,
+        "a refusal must leave the file exactly as it was"
+    );
+    assert_eq!(object_ids(&root), before, "the object store grew");
+    assert!(!object_store_contains(&root, "WINCANARY-77"));
+
+    // Edit is never refused, and must say plainly that it copied nothing
+    // rather than falling silent about it.
+    let r = EditTool::new(None)
+        .with_unsaved_guard(ws.guard.clone())
+        .execute(json!({
+            "file_path": file.to_str().unwrap(),
+            "old_string": "second line",
+            "new_string": "",
+        }))
+        .await;
+    assert!(!r.is_error, "{}", r.content);
+    assert!(
+        r.content.contains("no recovery copy was made"),
+        "{}",
+        r.content
+    );
+    assert!(r.content.contains("not recoverable"), "{}", r.content);
+    assert!(!r.content.contains("cat-file blob"), "{}", r.content);
+    assert_eq!(
+        object_ids(&root),
+        before,
+        "the object store grew on the Edit path"
+    );
+}
+
+// ===========================================================================
 // ADV-8  The original, still gated behind the setpriv fixture: a root-owned
 //        0600 file in a directory the agent uid can write.
 // ===========================================================================
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unreadable_pre_image_is_refused_not_clobbered() {
     let Ok(fixture) = std::env::var("ADV8_FIXTURE") else {
@@ -909,6 +971,7 @@ async fn an_unreadable_pre_image_is_refused_not_clobbered() {
     assert!(r.content.contains("could not be read"), "{}", r.content);
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "getuid"]
     safe fn libc_getuid() -> u32;

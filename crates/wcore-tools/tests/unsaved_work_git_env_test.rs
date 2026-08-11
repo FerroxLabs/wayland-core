@@ -124,17 +124,13 @@ fn the_ambient_git_environment_cannot_redirect_the_guard() {
     // not vacuous.
     let stray = hash_object(&root, "stray control bytes\n");
 
-    let note = match UnsavedWorkGuard::new_isolated().assess(
+    let verdict = UnsavedWorkGuard::new_isolated().assess(
         &target,
         "secret.env",
         prior,
         "DEPLOY_TOKEN=<placeholder>\n",
         Mode::Rewrite,
-    ) {
-        Verdict::ProceedWithNote(n) => n,
-        other => panic!("expected a copy to be made in the real object store, got {other:?}"),
-    };
-    let oid = oid_in(&note);
+    );
 
     unsafe { std::env::remove_var("GIT_OBJECT_DIRECTORY") };
 
@@ -142,10 +138,23 @@ fn the_ambient_git_environment_cannot_redirect_the_guard() {
         !readable(&root, &stray),
         "positive control failed: the redirect never took effect, so this arm proves nothing"
     );
-    assert!(
-        readable(&root, &oid),
-        "the note's own recovery command cannot find the copy: it went to the redirected store"
-    );
+    let copied = match verdict {
+        Verdict::ProceedWithNote(n) => Some(oid_in(&n)),
+        // Windows: no copy can be proven no wider than the file, so none is
+        // made at all — which is also a redirect that did not happen.
+        Verdict::Refuse(m) if !cfg!(unix) => {
+            assert!(m.contains("cannot be bounded"), "{m}");
+            None
+        }
+        other => panic!("expected a copy to be made in the real object store, got {other:?}"),
+    };
+    if let Some(oid) = &copied {
+        assert!(
+            readable(&root, oid),
+            "the note's own recovery command cannot find the copy: it went to the \
+             redirected store"
+        );
+    }
 
     // ---- arm 2: GIT_DIR ---------------------------------------------------
     let plain = tempfile::tempdir().unwrap();
@@ -198,7 +207,8 @@ fn the_ambient_git_environment_cannot_redirect_the_guard() {
         .filter(|l| l.contains("dangling blob"))
         .count();
     assert_eq!(
-        dangling, 1,
+        dangling,
+        usize::from(copied.is_some()),
         "exactly the arm-1 copy should be in this repository; arm 2's bytes must not be: {report}"
     );
 

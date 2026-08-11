@@ -1375,8 +1375,13 @@ fn unproven_store_note(dropped_total: usize, why: &str) -> String {
 }
 
 /// One class of principal, for comparing how far a file's bytes reach.
+/// Only the unix comparison reads these; the Windows arm has no comparison to
+/// make, so it refuses instead.
+#[cfg(unix)]
 const OWNER: u32 = 0b100;
+#[cfg(unix)]
 const GROUP: u32 = 0b010;
+#[cfg(unix)]
 const OTHER: u32 = 0b001;
 
 /// Prove that a copy of `source` placed under `objects` is readable by no one
