@@ -288,9 +288,15 @@ async fn connect_refused_keeps_the_default_ceiling() {
         3,
         "connect failures keep the 3-attempt ceiling"
     );
+    // Bounded against the WINDOW, not against a hand-picked stopwatch value.
+    // The claim is "a dead host does not get the long window", and the only
+    // number that can express it is the window itself. A literal 5 s failed on
+    // Windows, where three refused connects legitimately cost 7.4 s (measured,
+    // SeanDesktop, 2026-08-11) — the ceiling was right there, the assertion was
+    // not.
     assert!(
-        elapsed < Duration::from_secs(5),
-        "failover must not wait out the broken-connection window on a dead host \
-         (took {elapsed:?})"
+        elapsed < BROKEN_CONNECTION_RETRY_WINDOW / 2,
+        "failover must not wait out the broken-connection window \
+         ({BROKEN_CONNECTION_RETRY_WINDOW:?}) on a dead host (took {elapsed:?})"
     );
 }

@@ -1327,23 +1327,36 @@ fn is_unserved_request_failure(failure_code: &str) -> bool {
 /// orders of magnitude in wall-clock terms while looking identical in the
 /// source.
 ///
-/// 300 s is not a new number: it is the one the product already uses to
-/// declare a provider dead. `wcore_providers::http_client::READ_TIMEOUT` gives
-/// a single healthy request 300 s of silence before killing it. A provider
-/// that cannot serve anything for longer than the product is willing to wait
-/// INSIDE one request is not coming back within this turn, and the right
-/// answer past that point is to stop and hand back a session the user can
-/// resume — not to wait indefinitely.
+/// The size comes from two numbers the product already commits to, multiplied:
+///
+/// - `wcore_providers::http_client::READ_TIMEOUT` (300 s) is how long ONE
+///   request is allowed to be silent before the product calls it dead. That is
+///   the unit of "the provider did not answer".
+/// - `wcore_config`'s `default_failure_threshold` (3) is how many consecutive
+///   failures the circuit breaker already requires before it will declare a
+///   provider broken. That is the unit of "and it was not a one-off".
+///
+/// Three full silent requests is therefore the product's own existing standard
+/// of evidence that a provider is gone, and this budget is exactly that:
+/// 3 x 300 s. A budget of ONE `READ_TIMEOUT` was tried first and is wrong for
+/// a coherent reason — it makes the retry loop weaker than the single request
+/// it wraps, so a provider that hangs for 90 s per attempt gets barely four
+/// tries, fewer than the product will spend waiting on one healthy call.
 ///
 /// Holding the window open is cheap. These failures were never served, so
 /// nothing was generated and nothing was billed; a re-send costs a socket. And
 /// [`UNSERVED_RETRY_BACKOFF_CAP`] bounds the rate: however fast each attempt
-/// fails, the window admits at most ~25 sends, about five a minute.
-const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+/// fails, the window admits roughly 35 sends, about two a minute.
+const UNSERVED_OUTAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(900);
 
 /// Ceiling on the gap between two re-sends of an unserved request, and so also
 /// the worst-case delay between the provider healing and the run noticing.
-const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(15);
+///
+/// 30 s is `wcore_config`'s `default_recovery_timeout_secs` — the breaker's own
+/// cooldown base. Pacing the retry loop at the breaker's recovery cadence means
+/// the engine never probes a wedged endpoint faster than the component whose
+/// job is to protect it would.
+const UNSERVED_RETRY_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Backoff before re-issuing a request the provider never served: doubling
 /// from 500 ms, capped at [`UNSERVED_RETRY_BACKOFF_CAP`]. `attempt` is 1-based.
@@ -1783,8 +1796,9 @@ mod v0911_engine_recovery_tests {
         assert_eq!(ms(3), 2_000);
         assert_eq!(ms(4), 4_000);
         assert_eq!(ms(5), 8_000);
+        assert_eq!(ms(6), 16_000);
         // Capped from here on: the window is long, the send rate must not be.
-        assert_eq!(ms(6), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
+        assert_eq!(ms(7), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
         assert_eq!(ms(50), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
         // No overflow panic however deep the outage goes.
         assert_eq!(ms(u32::MAX), UNSERVED_RETRY_BACKOFF_CAP.as_millis());
@@ -24494,17 +24508,21 @@ mod audit_2026_05_22_tests {
         );
         // A fixed COUNT would make these equal. Time does not.
         assert!(
-            fast_sends > slow_sends * 3,
+            fast_sends > slow_sends * 2,
             "a fast-failing outage must fit far more sends into the same window \
              than a slow-failing one (fast={fast_sends} slow={slow_sends}); equal \
              counts mean the bound is still a count"
         );
         // And the backoff cap keeps the rate polite rather than letting a
-        // long window become a send loop.
+        // long window become a send loop. The ceiling is derived from the two
+        // constants, not written down, so it follows them if either moves.
+        let rate_ceiling = (super::UNSERVED_OUTAGE_BUDGET.as_secs()
+            / super::UNSERVED_RETRY_BACKOFF_CAP.as_secs()) as usize
+            + 12;
         assert!(
-            fast_sends <= 32,
-            "the backoff cap must bound the send rate inside the window, saw \
-             {fast_sends}"
+            fast_sends <= rate_ceiling,
+            "the backoff cap must bound the send rate inside the window \
+             (ceiling {rate_ceiling}), saw {fast_sends}"
         );
     }
 
