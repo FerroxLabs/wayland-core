@@ -1429,6 +1429,15 @@ fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
     let fresh = hash_object(&f.root, "a fresh unreferenced object\n");
     assert_ne!(fresh, oid);
 
+    // The note's other unexecuted sentence: `git gc --auto` does not fire for
+    // one object. Measured here, on both sides of the prune window, so it is
+    // a result rather than a quotation of gc.auto's 6700 default.
+    git(&f.root, &["gc", "-q", "--auto"]);
+    assert!(
+        f.blob_readable(&oid),
+        "gc --auto disposed of the copy, so the note is wrong about it"
+    );
+
     assert!(
         Command::new("touch")
             .args(["-d", "3 weeks ago"])
@@ -1436,6 +1445,12 @@ fn an_ordinary_gc_disposes_of_the_copy_once_the_prune_window_has_passed() {
             .status()
             .unwrap()
             .success()
+    );
+    git(&f.root, &["gc", "-q", "--auto"]);
+    assert!(
+        f.blob_readable(&oid),
+        "gc --auto fired once the object was old enough; the note says it \
+         does not fire at all for one object"
     );
     git(&f.root, &["gc", "-q"]);
     assert!(
