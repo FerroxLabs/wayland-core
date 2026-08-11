@@ -224,6 +224,44 @@ fn committing_the_unsaved_line_mid_session_does_not_disarm_the_guard() {
 }
 
 #[test]
+fn a_file_first_touched_after_a_mid_session_commit_is_judged_against_the_pin() {
+    // The blob cache can mask a broken pin. Once a file's recorded contents
+    // are cached under the pinned commit, later calls never ask git again, so
+    // a test that assesses the same file before and after the commit passes
+    // even if the lookup has been switched to live HEAD — measured: the
+    // mutation of the pinned commit survived until this test existed.
+    //
+    // Pin on one file, then judge a *different* one for the first time after
+    // the commit. That is also the path the product actually takes when an
+    // agent commits and then turns to something it has not touched yet.
+    let f = repo();
+    f.write("seed.py", "seed\n");
+    f.write("other.py", "def b():\n    return 1\n");
+    git(&f.root, &["add", "seed.py", "other.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let g = f.guard();
+
+    // Session start: the repository is pinned here, via a file that is not
+    // the one under test, so nothing about `other.py` is cached.
+    let seed = f.root.join("seed.py");
+    g.assess(&seed, "seed.py", "seed\n", "seed\n", Mode::Rewrite);
+
+    // The user's unsaved line, then the A-2 agent's habit of committing it.
+    let p = f.write("other.py", "def b():\n    return 1\n# WIP do not touch\n");
+    git(&f.root, &["add", "other.py"]);
+    git(&f.root, &["commit", "-qm", "wip"]);
+
+    let msg = assert_refused(g.assess(
+        &p,
+        "other.py",
+        &f.read("other.py"),
+        "def b():\n    return 2\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("# WIP do not touch"), "{msg}");
+}
+
+#[test]
 fn git_rm_cached_mid_session_does_not_disarm_the_guard() {
     let (f, p) = parser_fixture();
     let g = f.guard();

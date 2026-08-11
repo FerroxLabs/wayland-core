@@ -246,6 +246,48 @@ async fn a_mid_session_commit_does_not_disarm_the_guard() {
     assert!(ws.text("parser.py").contains(UNSAVED_LINE));
 }
 
+/// The same defence, on the path where the blob cache cannot cover for it.
+///
+/// Once a file's recorded contents are cached under the pinned commit, later
+/// calls never ask git again — so a test that touches one file before and
+/// after the commit still passes even if the lookup has been switched to live
+/// HEAD. Measured: the mutation of the pinned commit survived this suite until
+/// this test existed. Pin on one file, then write a different one for the
+/// first time after the commit.
+#[tokio::test]
+async fn a_file_first_written_after_a_mid_session_commit_is_judged_against_the_pin() {
+    let ws = Ws::new();
+    ws.put("seed.py", "seed = 1\n");
+    ws.put("other.py", COMMITTED);
+    git(ws.root(), &["add", "seed.py", "other.py"]);
+    git(ws.root(), &["commit", "-qm", "initial"]);
+
+    // Session start pins here, through a file that is not the one under test.
+    let seed = ws.root().join("seed.py");
+    let pinned = ws
+        .writer()
+        .execute(json!({"file_path": seed.to_str().unwrap(), "content": "seed = 1\n"}))
+        .await;
+    assert!(!pinned.is_error, "got: {}", pinned.content);
+
+    // The user's unsaved line, then the A-2 agent committing straight to main.
+    let other = ws.put("other.py", &format!("{COMMITTED}{UNSAVED_LINE}\n"));
+    git(ws.root(), &["add", "other.py"]);
+    git(ws.root(), &["commit", "-qm", "wip"]);
+
+    let result = ws
+        .writer()
+        .execute(json!({"file_path": other.to_str().unwrap(),
+                        "content": "def parse(text):\n    return []\n"}))
+        .await;
+    assert!(
+        result.is_error && result.content.contains(UNSAVED_LINE),
+        "a commit made during the session must not launder unsaved work into \
+         the baseline: {}",
+        result.content
+    );
+}
+
 #[tokio::test]
 async fn dropping_the_file_from_the_index_does_not_disarm_the_guard() {
     let (ws, file) = workspace_with_unsaved_work();
