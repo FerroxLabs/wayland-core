@@ -63,6 +63,16 @@ pub enum OpenAiStep {
         name: String,
         arguments: serde_json::Value,
     },
+    /// A tool call the provider cut off mid-argument at its OUTPUT token cap:
+    /// `partial_arguments` is an unterminated JSON prefix and the stream ends
+    /// with `finish_reason: "length"`. Reproduces the field signature of the
+    /// T3 truncation (`Write{"file_path": ".../review.json"`), where the model
+    /// was cut while emitting the deliverable.
+    TruncatedToolCall {
+        id: String,
+        name: String,
+        partial_arguments: String,
+    },
     TextThenStall {
         text: String,
         delay_ms: u64,
@@ -114,6 +124,19 @@ impl OpenAiStep {
         }
     }
 
+    /// Script an output-cap truncation that lands mid tool-call argument.
+    pub fn truncated_tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        partial_arguments: impl Into<String>,
+    ) -> Self {
+        Self::TruncatedToolCall {
+            id: id.into(),
+            name: name.into(),
+            partial_arguments: partial_arguments.into(),
+        }
+    }
+
     pub fn text_then_stall(text: impl Into<String>, delay_ms: u64) -> Self {
         Self::TextThenStall {
             text: text.into(),
@@ -135,6 +158,7 @@ impl OpenAiStep {
             | Self::TextWithPromptTokens { .. }
             | Self::DuplicateText { .. }
             | Self::ToolCall { .. }
+            | Self::TruncatedToolCall { .. }
             | Self::TextThenStall { .. } => None,
         }
     }
@@ -277,6 +301,26 @@ impl OpenAiFixtureScript {
                     let arguments = serde_json::to_vec(arguments)
                         .map_err(|error| OpenAiFixtureError::InvalidScript(error.to_string()))?;
                     if arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
+                        return Err(OpenAiFixtureError::InvalidScript(format!(
+                            "tool arguments exceed {MAX_TOOL_ARGUMENT_BYTES} bytes"
+                        )));
+                    }
+                }
+                OpenAiStep::TruncatedToolCall {
+                    id,
+                    name,
+                    partial_arguments,
+                } => {
+                    if id.is_empty()
+                        || name.is_empty()
+                        || id.len() > MAX_TOOL_IDENTIFIER_BYTES
+                        || name.len() > MAX_TOOL_IDENTIFIER_BYTES
+                    {
+                        return Err(OpenAiFixtureError::InvalidScript(
+                            "tool id and name must contain 1..=256 bytes".to_string(),
+                        ));
+                    }
+                    if partial_arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
                         return Err(OpenAiFixtureError::InvalidScript(format!(
                             "tool arguments exceed {MAX_TOOL_ARGUMENT_BYTES} bytes"
                         )));
@@ -565,6 +609,11 @@ async fn handle_chat_completion(
             name,
             arguments,
         } => sse_response(tool_call_sse(&id, &name, &arguments)),
+        OpenAiStep::TruncatedToolCall {
+            id,
+            name,
+            partial_arguments,
+        } => sse_response(truncated_tool_call_sse(&id, &name, &partial_arguments)),
         OpenAiStep::TextThenStall { text, delay_ms } => {
             stalling_sse_response(text_delta_frame(&text), delay_ms)
         }
@@ -723,6 +772,48 @@ fn tool_call_sse(id: &str, name: &str, arguments: &serde_json::Value) -> String 
             "prompt_tokens": 7,
             "completion_tokens": 3,
             "total_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }
+    });
+    format!("data: {call}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
+}
+
+/// The T3 wire shape: a tool-call delta whose `arguments` string is an
+/// unterminated JSON prefix, followed by `finish_reason: "length"`. The stream
+/// is otherwise well-formed and reaches `[DONE]` — which is exactly why the
+/// dropped call was invisible.
+fn truncated_tool_call_sse(id: &str, name: &str, partial_arguments: &str) -> String {
+    let call = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": partial_arguments
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 8192,
+            "total_tokens": 8199,
             "prompt_tokens_details": {"cached_tokens": 0}
         }
     });

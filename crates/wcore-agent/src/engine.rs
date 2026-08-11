@@ -6616,8 +6616,35 @@ impl AgentEngine {
         turn: usize,
         finish_reason: FinishReason,
     ) -> Result<AgentResult, AgentError> {
-        self.finish_run_terminated_inner(user_input, turn, finish_reason, true)
-            .await
+        self.finish_run_terminated_inner(
+            user_input,
+            turn,
+            finish_reason,
+            StopReason::MaxTurns,
+            true,
+        )
+        .await
+    }
+
+    /// T3 — terminate the run because the provider cut the model off at its
+    /// OUTPUT token cap. Identical durable bookkeeping to
+    /// [`finish_run_terminated`], but the outcome carries
+    /// `StopReason::MaxTokens` so `$?` says "the answer was cut off"
+    /// (`wcore_cli::exit_code::OUTPUT_TRUNCATED`) rather than "the agent ran
+    /// out of turns" — two unrelated events with different remedies.
+    async fn finish_run_output_truncated(
+        &mut self,
+        user_input: &str,
+        turn: usize,
+    ) -> Result<AgentResult, AgentError> {
+        self.finish_run_terminated_inner(
+            user_input,
+            turn,
+            FinishReason::Length,
+            StopReason::MaxTokens,
+            true,
+        )
+        .await
     }
 
     /// #636: like [`finish_run_terminated`] but `persist_session` gates whether
@@ -6632,6 +6659,7 @@ impl AgentEngine {
         user_input: &str,
         turn: usize,
         finish_reason: FinishReason,
+        stop_reason: StopReason,
         persist_session: bool,
     ) -> Result<AgentResult, AgentError> {
         if persist_session {
@@ -6653,11 +6681,11 @@ impl AgentEngine {
             self.save_session_mirror();
         }
         let auto_skill_picked = self.current_skill_router_pick.clone();
-        self.observe_skill_router_outcome(StopReason::MaxTurns);
-        self.observe_auto_skill(user_input, auto_skill_picked, StopReason::MaxTurns, turn);
+        self.observe_skill_router_outcome(stop_reason);
+        self.observe_auto_skill(user_input, auto_skill_picked, stop_reason, turn);
         let result = AgentResult {
             text: String::new(),
-            stop_reason: StopReason::MaxTurns,
+            stop_reason,
             finish_reason,
             usage: self.total_usage.clone(),
             usage_delta: self.run_usage.clone(),
@@ -10321,6 +10349,15 @@ impl AgentEngine {
             let mut length_wedge_retried = first_recovery_checkpoint
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.length_wedge_retried);
+            // T3 OUTPUT-CAP GATE: bounds the truncation retry to ONE extra
+            // provider send per turn. There is no spend ceiling on this path,
+            // so a loop here is a financial hazard, not just a slow turn.
+            // Deliberately NOT carried on the recovery checkpoint: a resumed
+            // turn re-dispatches from scratch, and widening the checkpoint
+            // schema for a per-turn guard would couple this fix to the
+            // recovery contract. Worst case after a mid-turn resume is one
+            // further retry — still bounded, never a loop.
+            let mut output_truncation_retried = false;
             let mut resumed_provider_dispatch = false;
             let mut resumed_dispatch_id = None;
             let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
@@ -10939,6 +10976,7 @@ impl AgentEngine {
                                         user_input,
                                         turn,
                                         FinishReason::Length,
+                                        StopReason::MaxTurns,
                                         resumable,
                                     )
                                     .await;
@@ -11083,6 +11121,14 @@ impl AgentEngine {
             // verdict (not the old silent "successful empty turn" that
             // poisoned the SkillRouter / auto-skill learning).
             const MAX_STREAM_RETRIES: u32 = 2;
+            // T3: appended to the OUTBOUND system prompt for the single
+            // output-cap retry (never persisted). Re-sending byte-identical
+            // context after a truncation just buys the same cut again.
+            const OUTPUT_TRUNCATION_RETRY_HINT: &str = "\n\nIMPORTANT: your previous \
+                 response was cut off by the output token limit while you were emitting a \
+                 tool call, so that call never ran. Keep this response short enough to \
+                 finish: write large files in several smaller calls rather than one big \
+                 one, and put no more than is necessary in each tool argument.";
             let mut assistant_text = String::new();
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
@@ -11131,6 +11177,11 @@ impl AgentEngine {
                 let mut grounding_citations: Vec<String> = Vec::new();
                 let mut grounding_search_results: Vec<wcore_types::llm::FluxSearchResult> =
                     Vec::new();
+                // T3: tool calls the provider severed at its output cap this
+                // attempt — `(name, bytes of argument JSON that arrived)`.
+                // Reset per attempt alongside the other accumulators so a
+                // recovered retry never reports a stale truncation.
+                let mut attempt_truncated_tool_calls: Vec<(String, usize)> = Vec::new();
 
                 let provider_dispatch_id = if resumed_provider_dispatch {
                     resumed_provider_dispatch = false;
@@ -11205,6 +11256,39 @@ impl AgentEngine {
                             "recovered provider response does not match checkpoint dispatch"
                                 .to_string(),
                         ));
+                    }
+                    // T3 — the journaled attempt was cut mid tool-call at the
+                    // provider's output cap. It reconstructs to a turn with no
+                    // runnable tool calls, which is exactly the shape that used
+                    // to replay as a clean finish. The single output-cap retry
+                    // is per-turn state that the recovery checkpoint does not
+                    // carry, so this path does not retry — it fails closed with
+                    // the truth rather than resuming into a false success.
+                    if !round.truncated_tool_calls.is_empty() {
+                        let cut = round
+                            .truncated_tool_calls
+                            .iter()
+                            .map(|(name, bytes)| {
+                                let name = if name.is_empty() {
+                                    "<unnamed tool>"
+                                } else {
+                                    name.as_str()
+                                };
+                                format!("{name} ({bytes} bytes of arguments received)")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        self.output.emit_error(
+                            &format!(
+                                "Run stopped: the recovered turn had been cut off by the \
+                                 model's output token limit while writing a tool call \
+                                 ({cut}), so that call never ran and nothing it would have \
+                                 written exists. Raise this model's max_tokens, or ask for \
+                                 the work in smaller pieces."
+                            ),
+                            false,
+                        );
+                        return self.finish_run_output_truncated(user_input, turn).await;
                     }
                     if !round.thinking_text.is_empty() {
                         self.output
@@ -11952,6 +12036,17 @@ impl AgentEngine {
                             attempt_usage = usage;
                             done_seen = true;
                         }
+                        LlmEvent::TruncatedToolCall {
+                            name,
+                            partial_arg_bytes,
+                        } => {
+                            // T3: the provider cut this call mid-argument at
+                            // its output cap. Record it — the success gate
+                            // below decides the turn. It is NEVER pushed onto
+                            // `tool_calls`: running a call whose arguments
+                            // stop mid-value is worse than not running it.
+                            attempt_truncated_tool_calls.push((name, partial_arg_bytes));
+                        }
                         LlmEvent::Error(e) => {
                             if crate::journal_provider::is_journal_authority_error(&e) {
                                 return Err(AgentError::SessionAuthority(e));
@@ -12265,10 +12360,72 @@ impl AgentEngine {
                                     user_input,
                                     turn,
                                     FinishReason::Length,
+                                    StopReason::MaxTurns,
                                     resumable,
                                 )
                                 .await;
                         }
+                    }
+                    // OUTPUT-CAP TRUNCATION GATE (T3) — `finish_reason=length`
+                    // BELOW the input ceiling is the model being cut off by
+                    // `max_tokens`, which the wedge gate above deliberately
+                    // ignores (it only handles a context-window wedge, gated on
+                    // the INPUT side, so an output-cap cut never armed it).
+                    // When the cut landed inside a tool call the provider now
+                    // reports it: that call cannot run, so this attempt
+                    // produced nothing usable and committing it would end the
+                    // run as though the model had finished — the exact silent
+                    // failure this gate exists to stop.
+                    if !attempt_truncated_tool_calls.is_empty() {
+                        let cut = attempt_truncated_tool_calls
+                            .iter()
+                            .map(|(name, bytes)| {
+                                let name = if name.is_empty() {
+                                    "<unnamed tool>"
+                                } else {
+                                    name.as_str()
+                                };
+                                format!("{name} ({bytes} bytes of arguments received)")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        if !output_truncation_retried {
+                            output_truncation_retried = true;
+                            self.output.emit_info(&format!(
+                                "The model hit the output token limit while writing a tool \
+                                 call ({cut}) — the call was cut off mid-argument and cannot \
+                                 be run. Retrying this turn once, asking for a smaller write."
+                            ));
+                            // Retry-scoped nudge on the OUTBOUND copy only,
+                            // the same discipline
+                            // `stub_failed_tool_results_for_retry` uses below:
+                            // `self.messages` keeps the real conversation, so
+                            // a resume never replays a synthetic instruction.
+                            // It also makes the retry differ from the send
+                            // that was cut, so the attempt has a real chance
+                            // instead of reproducing the identical
+                            // truncation. Carried on `system` rather than as
+                            // an extra message because providers that require
+                            // strictly alternating roles would reject a second
+                            // user turn here.
+                            request.system.push_str(OUTPUT_TRUNCATION_RETRY_HINT);
+                            // The stream itself completed, so this is not a
+                            // stalled attempt — clear the stall state exactly
+                            // as the committed path below does.
+                            self.midflight_monitor.record_stream_attempt(false, false);
+                            continue 'stream;
+                        }
+                        self.output.emit_error(
+                            &format!(
+                                "Run stopped: the model hit the output token limit while \
+                                 writing a tool call ({cut}), and again on the retry. The \
+                                 call was cut off mid-argument, so it was NOT run and \
+                                 nothing it would have written exists. Raise this model's \
+                                 max_tokens, or ask for the work in smaller pieces."
+                            ),
+                            false,
+                        );
+                        return self.finish_run_output_truncated(user_input, turn).await;
                     }
                     // FluxRouter web_search grounding (contract §5.4): render
                     // the "Sources" block after a SUCCESSFUL grounded answer.
@@ -12674,12 +12831,23 @@ impl AgentEngine {
             // Surface a visible, non-retryable error instead of the silent
             // no-op. (Genuine content/tool-call/thinking turns are unaffected.)
             if assistant_content.is_empty() {
-                self.output.emit_error(
+                // T3: `finish_reason=length` is a KNOWN cause of an empty
+                // turn — the model spent its whole output budget (typically
+                // on reasoning tokens) and was cut off before emitting
+                // anything. Telling that user the endpoint "may be
+                // incompatible" is false and sends them to verify a wire
+                // format that is working perfectly. Only the genuinely
+                // unexplained empty response gets that diagnosis.
+                let message = if finish_reason == FinishReason::Length {
+                    "The model was cut off by the provider's output token limit before it \
+                     produced any content — this turn is TRUNCATED, not complete. Raise \
+                     this model's max_tokens, or ask for the work in smaller pieces."
+                } else {
                     "Provider returned an empty response — no content and no tool calls. \
                      The endpoint or model may be incompatible (verify it speaks the OpenAI \
-                     chat-completions streaming format and that the model name is valid).",
-                    false,
-                );
+                     chat-completions streaming format and that the model name is valid)."
+                };
+                self.output.emit_error(message, false);
             }
 
             self.messages
@@ -31531,7 +31699,13 @@ mod retry_wedge_protection_tests {
         )];
 
         engine
-            .finish_run_terminated_inner("new-small", 1, FinishReason::Length, true)
+            .finish_run_terminated_inner(
+                "new-small",
+                1,
+                FinishReason::Length,
+                StopReason::MaxTurns,
+                true,
+            )
             .await
             .unwrap();
 

@@ -2098,7 +2098,24 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
             ("stop", true) => StopReason::EndTurn,
             // "tool_calls" with empty accumulator — defensive; treat as ToolUse.
             ("tool_calls", true) => StopReason::ToolUse,
-            ("length", _) => StopReason::MaxTokens,
+            // An OUTPUT-cap cut can land in the MIDDLE of a tool call: the
+            // accumulated `arguments` are an unterminated JSON fragment and
+            // the call is unrunnable. This arm used to fall through without
+            // touching `state.tool_calls`, so the partial call was dropped
+            // with no event, no error and no diagnostic — the engine then saw
+            // a turn with no tool calls and ended the run as if the model had
+            // finished. Surface every pending call; the engine decides what
+            // the turn means. The accumulator is drained either way, so no
+            // fragment can leak into a later turn.
+            ("length", _) => {
+                for tc in state.tool_calls.drain(..) {
+                    events.push(LlmEvent::TruncatedToolCall {
+                        name: decode_tool_name(&tc.name),
+                        partial_arg_bytes: tc.arguments.len(),
+                    });
+                }
+                StopReason::MaxTokens
+            }
             // Unmapped: keep agent loop alive with EndTurn; FinishReason::Error
             // already flags the protocol-level signal.
             _ => StopReason::EndTurn,
@@ -3206,6 +3223,149 @@ mod tests {
         let body = p.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    // --- T3: output-cap truncation mid tool call --------------------------
+
+    /// The field signature: `finish_reason: "length"` arrives while a `Write`
+    /// of the deliverable is still streaming. The partial call must be
+    /// reported, never run — its `arguments` stop mid-value.
+    #[test]
+    fn a_tool_call_severed_by_the_output_cap_is_reported_not_dropped() {
+        const PARTIAL: &str = r#"{"file_path": "/tmp/review.json""#;
+        let mut state = StreamState::new();
+        let opening = parse_sse_chunk(
+            &json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "Write", "arguments": PARTIAL}
+                    }]},
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+            &mut state,
+        );
+        assert!(
+            opening.is_empty(),
+            "an in-flight tool-call delta emits nothing yet, got {opening:?}"
+        );
+
+        let cut = parse_sse_chunk(
+            &json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+            })
+            .to_string(),
+            &mut state,
+        );
+
+        let reported: Vec<(&str, usize)> = cut
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::TruncatedToolCall {
+                    name,
+                    partial_arg_bytes,
+                } => Some((name.as_str(), *partial_arg_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            vec![("Write", PARTIAL.len())],
+            "the severed call must be surfaced with its name and the bytes \
+             that did arrive; got {cut:?}"
+        );
+        assert!(
+            !cut.iter()
+                .any(|event| matches!(event, LlmEvent::ToolUse { .. })),
+            "a call missing half its arguments must NEVER be handed to the \
+             engine as runnable; got {cut:?}"
+        );
+        assert!(
+            state.tool_calls.is_empty(),
+            "the accumulator must be drained so no fragment leaks into a \
+             later turn"
+        );
+        assert!(
+            matches!(
+                state.pending_done,
+                Some(LlmEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    finish_reason: FinishReason::Length,
+                    ..
+                })
+            ),
+            "the turn still ends as a max_tokens stop; got {:?}",
+            state.pending_done
+        );
+    }
+
+    /// NEGATIVE CONTROL. `finish_reason=length` with nothing pending must not
+    /// invent a truncation event — otherwise the assertion above could not be
+    /// attributed to the severed call.
+    #[test]
+    fn a_length_stop_with_no_pending_call_reports_no_truncation() {
+        let mut state = StreamState::new();
+        let events = parse_sse_chunk(
+            &json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+            })
+            .to_string(),
+            &mut state,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TruncatedToolCall { .. })),
+            "a plain text-side length stop is not a severed tool call; \
+             got {events:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL. A COMPLETE tool call that happens to end on
+    /// `tool_calls` must still be handed over as runnable — the new arm must
+    /// not have widened into the normal path.
+    #[test]
+    fn a_complete_tool_call_is_still_runnable() {
+        let mut state = StreamState::new();
+        let _ = parse_sse_chunk(
+            &json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "Write", "arguments": r#"{"file_path": "/tmp/ok"}"#}
+                    }]},
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+            &mut state,
+        );
+        let done = parse_sse_chunk(
+            &json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+            })
+            .to_string(),
+            &mut state,
+        );
+        assert!(
+            done.iter()
+                .any(|event| matches!(event, LlmEvent::ToolUse { name, .. } if name == "Write")),
+            "a complete call must still run; got {done:?}"
+        );
+        assert!(
+            !done
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TruncatedToolCall { .. })),
+            "a complete call must not be reported as truncated; got {done:?}"
+        );
     }
 
     // --- map_openai_finish_reason (Task F) --------------------------------
