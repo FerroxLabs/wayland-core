@@ -213,6 +213,20 @@ pub(super) fn validate_worker_id(worker_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Name the probe and the path in a filesystem error.
+///
+/// `SwarmError::Io` wraps a bare `std::io::Error`, so any failure in the
+/// workspace-authority path reaches the operator as `io: No such file or
+/// directory (os error 2)` and nothing else — not which path, not which probe.
+/// That is exactly what the macOS leg of
+/// `independent_cli_processes_cannot_overbook_shared_capacity` reduced to: the
+/// losing process was refused, but for an unnamed filesystem reason instead of
+/// the capacity verdict, and the failure carried nothing to look at. A subsystem
+/// whose whole job is filesystem authority has to say which object it failed on.
+pub(super) fn io_at(probe: &str, path: &Path, error: std::io::Error) -> SwarmError {
+    SwarmError::WorktreeIo(format!("{probe} {}: {error}", path.display()))
+}
+
 pub(super) fn ensure_real_directory(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => validate_real_directory(path, &metadata),
@@ -229,7 +243,9 @@ pub(super) fn ensure_real_directory(path: &Path) -> Result<()> {
 }
 
 pub(super) fn ensure_unchanged_real_directory(path: &Path, parent: &Path) -> Result<()> {
-    validate_real_directory(path, &std::fs::symlink_metadata(path)?)?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| io_at("stat of the retained worktree root", path, error))?;
+    validate_real_directory(path, &metadata)?;
     // Re-derive through the SHARED helper, not a bare canonicalize: `path` and
     // `parent` are the stored roots, which are produced by that same helper.
     // Both operands of a root comparison must come from one definition or this
@@ -258,7 +274,8 @@ pub(super) fn ensure_absent_destination(path: &Path) -> Result<()> {
 }
 
 pub(super) fn is_real_directory_entry(path: &Path) -> Result<bool> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| io_at("stat of the workspace entry", path, error))?;
     if is_symlink_or_reparse(&metadata) {
         return Err(SwarmError::WorktreeIo(format!(
             "refused linked cleanup entry: {}",

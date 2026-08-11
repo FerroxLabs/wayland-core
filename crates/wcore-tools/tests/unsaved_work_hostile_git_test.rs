@@ -147,30 +147,68 @@ async fn healthy_repository_refuses_the_measured_harm_shape() {
 
 // --- arm 2: dubious ownership. B1's most important case -----------------
 
+/// The trigger is `GIT_TEST_ASSUME_DIFFERENT_OWNER`, scoped to one child
+/// process, rather than a `chown` run as root.
+///
+/// The previous trigger chowned the tree to 65534 and asserted `id -u == 0`
+/// first, because a non-root chown cannot change an owner. That made the arm
+/// unrunnable anywhere that is not a root container: on the hosted macOS
+/// runner it failed on that assertion at uid 501, so the leg reported a
+/// failure that said nothing about the guard. Skipping instead would have been
+/// worse — a permanently green arm — so the trigger moved rather than the
+/// assertion.
+///
+/// The variable is git's own switch for exactly this case and produces the
+/// identical refusal: exit 128 with `fatal: detected dubious ownership in
+/// repository at '<path>'`. It is set on the child's environment, never on
+/// this process's: it is read by every `git` the guard spawns, so setting it
+/// in-process would leak into every other arm in this binary — and under
+/// edition 2024 `std::env::set_var` is `unsafe` besides.
+///
+/// The repository is built HERE and not in the child: under the variable git
+/// refuses the repository for `init`, `add` and `commit` too, so a child that
+/// built its own corpus could never get one.
 #[cfg(unix)]
 #[tokio::test]
 async fn dubious_ownership_refuses_rather_than_calling_it_an_empty_baseline() {
     // git's `safe.directory` rejection. Round 2 turned this into
     // SNAPSHOT+ALLOW with the claim "None of this file was in any commit".
-    let uid = Command::new("id").arg("-u").output().unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&uid.stdout).trim(),
-        "0",
-        "this arm must run as root so the chown below actually changes \
-         ownership — skipping it instead would make the matrix permanently \
-         green, which is worse than not having it"
-    );
     let (dir, file) = corpus_repo();
     let root = dunce::canonicalize(dir.path()).unwrap();
-    chown_tree(&root, 65534);
+    let reports = tempfile::tempdir().unwrap();
+    let report_path = reports.path().join("outcome");
 
-    let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
-    report("dubious-ownership", &outcome, &detail);
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "dubious_ownership_fixture",
+            "--nocapture",
+        ])
+        .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        .env("WCORE_DUBIOUS_ROOT", &root)
+        .env("WCORE_DUBIOUS_FILE", &file)
+        .env("WCORE_DUBIOUS_REPORT", &report_path)
+        .status()
+        .expect("spawn the dubious-ownership fixture");
+    assert!(
+        status.success(),
+        "the dubious-ownership fixture process failed; its own output above \
+         says why, and until it passes this arm has measured nothing"
+    );
 
-    // Restore before any assertion can unwind past the cleanup.
-    chown_tree(&root, 0);
+    let recorded = std::fs::read_to_string(&report_path)
+        .expect("the fixture must record an outcome even to be judged");
+    let (outcome, detail) = recorded
+        .split_once('\n')
+        .expect("the report is one outcome line then the detail");
+    println!(
+        "[MATRIX] {:<28} => {outcome}\n           {}",
+        "dubious-ownership",
+        detail.lines().next().unwrap_or("").trim()
+    );
 
-    assert_eq!(outcome, Outcome::Refused);
+    assert_eq!(outcome, format!("{:?}", Outcome::Refused));
     assert!(
         detail.contains("could not be established"),
         "the refusal must say the baseline is unknown, not invent one: {detail}"
@@ -181,13 +219,35 @@ async fn dubious_ownership_refuses_rather_than_calling_it_an_empty_baseline() {
     );
 }
 
+/// The dubious-ownership arm's body, run as its own process so
+/// `GIT_TEST_ASSUME_DIFFERENT_OWNER` applies to it and to nothing else.
 #[cfg(unix)]
-fn chown_tree(root: &Path, uid: u32) {
-    let status = Command::new("chown")
-        .args(["-R", &format!("{uid}:{uid}"), root.to_str().unwrap()])
-        .status()
+#[tokio::test]
+#[ignore = "subprocess fixture"]
+async fn dubious_ownership_fixture() {
+    let root = PathBuf::from(std::env::var("WCORE_DUBIOUS_ROOT").unwrap());
+    let file = PathBuf::from(std::env::var("WCORE_DUBIOUS_FILE").unwrap());
+    let report = PathBuf::from(std::env::var("WCORE_DUBIOUS_REPORT").unwrap());
+
+    // The trigger has to be proved in force before the guard is asked
+    // anything. A git that ignored the variable would resolve the real
+    // baseline, the guard would refuse citing the unsaved line, and every
+    // assertion in the parent would pass while measuring the healthy case.
+    let probe_git = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&root)
+        .output()
         .unwrap();
-    assert!(status.success(), "chown failed");
+    let stderr = String::from_utf8_lossy(&probe_git.stderr).into_owned();
+    assert!(
+        !probe_git.status.success() && stderr.contains("dubious ownership"),
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER did not make this git refuse the \
+         repository, so this arm would prove nothing: status={:?} stderr={stderr}",
+        probe_git.status.code()
+    );
+
+    let (outcome, detail) = probe(&root, &file, DROPS_IT).await;
+    std::fs::write(&report, format!("{outcome:?}\n{detail}")).unwrap();
 }
 
 // --- arm 3: an unreadable config ----------------------------------------

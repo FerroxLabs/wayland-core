@@ -170,6 +170,9 @@ doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
 # the tools' own path validation refuses that namespace. `dunce::canonicalize`
 # reduces it to the ordinary form; it is a plain canonicalize on Unix.
 dunce = "1"
+# Backdates a loose object for the gc prune-window arm. `touch -d "3 weeks
+# ago"` is a GNU extension that the BSD touch macOS ships rejects.
+filetime = "0.2"
 tempfile.workspace  = true
 criterion.workspace = true
 # R2 fix A2: debug_helpers tests mutate process-wide env vars; serialize

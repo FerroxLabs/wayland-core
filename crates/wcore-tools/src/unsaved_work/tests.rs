@@ -1561,7 +1561,10 @@ fn every_travel_claim_the_note_makes_is_executed_against_git() {
 /// 2. Deleting the anchor and running gc again disposes of the copy. Without
 ///    it, "the copy survived" would not distinguish the anchor holding it
 ///    from something else in the repository holding it.
-#[cfg(unix)] // cp / tar / touch
+// Still unix-gated now that the `touch` dependency is gone: this arm has never
+// been run against a Windows `git gc`, and lifting the gate here would add an
+// unmeasured arm to that leg rather than repair one.
+#[cfg(unix)]
 #[test]
 fn the_prune_window_does_not_reach_an_anchored_copy() {
     let f = repo();
@@ -1592,15 +1595,18 @@ fn the_prune_window_does_not_reach_an_anchored_copy() {
         .root
         .join(format!(".git/objects/{}/{}", &unheld[..2], &unheld[2..]));
 
+    // Not `touch -d "3 weeks ago"`: that relative form is a GNU extension, and
+    // BSD touch — which is what macOS ships — rejects it outright with "out of
+    // range or illegal time specification", so the arm died on the macOS leg
+    // before it measured anything. `set_file_mtime` issues the same `utimensat`
+    // GNU touch does, so it still backdates a mode-0444 loose object without
+    // widening its permissions first: a file's OWNER may set its timestamps
+    // whatever its permission bits say.
     let backdate = |path: &std::path::Path| {
-        assert!(
-            Command::new("touch")
-                .args(["-d", "3 weeks ago"])
-                .arg(path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        let three_weeks = std::time::Duration::from_secs(21 * 24 * 60 * 60);
+        let when = std::time::SystemTime::now() - three_weeks;
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(when))
+            .unwrap_or_else(|error| panic!("backdating {path:?} failed: {error}"));
     };
     backdate(&loose);
     backdate(&unheld_loose);
