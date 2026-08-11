@@ -326,16 +326,38 @@ away Write's prevention property (the one that repairs the file rather than
 archiving it) for a regression that is not caused by it. I have not made that
 change.
 
-**What is still plausibly attributable to INV-2 round 5** is the *tool
-description*, not the refusal. `git blame` puts the two unsaved-work bullets on
-`07b3536b`, `3d43e680` and `1735564f` — the round 3/4/merge guard commits —
-which matches the coordinator's trend starting at the first build carrying
-round 5. The last bullet ends "the single worst thing you can do to the user's
-file", and the failing runs avoid Write entirely while doing 25-35 Bash calls.
-That is a hypothesis, not a finding. The A/B experiment that would settle it is
-running: arm A is `bin-A` unchanged, arm B is the same tree with those two
-bullets trimmed to one neutral sentence, n=6 each through `run-canon2.sh`,
-under `/root/uw-probe/a4-armA` and `/root/uw-probe/a4-armB`, driver
-`/root/uw-probe/expAB.sh`, log `/root/uw-probe/expAB.log`. Arm B's binary is
-built from a temporary edit that the driver reverts; `git status --porcelain`
-is printed after the revert to prove the lane tree is clean.
+**A follow-up hypothesis of mine, tested and refuted.** The only remaining
+mechanism attributable to INV-2 round 5 was the Write tool *description* -
+`git blame` puts its two unsaved-work bullets on `07b3536b`, `3d43e680`,
+`1735564f`, and the last ends "the single worst thing you can do to the user's
+file" while the failing runs avoid Write and do 25-36 Bash calls. I ran the A/B
+rather than asserting it. Arm A is `bin-A` (sha256 `2cf9aaed...`); arm B is the
+same tree with those two bullets replaced by one neutral sentence (`bin-B`,
+sha256 `d310a8ff...`). Both artifacts were byte-grepped with positive and
+negative controls: A contains the old text (3 hits), B does not (0 hits) and
+contains the new text (3 hits). n=6 each, same harness, same machine.
+
+| arm | Write description | A-4 |
+|---|---|---|
+| A | unchanged | **3 PASS / 3 FAIL** |
+| B | two bullets trimmed | **1 PASS / 5 FAIL** |
+
+Trimming it did not help and the point estimate moved the wrong way. At n=6 the
+difference is also not distinguishable from noise (Fisher exact p ~ 0.55), so
+the honest reading is **no evidence that the guard's tool description causes
+the A-4 failures**. My hypothesis is not supported and I am not proposing the
+change.
+
+**What that leaves.** Measured A-4 pass rates: `pinned-9540ca17` 1/6 (reported)
+and 1/2 (mine), `bin-A` 3/6, `bin-B` 1/6. All four are consistent with one
+underlying rate near 30%, and none is distinguishable from another at these
+sample sizes. That cuts both ways, and it is worth saying plainly: at n=6
+against a ~30% base rate a 4/4 pre-merge reading is not rare, so the trend
+table's "regression at the INV-2 r5 build" is not established either. What *is*
+established, across **19 runs on three binaries without a single exception**,
+is that no unsaved-work refusal ever fires on A-4 and INV-2 reads PASS in every
+run. The guard is not the mechanism, whatever the mechanism turns out to be.
+
+Raw results: `/root/uw-probe/a4-armA`, `/root/uw-probe/a4-armB`, driver
+`/root/uw-probe/expAB.sh`, log `/root/uw-probe/expAB.log`. The driver reverted
+its temporary `write.rs` edit; the lane tree is clean.
