@@ -327,7 +327,16 @@ async fn fix3_moderate_pipeline_runs_and_preserves_order_with_null_holes() {
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             let dump = format!("{req:?}");
             if dump.contains("DROPME") {
-                return Err(ProviderError::Connection("boom".into()));
+                // A SERVED failure, deliberately. `ProviderError::Connection` classifies as
+                // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
+                // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
+                // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
+                // provider outage; an HTTP 500 is persistent, is retried the bounded number of
+                // times, and reaches the same failure path in ~1.5 s.
+                return Err(ProviderError::Api {
+                    status: 500,
+                    message: "boom".into(),
+                });
             }
             // Echo a stable marker so we can assert order. Find the item tag.
             let tag = ["A0", "A1", "A2", "A3", "A4"]

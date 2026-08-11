@@ -134,7 +134,16 @@ impl LlmProvider for FailTagProvider {
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let tag = tag_of(request).unwrap_or_else(|| "untagged".to_string());
         if tag == self.fail_tag {
-            return Err(ProviderError::Connection("boom".into()));
+            // A SERVED failure, deliberately. `ProviderError::Connection` classifies as
+            // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
+            // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
+            // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
+            // provider outage; an HTTP 500 is persistent, is retried the bounded number of
+            // times, and reaches the same failure path in ~1.5 s.
+            return Err(ProviderError::Api {
+                status: 500,
+                message: "boom".into(),
+            });
         }
         let (tx, rx) = mpsc::channel(8);
         tokio::spawn(async move {
