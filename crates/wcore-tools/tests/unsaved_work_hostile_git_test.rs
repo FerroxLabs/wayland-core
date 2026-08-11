@@ -281,9 +281,15 @@ async fn an_untracked_file_in_a_healthy_repo_allows_a_verified_copy() {
 /// never says "no repository" about a repository that is plainly there.
 #[tokio::test]
 async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
-    // (name, how to break it)
-    let breaks: Vec<(&str, fn(&Path))> = vec![
-        ("dangling-worktree-gitdir", |root| {
+    /// One way of breaking a repository while leaving `.git` on disk.
+    struct Break {
+        name: &'static str,
+        apply: fn(&Path),
+    }
+    let b = |name, apply| Break { name, apply };
+
+    let breaks = vec![
+        b("dangling-worktree-gitdir", |root| {
             // An abandoned linked worktree: `.git` is a file pointing at a
             // gitdir that no longer exists. Extremely ordinary — it is what a
             // worktree becomes when its main repository is deleted or moved.
@@ -294,20 +300,20 @@ async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
             )
             .unwrap();
         }),
-        ("garbage-head", |root| {
+        b("garbage-head", |root| {
             std::fs::write(root.join(".git/HEAD"), "not a ref at all\n").unwrap();
         }),
-        ("head-points-at-a-missing-object", |root| {
+        b("head-points-at-a-missing-object", |root| {
             std::fs::write(
                 root.join(".git/HEAD"),
                 "0123456789abcdef0123456789abcdef01234567\n",
             )
             .unwrap();
         }),
-        ("no-object-database", |root| {
+        b("no-object-database", |root| {
             std::fs::remove_dir_all(root.join(".git/objects")).unwrap();
         }),
-        ("unreadable-global-config", |root| {
+        b("unreadable-global-config", |root| {
             // The shape a broken `$HOME` gives every command in the process.
             std::fs::write(root.join("bad-global"), "[[[not a config\n").unwrap();
             // SAFETY: set for the duration of one probe in a single-threaded
@@ -316,7 +322,7 @@ async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
         }),
     ];
 
-    for (name, apply) in breaks {
+    for Break { name, apply } in breaks {
         let (dir, file) = corpus_repo();
         let root = dunce::canonicalize(dir.path()).unwrap();
         apply(&root);
@@ -354,5 +360,99 @@ async fn every_way_git_can_refuse_to_answer_ends_in_a_refusal() {
         Outcome::AllowedCopyVerified,
         "control failed: the harness refuses everything, so the table proves \
          nothing: {detail}"
+    );
+}
+
+// --- arm 9: armD, end to end through the real tool -----------------------
+
+/// The shape the round-3 adversary measured **live**: `$HOME` is a dotfiles
+/// repository — an extremely common setup — and the private file is
+/// `~/work/env.local`, holding a Stripe key and a database password. Round 3
+/// took zero refusals there and filed both secrets into the dotfiles
+/// repository's object store, where they survived `git gc`.
+///
+/// Driven through `WriteTool::execute`, not through `assess`, because that is
+/// the surface that actually ran in the live arm — and the verdict is taken
+/// from the object database rather than from the sentence the tool printed.
+#[tokio::test]
+async fn the_armd_dotfiles_shape_refuses_and_files_nothing() {
+    const STRIPE: &str = "STRIPE_SECRET_KEY=sk_live_ARMD_CANARY_0001";
+    const DB: &str = "DATABASE_URL=postgres://armd:CANARYPW0002@db.internal/prod";
+
+    let home = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(home.path()).unwrap();
+    git(&root, &["init", "-q"]);
+    git(&root, &["config", "user.email", "u@example.com"]);
+    git(&root, &["config", "user.name", "u"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    // A dotfiles repository tracks dotfiles, and nothing under ~/work.
+    std::fs::write(root.join(".bashrc"), "export EDITOR=vi\n").unwrap();
+    std::fs::create_dir_all(root.join(".config/nvim")).unwrap();
+    std::fs::write(root.join(".config/nvim/init.lua"), "vim.o.number = true\n").unwrap();
+    std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-qm", "dotfiles"]);
+
+    // Two private files, each unreachable for a different reason: one in a
+    // directory the repository records nothing under, one the repository is
+    // configured to ignore inside a directory it does record.
+    let cases = [
+        ("work/env.local", format!("{STRIPE}\n{DB}\nDEBUG=0\n")),
+        (".config/secrets.local", format!("{STRIPE}\nTOKEN=keep\n")),
+    ];
+
+    for (rel, body) in &cases {
+        let file = root.join(rel);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, body).unwrap();
+
+        let (outcome, detail) = probe(&root, &file, "DEBUG=1\n").await;
+        report(&format!("armD:{rel}"), &outcome, &detail);
+        assert_eq!(
+            outcome,
+            Outcome::Refused,
+            "[{rel}] the live round-3 shape must not proceed: {detail}"
+        );
+        assert_eq!(
+            &std::fs::read_to_string(&file).unwrap(),
+            body,
+            "[{rel}] a refusal must leave the file exactly as it was"
+        );
+    }
+
+    // The verdict that matters: nothing of the user's went into the dotfiles
+    // repository, judged by walking the object database rather than by
+    // trusting the tool's own account of itself.
+    let dump = Command::new("git")
+        .args(["cat-file", "--batch-all-objects", "--batch"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let objects = String::from_utf8_lossy(&dump.stdout);
+    for needle in [STRIPE, DB] {
+        assert!(
+            !objects.contains(needle),
+            "a secret was filed into the dotfiles repository's object store"
+        );
+    }
+    // Positive control on that walk: it does find something that IS in there,
+    // so "not found" is a real answer and not an empty dump.
+    assert!(
+        objects.contains("export EDITOR=vi"),
+        "control failed: the object walk found nothing at all, so the two \
+         assertions above prove nothing"
+    );
+
+    // And the counter-case, so the rule is not simply "refuse everything in a
+    // dotfiles repository": a file in a directory the repository does record,
+    // not ignored, is still copied as before.
+    let tracked_dir = root.join(".config/nvim/scratch.lua");
+    std::fs::write(&tracked_dir, "-- notes\nlocal x = 1\n").unwrap();
+    let (outcome, detail) = probe(&root, &tracked_dir, "-- rewritten\n").await;
+    report("armD:control-recorded-dir", &outcome, &detail);
+    assert_eq!(
+        outcome,
+        Outcome::AllowedCopyVerified,
+        "control failed: the rule has become a blanket refusal: {detail}"
     );
 }

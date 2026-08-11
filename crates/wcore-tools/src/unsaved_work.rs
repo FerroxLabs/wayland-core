@@ -841,15 +841,15 @@ impl UnsavedWorkGuard {
     fn repository_ignores(&self, root: &Path, rel: &str) -> bool {
         let mut payload = rel.as_bytes().to_vec();
         payload.push(0);
-        match git_invoke(
-            root,
-            Pathspecs::AsGitTakesThem,
-            &["check-ignore", "-q", "--stdin", "-z"],
-            Some(&payload),
-        ) {
-            Some(run) if run.code == Some(1) => false,
-            _ => true,
-        }
+        !matches!(
+            git_invoke(
+                root,
+                Pathspecs::AsGitTakesThem,
+                &["check-ignore", "-q", "--stdin", "-z"],
+                Some(&payload),
+            ),
+            Some(run) if run.code == Some(1)
+        )
     }
 
     /// Put `bytes` in the repository's own object database and prove they can
