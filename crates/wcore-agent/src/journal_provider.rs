@@ -619,6 +619,13 @@ fn provider_stream_event(event: &LlmEvent) -> Result<ProviderStreamEvent, Provid
         LlmEvent::Error(message) => ProviderStreamEvent::Error {
             message: message.clone(),
         },
+        LlmEvent::TruncatedToolCall {
+            name,
+            partial_arg_bytes,
+        } => ProviderStreamEvent::TruncatedToolCall {
+            name: name.clone(),
+            partial_arg_bytes: *partial_arg_bytes as u64,
+        },
         LlmEvent::Citations(urls) => ProviderStreamEvent::Citations { urls: urls.clone() },
         LlmEvent::SearchResults(results) => ProviderStreamEvent::SearchResults {
             results: results

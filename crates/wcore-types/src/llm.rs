@@ -160,6 +160,25 @@ pub enum LlmEvent {
         finish_reason: FinishReason,
         usage: TokenUsage,
     },
+    /// The provider stopped at its OUTPUT token cap (`finish_reason=length`)
+    /// while a tool call was still streaming, so the accumulated argument JSON
+    /// is an unterminated fragment. The call CANNOT be run — half its
+    /// arguments never arrived — but dropping it silently is what made a turn
+    /// cut off mid-deliverable indistinguishable from a model that had simply
+    /// finished talking: the engine saw an empty tool-call list and took the
+    /// natural-completion path. Providers emit one of these per pending call
+    /// so the engine has a condition to act on instead of a hole.
+    ///
+    /// NOT an [`LlmEvent::Error`]: the stream itself is well-formed, and the
+    /// right response to a severed output differs from a transport fault.
+    TruncatedToolCall {
+        /// Tool name accumulated before the cut (empty when the cut landed
+        /// before the name arrived).
+        name: String,
+        /// Bytes of argument JSON that did arrive. Sizes the loss for the user
+        /// without echoing a half-written payload back at them.
+        partial_arg_bytes: usize,
+    },
     /// Error from the API
     Error(String),
     /// FluxRouter web_search grounding (contract §5.4): the deduplicated set of

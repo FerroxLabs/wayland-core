@@ -534,6 +534,14 @@ pub enum ProviderStreamEvent {
     Error {
         message: String,
     },
+    /// T3 — a tool call the provider severed at its OUTPUT token cap. Recorded
+    /// so the durable stream says what the live stream said: this attempt was
+    /// cut mid-call and produced nothing runnable. Additive to the tagged wire
+    /// contract; journals written before it simply never carry the variant.
+    TruncatedToolCall {
+        name: String,
+        partial_arg_bytes: u64,
+    },
     Citations {
         urls: Vec<String>,
     },

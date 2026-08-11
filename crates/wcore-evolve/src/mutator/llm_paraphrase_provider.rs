@@ -219,6 +219,7 @@ async fn collect_text(
             | LlmEvent::ThinkingSubject(_)
             | LlmEvent::ThinkingSignature(_)
             | LlmEvent::ToolUse { .. }
+            | LlmEvent::TruncatedToolCall { .. }
             | LlmEvent::Citations(_)
             | LlmEvent::SearchResults(_)
             | LlmEvent::ProviderMeta { .. } => {}
