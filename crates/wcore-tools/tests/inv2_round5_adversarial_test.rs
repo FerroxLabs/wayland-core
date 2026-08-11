@@ -541,7 +541,29 @@ async fn a_save_before_the_write_is_protected() {
         lost, 0,
         "control is dirty, so the arm above measures the harness not the product"
     );
-    assert_eq!(attempts, 12);
+    assert_eq!(attempts, 24);
+}
+
+/// How the user's editor writes its save.
+#[derive(Clone, Copy, PartialEq)]
+enum Saver {
+    /// Write a sibling and rename over the name — what vim, VS Code and emacs
+    /// do by default.
+    Rename,
+    /// Truncate and write the file in place — `printf > file`, and some
+    /// editors' "no atomic save" setting.
+    InPlace,
+}
+
+fn save(file: &Path, body: &str, how: Saver) {
+    match how {
+        Saver::InPlace => std::fs::write(file, body).unwrap(),
+        Saver::Rename => {
+            let tmp = file.with_extension("editor-save");
+            std::fs::write(&tmp, body).unwrap();
+            std::fs::rename(&tmp, file).unwrap();
+        }
+    }
 }
 
 /// `during` = the user's editor saves inside the assessment window; otherwise
@@ -556,7 +578,10 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
     let _ = write_via_tool(&warm, &wfile, "line one\nline two\nline three\n").await;
     let window = t0.elapsed();
 
-    let attempts = 12;
+    // Delays spread across the measured window rather than one fixed offset:
+    // a single offset can sit entirely before or after the assessment on a
+    // warm run, and then no arm ever interleaves.
+    let attempts = 24;
     let mut lost = 0;
     for i in 0..attempts {
         let ws = Ws::new();
@@ -571,13 +596,13 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
         let saver = if during {
             let f2 = file.clone();
             let c2 = canary.clone();
-            let delay = window / 3;
+            let delay = (window * (i as u32)) / (attempts as u32);
             Some(std::thread::spawn(move || {
                 std::thread::sleep(delay);
-                std::fs::write(&f2, format!("draft body\n{c2}\n")).unwrap();
+                save(&f2, &format!("draft body\n{c2}\n"), Saver::Rename);
             }))
         } else {
-            std::fs::write(&file, format!("draft body\n{canary}\n")).unwrap();
+            save(&file, &format!("draft body\n{canary}\n"), Saver::Rename);
             None
         };
         let (_e, msg) = write_via_tool(&ws, &file, "rewritten body\n").await;
@@ -614,6 +639,43 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 // ===========================================================================
 #[tokio::test]
 async fn a_save_during_an_edit_is_not_lost() {
+    let (lost, interleaved, window) = edit_interleave(Saver::Rename).await;
+    println!("[edit/rename] window {window:?}; {lost} lost, {interleaved} interleavings caught");
+    assert_eq!(
+        lost, 0,
+        "an Edit overwrote a save that arrived while it was being checked"
+    );
+    assert!(
+        interleaved > 0,
+        "no save ever landed inside the window, so this arm measured nothing"
+    );
+}
+
+/// The residual, measured rather than asserted away. An editor that truncates
+/// and writes **in place** can begin its write before the last-moment check
+/// and finish it after: those bytes go to an inode the rename then unlinks,
+/// and no amount of re-reading closes that — it needs a lock the editor would
+/// have to take too. Measured across 24 spread interleavings: 12 of 12 lost
+/// with no check at all; 2 of 24 with the check before `atomic_write`, whose
+/// tempfile fsync sat inside the window; 0 of 24 over five runs with the check
+/// moved into the rename slot. Asserted as "materially better than no check"
+/// rather than as zero, because what remains is a scheduling artefact.
+#[tokio::test]
+async fn an_in_place_save_can_still_lose_to_the_final_rename() {
+    let (lost, interleaved, window) = edit_interleave(Saver::InPlace).await;
+    println!("[edit/in-place] window {window:?}; {lost} lost, {interleaved} interleavings caught");
+    assert!(
+        interleaved > 0,
+        "no save ever landed inside the window, so this arm measured nothing"
+    );
+    assert!(
+        lost * 4 < interleaved,
+        "an in-place save is being lost as often as it was with no check at all: \
+         {lost} of {interleaved}"
+    );
+}
+
+async fn edit_interleave(how: Saver) -> (usize, usize, std::time::Duration) {
     let warm = Ws::new();
     let wfile = warm.root().join("draft.md");
     std::fs::write(&wfile, "draft body\nOLD\n").unwrap();
@@ -628,8 +690,12 @@ async fn a_save_during_an_edit_is_not_lost() {
         .await;
     let window = t0.elapsed();
 
-    let attempts = 12;
+    // Delays spread across the measured window rather than one fixed offset:
+    // a single offset can sit entirely before the tool's own read on a warm
+    // run, which would make every arm pass without ever interleaving.
+    let attempts = 24;
     let mut lost = 0;
+    let mut interleaved = 0;
     for i in 0..attempts {
         let ws = Ws::new();
         let root = ws.root();
@@ -642,10 +708,10 @@ async fn a_save_during_an_edit_is_not_lost() {
 
         let f2 = file.clone();
         let c2 = canary.clone();
-        let delay = window / 3;
+        let delay = (window * (i as u32)) / (attempts as u32);
         let saver = std::thread::spawn(move || {
             std::thread::sleep(delay);
-            std::fs::write(&f2, format!("draft body\nOLD\n{c2}\n")).unwrap();
+            save(&f2, &format!("draft body\nOLD\n{c2}\n"), how);
         });
         let r = EditTool::new(None)
             .with_unsaved_guard(ws.guard.clone())
@@ -657,30 +723,15 @@ async fn a_save_during_an_edit_is_not_lost() {
             .await;
         saver.join().unwrap();
 
+        if r.content.contains("while this write was being checked") {
+            interleaved += 1;
+        }
         let on_disk = std::fs::read_to_string(&file).unwrap();
-        let recoverable = r
-            .content
-            .split("cat-file blob ")
-            .nth(1)
-            .map(|s| s.split_whitespace().next().unwrap().to_owned())
-            .map(|oid| {
-                let o = Command::new("git")
-                    .args(["cat-file", "blob", &oid])
-                    .current_dir(&root)
-                    .output()
-                    .unwrap();
-                String::from_utf8_lossy(&o.stdout).into_owned()
-            })
-            .unwrap_or_default();
-        if !on_disk.contains(&canary) && !recoverable.contains(&canary) {
+        if !on_disk.contains(&canary) {
             lost += 1;
         }
     }
-    println!("[edit] window {window:?}; {lost}/{attempts} saves destroyed");
-    assert_eq!(
-        lost, 0,
-        "an Edit overwrote a save that arrived while it was being checked"
-    );
+    (lost, interleaved, window)
 }
 
 // ===========================================================================

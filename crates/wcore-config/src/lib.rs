@@ -8,7 +8,7 @@ pub mod circuit_breaker;
 // memory store, memory index — anywhere a partial write would
 // corrupt user-visible state.
 pub mod atomic_io;
-pub use atomic_io::atomic_write;
+pub use atomic_io::{atomic_write, atomic_write_checked};
 // W8a A.5: BudgetConfig TOML schema (consumed by wcore-agent::budget).
 pub mod budget;
 // W8c.1 E.11: BrowserConfig TOML schema (consumed by wcore-browser::select_provider).

@@ -310,18 +310,22 @@ impl Tool for EditTool {
         // ADV-7: the assessment above spends real time in `git`, and Edit's
         // own read is older still. A save that landed in between would be
         // overwritten by a replacement computed against bytes that are gone.
-        if let Err(why) = crate::unsaved_work::pre_image_unchanged(path, Some(content.as_bytes())) {
-            return ToolResult {
-                content: crate::unsaved_work::changed_under_write(file_path, &why),
-                is_error: true,
-            };
-        }
-
-        if let Err(e) = wcore_config::atomic_write(path, new_content.as_bytes()) {
-            return ToolResult {
-                content: format!("Failed to write file: {}", e),
-                is_error: true,
-            };
+        match wcore_config::atomic_write_checked(path, new_content.as_bytes(), || {
+            crate::unsaved_work::pre_image_unchanged(path, Some(content.as_bytes()))
+        }) {
+            Ok(Ok(())) => {}
+            Ok(Err(why)) => {
+                return ToolResult {
+                    content: crate::unsaved_work::changed_under_write(file_path, &why),
+                    is_error: true,
+                };
+            }
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Failed to write file: {}", e),
+                    is_error: true,
+                };
+            }
         }
 
         // Post-write cache update: refresh mtime and content.
