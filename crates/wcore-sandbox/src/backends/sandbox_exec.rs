@@ -514,6 +514,13 @@ impl SandboxBackend for SandboxExecBackend {
         true
     }
 
+    /// The generated SBPL profile is deny-by-default for `file-write*`, with
+    /// allows emitted only for the manifest's granted subpaths, so a write
+    /// outside them is refused by the kernel.
+    fn confines_filesystem(&self) -> bool {
+        true
+    }
+
     fn is_available(&self) -> bool {
         *self.probed_available.get_or_init(|| {
             // Probe: invoke sandbox-exec with the minimum known-good

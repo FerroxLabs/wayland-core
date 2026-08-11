@@ -559,15 +559,26 @@ fn local_shell_notice(
     {
         return None;
     }
+    // The write half is stated separately and only when true, so the sentence
+    // tracks the backend's own `confines_filesystem` claim instead of being a
+    // second, independently-rotting description of it.
+    let write_escape = if runtime.confines_filesystem() {
+        ""
+    } else {
+        " It cannot confine writes either: a Bash command can create or overwrite files \
+          ANYWHERE this user account can, not just inside the workspace — the workspace roots \
+          bound Core's own Read/Write/Edit tools, not the shell's children."
+    };
     Some(format!(
         "Local shell enabled WITHOUT OS secret containment: the active sandbox backend ({}) \
          cannot enforce filesystem read-deny, so a Bash command in this session can read this \
-         workspace's secrets and your credential stores — the OS will not stop it. Still in \
+         workspace's secrets and your credential stores — the OS will not stop it.{} Still in \
          force: kill-on-close process-tree ownership, per-command approval for Bash (unless you \
          disabled approvals), the channel tool posture, and the Read/Write/Edit secret guard. \
          This applies to your local keyboard session only; a channel or remote session on this \
          backend still gets no shell.",
         runtime.backend_name(),
+        write_escape,
     ))
 }
 
@@ -5361,6 +5372,12 @@ mod tests {
         assert!(
             notice.contains("cannot enforce filesystem read-deny"),
             "{notice}"
+        );
+        // The write escape is the half the notice used to omit entirely.
+        assert!(!relaxed.confines_filesystem());
+        assert!(
+            notice.contains("cannot confine writes"),
+            "the notice must name the write escape, not only the read one: {notice}"
         );
         assert!(notice.contains("process-tree ownership"), "{notice}");
         assert!(notice.contains("approval"), "{notice}");

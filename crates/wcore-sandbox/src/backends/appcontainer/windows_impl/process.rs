@@ -316,6 +316,14 @@ impl SandboxBackend for AppContainerBackend {
         !containment_withdrawn()
     }
 
+    /// The Low-integrity restricted token plus the per-root DACL grants confine
+    /// the child to the manifest's filesystem grants. Withdrawn on the same
+    /// predicate as the sibling claims above: a backend this host has disproved
+    /// must not keep advertising confinement it cannot apply.
+    fn confines_filesystem(&self) -> bool {
+        !containment_withdrawn()
+    }
+
     /// True because [`Self::execute_with_cwd_authority`] establishes an
     /// OS-ENFORCED PIN on the retained directory's name before the pathname is
     /// used, and holds it for the whole execution — see [`bind_retained_cwd`].

@@ -216,7 +216,14 @@ same-revision snapshot with different bytes, a gapped or stale revision, an
 unsupported `contract_version` major, and `critical: false` all fail closed.
 
 `posture` is `smart`, `managed`, or `dangerous`. `approvals` is `prompt`,
-`auto_edit`, or `bypass`; `sandbox` is `required` or `bypass`. Dangerous
+`auto_edit`, or `bypass`; `sandbox` is `required` or `bypass`. **`sandbox:
+required` reports session AUTHORITY — a real backend was selected and this is
+not a Dangerous launch. It is not a claim about how much that backend
+enforces**, which varies by platform: bubblewrap (Linux) and `sandbox-exec`
+(macOS) confine the child's filesystem, the Windows session default
+(`windows_job_object`) does not. A host must not render `required` as
+"the workspace is a boundary"; `wayland-core sandbox status` reports the
+per-capability breakdown, including `confines_filesystem`. Dangerous
 snapshots also carry `dangerous_activation_id` and
 `dangerous_expires_at_unix_ms`; non-dangerous snapshots must omit both.
 
@@ -225,6 +232,14 @@ snapshots also carry `dangerous_activation_id` and
 Emitted after `execution_policy` and again when a local host-approved developer
 capability changes the effective read roots. It is an output-only receipt of
 what Core enforces; echoing any field back cannot mint trust or authority.
+
+`writable_roots` / `readable_roots` are the roots Core applies to its OWN file
+tools (Read / Write / Edit, via the VFS jail) on every platform, and hands to
+the OS sandbox as the child's grants. Whether the OS then STOPS a shell child
+from leaving them is the `backend`'s property, not the receipt's: on the Windows
+default (`backend: "windows_job_object"`) it does not, so a shell command can
+write outside these roots. Hosts presenting these as a containment boundary
+should qualify it by `backend`.
 
 ```json
 {

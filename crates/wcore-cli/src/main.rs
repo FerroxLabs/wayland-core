@@ -807,8 +807,13 @@ enum TopCmd {
     },
     /// Inspect platform containment — `status` reports the selected sandbox
     /// backend and its properties; `exec` runs a command through the agent's
-    /// own shell tool so you can observe, from the child's own output, that
-    /// the sandbox was ACTIVE rather than merely available.
+    /// own shell tool so you can observe, from the child's own output, what
+    /// the sandbox actually applied rather than merely that it was available.
+    ///
+    /// The properties differ by platform and some of them are `false`. Read
+    /// `confines_filesystem` for "can a command write outside my workspace" —
+    /// it is `false` on the Windows default, where a Job Object bounds process
+    /// lifetime but does not filter the filesystem.
     Sandbox(wcore_cli::sandbox_cmd::SandboxArgs),
 }
 

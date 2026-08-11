@@ -7,6 +7,24 @@
 //! path outside its workspace, is visible on the host when run uncontained and
 //! is NOT visible on the host when run through `sandbox exec`.
 //!
+//! WHAT IT ASSERTS IS AGREEMENT, NOT CONFINEMENT. `sandbox status` publishes
+//! `confines_filesystem`. This test performs the escape the field is about and
+//! requires the OUTCOME to match the CLAIM, in both directions:
+//!
+//! * claim `true`  -> the escape file must NOT appear;
+//! * claim `false` -> the escape file MUST appear (or the command must be
+//!   refused outright), because a claim that understates what the OS enforces
+//!   is drift too, and it is the direction that hides a claim quietly going
+//!   stale.
+//!
+//! It is built this way because the earlier version keyed the differential off
+//! `bypasses_containment`, which is SESSION AUTHORITY ("is this the operator's
+//! Dangerous launch"), not a filesystem capability. It reads `false` on the
+//! Windows `windows_job_object` default while a child writes wherever it likes,
+//! so the surface advertised containment the backend could not provide. A
+//! status field asserting containment has to be checked against a real escape
+//! or the two drift apart in silence.
+//!
 //! TWO TRAPS THIS TEST IS BUILT AROUND, both of which would make it pass
 //! vacuously:
 //!
@@ -118,8 +136,10 @@ fn escape_target() -> std::path::PathBuf {
     home.join(format!("f28-escape-marker-{}", std::process::id()))
 }
 
+/// Formerly `sandbox_exec_confines_a_write_that_escapes_the_workspace`, when
+/// it asserted confinement unconditionally off the wrong field.
 #[test]
-fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
+fn sandbox_status_filesystem_claim_matches_a_real_escape_attempt() {
     let workspace = tempfile::tempdir().expect("workspace");
     // The escape target lives outside every root the contained policy grants.
     let escape = escape_target();
@@ -129,6 +149,12 @@ fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
     let backend = status["backend"].as_str().unwrap_or("<none>").to_owned();
     let available = status["available"].as_bool().unwrap_or(false);
     let bypasses = status["bypasses_containment"].as_bool().unwrap_or(true);
+    // No `unwrap_or`: an absent field is a status surface that stopped
+    // reporting the claim, which must fail rather than default to something
+    // comfortable.
+    let confines = status["confines_filesystem"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("`sandbox status` must report confines_filesystem: {status}"));
 
     // ---------------------------------------------------------------
     // Baseline: the SAME command, uncontained. Proves the probe is capable
@@ -178,29 +204,75 @@ fn sandbox_exec_confines_a_write_that_escapes_the_workspace() {
         return;
     }
 
+    // A backend that claims no filesystem confinement is allowed to refuse the
+    // command outright (`fail_closed` does exactly that). Refusal enforces at
+    // least as much as the claim, so it agrees with it.
+    let ran = stdout.contains(RAN);
+    if !confines && !ran {
+        let _ = std::fs::remove_file(&escape);
+        assert!(
+            !out.status.success(),
+            "backend `{backend}` claims confines_filesystem=false and the child \
+             never ran, yet `sandbox exec` reported success — nothing here \
+             evidences anything. stdout={stdout} stderr={stderr}"
+        );
+        return;
+    }
+
     // The child must have RUN. Otherwise the escape check below proves nothing.
     assert!(
-        stdout.contains(RAN),
+        ran,
         "backend `{backend}` reported available, but the child never ran, so \
          containment cannot be evidenced from this execution. \
          stdout={stdout} stderr={stderr}"
     );
 
     // THE DIFFERENTIAL. Same command, same path, proven-capable probe, child
-    // proven to have run: the write is visible on the host uncontained and
-    // must NOT be visible on the host through the sandbox.
+    // proven to have run: what the host can see afterwards must be exactly what
+    // `confines_filesystem` said it would be.
     //
     // Read the observation BEFORE cleaning up, so a panic cannot leave the
     // marker behind in the operator's home directory.
     let escaped = escape.exists();
     let _ = std::fs::remove_file(&escape);
-    assert!(
-        !escaped,
-        "CONTAINMENT FAILURE on backend `{backend}`: a child run through \
-         `sandbox exec` wrote {} — outside every root its workspace policy \
-         grants. stdout={stdout}",
-        escape.display()
-    );
+    if confines {
+        assert!(
+            !escaped,
+            "CONTAINMENT FAILURE on backend `{backend}`: `sandbox status` reports \
+             confines_filesystem=true, but a child run through `sandbox exec` \
+             wrote {} — outside every root its workspace policy grants. \
+             stdout={stdout}",
+            escape.display()
+        );
+    } else {
+        assert!(
+            escaped,
+            "STALE CLAIM on backend `{backend}`: `sandbox status` reports \
+             confines_filesystem=false, but the escape to {} did not land. \
+             Either this backend now confines the filesystem and the claim \
+             understates it, or this probe stopped being able to demonstrate \
+             an escape — both make the reported posture untrustworthy. \
+             stdout={stdout}",
+            escape.display()
+        );
+    }
+}
+
+/// `bypasses_containment` and `confines_filesystem` are DIFFERENT questions,
+/// and this asserts the surface keeps answering both. The defect this guards
+/// against is a future edit deciding they are redundant and dropping one: on
+/// the Windows default they disagree (`bypasses_containment=false` while
+/// `confines_filesystem=false`), and collapsing them is how the surface starts
+/// advertising containment again.
+#[test]
+fn status_reports_session_authority_and_filesystem_confinement_separately() {
+    let status = status_json();
+    for field in ["bypasses_containment", "confines_filesystem"] {
+        assert!(
+            status[field].is_boolean(),
+            "`sandbox status` must report `{field}` as a boolean: {status}"
+        );
+    }
 }
 
 /// `sandbox status` reports a containment-required runtime. A runtime that

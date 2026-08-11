@@ -330,6 +330,31 @@ pub trait SandboxBackend: Send + Sync + 'static {
         false
     }
 
+    /// True if the OS confines the child to the manifest's filesystem grants
+    /// (`fs_read_allow` / `fs_write_allow`), so a write to a path outside every
+    /// granted root FAILS rather than landing on the host.
+    ///
+    /// This is a SEPARATE question from [`Self::enforces_read_deny`] (which is
+    /// about subtracting named secrets from an otherwise-granted root) and from
+    /// `SandboxRegistry::bypasses_containment` (which is session AUTHORITY —
+    /// "is this the operator's explicit no-sandbox launch" — and is `false` for
+    /// every non-Dangerous session whatever the backend can enforce). Neither
+    /// of those answers "can a shell command write outside my workspace", and
+    /// an operator reading a status surface reasonably thinks one of them does.
+    ///
+    /// Default `false`. A backend opts in by overriding this AND actually
+    /// implementing the confinement. The Windows session default
+    /// (`windows_job_object`) keeps the default: a Job Object bounds process
+    /// lifetime and resource use, it does not filter the filesystem, so a child
+    /// there really can write anywhere this user can.
+    ///
+    /// Nothing gates execution on this predicate — it exists so the reported
+    /// posture can be checked against a real escape attempt (see
+    /// `wcore-cli/tests/sandbox_activeness.rs`) rather than drifting from it.
+    fn confines_filesystem(&self) -> bool {
+        false
+    }
+
     /// True only when the backend owns the complete descendant tree even if
     /// an untrusted child calls `setsid` or `setpgid`. Process-group cleanup
     /// alone is not hard ownership and must keep the default `false`.

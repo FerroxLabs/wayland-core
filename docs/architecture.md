@@ -364,14 +364,22 @@ so the model never sees a tool it cannot safely invoke.
 
 **Backend coverage:**
 
-| Backend | Mechanism | `enforces_read_deny()` |
-|---------|-----------|------------------------|
-| macOS sandbox-exec | `(deny file-read* (subpath …))` SBPL rules after allows (last-match-wins) | `true` |
-| Linux bwrap | `--ro-bind /dev/null <file>` / `--tmpfs <dir>` overlay after positive binds | `true` |
-| Windows AppContainer (opt-in, `WAYLAND_SANDBOX=appcontainer`) | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) |
-| Windows Job Object (**the Windows default**) | Kill-on-close Job Object owns the process tree; env scrubbed to the manifest. No AppContainer profile, no Low-integrity token, so no OS filesystem or network confinement. | `false` (default) |
-| Docker (`live-docker`) | `/dev/null:<path>:ro` bind / empty-dir bind after mounts | `true` |
-| `no_sandbox` / `FailClosed` | Not enforced | `false` (default) |
+| Backend | Mechanism | `enforces_read_deny()` | `confines_filesystem()` |
+|---------|-----------|------------------------|-------------------------|
+| macOS sandbox-exec | `(deny file-read* (subpath …))` SBPL rules after allows (last-match-wins) | `true` | `true` |
+| Linux bwrap | `--ro-bind /dev/null <file>` / `--tmpfs <dir>` overlay after positive binds | `true` | `true` |
+| Windows AppContainer (opt-in, `WAYLAND_SANDBOX=appcontainer`) | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) | `true` (real) |
+| Windows Job Object (**the Windows default**) | Kill-on-close Job Object owns the process tree; env scrubbed to the manifest. No AppContainer profile, no Low-integrity token, so no OS filesystem or network confinement. | `false` (default) | `false` (default) |
+| Docker (`live-docker`) | `/dev/null:<path>:ro` bind / empty-dir bind after mounts | `true` | `true` |
+| `no_sandbox` / `FailClosed` | Not enforced | `false` (default) | `false` (default) |
+
+`confines_filesystem()` is the answer to "can a shell command write outside the
+workspace". It is reported by `wayland-core sandbox status` and is deliberately
+NOT the same field as `bypasses_containment`, which is session authority (only a
+Dangerous launch sets it) and reads `false` on the Windows default while a write
+still escapes. `wcore-cli/tests/sandbox_activeness.rs` performs the escape and
+fails if the outcome and the claim disagree in either direction. Nothing gates
+execution on `confines_filesystem()`; the gates remain `enforces_read_deny()`.
 
 On Windows the default is therefore the RELAXED row, and the `false` there is
 load-bearing rather than a gap left open: it is what makes `channel_tools.rs`
