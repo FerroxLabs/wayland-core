@@ -11,13 +11,15 @@ use crate::Tool;
 use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 use crate::path_validation::validate_user_path;
-use crate::unsaved_work::UnsavedWorkGuard;
+use crate::unsaved_work::{Mode, UnsavedWorkGuard, Verdict};
 
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
-    /// P2: session-scoped record of the user's unsaved work, so a
-    /// whole-file overwrite can never silently delete it.
-    unsaved: UnsavedWorkGuard,
+    /// INV-2: session-scoped record of the user's unsaved work, so a
+    /// whole-file overwrite can never silently delete it. Shared with the
+    /// Edit tool and with every sub-agent's tools, so one baseline and one
+    /// agent-authored set govern both write surfaces.
+    unsaved: Arc<UnsavedWorkGuard>,
 }
 
 impl WriteTool {
@@ -39,8 +41,19 @@ impl WriteTool {
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
         Self {
             file_cache,
-            unsaved: UnsavedWorkGuard::new(),
+            unsaved: UnsavedWorkGuard::shared(),
         }
+    }
+
+    /// Use `guard` instead of the process-wide one.
+    ///
+    /// The shared guard writes its recovery snapshots under the real profile
+    /// home, which a test process must never touch; a test hands in a guard
+    /// rooted in its own temporary directory. A host that runs several
+    /// independent sessions in one process can use it for the same reason.
+    pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
+        self.unsaved = guard;
+        self
     }
 }
 
@@ -58,8 +71,8 @@ impl Tool for WriteTool {
          - Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n\
          - Use Write only for creating new files or complete rewrites.\n\
          - A rewrite that would delete a line present on disk but absent from the \
-         file's last commit is refused: that is unsaved user work. Keep those lines \
-         or use Edit."
+         file's last commit is refused: that is unsaved user work. Reproduce those \
+         lines in the content you write."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -117,15 +130,26 @@ impl Tool for WriteTool {
         // exactly as it was. On a create there is nothing to lose, and
         // recording the empty baseline now is what keeps the agent's own later
         // rewrites of its own file free.
-        if existed {
-            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
-                return ToolResult {
-                    content: refusal,
-                    is_error: true,
-                };
-            }
+        let previous = if existed {
+            std::fs::read_to_string(path).unwrap_or_default()
         } else {
-            self.unsaved.observe(path);
+            String::new()
+        };
+        let mut unsaved_note = String::new();
+        if existed {
+            match self
+                .unsaved
+                .assess(path, file_path, &previous, content, Mode::Rewrite)
+            {
+                Verdict::Proceed => {}
+                Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+                Verdict::Refuse(refusal) => {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
+            }
         }
 
         // Create parent directories
@@ -162,11 +186,12 @@ impl Tool for WriteTool {
             if let Some(cache_arc) = &self.file_cache {
                 update_cache_after_write(cache_arc, path, content);
             }
+            self.unsaved.note_written(path, &previous, content);
 
             return ToolResult {
                 content: format!(
-                    "Updated {} (rename failed: {}, used direct write)",
-                    file_path, e
+                    "Updated {} (rename failed: {}, used direct write){}",
+                    file_path, e, unsaved_note
                 ),
                 is_error: false,
             };
@@ -175,11 +200,12 @@ impl Tool for WriteTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, content);
         }
+        self.unsaved.note_written(path, &previous, content);
 
         let line_count = content.lines().count();
         let action = if existed { "Updated" } else { "Created" };
         ToolResult {
-            content: format!("{} {} ({} lines)", action, file_path, line_count),
+            content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
             is_error: false,
         }
     }
@@ -217,19 +243,38 @@ impl Tool for WriteTool {
         let path = validated.as_path();
         let existed = ctx.vfs.exists(path).await.unwrap_or(false);
 
-        // P2: same unsaved-work refusal as the legacy path, before the write.
-        // Existence comes from the VFS, so a path the sandbox would reject
-        // never reaches the guard's reader — the sandbox denial, not a message
-        // quoting that file's lines, is the right answer there.
-        if existed {
-            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
-                return ToolResult {
-                    content: refusal,
-                    is_error: true,
-                };
-            }
+        // INV-2: same unsaved-work assessment as the legacy path, before the
+        // write. The pre-image is read back through the SAME vfs this call
+        // will write to, so a sandboxed sub-agent is judged against the bytes
+        // it can actually see rather than against the real filesystem. A path
+        // the sandbox would reject never reaches the guard at all — the
+        // sandbox denial, not a message quoting that file's lines, is the
+        // right answer there.
+        let previous = if existed {
+            ctx.vfs
+                .read(path)
+                .await
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_default()
         } else {
-            self.unsaved.observe(path);
+            String::new()
+        };
+        let mut unsaved_note = String::new();
+        if existed {
+            match self
+                .unsaved
+                .assess(path, file_path, &previous, content, Mode::Rewrite)
+            {
+                Verdict::Proceed => {}
+                Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+                Verdict::Refuse(refusal) => {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
+            }
         }
 
         // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
@@ -250,11 +295,12 @@ impl Tool for WriteTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, content);
         }
+        self.unsaved.note_written(path, &previous, content);
 
         let line_count = content.lines().count();
         let action = if existed { "Updated" } else { "Created" };
         ToolResult {
-            content: format!("{action} {file_path} ({line_count} lines)"),
+            content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
             is_error: false,
         }
     }
@@ -290,6 +336,16 @@ mod tests {
     use crate::file_cache::file_mtime_ms;
     use wcore_config::file_cache::FileCacheConfig;
 
+    /// A Write tool whose recovery snapshots land in a throwaway directory
+    /// rather than the real `~/.wayland`.
+    fn tool(cache: Option<Arc<RwLock<FileStateCache>>>) -> WriteTool {
+        WriteTool::new(cache).with_unsaved_guard(Arc::new(
+            crate::unsaved_work::UnsavedWorkGuard::with_snapshot_root(
+                std::env::temp_dir().join("wcore-tools-test-unsaved-snapshots"),
+            ),
+        ))
+    }
+
     fn make_cache() -> Arc<RwLock<FileStateCache>> {
         let config = FileCacheConfig {
             max_entries: 100,
@@ -311,7 +367,7 @@ mod tests {
             "content": "hello world"
         });
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
         let result = tool.execute(input).await;
 
         assert!(
@@ -333,7 +389,7 @@ mod tests {
             "content": "nested content"
         });
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
         let result = tool.execute(input).await;
 
         assert!(
@@ -356,7 +412,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("overwrite.txt");
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
 
         let input1 = json!({
             "file_path": file_path.to_str().unwrap(),
@@ -388,7 +444,7 @@ mod tests {
             "content": content
         });
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
         let result = tool.execute(input).await;
 
         assert!(
@@ -412,7 +468,7 @@ mod tests {
         let file_path = dir.path().join("cached.txt");
 
         let cache = make_cache();
-        let tool = WriteTool::new(Some(cache.clone()));
+        let tool = tool(Some(cache.clone()));
 
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
@@ -437,8 +493,12 @@ mod tests {
         let file_path = dir.path().join("write_edit.txt");
 
         let cache = make_cache();
-        let write_tool = WriteTool::new(Some(cache.clone()));
-        let edit_tool = crate::edit::EditTool::new(Some(cache));
+        let write_tool = tool(Some(cache.clone()));
+        let edit_tool = crate::edit::EditTool::new(Some(cache)).with_unsaved_guard(Arc::new(
+            crate::unsaved_work::UnsavedWorkGuard::with_snapshot_root(
+                std::env::temp_dir().join("wcore-tools-test-unsaved-snapshots"),
+            ),
+        ));
 
         // Write creates the file and populates cache.
         let write_input = json!({
@@ -468,7 +528,7 @@ mod tests {
         let file_path = dir.path().join("overwrite_cache.txt");
 
         let cache = make_cache();
-        let tool = WriteTool::new(Some(cache.clone()));
+        let tool = tool(Some(cache.clone()));
 
         // First write.
         let input1 = json!({

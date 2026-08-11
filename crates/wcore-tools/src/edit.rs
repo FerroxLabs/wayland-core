@@ -12,6 +12,7 @@ use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
 use crate::fuzzy_match::fuzzy_find_and_replace;
 use crate::path_validation::validate_user_path;
+use crate::unsaved_work::{Mode, UnsavedWorkGuard, Verdict};
 
 pub struct EditTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
@@ -21,6 +22,13 @@ pub struct EditTool {
     /// chain. Default `false` so existing behavior and error messages are
     /// byte-identical on the happy path.
     fuzzy_fallback: bool,
+    /// INV-2: the same guard the Write tool holds. Round 1 left Edit
+    /// unguarded and the refusal message recommended it; the live adversarial
+    /// arms measured the model routing straight there on the first refusal.
+    /// Edit is never refused (see the module docs — its removals are quoted
+    /// from disk, and refusing would make it unusable on a dirty tree), but a
+    /// removal of unrecorded content is snapshotted and reported.
+    unsaved: Arc<UnsavedWorkGuard>,
 }
 
 impl EditTool {
@@ -39,6 +47,7 @@ impl EditTool {
         Self {
             file_cache,
             fuzzy_fallback: false,
+            unsaved: UnsavedWorkGuard::shared(),
         }
     }
 
@@ -50,6 +59,13 @@ impl EditTool {
     /// signature stays back-compatible for every call site.
     pub fn with_fuzzy_fallback(mut self, enabled: bool) -> Self {
         self.fuzzy_fallback = enabled;
+        self
+    }
+
+    /// Use `guard` instead of the process-wide one. See
+    /// [`crate::write::WriteTool::with_unsaved_guard`].
+    pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
+        self.unsaved = guard;
         self
     }
 
@@ -274,6 +290,23 @@ impl Tool for EditTool {
                 }
             };
 
+        // INV-2: an Edit that removes content the pinned commit does not hold
+        // is durable-then-allowed, never silently lost and never refused.
+        let mut unsaved_note = String::new();
+        match self
+            .unsaved
+            .assess(path, file_path, &content, &new_content, Mode::Surgical)
+        {
+            Verdict::Proceed => {}
+            Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+            Verdict::Refuse(refusal) => {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        }
+
         if let Err(e) = wcore_config::atomic_write(path, new_content.as_bytes()) {
             return ToolResult {
                 content: format!("Failed to write file: {}", e),
@@ -285,11 +318,11 @@ impl Tool for EditTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, &new_content);
         }
+        self.unsaved.note_written(path, &content, &new_content);
 
         ToolResult {
             content: format!(
-                "Edited {}: replaced {} occurrence(s)",
-                file_path, match_count
+                "Edited {file_path}: replaced {match_count} occurrence(s){unsaved_note}"
             ),
             is_error: false,
         }
@@ -384,6 +417,24 @@ impl Tool for EditTool {
                 }
             };
 
+        // INV-2: identical assessment to the legacy path. `content` came from
+        // `ctx.vfs`, so the pre-image judged here is the one this call will
+        // replace.
+        let mut unsaved_note = String::new();
+        match self
+            .unsaved
+            .assess(path, file_path, &content, &new_content, Mode::Surgical)
+        {
+            Verdict::Proceed => {}
+            Verdict::ProceedWithSnapshot(note) => unsaved_note = note,
+            Verdict::Refuse(refusal) => {
+                return ToolResult {
+                    content: refusal,
+                    is_error: true,
+                };
+            }
+        }
+
         // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
         // actual write so an upstream FileWatcher can debounce its own
         // change event. See the matching block in WriteTool::execute_with_ctx.
@@ -401,9 +452,12 @@ impl Tool for EditTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, &new_content);
         }
+        self.unsaved.note_written(path, &content, &new_content);
 
         ToolResult {
-            content: format!("Edited {file_path}: replaced {match_count} occurrence(s)"),
+            content: format!(
+                "Edited {file_path}: replaced {match_count} occurrence(s){unsaved_note}"
+            ),
             is_error: false,
         }
     }
@@ -438,6 +492,16 @@ mod tests {
     use crate::file_cache::update_cache_after_write;
     use wcore_config::file_cache::FileCacheConfig;
 
+    /// An Edit tool whose recovery snapshots land in a throwaway directory
+    /// rather than the real `~/.wayland`.
+    fn tool(cache: Option<Arc<RwLock<FileStateCache>>>) -> EditTool {
+        EditTool::new(cache).with_unsaved_guard(Arc::new(
+            crate::unsaved_work::UnsavedWorkGuard::with_snapshot_root(
+                std::env::temp_dir().join("wcore-tools-test-unsaved-snapshots"),
+            ),
+        ))
+    }
+
     fn make_cache() -> Arc<RwLock<FileStateCache>> {
         let config = FileCacheConfig {
             max_entries: 100,
@@ -461,7 +525,7 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "hello world").unwrap();
 
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "hello",
@@ -495,7 +559,7 @@ mod tests {
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode(&edited), 0o755, "fixture did not take 0755");
 
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let result = tool
             .execute(json!({
                 "file_path": edited.to_str().unwrap(),
@@ -528,7 +592,7 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "hello world").unwrap();
 
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "nonexistent",
@@ -551,7 +615,7 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         std::fs::write(&file_path, "aaa\nbbb\nccc\n").unwrap();
 
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "bbb",
@@ -570,7 +634,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("does_not_exist.txt");
 
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "anything",
@@ -596,7 +660,7 @@ mod tests {
         std::fs::write(&file_path, "hello").unwrap();
 
         let cache = make_cache();
-        let tool = EditTool::new(Some(cache));
+        let tool = tool(Some(cache));
 
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
@@ -625,7 +689,7 @@ mod tests {
         let cache = make_cache();
         simulate_read(&cache, &file_path);
 
-        let tool = EditTool::new(Some(cache));
+        let tool = tool(Some(cache));
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "hello",
@@ -654,7 +718,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(&file_path, "externally changed").unwrap();
 
-        let tool = EditTool::new(Some(cache));
+        let tool = tool(Some(cache));
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "original",
@@ -680,7 +744,7 @@ mod tests {
         let cache = make_cache();
         simulate_read(&cache, &file_path);
 
-        let tool = EditTool::new(Some(cache));
+        let tool = tool(Some(cache));
 
         // First edit.
         let input1 = json!({
@@ -708,7 +772,7 @@ mod tests {
         let file_path = dir.path().join("nocache.txt");
         std::fs::write(&file_path, "hello").unwrap();
 
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "hello",
@@ -733,7 +797,7 @@ mod tests {
         // On-disk line has trailing whitespace the LLM-supplied old_string lacks.
         std::fs::write(&file_path, "def foo():   \n    pass\n").unwrap();
 
-        let tool = EditTool::new(None).with_fuzzy_fallback(true);
+        let tool = tool(None).with_fuzzy_fallback(true);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             // No EXACT match: the on-disk line has trailing spaces before the
@@ -765,7 +829,7 @@ mod tests {
         std::fs::write(&file_path, "def foo():   \n    pass\n").unwrap();
 
         // Default tool: fuzzy fallback OFF.
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             // Same real (whitespace) mismatch as the on-test: exact search can't
@@ -798,7 +862,7 @@ mod tests {
         let cache = make_cache();
         simulate_read(&cache, &file_path);
 
-        let tool = EditTool::new(Some(cache.clone()));
+        let tool = tool(Some(cache.clone()));
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
             "old_string": "a",
@@ -823,7 +887,7 @@ mod tests {
 
     #[test]
     fn compute_edit_matches_lf_pattern_against_crlf_file() {
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let content = "line one\r\nline two\r\nline three\r\n";
         // old_string as the Read tool would have shown it: LF-only.
         let (out, count) = tool
@@ -835,7 +899,7 @@ mod tests {
 
     #[test]
     fn compute_edit_lf_file_unaffected_by_crlf_retry() {
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let (out, count) = tool
             .compute_edit("a\nb\nc\n", "a\nb", "X\nY", false)
             .expect("LF happy path");
@@ -845,7 +909,7 @@ mod tests {
 
     #[test]
     fn compute_edit_crlf_missing_pattern_still_errors() {
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let err = tool
             .compute_edit("a\r\nb\r\n", "zzz\nyyy", "q", false)
             .expect_err("genuinely-absent pattern must still error");
@@ -854,7 +918,7 @@ mod tests {
 
     #[test]
     fn compute_edit_crlf_replace_all_multi() {
-        let tool = EditTool::new(None);
+        let tool = tool(None);
         let content = "x\r\ny\r\nx\r\ny\r\n";
         let (out, count) = tool
             .compute_edit(content, "x\ny", "p\nq", true)
