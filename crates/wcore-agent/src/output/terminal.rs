@@ -337,6 +337,15 @@ impl OutputSink for TerminalSink {
     /// stays in force for `ProtocolSink`, where the frame is machine-consumed
     /// and correlated to a `msg_id`.
     fn emit_durability_degraded(&self, msg: &str) {
+        // Zero times, not once, when config resolution already said it. That
+        // startup notice and this one report the SAME immutable host fact in
+        // two different wordings, and it reached the same stderr moments
+        // earlier — measured at 1,333 of a trivial run's 2,019 stderr bytes.
+        // The latch below still stands on its own for the paths that reach a
+        // turn without a resolution notice.
+        if wcore_config::config::replay_protection_notice_printed() {
+            return;
+        }
         if self
             .durability_degrade_announced
             .swap(true, Ordering::Relaxed)
