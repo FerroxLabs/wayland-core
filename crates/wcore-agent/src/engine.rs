@@ -6105,7 +6105,7 @@ impl AgentEngine {
         user_input: &str,
         additional_content: Vec<ContentBlock>,
     ) {
-        let mut content: Vec<ContentBlock> = Self::orphan_repair_results(self.messages.last());
+        let mut content: Vec<ContentBlock> = self.orphan_repair_results(self.messages.last());
         // Preserve legacy empty-text turns, but do not insert a meaningless
         // empty text block ahead of an image-only composer message.
         if !user_input.is_empty() || additional_content.is_empty() {
@@ -6174,22 +6174,64 @@ impl AgentEngine {
     /// and `save_session` (repair before persisting to disk, so a
     /// session inspector / export never reads an Anthropic-invalid
     /// `tool_use`-without-`tool_result` message).
-    fn orphan_repair_results(last: Option<&Message>) -> Vec<ContentBlock> {
-        match last {
-            Some(last) if matches!(last.role, Role::Assistant) => last
-                .content
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::ToolUse { id, .. } => Some(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: "Turn cancelled before this tool ran.".to_string(),
-                        is_error: true,
-                    }),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
+    fn orphan_repair_results(&self, last: Option<&Message>) -> Vec<ContentBlock> {
+        let Some(last) = last else {
+            return Vec::new();
+        };
+        if !matches!(last.role, Role::Assistant) {
+            return Vec::new();
         }
+        let ids = last
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let interrupted = self.interrupted_provider_call_ids();
+        ids.into_iter()
+            .map(|id| ContentBlock::ToolResult {
+                content: if interrupted.contains(&id) {
+                    crate::recovery::INTERRUPTED_TOOL_RESULT.to_string()
+                } else {
+                    "Turn cancelled before this tool ran.".to_string()
+                },
+                tool_use_id: id,
+                is_error: true,
+            })
+            .collect()
+    }
+
+    /// Provider call ids whose durable tool effect the journal records as
+    /// interrupted with an outcome nobody observed.
+    ///
+    /// Read from the journal rather than remembered in a field so it survives
+    /// the process that recorded it — the whole point is that the process died.
+    /// Only reached when a dangling `tool_use` actually needs repairing, which
+    /// is the crash/cancel path and not the per-turn one.
+    fn interrupted_provider_call_ids(&self) -> std::collections::BTreeSet<String> {
+        let Some(journal) = self.session_journal.as_ref() else {
+            return std::collections::BTreeSet::new();
+        };
+        let Ok(state) = journal.state() else {
+            return std::collections::BTreeSet::new();
+        };
+        state
+            .tools
+            .values()
+            .filter(|tool| match &tool.effect {
+                ToolEffectState::Running | ToolEffectState::Unknown { .. } => true,
+                ToolEffectState::Failed { error } => {
+                    error == crate::recovery::INTERRUPTED_EFFECT_UNOBSERVED
+                }
+                _ => false,
+            })
+            .map(|tool| tool.provider_call_id.clone())
+            .collect()
     }
 
     /// AUDIT D-6 — if `self.messages` ends with an assistant message
@@ -6198,7 +6240,7 @@ impl AgentEngine {
     /// in-memory message list is always a valid alternating shape.
     /// No-op when there is nothing to repair.
     fn repair_orphaned_tool_use(&mut self) {
-        let repairs = Self::orphan_repair_results(self.messages.last());
+        let repairs = self.orphan_repair_results(self.messages.last());
         if !repairs.is_empty() {
             self.messages.push(Message::now(Role::User, repairs));
         }
@@ -6266,12 +6308,16 @@ impl AgentEngine {
                 i += 1;
                 continue;
             }
+            let interrupted = self.interrupted_provider_call_ids();
             let synth: Vec<ContentBlock> = missing
                 .into_iter()
                 .map(|id| ContentBlock::ToolResult {
+                    content: if interrupted.contains(&id) {
+                        crate::recovery::INTERRUPTED_TOOL_RESULT.to_string()
+                    } else {
+                        "Tool result missing — backfilled before sending to provider.".to_string()
+                    },
                     tool_use_id: id,
-                    content: "Tool result missing — backfilled before sending to provider."
-                        .to_string(),
                     is_error: true,
                 })
                 .collect();
@@ -8190,6 +8236,292 @@ impl AgentEngine {
         })
         .await?;
         self.finish_budget_turn(turn_id)
+    }
+
+    /// Bring a crash-interrupted session back to a boundary a new user turn
+    /// can start from, without re-running or assuming the outcome of anything
+    /// that was in flight.
+    ///
+    /// [`Self::run_with_content`] fail-closes on an interrupted turn and names
+    /// three remedies — "resume, reconcile, or cancel". On the ordinary
+    /// `--continue` path none of them was reachable: nothing consulted the
+    /// recovery plan, `session reconcile` only *listed* the outstanding item,
+    /// and `session cancel` refused *because* that item was outstanding. A
+    /// killed job was therefore unresumable for the rest of the session's
+    /// life. That is job-corpus row `B-1`: ten kill boundaries, ten losses of
+    /// the work after the kill, and zero duplication anywhere.
+    ///
+    /// The invariant kept here is the one whose absence caused the loss: an
+    /// ATTEMPT is never promoted to a LANDED EFFECT, and neither is it demoted
+    /// to one that never happened. Every unobserved effect takes a terminal
+    /// receipt that records ignorance — `Unknown` then `Failed`, or
+    /// `Cancelled` — and the caller receives a description of exactly what was
+    /// in flight so the next turn can verify the world before repeating any of
+    /// it.
+    ///
+    /// Returns `None` when the session is already at a clean boundary.
+    pub async fn settle_interrupted_turn_for_resume(
+        &mut self,
+    ) -> Result<Option<crate::recovery::InterruptedTurnReport>, AgentError> {
+        if self.session_journal.is_none() {
+            return Ok(None);
+        }
+        let turn_id = match self.recovery_plan()?.disposition {
+            crate::recovery::RecoveryDisposition::Ready => return Ok(None),
+            crate::recovery::RecoveryDisposition::ContinueTurnStart { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::AwaitApproval { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
+        };
+        // Read the account of what was in flight BEFORE terminalizing it.
+        // Afterwards the journal records only that an outcome is unknown, not
+        // which operation it is unknown about.
+        let report = self.describe_interrupted_turn(&turn_id)?;
+        self.admit_unobserved_effects(&turn_id).await?;
+        self.abandon_nonterminal_hook_phases(&turn_id).await?;
+        let cursor = self.recovery_plan()?.cursor();
+        self.cancel_interrupted_turn(&turn_id, &cursor).await?;
+        Ok(Some(report))
+    }
+
+    /// Name every effect of `turn_id` whose outcome the interruption hid.
+    fn describe_interrupted_turn(
+        &self,
+        turn_id: &str,
+    ) -> Result<crate::recovery::InterruptedTurnReport, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let mut unobserved = Vec::new();
+        for (tool_execution_id, tool) in &state.tools {
+            if tool.turn_id != turn_id {
+                continue;
+            }
+            let phrase = match &tool.effect {
+                ToolEffectState::Running => "was still running when the process died",
+                ToolEffectState::Unknown { .. } => "ran and its outcome was never observed",
+                _ => continue,
+            };
+            unobserved.push(format!(
+                "tool call #{ordinal} `{tool}`{summary} {phrase} ({tool_execution_id})",
+                ordinal = tool.ordinal,
+                tool = tool.tool,
+                summary = crate::recovery::stored_input_summary(&tool.effective_input),
+            ));
+        }
+        for (attempt_id, attempt) in &state.provider_attempts {
+            if attempt.turn_id != turn_id || !matches!(attempt.effect, ExternalEffectState::Unknown)
+            {
+                continue;
+            }
+            unobserved.push(format!(
+                "the request to {provider} ({model}) was in flight and its reply never arrived \
+                 ({attempt_id})",
+                provider = attempt.provider,
+                model = attempt.model,
+            ));
+        }
+        Ok(crate::recovery::InterruptedTurnReport {
+            turn_id: turn_id.to_owned(),
+            user_message: state
+                .turns
+                .get(turn_id)
+                .map(|turn| turn.user_message.clone())
+                .unwrap_or_default(),
+            unobserved,
+        })
+    }
+
+    /// Write the honest terminal receipt for every effect of `turn_id` the
+    /// interruption left nonterminal.
+    ///
+    /// Nothing here observes anything. A tool that was RUNNING becomes
+    /// `Unknown` — the interruption the crash left implicit — and then resolves
+    /// `Failed` with an error that says the effect may have landed. A PREPARED
+    /// tool or attempt takes the not-started receipt the journal already proves
+    /// (there is no start event). An UNKNOWN provider attempt takes the
+    /// `Cancelled` completion the reducer accepts for an attempt with no
+    /// stream. None of these claims an outcome; each records that this process
+    /// never saw one.
+    ///
+    /// Children and deliveries are deliberately not admitted here: no measured
+    /// interruption has left one nonterminal, and inventing a receipt for a
+    /// class this routine has never seen fail would be a guess. If one is
+    /// outstanding, [`Self::cancel_interrupted_turn`] refuses and the caller
+    /// surfaces that refusal.
+    async fn admit_unobserved_effects(&self, turn_id: &str) -> Result<(), AgentError> {
+        let evidence = serde_json::json!({
+            "recovery": "resume_after_interruption",
+            "turn_id": turn_id,
+        });
+
+        for tool_execution_id in
+            self.turn_tools_in_state(turn_id, |effect| matches!(effect, ToolEffectState::Running))?
+        {
+            self.append_journal_event(SessionEvent::ToolExecutionUnknown {
+                tool_execution_id,
+                reason: ToolUnknownReason::Interrupted,
+                evidence: evidence.clone(),
+            })
+            .await?;
+        }
+
+        for tool_execution_id in self.turn_tools_in_state(turn_id, |effect| {
+            matches!(effect, ToolEffectState::Prepared)
+        })? {
+            self.append_journal_event(SessionEvent::ToolExecutionNotStarted {
+                tool_execution_id,
+                reason: ToolNotStartedReason::Cancelled {
+                    reason: "interrupted before durable tool start".to_string(),
+                },
+            })
+            .await?;
+        }
+
+        for tool_execution_id in self.turn_tools_in_state(turn_id, |effect| {
+            matches!(effect, ToolEffectState::Unknown { .. })
+        })? {
+            self.resolve_unknown_tool_effect(
+                tool_execution_id,
+                ToolResolution::Failed {
+                    error: crate::recovery::INTERRUPTED_EFFECT_UNOBSERVED.to_string(),
+                    result: Some(serde_json::json!({
+                        "content": crate::recovery::INTERRUPTED_EFFECT_UNOBSERVED,
+                        "is_error": true,
+                    })),
+                },
+                ToolResolutionSource::Reconciler {
+                    reconciler: crate::recovery::INTERRUPTION_ADMISSION_RECONCILER.to_string(),
+                },
+                evidence.clone(),
+            )?;
+        }
+
+        loop {
+            let journal = self.session_journal.as_ref().ok_or_else(|| {
+                AgentError::SessionAuthority("session journal is not initialized".to_string())
+            })?;
+            let state = journal
+                .state()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let Some((attempt_id, attempt)) =
+                state.provider_attempts.iter().find(|(_, attempt)| {
+                    attempt.turn_id == turn_id
+                        && matches!(
+                            attempt.effect,
+                            ExternalEffectState::Prepared | ExternalEffectState::Unknown
+                        )
+                })
+            else {
+                break;
+            };
+            let attempt_id = attempt_id.clone();
+            let dispatch_id = attempt.dispatch_id.clone();
+            let event = match (&attempt.effect, dispatch_id) {
+                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
+                    attempt_id,
+                    reason: ProviderAttemptNotStartedReason::Cancelled {
+                        reason: "interrupted before the request was dispatched".to_string(),
+                    },
+                },
+                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
+                    SessionEvent::ProviderAttemptNotStartedV2 {
+                        attempt_id,
+                        dispatch_id,
+                        reason: ProviderAttemptNotStartedReason::Cancelled {
+                            reason: "interrupted before the request was dispatched".to_string(),
+                        },
+                    }
+                }
+                (_, None) => SessionEvent::ProviderAttemptFinished {
+                    attempt_id,
+                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
+                    response_digest: None,
+                },
+                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id,
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
+                    response_digest: None,
+                },
+            };
+            self.append_journal_event(event).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Tool execution ids of `turn_id` whose durable effect matches `wanted`,
+    /// read from a fresh reduction so an append made by an earlier step of
+    /// recovery is already visible.
+    fn turn_tools_in_state(
+        &self,
+        turn_id: &str,
+        wanted: impl Fn(&ToolEffectState) -> bool,
+    ) -> Result<Vec<String>, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        Ok(state
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.turn_id == turn_id && wanted(&tool.effect))
+            .map(|(tool_execution_id, _)| tool_execution_id.clone())
+            .collect())
+    }
+
+    /// Close the interrupted turn's hook phases so the reducer will accept a
+    /// terminal transition for the turn.
+    ///
+    /// A hook phase is the engine's own bookkeeping about whether a hook's
+    /// outcome was applied — not an external effect anyone can have an opinion
+    /// about — and each takes the one terminal transition its state admits.
+    /// `AbandonedUnknown` stays nonterminal for *continuation*, so this closes
+    /// the turn without ever claiming a lost hook outcome was applied. Same
+    /// rule as [`crate::session_lifecycle::cancel`], which reaches this state
+    /// from outside a live engine.
+    async fn abandon_nonterminal_hook_phases(&self, turn_id: &str) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let events = state
+            .hook_phases
+            .iter()
+            .filter(|(_, phase)| phase.turn_id == turn_id)
+            .filter_map(|(hook_phase_id, phase)| match phase.state {
+                crate::session_journal::HookPhaseState::Prepared => {
+                    Some(SessionEvent::HookPhaseNotStarted {
+                        hook_phase_id: hook_phase_id.clone(),
+                        reason:
+                            crate::session_journal::HookPhaseNotStartedReason::CancelledBeforeStart,
+                    })
+                }
+                crate::session_journal::HookPhaseState::Started { .. }
+                | crate::session_journal::HookPhaseState::Finished { .. } => {
+                    Some(SessionEvent::HookPhaseAbandonedUnknown {
+                        hook_phase_id: hook_phase_id.clone(),
+                    })
+                }
+                crate::session_journal::HookPhaseState::NotStarted { .. }
+                | crate::session_journal::HookPhaseState::NotApplicable
+                | crate::session_journal::HookPhaseState::AbandonedUnknown
+                | crate::session_journal::HookPhaseState::Consumed { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        for event in events {
+            self.append_journal_event(event).await?;
+        }
+        Ok(())
     }
 
     /// Close every not-yet-started descendant before terminalizing a recovered
@@ -27209,6 +27541,267 @@ mod audit_2026_05_22_tests {
             } if evidence["recovery"] == "engine_startup"
         ));
         assert!(state.turns["interrupted-turn"].completion.is_none());
+    }
+
+    /// Build the durable state a real process-tree kill leaves behind: an
+    /// interrupted turn holding a RUNNING tool and a dispatched provider
+    /// attempt whose reply never arrived. Both shapes were measured by job
+    /// corpus row B-1 — `k*-before` produces the first, `k*-after` the second.
+    fn interrupted_turn_engine(
+        dir: &tempfile::TempDir,
+    ) -> (
+        super::AgentEngine,
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use crate::session_journal::{ProviderAttemptPurpose, SessionEvent, state_payload_digest};
+
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("b1000001"))
+            .unwrap();
+        active
+            .journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "book tonight's shipments".into(),
+            })
+            .unwrap();
+
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn");
+        let running = scope
+            .prepare_tool(
+                "provider-call-1",
+                0,
+                "Bash",
+                json!({"command": "curl -X POST /register"}),
+                json!({"command": "curl -X POST /register"}),
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+        let tool_execution_id = running.id().to_owned();
+        drop(running);
+        drop(scope);
+
+        active
+            .journal
+            .append(SessionEvent::ProviderAttemptPrepared {
+                attempt_id: "attempt-1".into(),
+                turn_id: "interrupted-turn".into(),
+                purpose: ProviderAttemptPurpose::Conversation,
+                provider: "test".into(),
+                model: "test-model".into(),
+                request_digest: state_payload_digest(&json!({"request": 1})).unwrap(),
+            })
+            .unwrap();
+        active
+            .journal
+            .append(SessionEvent::ProviderAttemptStarted {
+                attempt_id: "attempt-1".into(),
+            })
+            .unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        (engine, tool_execution_id, calls)
+    }
+
+    /// Job corpus B-1. A kill at any write boundary used to end the session's
+    /// useful life: `run` fail-closes on the interrupted turn, `session
+    /// reconcile` only lists the outstanding item and `session cancel` refuses
+    /// *because* it is outstanding, so `--continue` never stopped refusing.
+    /// Ten boundaries, ten losses, zero duplication.
+    ///
+    /// Resume must reach a clean boundary by itself — and must get there
+    /// without ever claiming the interrupted effect landed.
+    #[tokio::test]
+    async fn resume_settles_an_interrupted_turn_without_claiming_its_effect_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, tool_execution_id, calls) = interrupted_turn_engine(&dir);
+
+        // Red without the fix: a new message is refused here, for good.
+        assert!(!matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+
+        let report = engine
+            .settle_interrupted_turn_for_resume()
+            .await
+            .unwrap()
+            .expect("an interrupted turn must produce a report");
+        assert_eq!(report.turn_id, "interrupted-turn");
+        assert!(
+            report
+                .unobserved
+                .iter()
+                .any(|line| line.contains("Bash") && line.contains("still running")),
+            "the report must name the tool call that was in flight: {:?}",
+            report.unobserved
+        );
+        assert!(
+            report
+                .unobserved
+                .iter()
+                .any(|line| line.contains("test-model")),
+            "the report must name the provider request that was in flight: {:?}",
+            report.unobserved
+        );
+        let briefing = report.briefing();
+        assert!(
+            briefing.contains("Your FIRST action must be a read-only check")
+                && briefing.contains("not a result you already have from before the crash"),
+            "the briefing must order a FRESH check before anything with an effect: {briefing}"
+        );
+
+        // The point of the whole exercise: a new user turn can now start.
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(
+            matches!(
+                &state.tools[&tool_execution_id].effect,
+                crate::session_journal::ToolEffectState::Failed { error }
+                    if error == crate::recovery::INTERRUPTED_EFFECT_UNOBSERVED
+            ),
+            "an interrupted tool must terminalize as unobserved, never as succeeded and never \
+             as not-started: {:?}",
+            state.tools[&tool_execution_id].effect
+        );
+        assert!(
+            matches!(
+                &state.tools[&tool_execution_id].resolution_source,
+                Some(crate::session_journal::ToolResolutionSource::Reconciler { reconciler })
+                    if reconciler == crate::recovery::INTERRUPTION_ADMISSION_RECONCILER
+            ),
+            "the receipt must record that an interruption, not an observation, decided it"
+        );
+        assert!(
+            matches!(
+                state.provider_attempts["attempt-1"].effect,
+                crate::session_journal::ExternalEffectState::Completed {
+                    outcome: crate::session_journal::CompletionOutcome::Cancelled
+                }
+            ),
+            "an in-flight provider attempt takes the cancelled receipt: {:?}",
+            state.provider_attempts["attempt-1"].effect
+        );
+        assert_eq!(
+            state.turns["interrupted-turn"].completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "settling an interrupted turn must never dispatch to the provider"
+        );
+    }
+
+    /// The measured cause of the ONLY duplication B-1 has ever produced.
+    ///
+    /// A crash leaves the assistant's `tool_use` with no `tool_result`, and the
+    /// repair used to synthesise `"Turn cancelled before this tool ran."` for
+    /// it. For an interrupted call that sentence is false: the `curl -X POST
+    /// /register` HAD run and the shipment HAD been booked. Told it never ran,
+    /// the model re-ran it verbatim and the customer was billed twice.
+    #[tokio::test]
+    async fn an_interrupted_tool_call_is_never_reported_as_one_that_never_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, _tool_execution_id, _calls) = interrupted_turn_engine(&dir);
+        engine.settle_interrupted_turn_for_resume().await.unwrap();
+
+        engine.messages.push(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse {
+                    id: "provider-call-1".into(),
+                    name: "Bash".into(),
+                    input: json!({"command": "curl -X POST /register"}),
+                    extra: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "provider-call-never-dispatched".into(),
+                    name: "Bash".into(),
+                    input: json!({"command": "echo hi"}),
+                    extra: None,
+                },
+            ],
+        ));
+        engine.repair_orphaned_tool_use();
+
+        let repaired = engine.messages.last().unwrap();
+        assert!(matches!(repaired.role, Role::User));
+        let text_for = |wanted: &str| {
+            repaired
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } if tool_use_id == wanted => Some(content.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no repair for {wanted}"))
+        };
+        assert_eq!(
+            text_for("provider-call-1"),
+            crate::recovery::INTERRUPTED_TOOL_RESULT,
+            "an interrupted call must be reported as interrupted, outcome unknown"
+        );
+        assert!(
+            !text_for("provider-call-1").contains("before this tool ran"),
+            "the false 'never ran' claim is what caused the double booking"
+        );
+        assert_eq!(
+            text_for("provider-call-never-dispatched"),
+            "Turn cancelled before this tool ran.",
+            "a call the journal has no record of dispatching keeps the true cancelled text"
+        );
+    }
+
+    /// Settling is idempotent and never invents a report: a session already at
+    /// a clean boundary is left exactly as it was.
+    #[tokio::test]
+    async fn resume_settles_nothing_when_the_session_is_already_at_a_clean_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, _tool_execution_id, _calls) = interrupted_turn_engine(&dir);
+        engine
+            .settle_interrupted_turn_for_resume()
+            .await
+            .unwrap()
+            .expect("first settle reports the interruption");
+        let before = engine.session_journal.as_ref().unwrap().state().unwrap();
+
+        assert!(
+            engine
+                .settle_interrupted_turn_for_resume()
+                .await
+                .unwrap()
+                .is_none(),
+            "a session with no interrupted turn must report nothing to settle"
+        );
+        let after = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            before.last_seq, after.last_seq,
+            "a second settle must not append a single journal event"
+        );
     }
 
     struct RestartProofOpaqueTool {

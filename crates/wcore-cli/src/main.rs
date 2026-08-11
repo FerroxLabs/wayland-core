@@ -2173,6 +2173,46 @@ async fn run() -> anyhow::Result<ExitCode> {
     if resume.is_none() {
         engine.init_session(&provider_name, &cwd, cli.session_id.as_deref())?;
     }
+
+    // A resumed session may carry a turn a crash cut in half. Nothing on this
+    // path used to consult the recovery plan, so the next message hit
+    // `AgentEngine::run`'s fail-closed gate — and every remedy that gate names
+    // was unreachable from here (`session reconcile` only lists the item,
+    // `session cancel` refuses because it is outstanding), which left a killed
+    // job unresumable for the rest of its life. That is job corpus row B-1:
+    // ten kill boundaries, ten losses, zero duplication. Settle the
+    // interrupted turn first, say out loud what was in flight, and carry the
+    // same account into the model's next turn so it verifies the world instead
+    // of assuming it. The TUI and `--json-stream` paths return above this
+    // point and keep driving recovery through their own explicit surfaces.
+    let interruption_briefing = if resume.is_some() {
+        match engine.settle_interrupted_turn_for_resume().await {
+            Ok(Some(report)) => {
+                let briefing = report.briefing();
+                terminal.formatter().session_info(&briefing);
+                Some(briefing)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                output.emit_error(
+                    &format!(
+                        "the interrupted turn from the previous run could not be settled: {error}"
+                    ),
+                    false,
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // The briefing is part of what the model is asked this turn, not a note
+    // printed beside it: a resumed job that is never told it was interrupted
+    // has no reason to re-check anything.
+    let prompt = match &interruption_briefing {
+        Some(briefing) if !prompt.is_empty() => format!("{briefing}\n\n{prompt}"),
+        _ => prompt,
+    };
     // Move session-tier memory off the bootstrap "boot" DB onto the real
     // per-session file, now that the session id is known.
     engine.rebind_memory_session().await;
