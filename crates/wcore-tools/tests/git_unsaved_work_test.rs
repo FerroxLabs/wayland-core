@@ -348,7 +348,7 @@ async fn a_merge_resolution_is_stageable_even_though_head_has_never_seen_it() {
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
     git(&root, &["config", "commit.gpgsign", "false"]);
-    std::fs::write(&root.join("retry.py"), "def fetch():\n    return 1\n").unwrap();
+    std::fs::write(root.join("retry.py"), "def fetch():\n    return 1\n").unwrap();
     git(&root, &["add", "retry.py"]);
     git(&root, &["commit", "-qm", "base"]);
 
