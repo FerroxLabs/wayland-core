@@ -292,14 +292,179 @@ pub fn mcp_stdio_command_builder(command_line: &str) -> Command {
 /// ```
 pub fn shell_command_argv(program: &str, args: &[&str]) -> Command {
     let mut cmd = Command::new(program);
-    cmd.args(args);
+    push_argv(&mut cmd, program, args);
     cmd.kill_on_drop(true);
     cmd
+}
+
+/// True when `program` names `cmd.exe` as its exact FINAL PATH COMPONENT
+/// (case-insensitive, `.exe` optional).
+///
+/// Equality on the final component — not a suffix test — so `notcmd.exe` and
+/// `foocmd` do not match. Both `\` and `/` count as separators, which is what
+/// the Windows path parser does. Compiled on every target so the rule stays
+/// unit-testable from a Linux or macOS CI job.
+fn program_is_cmd(program: &str) -> bool {
+    let lowered = program.to_ascii_lowercase();
+    // `std::path::Path` only treats `/` as a separator when compiled for
+    // Windows, and this fn compiles everywhere, so split explicitly.
+    let final_component = lowered.rsplit(['\\', '/']).next().unwrap_or(&lowered);
+    final_component == "cmd" || final_component == "cmd.exe"
+}
+
+/// Index within `args` of the `cmd /C` (or `/K`) payload, if this argv is a
+/// `cmd.exe` invocation that has one. `args` excludes the program itself.
+///
+/// Returns `None` for every other shape — a non-`cmd` program, a `cmd`
+/// invocation with no `/c`/`/k`, or a `/c` that is the last entry — so
+/// ordinary argv keeps ordinary argv handling.
+fn cmd_payload_index(program: &str, args: &[&str]) -> Option<usize> {
+    if !program_is_cmd(program) {
+        return None;
+    }
+    let flag_idx = args.iter().position(|a| {
+        let flag = a.to_ascii_lowercase();
+        flag == "/c" || flag == "/k"
+    })?;
+    let payload_idx = flag_idx + 1;
+    (payload_idx < args.len()).then_some(payload_idx)
+}
+
+/// Append `args`, delivering a `cmd.exe` `/C`/`/K` payload the way cmd reads it.
+///
+/// ARGV MODE IS NOT ARGV FOR CMD'S PAYLOAD. Every Windows process receives one
+/// command-line string; `Command::arg` builds it with the MSVC-CRT /
+/// `CommandLineToArgvW` rules, which rewrite an embedded `"` as `\"`. `cmd.exe`
+/// does not parse its `/C` tail that way — it strips the outer quote pair and
+/// runs the remainder verbatim, with no backslash processing — so the `\` std
+/// inserted as an escape survives into the command cmd actually executes.
+///
+/// Measured on hosted-Windows CI run 31507873209: a goal worker argv of
+/// `["cmd", "/c", "echo %T% > \"%SINK%\\c.%RANDOM%\" & exit 91"]` reached cmd as
+/// `echo %T% > \"C:\...\c.123\" & exit 91`, whose redirect target begins with a
+/// literal `\"`. cmd answered *"The filename, directory name, or volume label
+/// syntax is incorrect"*, wrote no file, and still ran the trailing `exit 91` —
+/// so the worker reported a clean declared-no-effect exit for an effect that
+/// never happened. That silent-wrong-answer shape is why this is corrected in
+/// the helper rather than at each call site.
+///
+/// This is the same defect [`push_shell_command_line`] closed for the
+/// shell-STRING builders (#262/#263); `shell_command_argv` was the remaining
+/// hole, because an argv whose program is `cmd` still carries a shell payload.
+/// Quoting layer only: the payload is still exactly the one entry the caller
+/// supplied, never a `format!`-interpolated shell string, so argv discipline
+/// and the injection boundary are unchanged.
+///
+/// KNOWN REMAINING GAP: a payload containing CR/LF still truncates at the first
+/// line break, because cmd stops reading there.
+/// `wcore_sandbox::backends::windows_cmdline::reject_undeliverable_cmd_payload`
+/// refuses that case on the sandbox exec path; refusing here would have to
+/// change this fn's signature to `Result`, so it is tracked separately rather
+/// than half-done. The two cmd payload rules should be consolidated into this
+/// crate once that lands.
+fn push_argv(cmd: &mut Command, program: &str, args: &[&str]) {
+    let payload_idx = cmd_payload_index(program, args);
+    if payload_idx.is_none() {
+        cmd.args(args);
+        return;
+    }
+    for (idx, arg) in args.iter().enumerate() {
+        if Some(idx) == payload_idx {
+            push_cmd_payload(cmd, arg);
+        } else {
+            cmd.arg(arg);
+        }
+    }
+}
+
+/// Append a `cmd /C` payload as ONE outer double-quote pair with the payload's
+/// own quotes passed through untouched — the spelling cmd strips exactly.
+///
+/// `raw_arg` is `cfg(windows)`-gated in tokio, so the branch must be a
+/// compile-time `#[cfg]`, not a runtime `cfg!(windows)`. Off Windows this shape
+/// is unreachable in production (nothing spawns `cmd`), and the plain `arg`
+/// keeps the non-Windows build honest rather than silently adding quotes.
+fn push_cmd_payload(cmd: &mut Command, payload: &str) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut quoted = String::with_capacity(payload.len() + 2);
+        quoted.push('"');
+        quoted.push_str(payload);
+        quoted.push('"');
+        cmd.as_std_mut().raw_arg(quoted);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.arg(payload);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `cmd /C` payload rule fires on exactly the argv shape that carries a
+    /// shell payload, and on nothing else. If this ever matched an ordinary
+    /// program, that program's args would lose their CRT escaping.
+    #[test]
+    fn cmd_payload_is_recognised_only_in_a_real_cmd_invocation() {
+        // Recognised: bare, .exe, cased, path-qualified, both separators, /k.
+        assert_eq!(cmd_payload_index("cmd", &["/c", "echo hi"]), Some(1));
+        assert_eq!(cmd_payload_index("CMD.EXE", &["/C", "echo hi"]), Some(1));
+        // A program literally named "/k" is not cmd, flag position notwithstanding.
+        assert!(cmd_payload_index("/k", &["/k", "echo hi"]).is_none());
+        assert_eq!(cmd_payload_index("cmd", &["/k", "echo hi"]), Some(1));
+        assert_eq!(
+            cmd_payload_index(r"C:\Windows\System32\cmd.exe", &["/c", "echo hi"]),
+            Some(1)
+        );
+        assert_eq!(
+            cmd_payload_index("C:/Windows/cmd.exe", &["/c", "echo hi"]),
+            Some(1)
+        );
+
+        // NOT recognised — these must keep ordinary argv escaping.
+        assert_eq!(cmd_payload_index("git", &["/c", "echo hi"]), None);
+        assert_eq!(cmd_payload_index("notcmd.exe", &["/c", "echo hi"]), None);
+        assert_eq!(cmd_payload_index("foocmd", &["/c", "echo hi"]), None);
+        // A cmd invocation with no /c or /k carries no payload.
+        assert_eq!(cmd_payload_index("cmd", &["/q", "echo hi"]), None);
+        // A trailing /c has nothing after it — must not index past the end.
+        assert_eq!(cmd_payload_index("cmd", &["/c"]), None);
+        assert_eq!(cmd_payload_index("cmd", &[]), None);
+    }
+
+    /// The final-component equality that keeps `notcmd.exe` out.
+    #[test]
+    fn program_is_cmd_matches_the_final_component_only() {
+        assert!(program_is_cmd("cmd"));
+        assert!(program_is_cmd("cmd.exe"));
+        assert!(program_is_cmd("CmD.ExE"));
+        assert!(program_is_cmd(r"C:\Windows\System32\cmd.exe"));
+        assert!(!program_is_cmd("notcmd.exe"));
+        assert!(!program_is_cmd("cmdlet"));
+        assert!(!program_is_cmd(r"C:\bin\cmd.bat"));
+        assert!(!program_is_cmd(""));
+    }
+
+    /// THE PROPERTY the CI failure was: argv mode must not corrupt a quoted
+    /// redirect target in a cmd payload. Off Windows there is no raw command
+    /// line to inspect, so this asserts the classification that drives it —
+    /// the payload is the entry the caller supplied, at the index the rule
+    /// found, and the surrounding args are untouched.
+    #[test]
+    fn a_quoted_redirect_target_stays_the_callers_payload() {
+        let payload = r#"echo %T% > "%SINK%\c.%RANDOM%" & exit 91"#;
+        let args = ["/c", payload];
+        let idx = cmd_payload_index("cmd", &args).expect("cmd /c payload must be found");
+        assert_eq!(
+            args[idx], payload,
+            "the payload must reach the spawn layer byte-identical to what the caller wrote"
+        );
+        // The flag itself is an ordinary arg and must NOT be raw-appended.
+        assert_ne!(idx, 0);
+    }
 
     #[test]
     fn shell_info_returns_platform_appropriate_values() {
