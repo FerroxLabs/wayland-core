@@ -25,17 +25,36 @@ use super::policy::AgentEgressPolicy;
 ///   config-file-only off switch (C8); the operator accepts the exfiltration
 ///   risk. A loud warning is logged.
 pub fn policy_from_config(config: &Config) -> AgentEgressPolicy {
+    // One line per process, not one per constructed policy. The posture is a
+    // property of the installed GLOBAL chokepoint, and only the first policy
+    // built ever becomes that — `install_global_policy` is one-shot. A normal
+    // CLI launch builds two (main's `install_egress_policy`, then
+    // `AgentBootstrap`'s per-session policy), which wrote the identical
+    // "egress security ENFORCING" line to the diagnostics log twice, 118 µs
+    // apart, describing one decision.
+    //
+    // One `Once` PER POSTURE, not one shared between them: a process that
+    // builds an enforcing policy and later a disabled one has made two
+    // security-relevant decisions, and a single latch would silently drop
+    // whichever came second. Quieting a repeat must not be able to quiet a
+    // change.
+    static ENFORCING_ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    static DISABLED_ANNOUNCED: std::sync::Once = std::sync::Once::new();
     if config.security.enabled {
         let allow = build_allowlist(config);
-        tracing::info!(
-            allowlisted = allow.len(),
-            "egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked"
-        );
+        ENFORCING_ANNOUNCED.call_once(|| {
+            tracing::info!(
+                allowlisted = allow.len(),
+                "egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked"
+            );
+        });
         AgentEgressPolicy::enforcing(allow)
     } else {
-        tracing::warn!(
-            "egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated"
-        );
+        DISABLED_ANNOUNCED.call_once(|| {
+            tracing::warn!(
+                "egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated"
+            );
+        });
         AgentEgressPolicy::disabled()
     }
 }

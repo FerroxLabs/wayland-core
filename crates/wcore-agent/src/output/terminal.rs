@@ -69,6 +69,9 @@ pub struct TerminalSink {
     /// method's override below — the fact is a process property, not a turn
     /// property, so the human hears it once.
     durability_degrade_announced: AtomicBool,
+    /// The last error text this sink printed, for the restatement guard in
+    /// [`OutputSink::emit_error`].
+    last_error: Mutex<Option<String>>,
 }
 
 struct SpinnerHandle {
@@ -94,6 +97,7 @@ impl TerminalSink {
             wrote_text: AtomicBool::new(false),
             last_byte_newline: AtomicBool::new(false),
             durability_degrade_announced: AtomicBool::new(false),
+            last_error: Mutex::new(None),
         }
     }
 
@@ -317,7 +321,42 @@ impl OutputSink for TerminalSink {
         }
     }
 
+    /// Print the error, unless the user has just read it.
+    ///
+    /// One provider fault reaches this sink twice on the CLI path: the engine
+    /// reports the failure itself, then returns an `AgentError` and
+    /// `wcore_cli`'s `SlashOrRun::Engine(Err(e))` arm renders that too. Both
+    /// calls are correct in isolation — the engine's carries the retryable
+    /// flag a protocol host consumes, and the CLI's is what makes an error
+    /// from anywhere else visible at all — so neither can simply be deleted.
+    /// What a human reads is two `error:` lines for one fault, the second
+    /// stuttering ("API error: API error 500: …") and carrying no fact the
+    /// first did not.
+    ///
+    /// The rule is containment in EITHER direction, not equality: the second
+    /// render wraps the first in the `AgentError` Display prefix
+    /// (`"API error: " + text`), so the texts are never equal, and which of
+    /// the two is the longer depends on which layer added the prefix. One
+    /// error text wholly containing the other means the fault is already on
+    /// screen and the extra render adds only a wrapper. Only the immediately
+    /// preceding error is remembered — two identical faults separated by other
+    /// output are two events the user should see twice.
+    ///
+    /// Terminal-only, deliberately. `ProtocolSink` emits one frame per call
+    /// and a host correlates them by `msg_id`; suppressing a frame there would
+    /// change the protocol.
     fn emit_error(&self, msg: &str, _retryable: bool) {
+        {
+            let mut last = self.last_error.lock().unwrap();
+            if last
+                .as_deref()
+                .is_some_and(|prev| prev.contains(msg) || msg.contains(prev))
+            {
+                // Keep the text the user actually read as the reference point.
+                return;
+            }
+            *last = Some(msg.to_string());
+        }
         // Spec §3.2: error also tears down the thinking spinner.
         self.stop_thinking_spinner();
         self.first_delta_pending.store(false, Ordering::Release);
@@ -337,6 +376,15 @@ impl OutputSink for TerminalSink {
     /// stays in force for `ProtocolSink`, where the frame is machine-consumed
     /// and correlated to a `msg_id`.
     fn emit_durability_degraded(&self, msg: &str) {
+        // Zero times, not once, when config resolution already said it. That
+        // startup notice and this one report the SAME immutable host fact in
+        // two different wordings, and it reached the same stderr moments
+        // earlier — measured at 1,333 of a trivial run's 2,019 stderr bytes.
+        // The latch below still stands on its own for the paths that reach a
+        // turn without a resolution notice.
+        if wcore_config::config::replay_protection_notice_printed() {
+            return;
+        }
         if self
             .durability_degrade_announced
             .swap(true, Ordering::Relaxed)
@@ -358,6 +406,45 @@ mod tests {
         // first_delta_pending defaults to false; emit_text_delta without a
         // stream_start must not panic and must not call the marker.
         sink.emit_text_delta("hi", "m1");
+    }
+
+    /// One provider fault, two renders: the engine reports it, then the CLI
+    /// renders the returned `AgentError`, whose Display wraps the same text.
+    /// Measured on 0.12.26 as two `error:` lines for one expired key.
+    ///
+    /// Asserted on `last_error` rather than on captured output because the
+    /// formatter writes to the process's real stderr; the latch is what
+    /// decides, so it is what is checked. The end-to-end byte count is proved
+    /// against the built binary.
+    #[test]
+    fn a_wrapped_restatement_of_the_last_error_is_not_printed_again() {
+        let sink = TerminalSink::new(true);
+
+        OutputSink::emit_error(&sink, "boom: the key was rejected", false);
+        assert_eq!(
+            sink.last_error.lock().unwrap().as_deref(),
+            Some("boom: the key was rejected"),
+            "the first render is the one the user reads"
+        );
+
+        // The CLI's `{e:#}` render of the same fault: same payload, Display
+        // prefix in front.
+        OutputSink::emit_error(&sink, "API error: boom: the key was rejected", false);
+        assert_eq!(
+            sink.last_error.lock().unwrap().as_deref(),
+            Some("boom: the key was rejected"),
+            "a wrapped restatement must be suppressed, leaving the text the \
+             user actually read as the reference point"
+        );
+
+        // A genuinely different fault still gets through — without this the
+        // guard would be indistinguishable from "print at most one error".
+        OutputSink::emit_error(&sink, "a different failure entirely", false);
+        assert_eq!(
+            sink.last_error.lock().unwrap().as_deref(),
+            Some("a different failure entirely"),
+            "an unrelated error must still be printed"
+        );
     }
 
     #[test]

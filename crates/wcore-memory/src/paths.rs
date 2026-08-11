@@ -94,13 +94,56 @@ pub fn session_db_path(session_id: &str) -> Option<PathBuf> {
     )
 }
 
-/// Returns the project memory DB path under the project root:
-/// `<project_root>/.wayland-core/memory/memory.db`.
-pub fn project_db_path(project_root: &Path) -> PathBuf {
+/// Where the in-tree project memory DB used to live, and still does for any
+/// project that already has one: `<project_root>/.wayland-core/memory/memory.db`.
+///
+/// Public so a diagnostic surface can name the legacy location without
+/// re-deriving it, and so the resolver below has exactly one spelling of it.
+pub fn legacy_project_db_path(project_root: &Path) -> PathBuf {
     project_root
         .join(".wayland-core")
         .join("memory")
         .join("memory.db")
+}
+
+/// Returns the project memory DB path.
+///
+/// `<base>/projects/<sanitized_project_root>/memory/memory.db` — the user's own
+/// state directory, alongside the auto-memory files [`auto_memory_dir`] already
+/// keeps there for the same project — UNLESS the project already carries the
+/// legacy in-tree DB, in which case that one keeps being used.
+///
+/// # Why it moved out of the user's repository
+///
+/// It used to be unconditionally `<project_root>/.wayland-core/memory/memory.db`.
+/// Measured across a UAT: 8 of 8 project directories gained a 212,992-byte
+/// `memory.db`, including two whose runs failed before completing a single
+/// turn, and a TUI session added `-shm`/`-wal` beside it. In a git repository
+/// that is an untracked `.wayland-core/` in every `git status`, and the product
+/// writes no `.gitignore`. Agent state is per-user, not per-checkout: it does
+/// not belong to the repository, must not be committed by accident, and must
+/// not appear in a diff the user is trying to read.
+///
+/// # Why the legacy path is still honoured
+///
+/// A project that already has an in-tree DB has real memories in it. Silently
+/// resolving to a fresh empty file elsewhere would present as amnesia with no
+/// error to explain it, so an existing file wins. Nothing is moved or copied:
+/// the check is `exists()`, the file stays where its owner put it, and two
+/// binaries either side of this change agree on which file to open.
+///
+/// The fallback when no base directory resolves at all (no home, no
+/// `WCORE_MEMORY_DIR`) is the legacy path, which is what the previous
+/// behaviour was everywhere.
+pub fn project_db_path(project_root: &Path) -> PathBuf {
+    let legacy = legacy_project_db_path(project_root);
+    if legacy.exists() {
+        return legacy;
+    }
+    match auto_memory_dir(project_root) {
+        Some(dir) => dir.join("memory.db"),
+        None => legacy,
+    }
 }
 
 /// Returns the audit log DB path: `<base>/memory/audit.db`.

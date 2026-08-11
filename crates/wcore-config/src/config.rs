@@ -2999,7 +2999,41 @@ fn warn_replay_protection_unavailable_once() {
              descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To refuse to run this \
              way at all, set [session] require_durability = true."
         );
+        // AFTER the print, never before: a reader that saw the flag without
+        // the notice having reached stderr would suppress a message nobody
+        // had been given.
+        REPLAY_NOTICE_PRINTED.store(true, std::sync::atomic::Ordering::Release);
     });
+}
+
+/// Set once [`warn_replay_protection_unavailable_once`] has actually printed.
+static REPLAY_NOTICE_PRINTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Has the operator already been told, in prose on this process's stderr, that
+/// crash replay is off for this run?
+///
+/// [`replay_protection_unavailable`] answers the HOST question — can this host
+/// seal a request. This answers the REPORTING question, and the two are not the
+/// same: the host fact is true from the first `Config::resolve`, while the
+/// notice is printed by exactly one of them.
+///
+/// It exists because a second surface used to restate the same fact in its own
+/// words. The engine announces per turn through
+/// `OutputSink::emit_durability_degraded`, which a protocol host needs (its
+/// frame is machine-consumed and correlated to a `msg_id`) and a human does
+/// not. `TerminalSink` already suppressed its own repeats, but it could not see
+/// this notice, so a trivial headless run printed the same fact twice in two
+/// different wordings — measured at 1,333 of 2,019 stderr bytes, 66% of the
+/// whole run's stderr. The terminal sink now asks this before printing.
+///
+/// `Release`/`Acquire` rather than `Relaxed`: the store is sequenced after the
+/// `eprintln!`, and the pairing is what makes that ordering visible to another
+/// thread. A reader that observed the flag without observing the print would
+/// suppress a notice nobody had been given.
+#[must_use]
+pub fn replay_protection_notice_printed() -> bool {
+    REPLAY_NOTICE_PRINTED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Wave SD — path used by the plaintext credentials backend. Lives next

@@ -481,10 +481,10 @@ struct Cli {
     ///
     /// Accepts a skill NAME or a procedure UUID. The UUID form is what
     /// anyone who scripted the historical flag passes; the name form is
-    /// what `--skills-govern` prints. Reads and writes the project's
-    /// `.wayland-core/memory/memory.db`. Promotion is governed: the grant is
-    /// bound to a content digest, revoked artifacts are refused, and every
-    /// outcome is journalled.
+    /// what `--skills-govern` prints. Reads and writes this project's memory
+    /// DB (`wcore_memory::paths::project_db_path`). Promotion is governed:
+    /// the grant is bound to a content digest, revoked artifacts are refused,
+    /// and every outcome is journalled.
     #[arg(long, value_name = "SKILL_OR_PROCEDURE_ID")]
     skills_promote: Option<String>,
 
@@ -1821,15 +1821,22 @@ async fn run() -> anyhow::Result<ExitCode> {
             session_dir_config.session.max_sessions,
         );
         let sessions = session_mgr.list()?;
+        // The session table is this flag's ANSWER, not a diagnostic, so it goes
+        // to STDOUT. It used to go to stderr, which left
+        // `wayland-core --list-sessions | grep <id>` silently matching nothing
+        // while the table scrolled past on the terminal. `--list-agents` above
+        // already prints its answer to stdout, and so does the
+        // `session list` subcommand, whose doc comment recorded this flag as
+        // the outlier; it no longer is.
         if sessions.is_empty() {
-            eprintln!("No saved sessions.");
+            println!("No saved sessions.");
         } else {
-            eprintln!(
+            println!(
                 "{:<8} {:<12} {:<30} {:>5}  Summary",
                 "ID", "Date", "Model", "Msgs"
             );
             for s in &sessions {
-                eprintln!(
+                println!(
                     "{:<8} {:<12} {:<30} {:>5}  {}",
                     s.id,
                     s.created_at.format("%Y-%m-%d"),
