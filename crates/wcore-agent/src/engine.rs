@@ -6723,6 +6723,50 @@ impl AgentEngine {
     /// SAME unrecoverable context (the customer "can't recover in another chat"
     /// report). Skipping the save leaves the last recoverable on-disk state
     /// intact. Every other terminal path passes `true` (unchanged behavior).
+    /// Say on the ANSWER stream that the run stopped short.
+    ///
+    /// Every limit exit already logs a notice, but `emit_info` goes to
+    /// **stderr** (`output::mod.rs::session_info`), and `AgentResult.text` is
+    /// empty on this path. A one-shot `-p` run therefore hands its consumer a
+    /// stdout stream that ends mid-work and is indistinguishable from a
+    /// finished answer — the model's last narration reads as the reply.
+    /// Job-corpus row A-10 (survey 432c9a0f, video sub-case) is the measured
+    /// case: the run died on the turn cap one step before it had the answer,
+    /// stdout ended with "Let me examine them to find when the error first
+    /// appears.", and the grader scored that as a wrong answer rather than as
+    /// no answer.
+    ///
+    /// A wrong answer must become an admission. This is the admission, and it
+    /// goes where the answer went.
+    fn emit_terminated_run_admission(&self, turn: usize, stop_reason: StopReason) {
+        // `StopReason::MaxTurns` is the shared verdict for SEVERAL terminal
+        // guards - the turn cap, the runaway-loop breaker, the consecutive-
+        // failure breaker and the pre-send budget denial all land on it. Only
+        // the turn cap can be identified from here (`max_turns` is set and the
+        // counter reached it), so only the turn cap is NAMED. Measured why
+        // this matters: the first cut of this message said "hit its turn limit
+        // after 6 turns" for a run the failure-loop breaker had stopped at
+        // turn 6 of a 20-turn budget - a manufactured explanation, in the one
+        // sentence whose whole job is to stop the product manufacturing
+        // things.
+        let cause = match stop_reason {
+            StopReason::MaxTurns => match self.max_turns {
+                Some(limit) if turn >= limit => {
+                    format!("the run reached its turn limit of {limit}")
+                }
+                _ => format!("a run guard stopped it after {turn} turns"),
+            },
+            StopReason::MaxTokens => "the output limit of the model cut the reply off".to_string(),
+            _ => return,
+        };
+        let admission = format!(
+            "\n\n[stopped early] I did not finish this: {cause}. Anything above is \
+             partial work, not an answer."
+        );
+        self.output
+            .emit_text_delta(&admission, &self.current_msg_id);
+    }
+
     async fn finish_run_terminated_inner(
         &mut self,
         user_input: &str,
@@ -6744,6 +6788,7 @@ impl AgentEngine {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
         }
+        self.emit_terminated_run_admission(turn, stop_reason);
         self.fire_on_session_end(turn).await;
         self.cache_ledger.finish();
         if persist_session {

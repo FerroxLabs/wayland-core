@@ -110,11 +110,37 @@ pub async fn check_ffmpeg_available() -> bool {
 ///     argv.
 ///   * Canonicalizes the path and verifies the realpath lives under
 ///     one of the permitted prefixes ([`permitted_temp_root`],
-///     `~/Downloads/`, or `~/.wayland/videos/`). The verify-after-
-///     canonicalize order is the TOCTOU defense: a symlink that swaps
-///     target between check and use cannot smuggle the realpath out
-///     of the whitelist.
+///     `~/Downloads/`, `~/.wayland/videos/`, or the session workspace
+///     when the host supplied one). The verify-after-canonicalize
+///     order is the TOCTOU defense: a symlink that swaps target
+///     between check and use cannot smuggle the realpath out of the
+///     whitelist.
+///
+/// Convenience wrapper for callers with no workspace (the remote-download
+/// arm, which lands its tempfile inside [`permitted_temp_root`] by
+/// construction). Prefer [`validate_local_path_in`].
 pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
+    validate_local_path_in(raw, None)
+}
+
+/// [`validate_local_path`], plus the session workspace as a permitted root.
+///
+/// The whitelist without it refused **the file the user actually asked
+/// about**: a video committed in the repository the agent is running in is
+/// under neither `/tmp` nor `~/Downloads` nor `~/.wayland/videos`, so
+/// `video_analyze` answered every real request with
+/// "video path is outside permitted prefixes" and the model was pushed into
+/// copying media around by hand. Measured on job-corpus row A-10 (survey
+/// 432c9a0f): the refusal cost eight of the run's twenty turns and the run
+/// ended with no answer at all.
+///
+/// This is not a widening past the rest of the product: the workspace is the
+/// tree `Read` already serves under [`wcore_tools::vfs::SandboxedFs`], and
+/// `vision_analyze` already accepts any path clearing the shared
+/// `media_intake` validation. The ffmpeg-specific defenses above (protocol
+/// prefixes, leading `-`, canonicalize-then-verify) are untouched, and a path
+/// outside BOTH the temp roots and the workspace is still refused.
+pub fn validate_local_path_in(raw: &Path, workspace: Option<&Path>) -> Result<PathBuf, String> {
     let raw_str = raw
         .to_str()
         .ok_or_else(|| "video path is not valid UTF-8".to_string())?;
@@ -164,11 +190,17 @@ pub fn validate_local_path(raw: &Path) -> Result<PathBuf, String> {
             allowed.push(p);
         }
     }
+    if let Some(ws) = workspace
+        && let Ok(p) = std::fs::canonicalize(ws)
+    {
+        allowed.push(p);
+    }
 
     if !allowed.iter().any(|p| canonical.starts_with(p)) {
         return Err(format!(
-            "video path is outside permitted prefixes ({}, ~/Downloads/, ~/.wayland/videos/): {}",
+            "video path is outside permitted prefixes ({}, ~/Downloads/, ~/.wayland/videos/{}): {}",
             temp_root.display(),
+            workspace.map_or_else(String::new, |w| format!(", {}", w.display())),
             canonical.display()
         ));
     }
@@ -297,6 +329,9 @@ pub struct FfmpegFrameVideoBackend {
     vision: Arc<dyn VisionBackend>,
     /// Number of frames to extract. Defaults to [`DEFAULT_FRAME_COUNT`].
     frame_count: usize,
+    /// Session workspace, admitted as a permitted input root. `None` keeps
+    /// the pre-existing temp-only whitelist.
+    workspace: Option<PathBuf>,
 }
 
 impl FfmpegFrameVideoBackend {
@@ -305,7 +340,15 @@ impl FfmpegFrameVideoBackend {
         Self {
             vision,
             frame_count: DEFAULT_FRAME_COUNT,
+            workspace: None,
         }
+    }
+
+    /// Admit the session workspace as a permitted input root, so a video the
+    /// user keeps in their own project can be analysed at the path they named.
+    pub fn with_workspace_root(mut self, workspace: impl Into<PathBuf>) -> Self {
+        self.workspace = Some(workspace.into());
+        self
     }
 
     /// Override the default frame count (tests use this).
@@ -330,9 +373,8 @@ impl FfmpegFrameVideoBackend {
         // `None` for a `LocalFile` source.
         let mut _remote_guard: Option<tempfile::NamedTempFile> = None;
         let local = match &req.source {
-            VideoSource::LocalFile(p) => {
-                validate_local_path(p).map_err(VideoAnalysisError::Other)?
-            }
+            VideoSource::LocalFile(p) => validate_local_path_in(p, self.workspace.as_deref())
+                .map_err(VideoAnalysisError::Other)?,
             VideoSource::RemoteUrl(url) => {
                 let tmp = download_remote_video(url).await?;
                 let path = validate_local_path(tmp.path()).map_err(VideoAnalysisError::Other)?;
@@ -539,7 +581,7 @@ fn select_step(_frame_count: usize) -> usize {
 pub async fn build_video_analyze_backend(
     config: &wcore_config::config::Config,
 ) -> Option<Arc<dyn VideoAnalysisBackend>> {
-    build_video_analyze_backend_with_accounting(config, &MediaAccounting::default()).await
+    build_video_analyze_backend_with_accounting(config, &MediaAccounting::default(), None).await
 }
 
 /// [`build_video_analyze_backend`], with the session cost ledger bound.
@@ -550,9 +592,13 @@ pub async fn build_video_analyze_backend(
 /// so a single `video_analyze` tool call is nine billable provider calls. All
 /// nine were invisible to accounting. Binding the accounting here is what makes
 /// them nine visible rows rather than one invisible tool call.
+/// `workspace` is the session workspace, admitted as a permitted input root
+/// so the user's own files are analysable at the paths they name. `None`
+/// keeps the temp-only whitelist.
 pub async fn build_video_analyze_backend_with_accounting(
     config: &wcore_config::config::Config,
     accounting: &MediaAccounting,
+    workspace: Option<&Path>,
 ) -> Option<Arc<dyn VideoAnalysisBackend>> {
     if !check_ffmpeg_available().await {
         tracing::warn!(
@@ -562,7 +608,11 @@ pub async fn build_video_analyze_backend_with_accounting(
     }
     let vision = build_vision_backend_with_accounting(config, accounting)?;
     tracing::info!("video_analyze: ffmpeg + vision backend present — tool enabled");
-    Some(Arc::new(FfmpegFrameVideoBackend::new(vision)))
+    let backend = FfmpegFrameVideoBackend::new(vision);
+    Some(Arc::new(match workspace {
+        Some(ws) => backend.with_workspace_root(ws),
+        None => backend,
+    }))
 }
 
 // ---------------------------------------------------------------------
@@ -637,6 +687,123 @@ mod tests {
             err.contains("outside permitted prefixes"),
             "expected whitelist rejection, got: {err}"
         );
+    }
+
+    /// A directory that is NOT under any pre-existing permitted prefix.
+    ///
+    /// Deliberately not `tempfile::tempdir()`: on Linux that lands in `/tmp`,
+    /// which [`permitted_temp_root`] already whitelists, so a test built on it
+    /// would pass whatever the workspace arm did — the classic gate that
+    /// cannot fail. The crate directory is writable for the duration of
+    /// `cargo test` on every platform and is under none of the three
+    /// pre-existing roots.
+    fn dir_outside_every_permitted_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(".a10-video-path-test-")
+            .tempdir_in(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .expect("the crate directory is writable during cargo test")
+    }
+
+    /// Guards [`dir_outside_every_permitted_root`] itself: if the anchor ever
+    /// becomes a permitted root, every test built on it silently stops
+    /// testing anything.
+    #[test]
+    fn the_out_of_root_anchor_is_really_out_of_root() {
+        let dir = dir_outside_every_permitted_root();
+        let p = dir.path().join("anchor.mp4");
+        std::fs::write(&p, b"fake").unwrap();
+        let err = validate_local_path_in(&p, None)
+            .expect_err("the anchor must not already be a permitted root");
+        assert!(err.contains("outside permitted prefixes"), "got: {err}");
+    }
+
+    /// The defect job-corpus row A-10 caught: the user hands over a video
+    /// that lives in the repository the agent is running in, and the tool
+    /// refuses the path. Nothing about the temp whitelist made that file
+    /// unsafe — it is the same tree `Read` serves.
+    #[test]
+    fn video_accepts_a_file_in_the_session_workspace() {
+        let ws = dir_outside_every_permitted_root();
+        let media = ws.path().join("video");
+        std::fs::create_dir_all(&media).unwrap();
+        let p = media.join("checkout-api-incident.mp4");
+        std::fs::write(&p, b"fake").unwrap();
+
+        let refused = validate_local_path_in(&p, None)
+            .expect_err("without a workspace the temp-only whitelist must still refuse it");
+        assert!(
+            refused.contains("outside permitted prefixes"),
+            "got: {refused}"
+        );
+
+        let accepted = validate_local_path_in(&p, Some(ws.path()))
+            .expect("a file inside the session workspace must be accepted");
+        assert_eq!(
+            accepted,
+            std::fs::canonicalize(&p).unwrap(),
+            "the accepted path must be the canonicalized realpath"
+        );
+    }
+
+    /// The workspace arm admits the workspace and NOTHING else: a sibling
+    /// directory next to it, and an absolute system path, stay refused.
+    #[test]
+    fn workspace_arm_does_not_admit_paths_outside_the_workspace() {
+        let parent = dir_outside_every_permitted_root();
+        let ws = parent.path().join("ws");
+        let sibling = parent.path().join("not-ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let outside = sibling.join("secret.mp4");
+        std::fs::write(&outside, b"fake").unwrap();
+
+        let err = validate_local_path_in(&outside, Some(&ws)).unwrap_err();
+        assert!(
+            err.contains("outside permitted prefixes"),
+            "a sibling of the workspace must stay refused, got: {err}"
+        );
+
+        if Path::new("/etc/hosts").exists() {
+            let err = validate_local_path_in(Path::new("/etc/hosts"), Some(&ws)).unwrap_err();
+            assert!(
+                err.contains("outside permitted prefixes"),
+                "the workspace arm must not admit /etc/hosts, got: {err}"
+            );
+        }
+    }
+
+    /// A symlink planted inside the workspace that points outside it is
+    /// refused: the whitelist is checked against the REALPATH, so the
+    /// workspace arm cannot be used as a read-anything hole.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_arm_refuses_a_symlink_that_escapes_the_workspace() {
+        let parent = dir_outside_every_permitted_root();
+        let ws = parent.path().join("ws");
+        let outside_dir = parent.path().join("outside");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let real = outside_dir.join("real.mp4");
+        std::fs::write(&real, b"fake").unwrap();
+        let link = ws.join("innocent.mp4");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let err = validate_local_path_in(&link, Some(&ws))
+            .expect_err("a symlink whose realpath leaves the workspace must be refused");
+        assert!(err.contains("outside permitted prefixes"), "got: {err}");
+    }
+
+    /// The ffmpeg protocol/arg-injection defenses (S-H5) are unchanged by the
+    /// workspace arm — a workspace does not make `concat:` or a leading `-`
+    /// acceptable.
+    #[test]
+    fn workspace_arm_does_not_weaken_the_protocol_guards() {
+        let ws = dir_outside_every_permitted_root();
+        let err = validate_local_path_in(Path::new("concat:/etc/passwd|file.mp4"), Some(ws.path()))
+            .unwrap_err();
+        assert!(err.contains("concat:"), "got: {err}");
+        let err = validate_local_path_in(Path::new("-vf"), Some(ws.path())).unwrap_err();
+        assert!(err.contains("ffmpeg flag"), "got: {err}");
     }
 
     #[test]
