@@ -1509,6 +1509,62 @@ fn unserved_retry_backoff(attempt: u32) -> std::time::Duration {
         .min(UNSERVED_RETRY_BACKOFF_CAP)
 }
 
+/// Does this provider failure say, in words rather than in a status line, that
+/// the credential was rejected?
+///
+/// The transport code is not always the truth. Measured with an expired key
+/// against a FluxRouter-style gateway: the body carried
+/// `Authentication Error, Invalid proxy server token passed` while the HTTP
+/// status was a genuine 500, so [`is_http_4xx_error`] said "transient", the
+/// engine re-sent the identical rejected key twice, and the user read
+/// `API error 500` — which means "their outage, try later" — for what was
+/// "your key is wrong".
+///
+/// This classifies on the CONTENT signal and deliberately does not touch the
+/// reported status code. The product does not get to relabel a 500 as a 401;
+/// it gets to notice that a 500 body is an auth refusal and stop pretending
+/// another attempt might work.
+///
+/// The needles are the phrases auth refusals actually use, matched
+/// case-insensitively as substrings. They are all phrases about the CREDENTIAL:
+/// a bare "auth" or "token" would swallow "token limit exceeded" and
+/// "authorization header too large", which are not credential faults and are
+/// retryable.
+fn is_provider_auth_failure(reason: &str) -> bool {
+    const AUTH_NEEDLES: &[&str] = &[
+        "authentication error",
+        "authenticationerror",
+        "authentication_error",
+        "authentication failed",
+        "invalid authentication",
+        "invalid api key",
+        "invalid_api_key",
+        "incorrect api key",
+        "invalid proxy server token",
+        "invalid_token",
+        "expired api key",
+        "unauthorized",
+    ];
+    let lowered = reason.to_ascii_lowercase();
+    AUTH_NEEDLES.iter().any(|needle| lowered.contains(needle))
+}
+
+/// What to tell a user whose key was rejected.
+///
+/// Modelled on `wcore_config::config::MissingApiKey`, which is the best error
+/// this product emits: it names the exact command, the flag and the env vars
+/// rather than saying "check your credentials". The no-key case and the
+/// wrong-key case are the same problem one step apart and should read the same.
+///
+/// It says the fault is not retryable, because the previous behaviour visibly
+/// retried and a user who watched that happen needs to know it stopped on
+/// purpose.
+const AUTH_FAILURE_REMEDY: &str = "The provider rejected this API key — not retried, because an authentication \
+     failure fails identically on every attempt. Replace it with \
+     `wayland-core auth add <provider> <key>` (stored in the OS keyring or the \
+     encrypted vault), pass --api-key for a one-off, or set an environment \
+     variable (API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY).";
+
 fn is_http_4xx_error(reason: &str) -> bool {
     /// Returns true if the first 3 bytes of `s` are ASCII digits and
     /// the first digit is `4` — i.e. `s` starts with a literal 4xx
@@ -1904,6 +1960,64 @@ mod v0911_engine_recovery_tests {
             "provider stream closed before a Done event (truncated response)"
         ));
         assert!(!is_http_4xx_error("connection reset by peer"));
+    }
+
+    /// The measured fault: a gateway that reports an auth refusal in the body
+    /// under a genuine HTTP 500. Both halves are asserted, because the fix is
+    /// only correct if it classifies on the CONTENT — a change that simply
+    /// called every 500 non-retryable would satisfy the first line and break
+    /// real outage recovery, which the second line refuses.
+    #[test]
+    fn an_auth_refusal_under_a_500_is_a_client_error() {
+        let measured = "API error 500: {\"error\": {\"message\": \
+             \"litellm.AuthenticationError: AuthenticationError: OpenAIException - \
+             Authentication Error, Invalid proxy server token passed. key=5694939593c8.\"}}";
+        assert!(
+            is_provider_auth_failure(measured),
+            "an auth refusal must be recognised however it is transported"
+        );
+        assert!(
+            !is_http_4xx_error(measured),
+            "the status really is 500 — the fix must not depend on the code"
+        );
+    }
+
+    #[test]
+    fn auth_refusals_are_recognised_across_provider_wordings() {
+        for reason in [
+            "API error 401: invalid api key",
+            "API error 500: Authentication Error, Invalid proxy server token passed.",
+            "provider said: Incorrect API key provided",
+            "401 Unauthorized",
+            "{\"type\":\"authentication_error\"}",
+            "expired api key",
+        ] {
+            assert!(
+                is_provider_auth_failure(reason),
+                "must classify as an auth refusal: {reason}"
+            );
+        }
+    }
+
+    /// The needles are phrases about the CREDENTIAL. A transient 5xx, a
+    /// context-length fault and an oversized-header fault all contain "token"
+    /// or "auth" and must stay retryable — a looser matcher would turn every
+    /// provider outage into "your key is wrong" and stop retrying it.
+    #[test]
+    fn non_credential_faults_are_not_auth_refusals() {
+        for reason in [
+            "API error 500: internal server error",
+            "API error 503: service unavailable",
+            "API error 400: token limit exceeded for this model",
+            "authorization header too large",
+            "provider stream closed before a Done event (truncated response)",
+            "connection reset by peer",
+        ] {
+            assert!(
+                !is_provider_auth_failure(reason),
+                "must NOT be classified as an auth refusal: {reason}"
+            );
+        }
     }
 
     #[test]
@@ -12593,7 +12707,13 @@ impl AgentEngine {
                 // surfaced failure. Skip retry on any 4xx; preserve
                 // bounded retry for 5xx / truncated streams / network
                 // drops where the next attempt has a real chance.
-                let is_client_error = is_http_4xx_error(&reason);
+                // An auth refusal is a client error whatever status carried
+                // it. Without this, a gateway that reports "Authentication
+                // Error, Invalid proxy server token" under HTTP 500 gets the
+                // 5xx treatment: the identical rejected key is re-sent twice
+                // more, each send billed and each certain to fail.
+                let is_auth_failure = is_provider_auth_failure(&reason);
+                let is_client_error = is_http_4xx_error(&reason) || is_auth_failure;
                 // F11 owns retry admission at this layer. The provider call
                 // above runs under `scope_max_retries(0)`, so one engine
                 // attempt is exactly one physical send and one reservation.
@@ -12746,14 +12866,22 @@ impl AgentEngine {
                     );
                 }
                 self.save_session_mirror();
-                self.output.emit_error(
-                    &format!(
+                // Lead with the fault the user can act on. "Provider stream
+                // failed after retries: API error 500" reads as a provider
+                // outage; for an auth refusal it is the key that is wrong, the
+                // 500 is incidental, and there were no retries to speak of.
+                // The provider's own words are kept, in parentheses, because
+                // they are the evidence for the claim.
+                let final_error = if is_auth_failure {
+                    format!("{AUTH_FAILURE_REMEDY} The provider reported: {reason}")
+                } else {
+                    format!(
                         "Provider stream failed after retries: {reason}. The session has been \
                          saved — resume it to continue from here rather than starting over."
-                    ),
-                    !is_client_error,
-                );
-                return Err(AgentError::ApiError(reason));
+                    )
+                };
+                self.output.emit_error(&final_error, !is_client_error);
+                return Err(AgentError::ApiError(final_error));
             }
 
             self.total_usage.input_tokens += turn_usage.input_tokens;
