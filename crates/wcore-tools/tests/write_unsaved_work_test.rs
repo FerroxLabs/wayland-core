@@ -345,13 +345,35 @@ async fn editing_out_the_line_a_write_refusal_named_preserves_it_elsewhere() {
     assert!(refused.is_error);
 
     // `/root/adv-armB`, exactly: having been refused, delete the named line
-    // with Edit instead. That must no longer make the content unrecoverable.
-    let edited = ws
+    // with Edit instead. That route is now closed outright — a delete-only
+    // Edit of unsaved user lines refuses — so the arm first grades the close,
+    // then goes on to grade the copy on the shape Edit still has to allow.
+    let rerouted = ws
         .editor()
         .execute(json!({
             "file_path": file.to_str().unwrap(),
             "old_string": format!("{UNSAVED_LINE}\n"),
             "new_string": "",
+        }))
+        .await;
+    assert!(
+        rerouted.is_error,
+        "the delete-only reroute must be refused: {}",
+        rerouted.content
+    );
+    assert!(
+        ws.text("parser.py").contains(UNSAVED_LINE),
+        "a refused edit must leave the line where the user put it"
+    );
+
+    // The shape Edit cannot be refused for without becoming unusable on a
+    // dirty tree: rewriting the line rather than removing it.
+    let edited = ws
+        .editor()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(),
+            "old_string": UNSAVED_LINE,
+            "new_string": "# in-progress edit, reworded by the agent",
         }))
         .await;
     assert!(!edited.is_error, "got: {}", edited.content);
