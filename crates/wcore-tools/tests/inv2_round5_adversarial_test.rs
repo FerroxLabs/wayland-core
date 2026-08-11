@@ -17,6 +17,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tempfile::TempDir;
 use wcore_tools::Tool;
+use wcore_tools::edit::EditTool;
 use wcore_tools::unsaved_work::UnsavedWorkGuard;
 use wcore_tools::write::WriteTool;
 
@@ -606,6 +607,83 @@ async fn interleave(during: bool) -> (usize, usize, std::time::Duration) {
 }
 
 // ===========================================================================
+// The same window on the Edit path. Edit is never refused *by the guard*, but
+// a replacement computed against bytes that have since been replaced is not a
+// guard verdict — writing it would destroy whatever arrived, so it is refused
+// like any other stale write.
+// ===========================================================================
+#[tokio::test]
+async fn a_save_during_an_edit_is_not_lost() {
+    let warm = Ws::new();
+    let wfile = warm.root().join("draft.md");
+    std::fs::write(&wfile, "draft body\nOLD\n").unwrap();
+    let t0 = std::time::Instant::now();
+    let _ = EditTool::new(None)
+        .with_unsaved_guard(warm.guard.clone())
+        .execute(json!({
+            "file_path": wfile.to_str().unwrap(),
+            "old_string": "OLD",
+            "new_string": "NEW",
+        }))
+        .await;
+    let window = t0.elapsed();
+
+    let attempts = 12;
+    let mut lost = 0;
+    for i in 0..attempts {
+        let ws = Ws::new();
+        let root = ws.root();
+        std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        git(&root, &["add", "keep.txt"]);
+        git(&root, &["commit", "-qm", "init"]);
+        let file = root.join("draft.md");
+        std::fs::write(&file, "draft body\nOLD\n").unwrap();
+        let canary = format!("USER-SAVE-DURING-EDIT-{i}");
+
+        let f2 = file.clone();
+        let c2 = canary.clone();
+        let delay = window / 3;
+        let saver = std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            std::fs::write(&f2, format!("draft body\nOLD\n{c2}\n")).unwrap();
+        });
+        let r = EditTool::new(None)
+            .with_unsaved_guard(ws.guard.clone())
+            .execute(json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "OLD",
+                "new_string": "NEW",
+            }))
+            .await;
+        saver.join().unwrap();
+
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        let recoverable = r
+            .content
+            .split("cat-file blob ")
+            .nth(1)
+            .map(|s| s.split_whitespace().next().unwrap().to_owned())
+            .map(|oid| {
+                let o = Command::new("git")
+                    .args(["cat-file", "blob", &oid])
+                    .current_dir(&root)
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&o.stdout).into_owned()
+            })
+            .unwrap_or_default();
+        if !on_disk.contains(&canary) && !recoverable.contains(&canary) {
+            lost += 1;
+        }
+    }
+    println!("[edit] window {window:?}; {lost}/{attempts} saves destroyed");
+    assert_eq!(
+        lost, 0,
+        "an Edit overwrote a save that arrived while it was being checked"
+    );
+}
+
+// ===========================================================================
 // A9  git failing to resolve HEAD is not an unborn HEAD. Both land in a
 //     refusal for a file in a subdirectory, which is why round 4's suite
 //     could not tell them apart; at the repository root the unborn reading
@@ -620,7 +698,26 @@ async fn git_failing_to_resolve_head_is_not_an_unborn_head() {
     std::fs::write(&file, prior).unwrap();
     git(&root, &["add", "notes.txt"]);
     git(&root, &["commit", "-qm", "init"]);
-    std::fs::write(root.join(".git/HEAD"), "not a ref at all\n").unwrap();
+    // A corrupt packed-refs, which is the shape that discriminates: measured
+    // on git 2.43.0, `--is-inside-work-tree` and `--show-toplevel` both still
+    // succeed and only `rev-parse --verify --quiet HEAD` fails, with 128. A
+    // garbage `.git/HEAD` takes the repository down at the first command
+    // instead, so it refuses for a different reason and proves nothing here.
+    std::fs::write(
+        root.join(".git/packed-refs"),
+        "# pack-refs with: peeled fully-peeled sorted \nGARBAGE LINE\n",
+    )
+    .unwrap();
+    let control = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&control.stdout).trim(),
+        "true",
+        "control: git must still open this repository, or the arm is vacuous"
+    );
 
     let (err, msg) = write_via_tool(&ws, &file, "one\n").await;
     assert!(
@@ -686,10 +783,32 @@ async fn a_pre_image_that_is_not_text_is_refused_unless_the_commit_holds_it() {
         "the refusal must leave the bytes alone"
     );
 
-    // The one case that proves nothing is unsaved: the bytes on disk are
-    // exactly what the pinned commit records.
+    // Recorded, but not these bytes: the file has been changed since, and
+    // what changed cannot be read. Still refused.
     git(&root, &["add", "-f", "blob.bin"]);
     git(&root, &["commit", "-qm", "record the binary"]);
+    let moved: &[u8] = &[0x53, 0x45, 0x43, 0x52, 0x45, 0x54, 0xff, 0xfd, 0x0a];
+    std::fs::write(&file, moved).unwrap();
+    let ws_same = Ws::new();
+    let (err_m, msg_m) = {
+        let g = Arc::new(UnsavedWorkGuard::new_isolated());
+        let r = WriteTool::new(None)
+            .with_unsaved_guard(g)
+            .execute(json!({
+                "file_path": file.to_str().unwrap(), "content": "clobbered\n"
+            }))
+            .await;
+        (r.is_error, r.content)
+    };
+    drop(ws_same);
+    assert!(
+        err_m,
+        "bytes that differ from the commit were overwritten unread: {msg_m}"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), moved);
+
+    // The one case that proves nothing is unsaved: the bytes on disk are
+    // exactly what the pinned commit records.
     let ws2 = Ws::new();
     let file2 = ws2.root().join("blob.bin");
     // A fresh guard, but the same repository shape, so the pin includes it.

@@ -1554,6 +1554,41 @@ fn the_recovered_copy_is_the_prior_file_byte_for_byte() {
     );
 }
 
+/// R22. The pre-write re-read compares bytes, not lengths. A save that
+/// replaces a line with one of the same length is exactly the shape a length
+/// check would wave through, and no end-to-end arm can produce it reliably:
+/// the interleaving one measures a save that adds a line.
+#[test]
+fn the_pre_write_re_read_compares_bytes_and_not_lengths() {
+    let f = repo();
+    let judged = "TOKEN=aaaaaaaa\n";
+    let same_length = "TOKEN=bbbbbbbb\n";
+    assert_eq!(judged.len(), same_length.len());
+    let p = f.write("x.env", judged);
+
+    assert!(pre_image_unchanged(&p, Some(judged.as_bytes())).is_ok());
+
+    f.write("x.env", same_length);
+    let moved = pre_image_unchanged(&p, Some(judged.as_bytes()))
+        .expect_err("a same-length change is still a change");
+    assert!(moved.contains("changed on disk"), "{moved}");
+
+    // Deleted, and created underneath a create, are both changes too.
+    std::fs::remove_file(&p).unwrap();
+    assert!(
+        pre_image_unchanged(&p, Some(judged.as_bytes()))
+            .expect_err("deleted")
+            .contains("deleted")
+    );
+    assert!(pre_image_unchanged(&p, None).is_ok());
+    f.write("x.env", judged);
+    assert!(
+        pre_image_unchanged(&p, None)
+            .expect_err("created underneath")
+            .contains("created")
+    );
+}
+
 /// Bar 3. The note names the store git named, and the copy is in it. Round
 /// 4's first draft printed `<root>/.git/objects` unconditionally, which is a
 /// path that does not exist whenever `.git` is a file.
