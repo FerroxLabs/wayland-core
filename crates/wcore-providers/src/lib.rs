@@ -335,10 +335,21 @@ pub fn dump_response_chunk(debug: &DebugConfig, chunk: &str) {
 ///   degrades from refusal to a single guarded probe. Failing fast is a way
 ///   of getting to a fallback sooner, and with no fallback configured there
 ///   is nowhere to get to — all it buys is that a recoverable outage becomes
-///   a lost run. The anti-hammering half is kept intact: the probe is taken
-///   under `CooldownTracker`'s single-flight lease, so however many sessions
-///   or sub-agents share the tracker, exactly one request is in flight
-///   against the open circuit and the rest are refused.
+///   a lost run. The anti-hammering half is kept intact, but be precise about
+///   what it guarantees: the probe is taken under `CooldownTracker`'s
+///   single-flight lease, so however many sessions or sub-agents share the
+///   tracker, exactly one PERMIT is outstanding against the open circuit and
+///   every other caller is refused.
+///
+///   One permit is not necessarily one request. The retry ring inside the
+///   provider re-sends underneath the breaker, so a caller that has not
+///   scoped it down turns a single permit into several physical sends —
+///   measured through this constructor: 3. The engine path is one send per
+///   permit only because it wraps the call in
+///   `crate::retry::scope_max_retries(0)`; that is a property of that caller,
+///   not of this constructor. Callers that need one-send-per-permit must do
+///   the same. See
+///   `tests/adv_b2_default_install_test.rs::default_install_one_probe_permit_emits_more_than_one_physical_send`.
 ///
 /// With a real fallback chain (`ResilientProvider::new` called with
 /// candidates) the original E-H2 behaviour is unchanged in both cases.
