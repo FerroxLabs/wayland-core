@@ -12970,8 +12970,18 @@ impl AgentEngine {
                 self.output.emit_error(message, false);
             }
 
-            self.messages
-                .push(Message::now(Role::Assistant, assistant_content));
+            // …and do not COMMIT the empty turn either. The error above is the
+            // whole record of it; the turn produced no text, no thinking and no
+            // tool calls, so there is nothing to remember. Committing it pushes
+            // an assistant message with zero content blocks into `self.messages`
+            // — and therefore into the session journal, and from there into the
+            // `messages` array of every later request as an empty message body.
+            // A strict endpoint rejects that outright; a tolerant proxy repairs
+            // it in place and the repair reads back as the assistant speaking.
+            if !assistant_content.is_empty() {
+                self.messages
+                    .push(Message::now(Role::Assistant, assistant_content));
+            }
 
             // Fire on_turn_end after the assistant message is committed.
             // SwitchModel and InjectMessage apply to the NEXT turn (or are

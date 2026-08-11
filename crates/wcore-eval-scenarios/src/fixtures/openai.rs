@@ -80,6 +80,12 @@ pub enum OpenAiStep {
     StallBeforeHeaders {
         delay_ms: u64,
     },
+    /// HTTP 200 + a well-formed stream that reaches `[DONE]` carrying NO
+    /// content: no text delta, no tool call, no thinking. The wire shape an
+    /// OpenAI-compatible endpoint produces when the model emitted nothing.
+    /// Core must surface the dead-end and must NOT commit the empty turn to
+    /// the conversation.
+    EmptyResponse,
 }
 
 impl OpenAiStep {
@@ -98,6 +104,11 @@ impl OpenAiStep {
 
     pub fn http_error(status: u16) -> Self {
         Self::HttpError { status }
+    }
+
+    /// A 200 response that streams to `[DONE]` without a single content event.
+    pub fn empty_response() -> Self {
+        Self::EmptyResponse
     }
 
     pub fn rate_limited(retry_after_ms: u64) -> Self {
@@ -159,6 +170,7 @@ impl OpenAiStep {
             | Self::DuplicateText { .. }
             | Self::ToolCall { .. }
             | Self::TruncatedToolCall { .. }
+            | Self::EmptyResponse
             | Self::TextThenStall { .. } => None,
         }
     }
@@ -345,6 +357,7 @@ impl OpenAiFixtureScript {
                         )));
                     }
                 }
+                OpenAiStep::EmptyResponse => {}
             }
         }
         Ok(())
@@ -356,6 +369,11 @@ pub struct FixtureRequestRecord {
     pub sequence: u64,
     pub method: String,
     pub path: String,
+    /// `"<index>:<role>"` for every entry of the request's `messages` array
+    /// that arrived with an empty message body — `content` absent, null, or a
+    /// blank string — and no `tool_calls` to carry the turn instead. Records
+    /// the position and role only; no request content is retained.
+    pub empty_content_messages: Vec<String>,
     pub body_sha256: String,
     pub semantic_body_sha256: String,
     /// Per-leaf semantic hashes for diagnosing a repeatability mismatch
@@ -557,6 +575,7 @@ async fn handle_chat_completion(
             sequence,
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
+            empty_content_messages: empty_content_messages(&body),
             body_sha256,
             semantic_body_sha256,
             semantic_leaf_sha256,
@@ -617,11 +636,53 @@ async fn handle_chat_completion(
         OpenAiStep::TextThenStall { text, delay_ms } => {
             stalling_sse_response(text_delta_frame(&text), delay_ms)
         }
+        OpenAiStep::EmptyResponse => sse_response(empty_sse()),
         OpenAiStep::StallBeforeHeaders { delay_ms } => {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             sse_response(complete_text_sse("released", false, 7))
         }
     }
+}
+
+/// Positions of `messages` entries that carry an empty message body.
+///
+/// An entry counts as empty when it has no `tool_calls` to carry the turn AND
+/// its `content` is absent, null, or a string that is blank once trimmed. That
+/// is the shape a strict provider rejects and a tolerant proxy silently
+/// repairs, so it must never leave Core.
+fn empty_content_messages(body: &[u8]) -> Vec<String> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(messages) = value.get("messages").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            if message
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+            {
+                return false;
+            }
+            match message.get("content") {
+                None | Some(serde_json::Value::Null) => true,
+                Some(serde_json::Value::String(text)) => text.trim().is_empty(),
+                Some(serde_json::Value::Array(parts)) => parts.is_empty(),
+                Some(_) => false,
+            }
+        })
+        .map(|(index, message)| {
+            let role = message
+                .get("role")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            format!("{index}:{role}")
+        })
+        .collect()
 }
 
 fn semantic_leaf_hashes(
@@ -738,6 +799,33 @@ fn complete_text_sse(text: &str, duplicate: bool, prompt_tokens: u64) -> String 
     });
     let repeated = if duplicate { delta.as_str() } else { "" };
     format!("{delta}{repeated}data: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
+}
+
+/// A 200 stream that carries no content at all: the role chunk, a `stop`
+/// finish and `[DONE]`. Nothing in it produces a text, thinking or tool-call
+/// event.
+fn empty_sse() -> String {
+    let role = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
+    });
+    let finish = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 0,
+            "total_tokens": 7,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }
+    });
+    format!("data: {role}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
 fn tool_call_sse(id: &str, name: &str, arguments: &serde_json::Value) -> String {
