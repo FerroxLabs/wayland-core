@@ -172,6 +172,14 @@ async fn an_output_cap_truncation_is_not_reported_as_a_finished_run() {
         run.stderr
     );
     assert!(
+        !said.contains("unexpected_request"),
+        "the retry must be BOUNDED: the fixture scripts exactly two attempts \
+         and answers a third with HTTP 409, so a loop here would surface as \
+         `unexpected_request`; stdout={:?} stderr={:?}",
+        run.stdout,
+        run.stderr
+    );
+    assert!(
         !said.contains("may be incompatible"),
         "the endpoint is not incompatible — that diagnosis sends the user \
          down the wrong path; got stdout={:?} stderr={:?}",
