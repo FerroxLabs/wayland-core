@@ -10377,6 +10377,7 @@ dependencies = [
  "criterion",
  "csv",
  "dirs",
+ "dunce",
  "flate2",
  "futures",
  "glob",
