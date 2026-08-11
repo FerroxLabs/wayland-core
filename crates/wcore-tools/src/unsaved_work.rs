@@ -1557,6 +1557,40 @@ fn blob_oid(record: &str) -> Option<String> {
 
 /// `path` expressed the way a tree lookup wants it: relative to the repository
 /// root, forward-slashed, on every platform.
+/// The absolute root of the work tree holding `dir`, straight from git.
+///
+/// **Every path `git status --porcelain` and `git diff --name-only` print is
+/// relative to this, never to the directory git ran in.** Resolving one of
+/// them against `cwd` instead is not a cosmetic slip in a message: from
+/// `<root>/pkg`, a reported `pkg/a.txt` becomes `<root>/pkg/pkg/a.txt` and a
+/// reported `notes.txt` becomes `<root>/pkg/notes.txt` — both nonexistent, so
+/// every candidate reads as holding no unsaved work and the whole guard
+/// passes silently. `git add -A`, `git commit` and `git reset --hard` are all
+/// repository-wide from a subdirectory, so what that fail-open covers is the
+/// entire tree, not the subdirectory the session happens to be in.
+///
+/// Asked of git rather than inferred by walking up to a `.git` marker: a
+/// linked worktree, a submodule and a `.git` file all put the root somewhere a
+/// walk would guess wrong, and `rev-parse --show-toplevel` is the same source
+/// [`UnsavedWorkGuard::resolve_baseline`] already pins the baseline from.
+///
+/// `None` when git will not name a root. Every caller reads that as "nothing
+/// can be established here", which is the direction the rest of this module
+/// takes whenever git declines to answer.
+fn work_tree_root(dir: &Path) -> Option<PathBuf> {
+    let run = git_run(dir, &["rev-parse", "--show-toplevel"], None)?;
+    if !run.ok() {
+        return None;
+    }
+    let text = run.stdout_text();
+    let named = text.lines().next()?.trim();
+    if named.is_empty() {
+        return None;
+    }
+    let root = PathBuf::from(named);
+    Some(std::fs::canonicalize(&root).unwrap_or(root))
+}
+
 fn repo_relative(root: &Path, path: &Path) -> Option<String> {
     let root = std::fs::canonicalize(root).ok()?;
     let full = std::fs::canonicalize(path).ok()?;

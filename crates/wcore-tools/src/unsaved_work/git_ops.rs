@@ -70,7 +70,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Baseline, MAX_QUOTED_LINES, UnsavedWorkGuard, git_run, recorded_raw, repo_relative,
-    repository_marker_present, tally,
+    repository_marker_present, tally, work_tree_root,
 };
 
 /// Which paths an op is about to put into a commit.
@@ -93,21 +93,28 @@ pub fn staging_verdict(cwd: &Path, staging: Staging<'_>) -> Result<Option<String
     }
     let guard = UnsavedWorkGuard::shared();
     let named = matches!(staging, Staging::Named(_));
-    let candidates: Vec<PathBuf> = match staging {
+    let candidates: Vec<Candidate> = match staging {
         Staging::Everything => work_tree_paths(cwd, true),
-        Staging::Named(paths) => paths.iter().map(PathBuf::from).collect(),
+        // The caller's own paths, not git's output: `git add -- <p>` resolves
+        // them against `cwd` and so does this. They are the one candidate
+        // source that must NOT be resolved against the repository root.
+        Staging::Named(paths) => paths
+            .iter()
+            .map(|p| Candidate {
+                shown: p.clone(),
+                abs: cwd.join(p),
+            })
+            .collect(),
         Staging::Index => index_paths(cwd),
     };
 
     let incoming = incoming_heads(cwd);
     let mut refused: Vec<(String, Vec<String>)> = Vec::new();
     let mut noted: Vec<String> = Vec::new();
-    for rel in candidates {
-        let shown = rel.to_string_lossy().into_owned();
+    for Candidate { shown, abs } in candidates {
         if refused.iter().any(|(p, _)| *p == shown) || noted.contains(&shown) {
             continue;
         }
-        let abs = cwd.join(&rel);
         let unsaved = guard.unsaved_lines(&abs);
         if unsaved.is_empty() {
             continue;
@@ -166,8 +173,7 @@ pub fn stash_refusal(cwd: &Path) -> Option<String> {
     let guard = UnsavedWorkGuard::shared();
     let incoming = incoming_heads(cwd);
     let mut at_risk: Vec<(String, Vec<String>)> = Vec::new();
-    for rel in work_tree_paths(cwd, false) {
-        let abs = cwd.join(&rel);
+    for Candidate { shown, abs } in work_tree_paths(cwd, false) {
         let lines = guard.unsaved_lines(&abs);
         if lines.is_empty() {
             continue;
@@ -179,7 +185,7 @@ pub fn stash_refusal(cwd: &Path) -> Option<String> {
             None => lines,
         };
         if !remaining.is_empty() {
-            at_risk.push((rel.to_string_lossy().into_owned(), remaining));
+            at_risk.push((shown, remaining));
         }
     }
     if at_risk.is_empty() {
@@ -306,25 +312,67 @@ fn tally_owned(text: &str) -> HashMap<String, usize> {
         .collect()
 }
 
-/// Every path `git add -A` would pick up under `dir`.
-fn work_tree_paths(dir: &Path, include_untracked: bool) -> Vec<PathBuf> {
+/// One path an op is about to act on: how a message should name it, and
+/// where it actually is on disk.
+///
+/// The two are different strings whenever the session is not sitting in the
+/// repository root, and conflating them is the whole of the subdirectory
+/// fail-open [`work_tree_root`] documents.
+struct Candidate {
+    shown: String,
+    abs: PathBuf,
+}
+
+/// A path git reported, paired with where it really is.
+fn rooted(root: &Path, rel: &Path) -> Candidate {
+    Candidate {
+        shown: rel.to_string_lossy().into_owned(),
+        abs: root.join(rel),
+    }
+}
+
+/// Every path `git add -A` would pick up in the repository holding `dir`.
+///
+/// The repository's, not `dir`'s: `git add -A` and `git commit` from a
+/// subdirectory both reach the whole tree, so the whole tree is what has to be
+/// judged. Enumerated from the root and resolved against it, because that is
+/// what porcelain output is relative to — see [`work_tree_root`].
+fn work_tree_paths(dir: &Path, include_untracked: bool) -> Vec<Candidate> {
     let arg = if include_untracked {
         "--untracked-files=all"
     } else {
         "--untracked-files=no"
     };
-    let Some(run) = git_run(dir, &["status", "--porcelain", "-z", arg], None) else {
+    let Some(root) = work_tree_root(dir) else {
+        return Vec::new();
+    };
+    let Some(run) = git_run(&root, &["status", "--porcelain", "-z", arg], None) else {
         return Vec::new();
     };
     if !run.ok() {
         return Vec::new();
     }
     porcelain_paths(&run.stdout_text())
+        .iter()
+        .map(|rel| rooted(&root, rel))
+        .collect()
 }
 
 /// Every path in the index that `HEAD` does not already record identically.
-fn index_paths(dir: &Path) -> Vec<PathBuf> {
-    let Some(run) = git_run(dir, &["diff", "--cached", "--name-only", "-z"], None) else {
+///
+/// `--no-relative` is passed explicitly. It is the default, but `diff.relative`
+/// in the user's own config flips it, and a config that made this output
+/// cwd-relative would reopen the same fail-open from the opposite side — the
+/// paths would then be resolved against a root they are not relative to.
+fn index_paths(dir: &Path) -> Vec<Candidate> {
+    let Some(root) = work_tree_root(dir) else {
+        return Vec::new();
+    };
+    let Some(run) = git_run(
+        &root,
+        &["diff", "--cached", "--name-only", "--no-relative", "-z"],
+        None,
+    ) else {
         return Vec::new();
     };
     if !run.ok() {
@@ -333,7 +381,7 @@ fn index_paths(dir: &Path) -> Vec<PathBuf> {
     run.stdout_text()
         .split('\0')
         .filter(|f| !f.is_empty())
-        .map(PathBuf::from)
+        .map(|rel| rooted(&root, Path::new(rel)))
         .collect()
 }
 

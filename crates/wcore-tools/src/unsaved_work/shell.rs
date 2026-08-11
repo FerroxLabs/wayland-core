@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use super::git_ops::{files_under, ignored, quote_at_risk};
-use super::{UnsavedWorkGuard, git_run, repository_marker_present};
+use super::{UnsavedWorkGuard, git_run, repository_marker_present, work_tree_root};
 
 /// Git subcommands that throw away uncommitted changes in the work tree.
 ///
@@ -47,18 +47,26 @@ pub fn shell_refusal(command: &str, cwd: &Path) -> Option<String> {
     let mut at_risk: Vec<(String, Vec<String>)> = Vec::new();
     for segment in shell_segments(command) {
         if let Some((dir, paths)) = discarding_git_paths(&segment, cwd) {
-            let candidates = if paths.is_empty() {
+            let candidates: Vec<(String, PathBuf)> = if paths.is_empty() {
                 unsaved_work_tree_paths(&dir)
             } else {
+                // Pathspecs the caller typed, which git resolves against the
+                // directory it runs in — unlike anything git itself prints.
                 paths
+                    .into_iter()
+                    .map(|p| {
+                        let abs = dir.join(&p);
+                        (p, abs)
+                    })
+                    .collect()
             };
-            for rel in candidates {
-                if at_risk.iter().any(|(p, _)| *p == rel) {
+            for (shown, abs) in candidates {
+                if at_risk.iter().any(|(p, _)| *p == shown) {
                     continue;
                 }
-                let lines = guard.unsaved_lines(&dir.join(&rel));
+                let lines = guard.unsaved_lines(&abs);
                 if !lines.is_empty() {
-                    at_risk.push((rel, lines));
+                    at_risk.push((shown, lines));
                 }
             }
             continue;
@@ -276,15 +284,24 @@ fn discarding_git_paths(segment: &str, cwd: &Path) -> Option<(PathBuf, Vec<Strin
     Some((dir, paths))
 }
 
-/// Every tracked path under `dir` that git reports as modified.
+/// Every tracked path git reports as modified in the repository holding
+/// `dir`, paired with where each one actually is on disk.
 ///
 /// Used only when the command names no path and therefore reaches the whole
-/// work tree. Routed through [`git_run`] like every other git call here, so
-/// an ambient `GIT_DIR` or `GIT_WORK_TREE` cannot point the enumeration at a
-/// different tree than the one the guard then judges.
-fn unsaved_work_tree_paths(dir: &Path) -> Vec<String> {
+/// work tree — and that is the repository's work tree, not `dir`'s:
+/// `git -C pkg reset --hard` resets everything. The paths come back relative
+/// to the repository root, so they are enumerated from it and resolved against
+/// it; [`work_tree_root`] states what resolving them against `dir` costs.
+///
+/// Routed through [`git_run`] like every other git call here, so an ambient
+/// `GIT_DIR` or `GIT_WORK_TREE` cannot point the enumeration at a different
+/// tree than the one the guard then judges.
+fn unsaved_work_tree_paths(dir: &Path) -> Vec<(String, PathBuf)> {
+    let Some(root) = work_tree_root(dir) else {
+        return Vec::new();
+    };
     let Some(run) = git_run(
-        dir,
+        &root,
         &["status", "--porcelain", "-z", "--untracked-files=no"],
         None,
     ) else {
@@ -309,7 +326,7 @@ fn unsaved_work_tree_paths(dir: &Path) -> Vec<String> {
             fields.next();
         }
         if !path.is_empty() {
-            paths.push(path.to_owned());
+            paths.push((path.to_owned(), root.join(path)));
         }
     }
     paths
