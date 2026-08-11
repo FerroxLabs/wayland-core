@@ -1282,9 +1282,10 @@ mod output_sizing_tests {
 /// the retry loop fires as before. The cost of a missed 4xx is one
 /// extra retry; the cost of a false-positive 4xx is no retry on a
 /// transient failure. Bias toward the latter.
-/// True for the provider failure classes that mean NOTHING was served: the
-/// socket was refused, or it was established and then destroyed before a
-/// response head arrived.
+/// True for the provider failure classes that mean the request was never
+/// served: the socket was refused, or established and then destroyed before a
+/// response head arrived, or the provider answered "unavailable / overloaded"
+/// without running the model.
 ///
 /// These are the cheapest failures to retry — the provider answered nothing,
 /// so re-issuing the request re-sends context that was never consumed — and
@@ -1299,11 +1300,19 @@ mod output_sizing_tests {
 ///
 /// The codes come from `wcore_providers::retry::provider_failure_code` /
 /// `egress_failure_code`, not from message text: `connection` is a failure to
-/// establish, `transport` is a send-phase failure with no response. `timeout`
-/// and `stream_body` are deliberately excluded — a timeout may have been
-/// served slowly and `stream_body` means the body had already started.
-fn is_pre_response_transport_failure(failure_code: &str) -> bool {
-    matches!(failure_code, "connection" | "transport")
+/// establish, `transport` is a send-phase failure with no response, and
+/// `http_503` / `http_529` are the two statuses that mean "I did not do this
+/// work, come back in a moment".
+///
+/// Deliberately excluded: `timeout` (the provider may have been serving it
+/// slowly), `stream_body` (the body had already started), `http_429` (a rate
+/// limit carries its own `Retry-After` and is handled by that path), and every
+/// other 5xx (a 500 can follow partial generation that was billed).
+fn is_unserved_request_failure(failure_code: &str) -> bool {
+    matches!(
+        failure_code,
+        "connection" | "transport" | "http_503" | "http_529"
+    )
 }
 
 fn is_http_4xx_error(reason: &str) -> bool {
@@ -1704,20 +1713,23 @@ mod v0911_engine_recovery_tests {
     }
 
     #[test]
-    fn only_pre_response_transport_failures_get_the_larger_retry_budget() {
-        // Nothing was served: the cheapest class to retry, and the one row
-        // B-2 measured the product losing a whole job to.
-        assert!(is_pre_response_transport_failure("connection"));
-        assert!(is_pre_response_transport_failure("transport"));
-        // Served, or partly served, or not a transport failure at all —
-        // these keep MAX_STREAM_RETRIES because a re-send has a real cost.
-        assert!(!is_pre_response_transport_failure("stream_body"));
-        assert!(!is_pre_response_transport_failure("timeout"));
-        assert!(!is_pre_response_transport_failure("stream_truncated"));
-        assert!(!is_pre_response_transport_failure("http_500"));
-        assert!(!is_pre_response_transport_failure("http_429"));
-        assert!(!is_pre_response_transport_failure("egress_denied"));
-        assert!(!is_pre_response_transport_failure(""));
+    fn only_unserved_requests_get_the_larger_retry_budget() {
+        // The provider never did the work: the cheapest class to retry, and
+        // the one row B-2 measured the product losing whole jobs to.
+        assert!(is_unserved_request_failure("connection"));
+        assert!(is_unserved_request_failure("transport"));
+        assert!(is_unserved_request_failure("http_503"));
+        assert!(is_unserved_request_failure("http_529"));
+        // Served, or partly served, or handled by another path — these keep
+        // MAX_STREAM_RETRIES because a re-send has a real cost.
+        assert!(!is_unserved_request_failure("stream_body"));
+        assert!(!is_unserved_request_failure("timeout"));
+        assert!(!is_unserved_request_failure("stream_truncated"));
+        assert!(!is_unserved_request_failure("http_500"));
+        assert!(!is_unserved_request_failure("http_502"));
+        assert!(!is_unserved_request_failure("http_429"));
+        assert!(!is_unserved_request_failure("egress_denied"));
+        assert!(!is_unserved_request_failure(""));
     }
 
     #[test]
@@ -10302,10 +10314,10 @@ impl AgentEngine {
             // verdict (not the old silent "successful empty turn" that
             // poisoned the SkillRouter / auto-skill learning).
             const MAX_STREAM_RETRIES: u32 = 2;
-            // Failures that never received a response head get a larger
-            // budget — see `is_pre_response_transport_failure`. Linear
-            // backoff makes seven attempts span ~10.5 s.
-            const MAX_PRE_RESPONSE_STREAM_RETRIES: u32 = 6;
+            // Failures where the provider never did the work get a larger
+            // budget — see `is_unserved_request_failure`. Linear backoff
+            // makes seven attempts span ~10.5 s.
+            const MAX_UNSERVED_STREAM_RETRIES: u32 = 6;
             let mut assistant_text = String::new();
             let mut thinking_text = String::new();
             // C-4b — an opaque provider signature covering this turn's
@@ -11535,8 +11547,8 @@ impl AgentEngine {
                 // above runs under `scope_max_retries(0)`, so one engine
                 // attempt is exactly one physical send and one reservation.
                 // Keep the complete bounded engine retry budget here.
-                let stream_retry_budget = if is_pre_response_transport_failure(&failure_code) {
-                    MAX_PRE_RESPONSE_STREAM_RETRIES
+                let stream_retry_budget = if is_unserved_request_failure(&failure_code) {
+                    MAX_UNSERVED_STREAM_RETRIES
                 } else {
                     MAX_STREAM_RETRIES
                 };
