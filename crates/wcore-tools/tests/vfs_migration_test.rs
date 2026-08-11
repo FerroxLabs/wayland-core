@@ -290,11 +290,13 @@ async fn write_without_notifier_does_not_panic() {
 }
 
 #[tokio::test]
-async fn write_failure_still_marks_before_attempt() {
-    // The notify happens BEFORE the vfs write. If the write fails (e.g.
-    // outside-sandbox rejection), the mark is still recorded — that's
-    // fine because the FileWatcher's mark TTL prunes stale marks after
-    // DEBOUNCE. This test pins the "mark first, write after" order.
+async fn a_write_refused_before_it_starts_marks_nothing() {
+    // The mark exists so a FileWatcher can debounce a write this tool is
+    // about to make. It used to be emitted even for an out-of-sandbox path,
+    // because an unreadable pre-image was waved through and the containment
+    // rejection only arrived at the vfs write. INV-2 now refuses at the
+    // pre-image read — there is no write left to debounce, so nothing is
+    // marked. Pinned so the order cannot silently become "mark, then refuse".
     let tmp = tempfile::tempdir().expect("tempdir");
     let other = tempfile::tempdir().expect("other");
     let notifier = Arc::new(RecordingNotifier::default());
@@ -315,7 +317,13 @@ async fn write_failure_still_marks_before_attempt() {
         "write outside sandbox should fail, got: {}",
         result.content
     );
-    // Mark was emitted before the (failed) vfs write — pinned ordering.
-    let seen = n.seen.lock().clone();
-    assert_eq!(seen, vec![outside]);
+    assert!(
+        !tokio::fs::try_exists(&outside).await.unwrap_or(false),
+        "the refused write must not have landed"
+    );
+    assert!(
+        n.seen.lock().is_empty(),
+        "nothing is written, so nothing may be marked: {:?}",
+        n.seen.lock()
+    );
 }

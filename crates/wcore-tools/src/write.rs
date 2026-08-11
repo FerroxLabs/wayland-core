@@ -149,11 +149,18 @@ impl Tool for WriteTool {
         // file went `root:root 0600` -> `nobody:nogroup 0644`. Only a
         // definite "no such file" may produce an empty pre-image.
         let mut attributable = true;
+        // The exact bytes the assessment below is about to judge, re-checked
+        // immediately before the write lands (ADV-7).
+        let mut judged: Option<Vec<u8>> = None;
         let previous = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+            Ok(text) => {
+                judged = Some(text.as_bytes().to_vec());
+                text
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => {
                 let raw = std::fs::read(path).ok();
+                judged = raw.clone();
                 if let Verdict::Refuse(refusal) =
                     self.unsaved
                         .assess_opaque(path, file_path, raw.as_deref(), &e.to_string())
@@ -207,6 +214,18 @@ impl Tool for WriteTool {
         if let Err(e) = std::fs::write(&tmp_path, content) {
             return ToolResult {
                 content: format!("Failed to write file: {}", e),
+                is_error: true,
+            };
+        }
+
+        // ADV-7: the assessment took a measured 13.5 ms, and a save that
+        // landed inside it was destroyed uncopied while the note claimed the
+        // prior contents were preserved. Nothing older than this read is ever
+        // acted on.
+        if let Err(why) = crate::unsaved_work::pre_image_unchanged(path, judged.as_deref()) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return ToolResult {
+                content: crate::unsaved_work::changed_under_write(file_path, &why),
                 is_error: true,
             };
         }
@@ -308,11 +327,16 @@ impl Tool for WriteTool {
         // pre-image that the gate below waved through. Only the vfs saying
         // definitely "there is nothing here" may do that.
         let mut attributable = true;
+        let mut judged: Option<Vec<u8>> = None;
         let previous = match ctx.vfs.read(path).await {
             Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(text) => text,
+                Ok(text) => {
+                    judged = Some(text.as_bytes().to_vec());
+                    text
+                }
                 Err(e) => {
                     let raw = e.into_bytes();
+                    judged = Some(raw.clone());
                     if let Verdict::Refuse(refusal) = self.unsaved.assess_opaque(
                         path,
                         file_path,
@@ -369,6 +393,27 @@ impl Tool for WriteTool {
         // Skipped when no notifier is wired (the test-default case).
         if let Some(n) = ctx.file_write_notifier.as_ref() {
             n.note_self_originated_write(path).await;
+        }
+
+        // ADV-7, vfs side: same re-check, through the same vfs the write
+        // goes to.
+        let still = match ctx.vfs.read(path).await {
+            Ok(now) => match judged.as_deref() {
+                Some(before) if now == before => Ok(()),
+                Some(_) => Err("its contents changed on disk".to_owned()),
+                None => Err("something else created it".to_owned()),
+            },
+            Err(e) if judged.is_none() => match ctx.vfs.exists(path).await {
+                Ok(false) => Ok(()),
+                _ => Err(format!("it could no longer be read ({e})")),
+            },
+            Err(e) => Err(format!("it could no longer be read ({e})")),
+        };
+        if let Err(why) = still {
+            return ToolResult {
+                content: crate::unsaved_work::changed_under_write(file_path, &why),
+                is_error: true,
+            };
         }
 
         if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {

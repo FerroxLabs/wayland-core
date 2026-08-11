@@ -571,9 +571,10 @@ impl UnsavedWorkGuard {
     ) -> Verdict {
         let refuse = || {
             Verdict::Refuse(format!(
-                "Refused to overwrite {display_path}: its current contents could not be read as \
-                 text ({why}), so there is no way to tell whether any of them exist anywhere \
-                 else, and this write would destroy them. Nothing was changed."
+                "Refused to overwrite {display_path}: its current contents could not be read \
+                 ({why}), so there is no way to tell whether anything in them exists anywhere \
+                 else. Refused rather than write over contents this tool never saw. Nothing was \
+                 changed."
             ))
         };
         let Some(bytes) = on_disk else {
@@ -955,6 +956,48 @@ fn recorded_raw(root: &Path, commit: &str, rel: &str) -> Result<Option<Vec<u8>>,
         return Err(blob.why("git would not read the recorded contents"));
     }
     Ok(Some(blob.stdout))
+}
+
+/// Is the file at `path` still byte-for-byte the pre-image that was judged?
+/// `judged` is `None` when the assessment saw no file there at all.
+///
+/// ADV-7: the assessment between the pre-image read and the write runs about
+/// five `git` processes, a window measured at **13.5 ms**. With the user's
+/// editor saving inside it, 12 of 12 interleavings destroyed the save while
+/// the tool result claimed the previous contents had been preserved — the
+/// same save made *before* the call was protected 12 times out of 12, so that
+/// measured the product and not the harness.
+///
+/// The caller runs this immediately before the write lands and refuses if it
+/// fails. That narrows the window to the gap between this read and the
+/// rename; it does not close it, and nothing at this altitude can — closing it
+/// needs a lock the user's editor would have to take as well. What it does
+/// guarantee is that no assessment older than one syscall is ever acted on.
+pub fn pre_image_unchanged(path: &Path, judged: Option<&[u8]>) -> Result<(), String> {
+    match (std::fs::read(path), judged) {
+        (Ok(now), Some(before)) if now == before => Ok(()),
+        (Ok(_), Some(_)) => Err("its contents changed on disk".to_owned()),
+        (Ok(_), None) => Err("something else created it".to_owned()),
+        (Err(e), None) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        (Err(e), Some(_)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err("it was deleted".to_owned())
+        }
+        (Err(e), _) => Err(format!("it could no longer be read ({e})")),
+    }
+}
+
+/// The refusal for a pre-image that moved between the assessment and the
+/// write. Not a guard verdict: the content about to be written was chosen
+/// against bytes that are gone, so writing it would destroy whatever replaced
+/// them, whether or not any of it was recorded.
+pub fn changed_under_write(display_path: &str, why: &str) -> String {
+    format!(
+        "Refused to overwrite {display_path}: {why} while this write was being checked. The \
+         content about to be written was composed against contents that no longer exist, so \
+         writing it now would destroy whatever just arrived — most often the user saving in \
+         their editor. Nothing was changed. Read the file as it stands now and redo the change \
+         against that."
+    )
 }
 
 /// Is a repository plausibly present for `dir`, judged without asking git?

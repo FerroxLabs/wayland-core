@@ -307,6 +307,18 @@ impl Tool for EditTool {
             }
         }
 
+        // ADV-7: the assessment above spends real time in `git`, and Edit's
+        // own read is older still. A save that landed in between would be
+        // overwritten by a replacement computed against bytes that are gone.
+        if let Err(why) =
+            crate::unsaved_work::pre_image_unchanged(path, Some(content.as_bytes()))
+        {
+            return ToolResult {
+                content: crate::unsaved_work::changed_under_write(file_path, &why),
+                is_error: true,
+            };
+        }
+
         if let Err(e) = wcore_config::atomic_write(path, new_content.as_bytes()) {
             return ToolResult {
                 content: format!("Failed to write file: {}", e),
@@ -440,6 +452,20 @@ impl Tool for EditTool {
         // change event. See the matching block in WriteTool::execute_with_ctx.
         if let Some(n) = ctx.file_write_notifier.as_ref() {
             n.note_self_originated_write(path).await;
+        }
+
+        // ADV-7, vfs side.
+        match ctx.vfs.read(path).await {
+            Ok(now) if now == bytes => {}
+            _ => {
+                return ToolResult {
+                    content: crate::unsaved_work::changed_under_write(
+                        file_path,
+                        "its contents changed on disk",
+                    ),
+                    is_error: true,
+                };
+            }
         }
 
         if let Err(e) = ctx.vfs.write(path, new_content.as_bytes()).await {
