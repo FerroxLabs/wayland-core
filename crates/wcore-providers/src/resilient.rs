@@ -67,6 +67,21 @@ fn is_request_fatal(err: &ProviderError) -> bool {
     matches!(err, ProviderError::Api { status: 400, .. })
 }
 
+/// True when the circuit was opened because the provider was momentarily
+/// unavailable — it timed out, or it said it was overloaded.
+///
+/// Deliberately narrow. A cooldown entered because the request was REJECTED
+/// (bad credential, billing, unknown model) must keep refusing without
+/// sending: re-issuing it cannot succeed and every attempt costs a call. Only
+/// the "come back in a moment" reasons are worth an unprotected probe.
+fn cooldown_is_momentary(state: CooldownState) -> bool {
+    let reason = match state {
+        CooldownState::Cooling { reason, .. } | CooldownState::HalfOpen { reason } => reason,
+        CooldownState::Ready => return false,
+    };
+    matches!(reason, FailoverReason::Timeout | FailoverReason::Overloaded)
+}
+
 fn classify_error(err: &ProviderError) -> FailoverReason {
     let status = match err {
         ProviderError::Api { status, .. } => Some(*status),
@@ -365,7 +380,33 @@ impl LlmProvider for ResilientProvider {
         let mut receipt;
 
         let primary_state = self.health.state();
-        if let Some(permit) = self.health.try_acquire() {
+        let admission = self.health.try_acquire();
+        // A breaker exists to route traffic AWAY from a failing provider. With
+        // an empty fallback chain there is nowhere to route it, so refusing
+        // without sending cannot protect anything — it only converts a
+        // transient outage into a guaranteed failure that the caller's own
+        // bounded retry budget never gets to test. Job corpus row B-2 measured
+        // exactly that: three connection resets tripped the breaker, and every
+        // later attempt came back "primary circuit is open and no fallback is
+        // configured" while the provider had already healed. Attempt the
+        // primary anyway and let the caller decide when to stop; the tracker
+        // still records the verdict, so a success closes the circuit.
+        let unprotected_probe = admission.is_none()
+            && self.fallbacks.is_empty()
+            && cooldown_is_momentary(primary_state);
+        if unprotected_probe {
+            self.reporter.report(
+                &self.primary_name,
+                None,
+                CircuitState::Open,
+                Some("circuit open with no fallback configured; sending to the primary anyway"),
+            );
+        }
+        if let Some(permit) = admission.or(if unprotected_probe {
+            Some(CooldownPermit::HalfOpen)
+        } else {
+            None
+        }) {
             match crate::attempt_lifecycle::scope_provider_attempt_identity(
                 self.primary_name.clone(),
                 request.model.clone(),
@@ -1177,8 +1218,55 @@ mod tests {
         }
     }
 
+    /// A rejected request still refuses without sending once the circuit is
+    /// open: retrying a 403 cannot succeed and every attempt costs a call.
+    /// This is the guarantee the open circuit exists to provide when there is
+    /// no fallback, and it is unchanged.
     #[tokio::test]
-    async fn open_circuit_without_fallback_reports_that_no_request_was_attempted() {
+    async fn open_circuit_without_fallback_refuses_a_rejected_request() {
+        struct AlwaysForbidden;
+        #[async_trait]
+        impl LlmProvider for AlwaysForbidden {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::Api {
+                    status: 403,
+                    message: "forbidden".into(),
+                })
+            }
+        }
+
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysForbidden),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::Api { status: 403, .. })
+        ));
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::NotAttempted { .. })
+        ));
+    }
+
+    /// Job corpus row B-2: three connection resets tripped the breaker, and
+    /// every later attempt came back "not attempted" while the provider had
+    /// already healed — a momentary outage became a lost job. With no fallback
+    /// there is nowhere to route, so refusing protects nothing: send, and let
+    /// the caller's own bounded budget decide when to stop.
+    #[tokio::test]
+    async fn open_circuit_without_fallback_still_sends_after_a_momentary_outage() {
         let resilient = ResilientProvider::new(
             "primary",
             Arc::new(AlwaysFail),
@@ -1195,9 +1283,11 @@ mod tests {
             resilient.stream(&dummy_request()).await,
             Err(ProviderError::Connection(_))
         ));
+        // The circuit is open now. The second call must still reach the
+        // provider — the primary's own error, not a refusal to try.
         assert!(matches!(
             resilient.stream(&dummy_request()).await,
-            Err(ProviderError::NotAttempted { .. })
+            Err(ProviderError::Connection(_))
         ));
     }
 
