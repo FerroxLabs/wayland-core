@@ -38,6 +38,7 @@ use crate::session_journal::{
     ExternalEffectState, HookPhaseState, JournalError, ReducedSessionState, SessionEvent,
     SessionJournal, ToolEffectState, ToolResolution, ToolResolutionSource, TurnCompletion,
 };
+use wcore_types::tool::ToolEffectKind;
 
 /// Key under which a fork records its parent in [`Session::extra`].
 ///
@@ -75,8 +76,15 @@ pub enum SessionLifecycleError {
     },
     #[error("refused by session authority: {reason}")]
     RefusedByAuthority { reason: String },
-    #[error("session '{id}' has {count} outstanding reconcile item(s)")]
-    OutstandingReconcile { id: String, count: usize },
+    /// Carries the blocking items themselves, not just how many there are.
+    /// A count cannot be turned into a remedy, and the operator surface has to
+    /// print the exact command that clears each one — the defect this replaced
+    /// was a refusal that named no way out.
+    #[error("session '{id}' has {} outstanding reconcile item(s)", .items.len())]
+    OutstandingReconcile {
+        id: String,
+        items: Vec<ReconcileItem>,
+    },
     #[error("io error at '{path}': {source}")]
     Io {
         path: PathBuf,
@@ -179,6 +187,22 @@ pub struct SessionInspection {
     pub lineage_parent: Option<String>,
     pub retention: RetentionState,
     pub outstanding_reconcile: Vec<ReconcileItem>,
+}
+
+/// One blocker `cancel` settled without asking, and what settled it.
+#[derive(Debug, Clone)]
+pub struct AutoResolved {
+    pub item: ReconcileItem,
+    pub determined_by: DeterminedBy,
+}
+
+/// What [`cancel`] did. The auto-resolved list is reported rather than
+/// swallowed: the command wrote durable receipts, and an operator is entitled
+/// to see every one it wrote on their behalf.
+#[derive(Debug, Clone, Default)]
+pub struct CancelOutcome {
+    pub auto_resolved: Vec<AutoResolved>,
+    pub cancelled_turns: Vec<String>,
 }
 
 /// Result of [`fork`].
@@ -403,6 +427,182 @@ fn outstanding_items(state: &ReducedSessionState) -> Vec<ReconcileItem> {
     }
 
     items
+}
+
+/// Why one outstanding item needs no human judgement.
+///
+/// `reconcile --resolve` used to take `--as-outcome not-started` BY DEFAULT,
+/// which asks the operator whether an effect landed — precisely the thing they
+/// are reporting they do not know — and then silently answered it for them.
+/// Two of the three common shapes do not need the question asked at all, and
+/// the journal is where the answer already is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeterminedBy {
+    /// The reducer's own state fixes the receipt. A PREPARED provider attempt
+    /// was never dispatched; an UNKNOWN one was dispatched and its outcome was
+    /// never observed. `reconcile_resolve` has always ignored `--as-outcome`
+    /// for this class — the flag was decoration over a decision the journal
+    /// had already made.
+    ProviderAttemptState,
+    /// The tool itself declared [`ToolEffectKind::RepeatSafe`]: by its own
+    /// contract the invocation cannot have created an external effect, so
+    /// there is no landed effect for anyone to have an opinion about.
+    RepeatSafeContract,
+}
+
+impl DeterminedBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeterminedBy::ProviderAttemptState => "provider_attempt_state",
+            DeterminedBy::RepeatSafeContract => "repeat_safe_effect_contract",
+        }
+    }
+}
+
+/// Who decided one resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionAuthority {
+    /// A human asserted it with an explicit `--as-outcome`.
+    Operator(OperatorResolution),
+    /// The product read it out of the journal — see [`DeterminedBy`].
+    Journal(DeterminedBy),
+}
+
+/// The refusal shown when the product genuinely cannot tell what happened.
+///
+/// This is the branch that must not fake certainty. It names why the answer is
+/// unavailable, and then spells out what each disposition COMMITS the session
+/// to, so the operator is guessing with the consequences in front of them
+/// rather than picking a word.
+fn unanswerable_reason(item: &ReconcileItem) -> String {
+    format!(
+        "the journal cannot tell whether the effect of `{tool}` ({id}) landed. It was \
+         interrupted in state {state}, its effect contract is `opaque` — no receipt to \
+         re-read, and repeating it is not safe — so only you can say what happened. Re-run \
+         with an explicit disposition:\n  \
+         --as-outcome not-started   the work never began; nothing it would have changed was \
+         changed. The turn records no result and nothing re-runs it.\n  \
+         --as-outcome succeeded     the work completed. The turn records success with a NULL \
+         result — no output is invented — and nothing re-runs it.\n  \
+         --as-outcome failed        the work began and failed. The turn records the failure.\n\
+         All three are durable and a later resume will not revisit them, so if you cannot \
+         tell, inspect the workspace before choosing",
+        tool = item.tool,
+        id = item.tool_execution_id,
+        state = item.reason,
+    )
+}
+
+/// Can the product settle this item from the journal alone?
+///
+/// `None` means it genuinely cannot, and the honest response is to say so and
+/// ask — never to pick a default. The one class that reaches `None` in
+/// practice is a tool whose effect contract is `Opaque` (`Bash`, `Write`,
+/// `Edit`): the journal records that the tool STARTED and nothing after it,
+/// there is no receipt to compare, and repeating it is not safe. No amount of
+/// reading the journal turns that into knowledge.
+pub fn determined_disposition(
+    state: &ReducedSessionState,
+    item: &ReconcileItem,
+) -> Option<DeterminedBy> {
+    if !item.operator_resolvable {
+        return None;
+    }
+    match item.kind {
+        ReconcileKind::ProviderAttempt => Some(DeterminedBy::ProviderAttemptState),
+        ReconcileKind::ToolExecution => {
+            let tool = state.tools.get(&item.tool_execution_id)?;
+            (tool.effect_contract.kind == ToolEffectKind::RepeatSafe)
+                .then_some(DeterminedBy::RepeatSafeContract)
+        }
+        _ => None,
+    }
+}
+
+/// The interruption a crash left implicit, recorded before any receipt.
+///
+/// The journal's last word on a crashed tool is `Running`, and only `Unknown`
+/// accepts a resolution. This asserts nothing about the outcome — it is an
+/// admission of ignorance, and the exclusive writer lease the caller holds is
+/// the proof that no engine still owns the execution.
+fn record_tool_interruption(
+    journal: &SessionJournal,
+    state: &ReducedSessionState,
+    path: &std::path::Path,
+    tool_execution_id: &str,
+    recorded_by: &str,
+) -> Result<()> {
+    if !matches!(
+        state.tools.get(tool_execution_id).map(|tool| &tool.effect),
+        Some(ToolEffectState::Running)
+    ) {
+        return Ok(());
+    }
+    journal
+        .append(SessionEvent::ToolExecutionUnknown {
+            tool_execution_id: tool_execution_id.to_owned(),
+            reason: crate::session_journal::ToolUnknownReason::Interrupted,
+            evidence: serde_json::json!({
+                "recovery": "wayland-core session reconcile",
+                "prior_state": "running",
+                "operator_id": recorded_by,
+            }),
+        })
+        .map(|_| ())
+        .map_err(|source| SessionLifecycleError::Journal {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+/// The terminal receipt a crashed provider attempt takes, decided by the state
+/// the crash left rather than by anyone's opinion.
+///
+/// NOTE the fidelity limit, recorded rather than hidden: unlike
+/// `ToolExecutionResolved`, the provider-attempt receipts carry no `source`
+/// field, so the journal does not record who asserted this outcome. Filed as
+/// 23B-M3.
+fn provider_attempt_receipt(
+    state: &ReducedSessionState,
+    id: &str,
+    attempt_id: &str,
+    reason: &str,
+) -> Result<SessionEvent> {
+    let attempt =
+        state
+            .provider_attempts
+            .get(attempt_id)
+            .ok_or_else(|| SessionLifecycleError::NotFound {
+                id: format!("{id}/{attempt_id}"),
+            })?;
+    Ok(match (&attempt.effect, attempt.dispatch_id.as_ref()) {
+        (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
+            attempt_id: attempt_id.to_owned(),
+            reason: crate::session_journal::ProviderAttemptNotStartedReason::Cancelled {
+                reason: reason.to_owned(),
+            },
+        },
+        (ExternalEffectState::Prepared, Some(dispatch_id)) => {
+            SessionEvent::ProviderAttemptNotStartedV2 {
+                attempt_id: attempt_id.to_owned(),
+                dispatch_id: dispatch_id.clone(),
+                reason: crate::session_journal::ProviderAttemptNotStartedReason::Cancelled {
+                    reason: reason.to_owned(),
+                },
+            }
+        }
+        (_, None) => SessionEvent::ProviderAttemptFinished {
+            attempt_id: attempt_id.to_owned(),
+            outcome: crate::session_journal::CompletionOutcome::Cancelled,
+            response_digest: None,
+        },
+        (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
+            attempt_id: attempt_id.to_owned(),
+            dispatch_id: dispatch_id.clone(),
+            outcome: crate::session_journal::CompletionOutcome::Cancelled,
+            response_digest: None,
+        },
+    })
 }
 
 fn interrupted_turns(state: &ReducedSessionState) -> Vec<String> {
@@ -798,9 +998,9 @@ pub fn reconcile_resolve(
     manager: &SessionManager,
     id: &str,
     tool_execution_id: &str,
-    resolution: OperatorResolution,
+    resolution: Option<OperatorResolution>,
     operator_id: &str,
-) -> Result<()> {
+) -> Result<ResolutionAuthority> {
     let path = manager.journal_path(id);
     if !path.exists() {
         return Err(SessionLifecycleError::NotFound {
@@ -833,6 +1033,28 @@ pub fn reconcile_resolve(
         });
     }
 
+    // Can the journal settle this without asking? If it can, an absent
+    // `--as-outcome` is not a gap to paper over with a default. If it cannot,
+    // an absent `--as-outcome` must be REFUSED with the consequences spelled
+    // out — never silently answered.
+    let determined = determined_disposition(&state, &item);
+    let authority = match (resolution, determined) {
+        (Some(explicit), _) => ResolutionAuthority::Operator(explicit),
+        (None, Some(basis)) => ResolutionAuthority::Journal(basis),
+        (None, None) => {
+            return Err(SessionLifecycleError::RefusedByAuthority {
+                reason: unanswerable_reason(&item),
+            });
+        }
+    };
+    let effective = match authority {
+        ResolutionAuthority::Operator(explicit) => explicit,
+        // A repeat-safe tool created no external effect by its own declared
+        // contract, so "the effect did not land" is a reading of the contract,
+        // not a guess about the world.
+        ResolutionAuthority::Journal(_) => OperatorResolution::NotStarted,
+    };
+
     let journal = SessionJournal::open(&path, id.to_owned()).map_err(|source| {
         SessionLifecycleError::Journal {
             path: path.clone(),
@@ -840,37 +1062,11 @@ pub fn reconcile_resolve(
         }
     })?;
 
-    // A crash leaves the interruption implicit: the journal's last word on the
-    // tool is `Running`, and only `Unknown` accepts an operator receipt. The
-    // engine records exactly this transition on its own restart
-    // (`ToolUnknownReason::Interrupted`), but that path needs a live engine,
-    // so a headless operator could never reach it. Recording it here asserts
-    // nothing about the effect's outcome — it is an admission of ignorance,
-    // and the exclusive writer lease this function holds is the proof that no
-    // engine still owns the execution.
-    if matches!(
-        state.tools.get(tool_execution_id).map(|tool| &tool.effect),
-        Some(ToolEffectState::Running)
-    ) {
-        journal
-            .append(SessionEvent::ToolExecutionUnknown {
-                tool_execution_id: tool_execution_id.to_owned(),
-                reason: crate::session_journal::ToolUnknownReason::Interrupted,
-                evidence: serde_json::json!({
-                    "recovery": "wayland-core session reconcile",
-                    "prior_state": "running",
-                    "operator_id": operator_id,
-                }),
-            })
-            .map_err(|source| SessionLifecycleError::Journal {
-                path: path.clone(),
-                source,
-            })?;
-    }
+    record_tool_interruption(&journal, &state, &path, tool_execution_id, operator_id)?;
 
     let event = match item.kind {
         ReconcileKind::ToolExecution => {
-            let resolution = match resolution {
+            let resolution = match effective {
                 OperatorResolution::Succeeded => ToolResolution::Succeeded {
                     result: serde_json::Value::Null,
                 },
@@ -888,13 +1084,29 @@ pub fn reconcile_resolve(
                     result: None,
                 },
             };
+            // Attribute the receipt to whoever actually decided it. A
+            // determination the product made from the tool's own effect
+            // contract is a RECONCILER result; recording it as an operator
+            // assertion would put words in a human's mouth.
+            let source = match authority {
+                ResolutionAuthority::Operator(_) => ToolResolutionSource::Operator {
+                    operator_id: operator_id.to_owned(),
+                },
+                ResolutionAuthority::Journal(basis) => ToolResolutionSource::Reconciler {
+                    reconciler: basis.as_str().to_owned(),
+                },
+            };
             SessionEvent::ToolExecutionResolved {
                 tool_execution_id: tool_execution_id.to_owned(),
                 resolution,
-                source: ToolResolutionSource::Operator {
-                    operator_id: operator_id.to_owned(),
-                },
-                evidence: serde_json::json!({ "source": "wayland-core session reconcile" }),
+                source,
+                evidence: serde_json::json!({
+                    "source": "wayland-core session reconcile",
+                    "determined_by": match authority {
+                        ResolutionAuthority::Operator(_) => "operator",
+                        ResolutionAuthority::Journal(basis) => basis.as_str(),
+                    },
+                }),
             }
         }
         // A provider attempt has two operator-writable terminal receipts, and
@@ -910,45 +1122,12 @@ pub fn reconcile_resolve(
         // `ToolExecutionResolved`, the provider-attempt receipts carry no
         // `source` field, so the journal does not record that a HUMAN, rather
         // than the engine, asserted this outcome. Filed as 23B-M3.
-        ReconcileKind::ProviderAttempt => {
-            let attempt = state
-                .provider_attempts
-                .get(tool_execution_id)
-                .ok_or_else(|| SessionLifecycleError::NotFound {
-                    id: format!("{id}/{tool_execution_id}"),
-                })?;
-            match (&attempt.effect, attempt.dispatch_id.as_ref()) {
-                (ExternalEffectState::Prepared, None) => SessionEvent::ProviderAttemptNotStarted {
-                    attempt_id: tool_execution_id.to_owned(),
-                    reason: crate::session_journal::ProviderAttemptNotStartedReason::Cancelled {
-                        reason: format!("resolved as not-started by operator {operator_id}"),
-                    },
-                },
-                (ExternalEffectState::Prepared, Some(dispatch_id)) => {
-                    SessionEvent::ProviderAttemptNotStartedV2 {
-                        attempt_id: tool_execution_id.to_owned(),
-                        dispatch_id: dispatch_id.clone(),
-                        reason:
-                            crate::session_journal::ProviderAttemptNotStartedReason::Cancelled {
-                                reason: format!(
-                                    "resolved as not-started by operator {operator_id}"
-                                ),
-                            },
-                    }
-                }
-                (_, None) => SessionEvent::ProviderAttemptFinished {
-                    attempt_id: tool_execution_id.to_owned(),
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
-                    response_digest: None,
-                },
-                (_, Some(dispatch_id)) => SessionEvent::ProviderAttemptFinishedV2 {
-                    attempt_id: tool_execution_id.to_owned(),
-                    dispatch_id: dispatch_id.clone(),
-                    outcome: crate::session_journal::CompletionOutcome::Cancelled,
-                    response_digest: None,
-                },
-            }
-        }
+        ReconcileKind::ProviderAttempt => provider_attempt_receipt(
+            &state,
+            id,
+            tool_execution_id,
+            &format!("resolved as not-started by operator {operator_id}"),
+        )?,
         other => {
             return Err(SessionLifecycleError::RefusedByAuthority {
                 reason: format!("{} items are not operator-resolvable", other.as_str()),
@@ -962,7 +1141,7 @@ pub fn reconcile_resolve(
             path: path.clone(),
             source,
         })?;
-    Ok(())
+    Ok(authority)
 }
 
 /// Cancel every interrupted turn in a session.
@@ -974,7 +1153,7 @@ pub fn reconcile_resolve(
 /// reducer requires every descendant of a turn to be terminal before
 /// `TurnCancelled`, and that ordering is correct — an operator must say what
 /// happened to an effect before declaring the turn over.
-pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
+pub fn cancel(manager: &SessionManager, id: &str) -> Result<CancelOutcome> {
     let path = manager.journal_path(id);
     if !path.exists() {
         return Err(SessionLifecycleError::NotFound {
@@ -999,19 +1178,26 @@ pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
     // permanently uncancellable, because a `Finished` pre-tool phase is
     // consumed only by a recovery checkpoint that a crashed run never records.
     // They are abandoned below instead.
-    let outstanding = outstanding_items(&state)
+    let blocking = outstanding_items(&state)
         .into_iter()
         .filter(|item| item.kind != ReconcileKind::HookPhase)
         .collect::<Vec<_>>();
-    if !outstanding.is_empty() {
+    // Split the blockers by whether anyone has to be ASKED. An item the
+    // journal already settles is not a question, and making the operator type
+    // a separate command to answer it — with a flag whose default silently
+    // asserted `not-started` — is how a one-command recovery became four.
+    let (determinable, unanswerable): (Vec<_>, Vec<_>) = blocking
+        .into_iter()
+        .partition(|item| determined_disposition(&state, item).is_some());
+    if !unanswerable.is_empty() {
         return Err(SessionLifecycleError::OutstandingReconcile {
             id: id.to_owned(),
-            count: outstanding.len(),
+            items: unanswerable,
         });
     }
     let pending = interrupted_turns(&state);
-    if pending.is_empty() {
-        return Ok(Vec::new());
+    if pending.is_empty() && determinable.is_empty() {
+        return Ok(CancelOutcome::default());
     }
     let journal = SessionJournal::open(&path, id.to_owned()).map_err(|source| {
         SessionLifecycleError::Journal {
@@ -1019,6 +1205,62 @@ pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
             source,
         }
     })?;
+    // Settle every blocker the journal already answers, before the turns that
+    // depend on them are closed. Each receipt records WHAT determined it, so a
+    // later reader can tell a product determination from a human assertion.
+    let mut auto_resolved = Vec::new();
+    for item in &determinable {
+        let Some(basis) = determined_disposition(&state, item) else {
+            continue;
+        };
+        let event = match item.kind {
+            ReconcileKind::ProviderAttempt => provider_attempt_receipt(
+                &state,
+                id,
+                &item.tool_execution_id,
+                "resolved as not-started by wayland-core session cancel (journal-determined)",
+            )?,
+            ReconcileKind::ToolExecution => {
+                record_tool_interruption(
+                    &journal,
+                    &state,
+                    &path,
+                    &item.tool_execution_id,
+                    basis.as_str(),
+                )?;
+                SessionEvent::ToolExecutionResolved {
+                    tool_execution_id: item.tool_execution_id.clone(),
+                    resolution: ToolResolution::NotStarted {
+                        reason: crate::session_journal::ToolNotStartedReason::Cancelled {
+                            reason: format!(
+                                "no external effect is possible for this tool ({})",
+                                basis.as_str()
+                            ),
+                        },
+                    },
+                    source: ToolResolutionSource::Reconciler {
+                        reconciler: basis.as_str().to_owned(),
+                    },
+                    evidence: serde_json::json!({
+                        "source": "wayland-core session cancel",
+                        "determined_by": basis.as_str(),
+                    }),
+                }
+            }
+            _ => continue,
+        };
+        journal
+            .append(event)
+            .map_err(|source| SessionLifecycleError::Journal {
+                path: path.clone(),
+                source,
+            })?;
+        auto_resolved.push(AutoResolved {
+            item: item.clone(),
+            determined_by: basis,
+        });
+    }
+
     // Abandon the interrupted turns' nonterminal hook phases first. Each takes
     // the one terminal transition its state admits; `AbandonedUnknown` remains
     // nonterminal for continuation, so this closes the turn without ever
@@ -1061,7 +1303,10 @@ pub fn cancel(manager: &SessionManager, id: &str) -> Result<Vec<String>> {
                 source,
             })?;
     }
-    Ok(pending)
+    Ok(CancelOutcome {
+        auto_resolved,
+        cancelled_turns: pending,
+    })
 }
 
 /// Assert that a checkpoint restore destination lies inside the workspace the
@@ -1298,7 +1543,8 @@ mod tests {
             .create_for_run("anthropic", "test-model", "/tmp", None)
             .unwrap();
         let cancelled = cancel(&manager, &active.session.id).unwrap();
-        assert!(cancelled.is_empty());
+        assert!(cancelled.cancelled_turns.is_empty());
+        assert!(cancelled.auto_resolved.is_empty());
     }
 
     #[test]
@@ -1328,7 +1574,7 @@ mod tests {
         );
 
         let cancelled = cancel(&manager, &id).unwrap();
-        assert_eq!(cancelled, vec!["turn-1".to_owned()]);
+        assert_eq!(cancelled.cancelled_turns, vec!["turn-1".to_owned()]);
 
         // Re-read from disk: the disposition must survive a restart.
         let after = SessionJournal::recovered_state(&path).unwrap();
