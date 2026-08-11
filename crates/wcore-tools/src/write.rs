@@ -11,13 +11,15 @@ use crate::Tool;
 use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, update_cache_after_write};
 use crate::path_validation::validate_user_path;
-use crate::unsaved_work::UnsavedWorkGuard;
+use crate::unsaved_work::{Mode, UnsavedWorkGuard, Verdict};
 
 pub struct WriteTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
-    /// P2: session-scoped record of the user's unsaved work, so a
-    /// whole-file overwrite can never silently delete it.
-    unsaved: UnsavedWorkGuard,
+    /// INV-2: session-scoped record of the user's unsaved work, so a
+    /// whole-file overwrite can never silently delete it. Shared with the
+    /// Edit tool and with every sub-agent's tools, so one baseline and one
+    /// agent-authored set govern both write surfaces.
+    unsaved: Arc<UnsavedWorkGuard>,
 }
 
 impl WriteTool {
@@ -39,8 +41,21 @@ impl WriteTool {
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
         Self {
             file_cache,
-            unsaved: UnsavedWorkGuard::new(),
+            unsaved: UnsavedWorkGuard::shared(),
         }
+    }
+
+    /// Use `guard` instead of the process-wide one.
+    ///
+    /// The process-wide guard pins one baseline per repository for the whole
+    /// session and is shared by every sub-agent, so a test that needs its own
+    /// pins hands in an isolated guard; a host running several independent
+    /// sessions in one process wants one for the same reason. There is no
+    /// longer any snapshot directory under the profile home — recovery copies
+    /// go to the repository's own object store.
+    pub fn with_unsaved_guard(mut self, guard: Arc<UnsavedWorkGuard>) -> Self {
+        self.unsaved = guard;
+        self
     }
 }
 
@@ -58,8 +73,13 @@ impl Tool for WriteTool {
          - Prefer Edit over Write for modifying existing files — Edit only sends the diff.\n\
          - Use Write only for creating new files or complete rewrites.\n\
          - A rewrite that would delete a line present on disk but absent from the \
-         file's last commit is refused: that is unsaved user work. Keep those lines \
-         or use Edit."
+         file's last commit is refused: that is unsaved user work. Carry those lines \
+         into the content you write — in their changed form if what you are doing \
+         changes them.\n\
+         - Never route a rewrite around that refusal. A write made through Bash \
+         (`sed -i`, `>`, `rm`) is not checked by anything and destroys unsaved work \
+         irreversibly; using one to apply a change this tool refused is the single \
+         worst thing you can do to the user's file."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -117,15 +137,65 @@ impl Tool for WriteTool {
         // exactly as it was. On a create there is nothing to lose, and
         // recording the empty baseline now is what keeps the agent's own later
         // rewrites of its own file free.
-        if existed {
-            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
-                return ToolResult {
-                    content: refusal,
-                    is_error: true,
-                };
+        // Gated on the pre-image, not on `existed`: a probe that reports
+        // "no such file" on an error it could not classify would otherwise
+        // wave the overwrite straight through. If there are bytes there, they
+        // are judged, whatever `exists` said.
+        //
+        // ADV-8: and "there are bytes there" is decided by the read, not by
+        // the read succeeding. `unwrap_or_default()` turned every failure —
+        // a permission denied, a directory in the way, bytes that are not
+        // UTF-8 — into an empty pre-image, which the gate below then waved
+        // straight through. Measured as uid 65534 against a root-owned 0600
+        // file in a writable directory: no refusal, no note, no copy, and the
+        // file went `root:root 0600` -> `nobody:nogroup 0644`. Only a
+        // definite "no such file" may produce an empty pre-image.
+        let mut attributable = true;
+        // The exact bytes the assessment below is about to judge, re-checked
+        // immediately before the write lands (ADV-7).
+        let mut judged: Option<Vec<u8>> = None;
+        let previous = match std::fs::read_to_string(path) {
+            Ok(text) => {
+                judged = Some(text.as_bytes().to_vec());
+                text
             }
-        } else {
-            self.unsaved.observe(path);
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                let raw = std::fs::read(path).ok();
+                judged = raw.clone();
+                if let Verdict::Refuse(refusal) =
+                    self.unsaved
+                        .assess_opaque(path, file_path, raw.as_deref(), &e.to_string())
+                {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
+                // Proven byte-identical to the pinned commit, so nothing on
+                // disk is unsaved. Nothing may be claimed as agent-authored
+                // either — there is no line model for a pre-image that is not
+                // text — so the attribution record below is told this write
+                // introduced nothing.
+                attributable = false;
+                String::new()
+            }
+        };
+        let mut unsaved_note = String::new();
+        if !previous.is_empty() {
+            match self
+                .unsaved
+                .assess(path, file_path, &previous, content, Mode::Rewrite)
+            {
+                Verdict::Proceed => {}
+                Verdict::ProceedWithNote(note) => unsaved_note = note,
+                Verdict::Refuse(refusal) => {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
+            }
         }
 
         // Create parent directories
@@ -150,6 +220,18 @@ impl Tool for WriteTool {
             };
         }
 
+        // ADV-7: the assessment took a measured 13.5 ms, and a save that
+        // landed inside it was destroyed uncopied while the note claimed the
+        // prior contents were preserved. Nothing older than this read is ever
+        // acted on.
+        if let Err(why) = crate::unsaved_work::pre_image_unchanged(path, judged.as_deref()) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return ToolResult {
+                content: crate::unsaved_work::changed_under_write(file_path, &why),
+                is_error: true,
+            };
+        }
+
         if let Err(e) = std::fs::rename(&tmp_path, path) {
             // Fallback: direct write if rename fails (cross-device)
             let _ = std::fs::remove_file(&tmp_path);
@@ -162,11 +244,20 @@ impl Tool for WriteTool {
             if let Some(cache_arc) = &self.file_cache {
                 update_cache_after_write(cache_arc, path, content);
             }
+            // Not `previous` when the pre-image was not text: claiming the file
+            // was empty would make every line of `content` agent-authored, and so
+            // exempt from this guard for the rest of the session.
+            let attribution_pre = if attributable {
+                previous.as_str()
+            } else {
+                content
+            };
+            self.unsaved.note_written(path, attribution_pre, content);
 
             return ToolResult {
                 content: format!(
-                    "Updated {} (rename failed: {}, used direct write)",
-                    file_path, e
+                    "Updated {} (rename failed: {}, used direct write){}",
+                    file_path, e, unsaved_note
                 ),
                 is_error: false,
             };
@@ -175,11 +266,20 @@ impl Tool for WriteTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, content);
         }
+        // Not `previous` when the pre-image was not text: claiming the file
+        // was empty would make every line of `content` agent-authored, and so
+        // exempt from this guard for the rest of the session.
+        let attribution_pre = if attributable {
+            previous.as_str()
+        } else {
+            content
+        };
+        self.unsaved.note_written(path, attribution_pre, content);
 
         let line_count = content.lines().count();
         let action = if existed { "Updated" } else { "Created" };
         ToolResult {
-            content: format!("{} {} ({} lines)", action, file_path, line_count),
+            content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
             is_error: false,
         }
     }
@@ -217,19 +317,76 @@ impl Tool for WriteTool {
         let path = validated.as_path();
         let existed = ctx.vfs.exists(path).await.unwrap_or(false);
 
-        // P2: same unsaved-work refusal as the legacy path, before the write.
-        // Existence comes from the VFS, so a path the sandbox would reject
-        // never reaches the guard's reader — the sandbox denial, not a message
-        // quoting that file's lines, is the right answer there.
-        if existed {
-            if let Some(refusal) = self.unsaved.refusal(path, file_path, content) {
-                return ToolResult {
-                    content: refusal,
-                    is_error: true,
-                };
+        // INV-2: same unsaved-work assessment as the legacy path, before the
+        // write. The pre-image is read back through the SAME vfs this call
+        // will write to, so a sandboxed sub-agent is judged against the bytes
+        // it can actually see rather than against the real filesystem. A path
+        // the sandbox would reject never reaches the guard at all — the
+        // sandbox denial, not a message quoting that file's lines, is the
+        // right answer there.
+        // ADV-8, vfs side: the same fail-open in the same shape. A read that
+        // failed, and bytes that are not UTF-8, both became an empty
+        // pre-image that the gate below waved through. Only the vfs saying
+        // definitely "there is nothing here" may do that.
+        let mut attributable = true;
+        let mut judged: Option<Vec<u8>> = None;
+        let previous = match ctx.vfs.read(path).await {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => {
+                    judged = Some(text.as_bytes().to_vec());
+                    text
+                }
+                Err(e) => {
+                    let raw = e.into_bytes();
+                    judged = Some(raw.clone());
+                    if let Verdict::Refuse(refusal) = self.unsaved.assess_opaque(
+                        path,
+                        file_path,
+                        Some(&raw),
+                        "the bytes on disk are not valid UTF-8",
+                    ) {
+                        return ToolResult {
+                            content: refusal,
+                            is_error: true,
+                        };
+                    }
+                    attributable = false;
+                    String::new()
+                }
+            },
+            Err(e) => match ctx.vfs.exists(path).await {
+                // Definitely nothing there: an ordinary create.
+                Ok(false) => String::new(),
+                _ => {
+                    if let Verdict::Refuse(refusal) =
+                        self.unsaved
+                            .assess_opaque(path, file_path, None, &e.to_string())
+                    {
+                        return ToolResult {
+                            content: refusal,
+                            is_error: true,
+                        };
+                    }
+                    attributable = false;
+                    String::new()
+                }
+            },
+        };
+        let mut unsaved_note = String::new();
+        if !previous.is_empty() {
+            match self
+                .unsaved
+                .assess(path, file_path, &previous, content, Mode::Rewrite)
+            {
+                Verdict::Proceed => {}
+                Verdict::ProceedWithNote(note) => unsaved_note = note,
+                Verdict::Refuse(refusal) => {
+                    return ToolResult {
+                        content: refusal,
+                        is_error: true,
+                    };
+                }
             }
-        } else {
-            self.unsaved.observe(path);
         }
 
         // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
@@ -238,6 +395,27 @@ impl Tool for WriteTool {
         // Skipped when no notifier is wired (the test-default case).
         if let Some(n) = ctx.file_write_notifier.as_ref() {
             n.note_self_originated_write(path).await;
+        }
+
+        // ADV-7, vfs side: same re-check, through the same vfs the write
+        // goes to.
+        let still = match ctx.vfs.read(path).await {
+            Ok(now) => match judged.as_deref() {
+                Some(before) if now == before => Ok(()),
+                Some(_) => Err("its contents changed on disk".to_owned()),
+                None => Err("something else created it".to_owned()),
+            },
+            Err(e) if judged.is_none() => match ctx.vfs.exists(path).await {
+                Ok(false) => Ok(()),
+                _ => Err(format!("it could no longer be read ({e})")),
+            },
+            Err(e) => Err(format!("it could no longer be read ({e})")),
+        };
+        if let Err(why) = still {
+            return ToolResult {
+                content: crate::unsaved_work::changed_under_write(file_path, &why),
+                is_error: true,
+            };
         }
 
         if let Err(e) = ctx.vfs.write(path, content.as_bytes()).await {
@@ -250,11 +428,20 @@ impl Tool for WriteTool {
         if let Some(cache_arc) = &self.file_cache {
             update_cache_after_write(cache_arc, path, content);
         }
+        // Not `previous` when the pre-image was not text: claiming the file
+        // was empty would make every line of `content` agent-authored, and so
+        // exempt from this guard for the rest of the session.
+        let attribution_pre = if attributable {
+            previous.as_str()
+        } else {
+            content
+        };
+        self.unsaved.note_written(path, attribution_pre, content);
 
         let line_count = content.lines().count();
         let action = if existed { "Updated" } else { "Created" };
         ToolResult {
-            content: format!("{action} {file_path} ({line_count} lines)"),
+            content: format!("{action} {file_path} ({line_count} lines){unsaved_note}"),
             is_error: false,
         }
     }
@@ -290,6 +477,14 @@ mod tests {
     use crate::file_cache::file_mtime_ms;
     use wcore_config::file_cache::FileCacheConfig;
 
+    /// A Write tool whose recovery snapshots land in a throwaway directory
+    /// rather than the real `~/.wayland`.
+    fn tool(cache: Option<Arc<RwLock<FileStateCache>>>) -> WriteTool {
+        WriteTool::new(cache).with_unsaved_guard(Arc::new(
+            crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
+        ))
+    }
+
     fn make_cache() -> Arc<RwLock<FileStateCache>> {
         let config = FileCacheConfig {
             max_entries: 100,
@@ -311,7 +506,7 @@ mod tests {
             "content": "hello world"
         });
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
         let result = tool.execute(input).await;
 
         assert!(
@@ -333,7 +528,7 @@ mod tests {
             "content": "nested content"
         });
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
         let result = tool.execute(input).await;
 
         assert!(
@@ -356,7 +551,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("overwrite.txt");
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
 
         let input1 = json!({
             "file_path": file_path.to_str().unwrap(),
@@ -388,7 +583,7 @@ mod tests {
             "content": content
         });
 
-        let tool = WriteTool::new(None);
+        let tool = tool(None);
         let result = tool.execute(input).await;
 
         assert!(
@@ -412,7 +607,7 @@ mod tests {
         let file_path = dir.path().join("cached.txt");
 
         let cache = make_cache();
-        let tool = WriteTool::new(Some(cache.clone()));
+        let tool = tool(Some(cache.clone()));
 
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
@@ -437,8 +632,10 @@ mod tests {
         let file_path = dir.path().join("write_edit.txt");
 
         let cache = make_cache();
-        let write_tool = WriteTool::new(Some(cache.clone()));
-        let edit_tool = crate::edit::EditTool::new(Some(cache));
+        let write_tool = tool(Some(cache.clone()));
+        let edit_tool = crate::edit::EditTool::new(Some(cache)).with_unsaved_guard(Arc::new(
+            crate::unsaved_work::UnsavedWorkGuard::new_isolated(),
+        ));
 
         // Write creates the file and populates cache.
         let write_input = json!({
@@ -468,7 +665,7 @@ mod tests {
         let file_path = dir.path().join("overwrite_cache.txt");
 
         let cache = make_cache();
-        let tool = WriteTool::new(Some(cache.clone()));
+        let tool = tool(Some(cache.clone()));
 
         // First write.
         let input1 = json!({

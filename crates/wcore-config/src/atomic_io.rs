@@ -53,6 +53,24 @@ use std::path::Path;
 /// (`\\?\`) form before the round trip, which lifts the limit at the
 /// Win32 layer regardless of the machine's `LongPathsEnabled` setting.
 pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result<()> {
+    atomic_write_checked(path, contents, || Ok(())).map(|_| ())
+}
+
+/// [`atomic_write`], with a last-moment check that runs **after** the tempfile
+/// is written and durable and **immediately before** the rename. `Ok(Err(why))`
+/// means the check refused: the rename did not happen and `path` is untouched.
+///
+/// The placement is the entire point. INV-2 has to establish that the file on
+/// disk is still the one it judged before replacing it, and doing that before
+/// `atomic_write` leaves the tempfile write and its `sync_all()` inside the
+/// window — measured, 2 of 24 interleaved saves were still destroyed that way,
+/// because an fsync is milliseconds and a rename is microseconds. Checking
+/// here leaves only the rename.
+pub fn atomic_write_checked<P: AsRef<Path>>(
+    path: P,
+    contents: &[u8],
+    before_rename: impl FnOnce() -> Result<(), String>,
+) -> std::io::Result<Result<(), String>> {
     let path = path.as_ref();
     let dest = long_path_safe_dest(path)?;
     let dest = dest.as_ref();
@@ -61,6 +79,9 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents)?;
     tmp.as_file().sync_all()?;
+    if let Err(why) = before_rename() {
+        return Ok(Err(why));
+    }
     // B6 — carry the destination's own mode onto the temp file BEFORE the
     // rename, so the name is never published with the tempfile's 0600.
     carry_destination_mode(&tmp, dest);
@@ -68,7 +89,7 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, contents: &[u8]) -> std::io::Result
     // `persist()` does the atomic rename. `PersistError` wraps both
     // the underlying io::Error and the un-renamed temp file; we only
     // care about the io::Error for callers using `?`.
-    tmp.persist(dest).map(|_| ()).map_err(|e| e.error)
+    tmp.persist(dest).map(|_| Ok(())).map_err(|e| e.error)
 }
 
 /// Copy an EXISTING destination's permission bits onto the temp file that is

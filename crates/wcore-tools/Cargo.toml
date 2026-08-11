@@ -166,6 +166,10 @@ image-inspect = ["dep:image", "dep:kamadak-exif"]
 doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
 
 [dev-dependencies]
+# `std::fs::canonicalize` returns the verbatim `\\?\C:\…` form on Windows, and
+# the tools' own path validation refuses that namespace. `dunce::canonicalize`
+# reduces it to the ordinary form; it is a plain canonicalize on Unix.
+dunce = "1"
 tempfile.workspace  = true
 criterion.workspace = true
 # R2 fix A2: debug_helpers tests mutate process-wide env vars; serialize

@@ -34,6 +34,7 @@ Write content to a file atomically.
 
 - Atomic write: writes to a temp file first, then renames
 - Auto-creates parent directories
+- Subject to the [unsaved-work guarantee](#unsaved-work-guarantee) below
 
 ## Edit
 
@@ -42,11 +43,132 @@ Find and replace exact strings in a file.
 - Matches `old_string` exactly and replaces with `new_string`
 - Requires a unique match by default; errors on multiple matches
 - Use `replace_all` to replace all occurrences
+- Subject to the [unsaved-work guarantee](#unsaved-work-guarantee) below
+
+### Unsaved-work guarantee
+
+An agent that rewrites a file from its own picture of the contents can silently
+drop a line the user had on disk and had not committed. Write and Edit are
+therefore checked at the tool layer, not by asking the model to be careful.
+
+**What holds.** Through **Write**, a line that is on disk and that the tool
+cannot prove is recorded in the commit the session started at will not leave
+the disk unless the previous contents have first been written to the
+repository's own object store *and read back byte-for-byte*. Where no such copy
+can be made, the write is refused and nothing changes.
+
+- The baseline is the commit **the session started at**, not current `HEAD`, so
+  a commit made mid-session cannot launder unsaved work into it.
+- The recovery copy is a loose, unreferenced object in the object store git
+  itself names for that repository (`git rev-parse --git-path objects`), made
+  with `git hash-object -w`, and only where that store passes the proof below. The tool result prints the
+  exact command to get the bytes back:
+  `git -C <repo> cat-file blob <oid>`. Nothing is staged, committed or
+  referenced. **`git gc` does not remove it.** Measured on git 2.43.0 and
+  2.54.0: with `gc.cruftPacks` (default on since git 2.42) gc moves the object
+  into a cruft pack and `git cat-file blob` still returns it — still readable
+  after six consecutive `git gc` runs. Disposal takes
+  `git -C <repo> gc --prune=now`, or an ordinary gc once `gc.pruneExpire` (two
+  weeks by default) has passed; `git gc --auto` needs thousands of loose
+  objects and never fires for one. Until then the bytes are inside
+  `.git/objects` and, being in no commit, that is the only place they exist —
+  whether the file was gitignored, merely untracked, or tracked and wholly
+  rewritten. They travel with `cp -a`, `tar`, `rsync` and `git clone` of the
+  local path, and `git fsck --lost-found` writes them out as a plaintext file;
+  `git push` and `git bundle` do not carry them. The tool result says all of
+  this.
+- **Edit is never refused** — its `old_string` must match the bytes on disk, so
+  anything it removes was quoted from disk rather than silently omitted. It
+  copies where it can and states plainly when it could not.
+- If git cannot be consulted for a repository that plainly exists — dubious
+  ownership under `safe.directory`, an unreadable config, no `git` binary — the
+  baseline is unknown, so a Write that would drop lines is **refused** rather
+  than allowed, and the refusal quotes git's own reason. Writes that do not
+  remove existing lines are unaffected.
+- Outside any repository there is no object store, so a Write that would drop
+  lines is refused for want of anywhere to put a recoverable copy.
+- **The copy is only made where it is provably no more exposed than the file
+  itself.** One rule, checked per write; where the proof does not hold the
+  Write is refused, **nothing is copied**, and an Edit says no copy was made.
+  It holds only when all of these do:
+  - the repository does not ignore the file. Asked of the ignore *rules* with
+    `git check-ignore --no-index`, never of the index: the index is mutable
+    mid-session and one `git add -f` on a gitignored `.env` used to file it
+    into `.git/objects`, where `git clone <path>` carries it and
+    `git fsck --lost-found` writes it out as plaintext. A *tracked* file
+    matched by an ignore rule now reads as ignored, which costs a refusal
+    rather than a copy;
+  - the session's commit records something under the file's own directory, or
+    the file is at the repository root — measured live with `$HOME` as a
+    dotfiles repository and the private file at `~/work/env.local`;
+  - the object store is inside the work tree the file is in. In a **linked
+    worktree** the objects belong to the main repository, and in a
+    **submodule** to `<super>/.git/modules/<name>/objects`; both would put the
+    bytes outside the repository the user is working in, so both are refused;
+  - the copy is no wider-permissioned than the file. git writes a loose object
+    `0444`, so a `0600` file is refused rather than copied into a
+    world-readable object, as is any file whose directory is reachable by
+    fewer people than `.git/objects` is.
+- **On Windows the proof cannot be made, so the copy is not made.** Measured on
+  git 2.54.0.windows.1: under `%USERPROFILE%`, where most Windows repositories
+  live, `.git\objects` inherits `(I)(OI)(CI)(RX)` for both AppContainer package
+  SIDs — the principals that confine agent subprocesses. The file may carry the
+  same inherited ACEs, which would make the copy no more exposed; this code
+  cannot demonstrate that, and a copy that cannot be bounded is not made. A
+  Windows Write that would drop unrecorded lines is refused.
+- **The recovery copy is never scrubbed, and nothing claims it is.** A copy
+  with the secret redacted is not a recovery copy — it is lost work wearing a
+  disguise. Placement is the only lever, and the two rules above are it. The
+  lines a *refusal* quotes back are a different surface and are scrubbed with
+  the engine's own `PIIScrubber`.
+- **This guard creates no directory anywhere.** Earlier rounds kept snapshots
+  under the profile home behind `restrict_dir`/`restrict_file` helpers that
+  were no-ops off Unix, so on Windows `%USERPROFILE%\.wayland` inherited
+  `CodexSandboxUsers:(OI)(CI)(RX)` and two AppContainer SIDs. That store is
+  gone.
+- **A pre-image that cannot be read is refused, not treated as an empty file.**
+  A permission denied, a directory in the way, or bytes that are not UTF-8 all
+  used to produce an empty pre-image, which skipped the check entirely: as an
+  unprivileged uid against a root-owned `0600` file in a writable directory,
+  the write proceeded and the file went `root:root 0600` to
+  `nobody:nogroup 0644`. The one case that still proceeds is bytes that are
+  byte-for-byte what the pinned commit records.
+- **The file is re-read immediately before the write lands.** The assessment
+  runs several `git` processes — measured at 13.5 ms — and a save that arrived
+  inside that window was destroyed 12 times out of 12 while the note claimed
+  the previous contents were preserved. If the file is not byte-for-byte what
+  was judged, the write is refused. That narrows the window to a single
+  syscall rather than closing it.
+- git is run with `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`,
+  `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+  and `GIT_QUARANTINE_PATH` cleared, so an inherited git environment cannot
+  redirect either the recovery write or the read-back that verifies it.
+
+**What does not hold.** Three limits, stated because a broader claim would be
+untrue:
+
+- **Bash is not covered.** `sed -i`, `>` and `rm` do not route through the tool
+  layer and can still destroy unsaved work. The guarantee covers two of the
+  three write surfaces.
+- **A modified line is not distinguished from a dropped one.** A whole-file
+  transformation that renames a symbol occurring on an unsaved line reads as a
+  drop and is refused.
+- **Non-UTF-8 files** have no line model, so no line of them can be judged.
+  They are refused rather than left unprotected, unless their bytes are
+  exactly what the pinned commit records.
+- **The recovery note hands the model the object id and the `git cat-file`
+  command that retrieves the prior contents unscrubbed** — the same contents
+  whose *quoted* lines are scrubbed when they appear in a refusal. There is one
+  channel to both the user and the model here, and the user needs the command,
+  so the exposure is accepted and stated rather than closed.
 
 ## Bash
 
 Execute a shell command and return the result.
 
+- **Not covered by the [unsaved-work guarantee](#unsaved-work-guarantee).** A
+  command like `sed -i '2d' file` deletes a line the tool layer never sees, so
+  uncommitted work can be lost this way even though Write and Edit protect it.
 - Default timeout: 120 seconds, max 600 seconds
 - Returns exit code, stdout, and stderr
 - Interpreter: `sh -c` on Unix, `cmd /C` on Windows. **Windows override** — run
