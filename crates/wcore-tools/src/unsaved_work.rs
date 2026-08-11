@@ -232,6 +232,15 @@
 //!   dropping both returns `Proceed`. The exemption is now a count — as many
 //!   copies as this tool actually introduced, never more than are on disk —
 //!   so the user's own copy stays the user's.
+//! * **Agent-authored lines expire when the file moves underneath the tool.**
+//!   The tally is only meaningful while the file still is what this tool last
+//!   wrote, and the premise of this whole guard is that the user is editing
+//!   the same files. Measured: the agent writes `log('start')`, the user edits
+//!   the file in their editor, and a later rewrite drops that line silently on
+//!   the strength of a write two states ago. Once `previous` is not what the
+//!   tool last left there, nothing on disk can tell the agent's line from the
+//!   same text the user typed, so the whole file is the user's again until the
+//!   tool writes once more.
 //! * **The ambient git environment is removed, not inherited.** `GIT_DIR`,
 //!   `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_OBJECT_DIRECTORY`,
 //!   `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_QUARANTINE_PATH` are cleared
@@ -334,6 +343,13 @@ pub struct UnsavedWorkGuard {
     /// introduced. A count, not a set: exempting every copy of a text the
     /// agent wrote once leaves the user's own later copies unprotected.
     authored: Mutex<HashMap<PathBuf, HashMap<String, usize>>>,
+    /// Path -> the exact bytes this tool last left there. The tally above is
+    /// only meaningful while the file still is what the tool wrote; the whole
+    /// premise of this guard is that the user edits the same files, so it
+    /// often is not. Stored in full rather than hashed: an exact comparison
+    /// has no collision to reason about, and the map only ever holds files
+    /// this tool has written this session.
+    last_written: Mutex<HashMap<PathBuf, String>>,
 }
 
 static SHARED: OnceLock<Arc<UnsavedWorkGuard>> = OnceLock::new();
@@ -368,6 +384,7 @@ impl UnsavedWorkGuard {
             pins: Mutex::new(HashMap::new()),
             blobs: Mutex::new(HashMap::new()),
             authored: Mutex::new(HashMap::new()),
+            last_written: Mutex::new(HashMap::new()),
         }
     }
 
@@ -389,7 +406,7 @@ impl UnsavedWorkGuard {
     ) -> Verdict {
         // Everything below counts trimmed, non-blank lines, and counts them
         // exactly: three copies of a line are not one copy.
-        let authored = self.authored_lines(path);
+        let authored = self.authored_lines(path, previous);
         let disk = tally_excluding(previous, &authored);
         let user_lines: usize = disk.values().sum();
         if user_lines == 0 {
@@ -541,12 +558,28 @@ impl UnsavedWorkGuard {
     /// user adds later of a line the agent wrote once, which is the
     /// granularity round 3 got wrong.
     pub fn note_written(&self, path: &Path, previous: &str, written: &str) {
+        // Did the file move underneath the tool since it last wrote here? If
+        // so nothing carried over from that write may be claimed any more:
+        // only what *this* write introduces, judged against the bytes that
+        // were really there.
+        let stale = match self.last_written.lock() {
+            Ok(mut seen) => {
+                let moved = seen.get(path).map(String::as_str) != Some(previous);
+                seen.insert(path.to_path_buf(), written.to_owned());
+                moved
+            }
+            // Without the record there is no way to know, so claim nothing.
+            Err(_) => true,
+        };
         let before = tally(previous);
         let after = tally(written);
         let Ok(mut map) = self.authored.lock() else {
             return;
         };
         let entry = map.entry(path.to_path_buf()).or_default();
+        if stale {
+            entry.clear();
+        }
         let mut owned: HashMap<String, usize> = HashMap::new();
         for (line, now) in &after {
             let introduced = now.saturating_sub(before.get(line).copied().unwrap_or(0));
@@ -562,7 +595,25 @@ impl UnsavedWorkGuard {
         *entry = owned;
     }
 
-    fn authored_lines(&self, path: &Path) -> HashMap<String, usize> {
+    /// What this tool may still claim to have authored at `path`, given the
+    /// bytes that are actually there now.
+    ///
+    /// Attribution expires the moment `on_disk` stops being what this tool
+    /// last wrote. Nothing on disk distinguishes a line the agent wrote from
+    /// the same text typed by the user afterwards, so once the file has moved
+    /// underneath the tool, every line in it is treated as the user's. That is
+    /// the fail-closed direction, and it costs a refusal telling the caller to
+    /// carry the lines through — measured cost: a formatter or a hook
+    /// rewriting the file between two tool writes re-protects the agent's own
+    /// lines until the tool writes again.
+    fn authored_lines(&self, path: &Path, on_disk: &str) -> HashMap<String, usize> {
+        let Ok(written) = self.last_written.lock() else {
+            return HashMap::new();
+        };
+        if written.get(path).map(String::as_str) != Some(on_disk) {
+            return HashMap::new();
+        }
+        drop(written);
         self.authored
             .lock()
             .ok()

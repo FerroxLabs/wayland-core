@@ -983,6 +983,12 @@ fn the_note_names_the_command_that_actually_disposes_of_the_copy() {
 /// F1. The agent writes one line of text; the user writes their own copy of
 /// the same text. Round 3 keyed the exemption to the text, so the user's copy
 /// was unprotected for the rest of the session.
+///
+/// Here the user's copy arrives by editing the file, so
+/// `attribution_expires_when_the_file_changes_outside_the_tool` subsumes the
+/// count and *both* copies are protected. That is the stricter answer, and it
+/// is the honest one: with the file no longer what the tool wrote, nothing on
+/// disk says which of the two identical lines was the agent's.
 #[test]
 fn a_user_copy_of_a_line_the_agent_also_wrote_is_still_protected() {
     let f = repo();
@@ -1000,8 +1006,35 @@ fn a_user_copy_of_a_line_the_agent_also_wrote_is_still_protected() {
 
     let msg = assert_refused(g.assess(&p, "app.py", disk, "start\n", Mode::Rewrite));
     assert!(
+        msg.contains("2 line(s)"),
+        "the user's copy must be protected, and once the file has moved the \
+         agent's own copy cannot be told from it: {msg}"
+    );
+}
+
+/// The count is still load-bearing where attribution survives: one tool write
+/// that adds a second copy of a line the user already had. Exempting the text
+/// would take the user's original with it — round 3's F1 defect, on the one
+/// path the expiry rule does not reach.
+#[test]
+fn a_tool_write_that_duplicates_a_user_line_exempts_only_its_own_copy() {
+    let f = repo();
+    f.write("app.py", "start\n");
+    git(&f.root, &["add", "app.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.root.join("app.py");
+    let g = f.guard();
+
+    // The user's own uncommitted line is already there when the tool writes.
+    let before = "start\nTOKEN = load()\n";
+    let after = "start\nTOKEN = load()\nTOKEN = load()\n";
+    std::fs::write(&p, after).unwrap();
+    g.note_written(&p, before, after);
+
+    let msg = assert_refused(g.assess(&p, "app.py", after, "start\n", Mode::Rewrite));
+    assert!(
         msg.contains("1 line(s)"),
-        "exactly the user's one copy is protected, not both and not neither: {msg}"
+        "exactly the user's copy is protected, not both and not neither: {msg}"
     );
 }
 
@@ -1662,4 +1695,95 @@ fn object_store_contains(root: &Path, needle: &str) -> bool {
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).contains(needle)
+}
+
+// ---- round 4: attribution expires the moment the file moves underneath -----
+
+/// Bar 5, the half a count does not reach. The whole premise of this guard is
+/// that the user is editing the file in their own editor, so the file *will*
+/// change between two tool writes — and `note_written` is the only thing that
+/// ever updates the agent-authored tally. Round 3's map, and round 4's count,
+/// both went on exempting a line after the file underneath had become
+/// something the tool never wrote.
+///
+/// Measured: the agent writes `log('start')`, the user edits the file in their
+/// editor, and a later rewrite drops that line silently — because the guard is
+/// still attributing it to the agent on the strength of a write two states ago.
+#[test]
+fn attribution_expires_when_the_file_changes_outside_the_tool() {
+    let f = repo();
+    f.write("app.py", "import os\n");
+    git(&f.root, &["add", "app.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.root.join("app.py");
+    let g = f.guard();
+
+    let agent_wrote = "import os\nlog('start')\n";
+    f.write("app.py", agent_wrote);
+    g.note_written(&p, "import os\n", agent_wrote);
+
+    // Control: with the disk still exactly as the tool left it, the agent's
+    // own line is still the agent's and dropping it proceeds. Without this the
+    // arm below could pass simply because the exemption never worked.
+    assert!(
+        matches!(
+            g.assess(&p, "app.py", agent_wrote, "import os\n", Mode::Rewrite),
+            Verdict::Proceed
+        ),
+        "the agent's own file must not be protected from the agent"
+    );
+
+    // Now the user edits it in their editor.
+    let user_edited = "import os\nlog('start')\n# WIP: do not lose this\n";
+    f.write("app.py", user_edited);
+
+    // A rewrite that keeps the user's visible note and drops only the line the
+    // tool once wrote. Nothing on disk can tell that line apart from one the
+    // user typed themselves, so it is not the tool's to drop.
+    let msg = assert_refused(g.assess(
+        &p,
+        "app.py",
+        user_edited,
+        "import os\n# WIP: do not lose this\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("log('start')"), "{msg}");
+}
+
+/// The same expiry seen from the other end: once the file has moved, a *new*
+/// tool write re-establishes attribution from the state actually on disk, so
+/// the guard does not stay locked out for the rest of the session.
+#[test]
+fn a_later_tool_write_re_establishes_attribution_from_the_disk() {
+    let f = repo();
+    f.write("app.py", "import os\n");
+    git(&f.root, &["add", "app.py"]);
+    git(&f.root, &["commit", "-qm", "base"]);
+    let p = f.root.join("app.py");
+    let g = f.guard();
+
+    g.note_written(&p, "import os\n", "import os\nlog('start')\n");
+    let user_edited = "import os\nlog('start')\n# user note\n";
+    f.write("app.py", user_edited);
+
+    // The tool writes again, from the state that is really there, adding a
+    // line of its own.
+    let now = "import os\nlog('start')\n# user note\nlog('end')\n";
+    g.note_written(&p, user_edited, now);
+    f.write("app.py", now);
+
+    // Its own new line is its own to drop...
+    assert!(matches!(
+        g.assess(&p, "app.py", now, user_edited, Mode::Rewrite),
+        Verdict::Proceed
+    ));
+    // ...and the line it wrote before the user's edit is not.
+    let msg = assert_refused(g.assess(
+        &p,
+        "app.py",
+        now,
+        "import os\n# user note\nlog('end')\n",
+        Mode::Rewrite,
+    ));
+    assert!(msg.contains("log('start')"), "{msg}");
 }
