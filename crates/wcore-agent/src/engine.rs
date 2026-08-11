@@ -24534,24 +24534,56 @@ mod audit_2026_05_22_tests {
             "an unserved failure must outlast MAX_STREAM_RETRIES: fast={fast_sends} \
              slow={slow_sends}"
         );
-        // A fixed COUNT would make these equal. Time does not.
+        // A fixed COUNT would make these equal. Time does not — and the
+        // strong form of that claim is not a multiplier between the arms but
+        // an EXACT prediction for each arm, computed from the same two
+        // constants the loop uses. A count bound cannot satisfy both.
+        for (label, delay, observed) in [
+            ("fast", std::time::Duration::ZERO, fast_sends),
+            ("slow", std::time::Duration::from_secs(60), slow_sends),
+        ] {
+            let predicted = sends_the_window_admits(delay);
+            assert_eq!(
+                observed, predicted,
+                "the {label} arm must fit exactly the sends the window admits \
+                 at {delay:?} per attempt: predicted {predicted}, saw {observed}"
+            );
+        }
+        // And the two arms must genuinely differ, which is the part a count
+        // bound fails outright.
         assert!(
-            fast_sends > slow_sends * 2,
-            "a fast-failing outage must fit far more sends into the same window \
-             than a slow-failing one (fast={fast_sends} slow={slow_sends}); equal \
-             counts mean the bound is still a count"
+            fast_sends > slow_sends,
+            "a fast-failing outage must fit more sends into the same window \
+             than a slow-failing one (fast={fast_sends} slow={slow_sends}); \
+             equal counts mean the bound is still a count"
         );
-        // And the backoff cap keeps the rate polite rather than letting a
-        // long window become a send loop. The ceiling is derived from the two
-        // constants, not written down, so it follows them if either moves.
-        let rate_ceiling = (super::UNSERVED_OUTAGE_BUDGET.as_secs()
-            / super::UNSERVED_RETRY_BACKOFF_CAP.as_secs()) as usize
-            + 12;
-        assert!(
-            fast_sends <= rate_ceiling,
-            "the backoff cap must bound the send rate inside the window \
-             (ceiling {rate_ceiling}), saw {fast_sends}"
-        );
+    }
+
+    /// How many sends [`super::UNSERVED_OUTAGE_BUDGET`] admits when every
+    /// attempt fails after `delay`, walking the real backoff schedule.
+    ///
+    /// This replaces two hand-tuned numbers that used to guard this test: a
+    /// `fast_sends > slow_sends * 3` ratio and a `budget / cap + 12` ceiling.
+    /// Both had to be loosened when the budget grew, which is exactly the
+    /// wrong direction for a control — and the ratio is now arithmetically
+    /// false (36 vs 13 sends is 2.8x, not 3x), so restoring it would only
+    /// make the suite red. A prediction derived from the constants needs no
+    /// tuning when they move, and is strictly tighter than either bound it
+    /// replaces.
+    fn sends_the_window_admits(delay: std::time::Duration) -> usize {
+        // The deadline is armed on the FIRST failure, so the window starts at
+        // the end of send 1 and each retry is admitted on the clock reading
+        // taken when it fails.
+        let deadline = delay + super::UNSERVED_OUTAGE_BUDGET;
+        let mut sends = 1usize;
+        let mut elapsed = delay;
+        loop {
+            if elapsed >= deadline {
+                return sends;
+            }
+            elapsed += super::unserved_retry_backoff(sends as u32) + delay;
+            sends += 1;
+        }
     }
 
     /// Finding 4, and an honest label. A turn whose provider budget runs out
