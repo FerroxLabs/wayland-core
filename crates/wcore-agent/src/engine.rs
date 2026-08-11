@@ -2931,6 +2931,10 @@ pub struct AgentEngine {
     /// F10 production monitor instance. It is constructed with the engine so
     /// startup activation can truthfully report readiness, then reset to the
     /// current run's budget at each `run()` boundary.
+    /// Physical sends this turn that the provider never returned a response
+    /// to (see `is_unserved_request_failure`). Reset at every turn entry and
+    /// disclosed at every turn exit by `report_unserved_resends`.
+    unserved_resends: u32,
     midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
@@ -3477,6 +3481,7 @@ impl AgentEngine {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -3749,6 +3754,7 @@ impl AgentEngine {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -9354,7 +9360,66 @@ impl AgentEngine {
 
     /// Legacy loop body. `journal_turn_id` is present only for an engine that
     /// owns durable session authority.
+    /// Tell the user how many requests this turn sent that never came back.
+    ///
+    /// A request the provider never served can still have been billed. The
+    /// socket was established and the request dispatched; only the response
+    /// was lost, and the usage block that would have priced it rides in that
+    /// lost response. So the cost is genuinely unknowable from this side while
+    /// the COUNT is not — and the product already prefers saying "unpriced" to
+    /// implying zero. Say the knowable half rather than letting the spend be
+    /// silent, and state plainly that no figure shown includes it.
+    ///
+    /// Emitted only when the turn actually had unserved re-sends. A sentence
+    /// printed on every turn is a sentence users stop reading.
+    fn report_unserved_resends(&self) {
+        let sent = self.unserved_resends;
+        if sent == 0 {
+            return;
+        }
+        let (subject, verb) = if sent == 1 {
+            ("request", "was")
+        } else {
+            ("requests", "were")
+        };
+        self.output.emit_info(&format!(
+            "{sent} provider {subject} never returned a response. Each {verb} \
+             dispatched, so the provider may have served and billed it; that \
+             spend is not included in any cost or token figure shown here."
+        ));
+    }
+
+    /// One user turn, wrapped so unserved re-sends are counted from zero and
+    /// disclosed exactly once however the turn exits.
+    ///
+    /// Every turn entry funnels through here — `run_with_content` for a fresh
+    /// turn, `resume_interrupted_turn` for a recovered one — so no early
+    /// return deep inside the stream loop can skip the disclosure.
     async fn run_inner(
+        &mut self,
+        user_turn: UserTurnInput<'_>,
+        msg_id: &str,
+        journal_turn_id: Option<&str>,
+        resume_checkpoint: Option<crate::recovery::RecoveryCheckpoint>,
+        prepared_recovery_request: Option<LlmRequest>,
+        recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
+    ) -> Result<AgentResult, AgentError> {
+        self.unserved_resends = 0;
+        let result = self
+            .run_inner_impl(
+                user_turn,
+                msg_id,
+                journal_turn_id,
+                resume_checkpoint,
+                prepared_recovery_request,
+                recovered_provider_round,
+            )
+            .await;
+        self.report_unserved_resends();
+        result
+    }
+
+    async fn run_inner_impl(
         &mut self,
         user_turn: UserTurnInput<'_>,
         msg_id: &str,
@@ -11674,6 +11739,10 @@ impl AgentEngine {
                 // and billed, so each re-send has a real price and the number
                 // of them is exactly the right thing to cap.
                 let unserved = is_unserved_request_failure(&failure_code);
+                if unserved {
+                    // One physical send that produced no response head.
+                    self.unserved_resends = self.unserved_resends.saturating_add(1);
+                }
                 let retry_admitted = if unserved {
                     let deadline = *unserved_deadline.get_or_insert_with(|| {
                         tokio::time::Instant::now() + UNSERVED_OUTAGE_BUDGET
@@ -16763,6 +16832,7 @@ mod set_config_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -18578,6 +18648,7 @@ mod phase6_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -18898,6 +18969,7 @@ mod compact_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -20504,6 +20576,7 @@ mod plan_mode_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -20957,6 +21030,7 @@ mod hook_integration_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -22097,6 +22171,7 @@ mod approval_bridge_engine_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -23153,6 +23228,7 @@ mod user_model_writeback_tests {
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             narrowed_execution_budget: None,
+            unserved_resends: 0,
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -24603,6 +24679,108 @@ mod audit_2026_05_22_tests {
             elapsed += super::unserved_retry_backoff(sends as u32) + delay;
             sends += 1;
         }
+    }
+
+    /// An engine whose emitted events can be read back.
+    fn engine_and_events(
+        provider: Arc<dyn LlmProvider>,
+    ) -> (super::AgentEngine, crate::test_utils::TestSinkHandle) {
+        let sink = crate::test_utils::TestSink::new();
+        let handle = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(sink),
+        );
+        engine.max_turns = Some(20);
+        (engine, handle)
+    }
+
+    /// Every `info` message a turn emitted.
+    fn info_messages(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e["type"].as_str() == Some("info"))
+            .filter_map(|e| e["message"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    fn unreturned_disclosures(handle: &crate::test_utils::TestSinkHandle) -> Vec<String> {
+        info_messages(handle)
+            .into_iter()
+            .filter(|m| m.contains("never returned a response"))
+            .collect()
+    }
+
+    /// A turn that ends after requests the provider never answered must say how
+    /// many it sent, and must say that spend is not in any figure it showed.
+    ///
+    /// The window deliberately admits ~35 re-sends where the old count admitted
+    /// 6, and a `transport` failure CAN be billed — measured, see
+    /// `scripts/b2_transport_billing_probe.py`. The request was dispatched and
+    /// only the response was lost, so the usage block that would price it never
+    /// arrives: the cost is unknowable while the COUNT is not. Pin the knowable
+    /// half EXACTLY, against the same derivation the loop uses. A message
+    /// saying "some requests" would satisfy a weaker test and tell the user
+    /// nothing they could act on.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_reports_how_many_requests_never_returned_a_response() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut engine, events) = engine_and_events(Arc::new(SlowStreamErrProvider {
+            delay: std::time::Duration::ZERO,
+            calls: Arc::clone(&calls),
+        }));
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "the outage must still fail the turn, got {result:?}"
+        );
+
+        let sent = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            sent,
+            sends_the_window_admits(std::time::Duration::ZERO),
+            "precondition: the outage must have run the window out"
+        );
+
+        let disclosures = unreturned_disclosures(&events);
+        assert_eq!(
+            disclosures.len(),
+            1,
+            "the disclosure must be emitted exactly once per turn, got {disclosures:?}"
+        );
+        let msg = &disclosures[0];
+        // ACCURATE, not merely present: the reported count must equal the
+        // physical sends the provider actually saw.
+        assert!(
+            msg.starts_with(&format!("{sent} provider requests")),
+            "the disclosure must lead with the true send count {sent}: {msg}"
+        );
+        assert!(
+            msg.contains("billed") && msg.contains("not included"),
+            "the disclosure must say the spend may be real and is not in any \
+             figure shown: {msg}"
+        );
+    }
+
+    /// The control. The disclosure must NOT be a sentence the product always
+    /// prints: a warning shown on every turn is one the user learns to skip,
+    /// and it would be false on a turn that had no unanswered sends.
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_turn_says_nothing_about_unreturned_requests() {
+        let (mut engine, events) = engine_and_events(Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("done".into()),
+            done_endturn(),
+        ]])));
+        let result = engine.run("task", "m-1").await;
+        assert!(result.is_ok(), "the control turn must succeed: {result:?}");
+        let noise = unreturned_disclosures(&events);
+        assert!(
+            noise.is_empty(),
+            "a turn with no unserved re-sends must not mention them: {noise:?}"
+        );
     }
 
     /// Finding 4, and an honest label. A turn whose provider budget runs out
