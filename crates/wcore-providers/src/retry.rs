@@ -354,17 +354,36 @@ fn classify_connect_chain(refused_io_kind: bool, chain_text: &[String]) -> &'sta
         if text.contains("dns error") || text.contains("failed to lookup address information") {
             name_lookup_failed = true;
         }
+        // Windows. The markers above are Unix text: `with_transport_cause`
+        // keeps only the INNERMOST link, and on Windows that is the bare OS
+        // error — MEASURED on this tree as `No such host is known. (os error
+        // 11001)`, with the `dns error` label sitting one link further out
+        // where nothing reads it. Matched on the numeric suffix, which Rust
+        // appends itself and is therefore locale-invariant, unlike the
+        // FormatMessage prose in front of it.
+        //   11001 WSAHOST_NOT_FOUND, 11004 WSANO_DATA — the name is absent.
+        if text.contains("(os error 11001)") || text.contains("(os error 11004)") {
+            name_lookup_failed = true;
+        }
         // EAI_AGAIN — the RESOLVER was unavailable, not the name absent. That
         // is the transient case (a laptop between networks, a container whose
         // DNS is not up yet) and it must keep the full outage budget.
-        if text.contains("temporary failure in name resolution") || text.contains("try again") {
+        // 11002 WSATRY_AGAIN is the Windows spelling of the same event.
+        if text.contains("temporary failure in name resolution")
+            || text.contains("try again")
+            || text.contains("(os error 11002)")
+        {
             name_lookup_may_heal = true;
         }
         // Text fallback for the refusal. The io ERROR KIND above is the
         // primary signal and is locale-proof; this catches the path where all
         // that survives is a rendered message (see `provider_failure_code`'s
         // `Connection` arm, which has only a `String`).
-        if text.contains("connection refused") {
+        // 10061 WSAECONNREFUSED is the Windows spelling; its prose ("the
+        // target machine actively refused it") shares no substring with the
+        // Unix message, and the io ERROR KIND is unavailable on the
+        // `ProviderError::Connection` path, which has only a rendered string.
+        if text.contains("connection refused") || text.contains("(os error 10061)") {
             refused = true;
         }
     }
