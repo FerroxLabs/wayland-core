@@ -59,7 +59,7 @@ fn staged(root: &Path) -> String {
 /// Returns (keep-alive, repository root, the `pkg` subdirectory).
 fn repo_with_subdir() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);

@@ -53,7 +53,7 @@ fn commit_count(root: &Path) -> usize {
 /// written to either file.
 fn repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
@@ -180,7 +180,7 @@ async fn add_all_refuses_while_untracked_user_work_is_on_disk() {
 #[tokio::test]
 async fn add_all_still_stages_a_tree_the_agent_wrote() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
@@ -343,7 +343,7 @@ async fn stash_save_refuses_while_the_users_unsaved_work_is_in_the_tree() {
 #[tokio::test]
 async fn a_merge_resolution_is_stageable_even_though_head_has_never_seen_it() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q", "-b", "main"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
@@ -438,7 +438,7 @@ async fn a_merge_resolution_is_stageable_even_though_head_has_never_seen_it() {
 #[tokio::test]
 async fn a_merge_does_not_disarm_the_guard_for_the_users_own_file() {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q", "-b", "main"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
