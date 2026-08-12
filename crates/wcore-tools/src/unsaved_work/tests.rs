@@ -11,16 +11,38 @@ struct Fixture {
     root: PathBuf,
 }
 
+/// Run `git` in `dir` for a fixture.
+///
+/// The authority variables are stripped for the same reason production's
+/// [`git_invoke`] strips them, and for one more: `bash::tests`'
+/// `child_workspace_policy_strips_git_authority_env_and_denies_parent_roots`
+/// sets `GIT_DIR`, `GIT_COMMON_DIR` and `GIT_WORK_TREE` process-wide. It is
+/// `#[serial]`, which serialises it against other `#[serial]` tests and not
+/// against the ~1170 that are not — so during its window every bare `git`
+/// here pointed at an empty temporary directory and `init`, `config`, `add`
+/// and `commit` all failed. Measured: 4 of 11 whole-binary runs red, 0 of 11
+/// when run filtered. Its stderr also went to `Stdio::null()`, so the panic
+/// said only "git failed"; it is captured and quoted now.
 fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let out = Command::new("git")
         .args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .output()
         .expect("git must be available for these tests");
-    assert!(status.success(), "git {args:?} failed");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {dir:?}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
 }
 
 fn repo() -> Fixture {
@@ -381,7 +403,8 @@ fn an_unresolved_baseline_never_claims_a_recovery_copy() {
         &p,
         "parser.py",
         &f.read("parser.py"),
-        "def a():\n    return 1\n",
+        // Rewritten, not only deleted: a delete-only Surgical edit refuses.
+        "def a():\n    return 1\n# WIP touched by the agent\n",
         Mode::Surgical,
     ));
     assert!(note.contains("No recovery copy was made"), "{note}");
@@ -595,7 +618,8 @@ fn an_edit_outside_any_repository_says_no_copy_was_made() {
         &p,
         "loose.txt",
         "user content\nsecond\n",
-        "second\n",
+        // Rewritten, not only deleted: a delete-only Surgical edit refuses.
+        "user content, revised\nsecond\n",
         Mode::Surgical,
     ));
     assert!(note.contains("not recoverable"), "{note}");
@@ -928,16 +952,80 @@ fn the_refusal_does_not_tell_a_transformation_to_undo_itself() {
 #[cfg(unix)]
 // the copy is only made where it is provably no wider,
 // and Windows has no comparison to make: see object_store
+/// Job corpus row A-2 (2026-08-11), the Edit half. Two `Edit` calls whose
+/// `new_string` was the `old_string` minus one line stripped the user's
+/// in-progress line out of `README.md` and `src/receipts/parser.py`. The guard
+/// filed a recovery copy and let both through, and INV-2 read the file off
+/// disk and failed: a copy in the object store is not the work still being
+/// where the user left it.
+#[test]
+fn a_surgical_edit_that_only_deletes_the_users_unsaved_line_is_refused() {
+    let (f, p) = parser_fixture();
+    let before = f.read("parser.py");
+    let refusal = assert_refused(f.guard().assess(
+        &p,
+        "parser.py",
+        &before,
+        "def a():\n    return 1\n",
+        Mode::Surgical,
+    ));
+    assert!(refusal.contains("# WIP do not touch"), "{refusal}");
+    // The refusal must not route the model onto another write surface, which
+    // is what round 1 measured the model doing.
+    assert!(!refusal.contains("Write"), "{refusal}");
+}
+
+/// The wrong-refusal direction, and the reason the module documentation gives
+/// for Edit never being refused: the agent has to stay able to delete lines it
+/// wrote itself, on a tree that is dirty for other reasons.
+#[test]
+fn a_surgical_edit_may_still_delete_only_lines_this_tool_wrote() {
+    let (f, p) = parser_fixture();
+    let g = f.guard();
+    let user_state = f.read("parser.py");
+    let agent_state = format!("{user_state}print(\"debug\")\n");
+    std::fs::write(&p, &agent_state).unwrap();
+    g.note_written(&p, &user_state, &agent_state);
+
+    assert!(
+        matches!(
+            g.assess(&p, "parser.py", &agent_state, &user_state, Mode::Surgical),
+            Verdict::Proceed
+        ),
+        "removing only the tool's own line must not be refused"
+    );
+}
+
+/// The other wrong-refusal direction: an edit that CHANGES an unsaved line is
+/// not a deletion of it, and this module cannot tell a rename from a drop — so
+/// the delete-only rule must not catch one.
+#[test]
+fn a_surgical_edit_that_rewrites_an_unsaved_line_is_not_refused() {
+    let (f, p) = parser_fixture();
+    let before = f.read("parser.py");
+    assert_noted(f.guard().assess(
+        &p,
+        "parser.py",
+        &before,
+        "def a():\n    return 1\n# WIP renamed by the agent\n",
+        Mode::Surgical,
+    ));
+}
+
 #[test]
 fn a_surgical_edit_that_removes_unsaved_work_copies_it() {
     let (f, p) = parser_fixture();
     let g = f.guard();
     let before = f.read("parser.py");
+    // The new content REWRITES the unsaved line rather than only deleting it.
+    // A delete-only edit is refused outright (see
+    // `a_surgical_edit_that_only_deletes_the_users_unsaved_line_is_refused`),
+    // so writing this arm as one would grade the refusal instead of the copy.
     let note = assert_noted(g.assess(
         &p,
         "parser.py",
         &before,
-        "def a():\n    return 1\n",
+        "def a():\n    return 1\n# WIP touched by the agent\n",
         Mode::Surgical,
     ));
     assert_eq!(f.recover(&note), before);
@@ -1299,7 +1387,8 @@ fn an_edit_in_a_repository_that_is_not_this_files_archive_makes_no_copy() {
         &p,
         "work/env.local",
         prior,
-        "STRIPE_KEY=sk_live_x\n",
+        // Rewritten, not only deleted: a delete-only Surgical edit refuses.
+        "STRIPE_KEY=sk_live_x\nDB_PASSWORD=redacted\n",
         Mode::Surgical,
     ));
     assert!(note.contains("no recovery copy"), "{note}");
@@ -1919,11 +2008,14 @@ fn an_edit_to_an_ignored_file_makes_no_copy_and_says_so() {
     let prior = format!("{CANARY}\nkeep me\n");
     let p = f.write("secrets/prod.env", &prior);
 
-    let note =
-        assert_noted(
-            f.guard()
-                .assess(&p, "secrets/prod.env", &prior, "keep me\n", Mode::Surgical),
-        );
+    // Rewritten, not only deleted: a delete-only Surgical edit refuses.
+    let note = assert_noted(f.guard().assess(
+        &p,
+        "secrets/prod.env",
+        &prior,
+        "keep me\nAWS_SECRET_ACCESS_KEY=rotated\n",
+        Mode::Surgical,
+    ));
     assert!(note.contains("not recoverable"), "{note}");
     assert!(
         !note.contains("cat-file blob"),
