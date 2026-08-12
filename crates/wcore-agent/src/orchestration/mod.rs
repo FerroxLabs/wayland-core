@@ -5167,7 +5167,9 @@ mod tests {
             });
             let run = run.unwrap_or_else(|| panic!("tool_running missing for {expected}"));
             let anchor = anchor.unwrap_or_else(|| {
-                panic!("no tool_request and no call_announced for {expected} - the host fails closed")
+                panic!(
+                    "no tool_request and no call_announced for {expected} - the host fails closed"
+                )
             });
             assert!(
                 anchor < run,
