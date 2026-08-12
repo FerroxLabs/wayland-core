@@ -10009,6 +10009,7 @@ dependencies = [
  "candle-transformers",
  "chrono",
  "dirs",
+ "dunce",
  "hf-hub",
  "humantime-serde",
  "parking_lot",
