@@ -205,6 +205,29 @@ impl DailySpendStore {
     /// `actual_usd` is committed even when the grant has already been reclaimed
     /// by lease expiry — the money was spent either way, and the ledger must
     /// reflect that.
+    ///
+    /// # Which day is charged, and the follow-up deliberately not done here
+    ///
+    /// The day containing `now`, which for a call spanning midnight is not the
+    /// day that authorised it. A reservation granted at 23:50 out of day 1's
+    /// remaining budget settles into day 2: day 1 ends showing nothing for the
+    /// work it admitted, and day 2 opens carrying spend against a ceiling it
+    /// never agreed to.
+    ///
+    /// That is a reporting inaccuracy and NOT a breach of the ceiling. The
+    /// reservation is carried across the roll by [`SubjectLedger::roll_to`], so
+    /// the authority stays held for the whole life of the call and nothing is
+    /// over-admitted. Measured before that carry existed, this same case closed
+    /// the day at 1.80 committed against a 1.00 cap.
+    ///
+    /// Charging the authorising day instead needs [`DailyGrant`] to carry its
+    /// originating day key, and the ledger to retain a rolled-over day until
+    /// that day's last grant has settled or expired — bounded, at most one
+    /// maximum lease past the day end. That is a larger change than the safety
+    /// fix this sits on, and is intentionally left undone with the scope named
+    /// here rather than rediscovered later. Intended semantics when it is done:
+    /// a call counts against the day that AUTHORISED it, not the day it
+    /// happened to finish.
     pub fn settle(
         &self,
         subject: &str,
@@ -249,8 +272,7 @@ impl DailySpendStore {
         Ok(ledger
             .subjects
             .get(subject)
-            .filter(|entry| entry.day == today)
-            .map(|entry| entry.live_position(now))
+            .map(|entry| entry.position_as_of(&today, now))
             .unwrap_or(DailyPosition {
                 committed_usd: 0.0,
                 reserved_usd: 0.0,
@@ -391,26 +413,81 @@ impl DailySpendStore {
 }
 
 impl DailyLedgerFile {
-    /// Fetch `subject`'s bucket for the UTC day containing `now`, resetting a
-    /// stale day and reclaiming expired reservations. Buckets for other
-    /// subjects whose day has rolled over are dropped so the file stays small.
+    /// Fetch `subject`'s bucket for the UTC day containing `now`.
+    ///
+    /// Every bucket is rolled onto `now`'s day and reclaimed by lease first,
+    /// then buckets with nothing left to account for are dropped so the file
+    /// stays small. Rolling is not dropping: a bucket that has crossed
+    /// midnight still holding an unexpired reservation survives the roll, so
+    /// the file keeps exactly one entry per subject either way.
     fn bucket_for(&mut self, subject: &str, now: DateTime<Utc>) -> &mut SubjectLedger {
         let today = day_key(now);
-        self.subjects.retain(|_, entry| entry.day == today);
-        let entry = self
-            .subjects
+        for entry in self.subjects.values_mut() {
+            entry.roll_to(&today, now);
+        }
+        self.subjects.retain(|_, entry| !entry.is_vacant());
+        self.subjects
             .entry(subject.to_string())
             .or_insert_with(|| SubjectLedger {
-                day: today.clone(),
+                day: today,
                 committed_usd: 0.0,
                 reservations: Vec::new(),
-            });
-        entry.expire(now);
-        entry
+            })
     }
 }
 
 impl SubjectLedger {
+    /// Move this bucket onto `today`, then reclaim by lease.
+    ///
+    /// Settled spend is per-day and resets. Reservations are not settled
+    /// spend: a reservation is authority that is still in flight, and the
+    /// contract on [`DailySpendStore::reserve`] is that it keeps counting
+    /// against the ceiling until its lease expires. The calendar is not a
+    /// reclaim event, so the roll carries unexpired reservations forward and
+    /// `expire` remains the only thing that reclaims them.
+    ///
+    /// Measured before this existed: a 0.90 hold taken at 23:50 under a 1.00
+    /// cap was released at 00:00 with 20 minutes of lease left, a second 0.90
+    /// was admitted against the same cap, and the day closed at 1.80
+    /// committed with nothing to refuse it — `settle` does not check the cap
+    /// because the reservation is supposed to have bounded it already. The
+    /// roll also walked every subject, so one subject touching the ledger on
+    /// the new day released every other subject's hold.
+    fn roll_to(&mut self, today: &str, now: DateTime<Utc>) {
+        if self.day != today {
+            self.day = today.to_string();
+            self.committed_usd = 0.0;
+        }
+        self.expire(now);
+    }
+
+    /// Nothing left to account for: no settled spend, no live reservation.
+    /// Such a bucket carries no information and is dropped to bound the file.
+    fn is_vacant(&self) -> bool {
+        self.committed_usd == 0.0 && self.reservations.is_empty()
+    }
+
+    /// This bucket as the day containing `now` sees it, without mutating it.
+    ///
+    /// Mirrors what [`DailyLedgerFile::bucket_for`] would produce, so a
+    /// read-only caller and a reserving caller never disagree. Settled spend
+    /// reads as zero once the calendar has moved past the day it was settled
+    /// on; an unexpired reservation is reported whichever day it was taken,
+    /// because it is still holding authority. Filtering the whole bucket out
+    /// by day would report an in-flight hold as free budget that `reserve`
+    /// then refuses.
+    fn position_as_of(&self, today: &str, now: DateTime<Utc>) -> DailyPosition {
+        let live = self.live_position(now);
+        if self.day == today {
+            live
+        } else {
+            DailyPosition {
+                committed_usd: 0.0,
+                reserved_usd: live.reserved_usd,
+            }
+        }
+    }
+
     fn expire(&mut self, now: DateTime<Utc>) {
         let now_ms = now.timestamp_millis();
         self.reservations
@@ -539,7 +616,13 @@ mod tests {
     /// on `Utc::now()` the arm below failed for the last 29 minutes of every
     /// UTC day, which is when CI happened to run it.
     fn anchor() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-01-15T12:00:00Z")
+        at("2026-01-15T12:00:00Z")
+    }
+
+    /// A fixed instant, spelled RFC 3339. Every boundary arm below names the
+    /// clock explicitly rather than offsetting from wall time.
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
             .unwrap()
             .with_timezone(&Utc)
     }
@@ -612,6 +695,104 @@ mod tests {
         store
             .reserve("default", 0.20, 1.00, lease(), now + Duration::minutes(31))
             .expect("the lease expired, so the authority is reclaimed");
+    }
+
+    /// The day roll must not release authority that is still in flight.
+    ///
+    /// A reservation taken at 23:50 with a 30-minute lease is live until 00:20
+    /// the next day. Until this bound existed the bucket was dropped wholesale
+    /// at 00:00 and that hold silently stopped binding.
+    #[test]
+    fn an_unexpired_reservation_still_binds_after_the_utc_day_rolls() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let before = at("2026-01-15T23:50:00Z");
+        let after = at("2026-01-16T00:05:00Z");
+
+        let grant = store
+            .reserve("default", 0.90, 1.00, Duration::minutes(30), before)
+            .expect("admitted out of day 1");
+
+        let carried = store.position("default", after).unwrap();
+        assert!(
+            (carried.reserved_usd - 0.90).abs() < 1e-9,
+            "the hold is still in flight, so the new day must see it: {carried:?}"
+        );
+        assert!(
+            matches!(
+                store.reserve("default", 0.90, 1.00, lease(), after),
+                Err(DailySpendError::Exceeded { .. })
+            ),
+            "a concurrent process must not be admitted against authority that \
+             is still held"
+        );
+
+        store.settle("default", &grant, 0.90, after).unwrap();
+        let closed = store.position("default", after).unwrap();
+        assert!((closed.committed_usd - 0.90).abs() < 1e-9);
+        assert!(
+            closed.total_usd() <= 1.00 + USD_EPSILON,
+            "the ceiling must still bind across the boundary: {closed:?}"
+        );
+    }
+
+    /// The other half of the same bound: carrying a reservation across
+    /// midnight must not make it immortal. `expire` stays the only reclaim,
+    /// so "reclaimed too early" must not be traded for "leaked forever".
+    #[test]
+    fn a_reservation_carried_across_midnight_is_still_released_by_its_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+
+        let _abandoned = store
+            .reserve(
+                "default",
+                0.90,
+                1.00,
+                Duration::minutes(30),
+                at("2026-01-15T23:50:00Z"),
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .reserve("default", 0.20, 1.00, lease(), at("2026-01-16T00:19:00Z"))
+                .is_err(),
+            "one minute before the carried lease expires it must still bind"
+        );
+        store
+            .reserve("default", 0.20, 1.00, lease(), at("2026-01-16T00:21:00Z"))
+            .expect("a carried lease that expired is reclaimed, not leaked");
+    }
+
+    /// Cross-subject blast radius. The roll walks every subject, so it must
+    /// not be able to release a hold belonging to a subject that is not even
+    /// the one being reserved against.
+    #[test]
+    fn a_day_roll_for_one_subject_does_not_release_anothers_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let before = at("2026-01-15T23:50:00Z");
+        let after = at("2026-01-16T00:05:00Z");
+
+        let _alpha_hold = store
+            .reserve("alpha", 0.90, 1.00, Duration::minutes(30), before)
+            .unwrap();
+        // An unrelated subject touches the same ledger on the new day.
+        store.reserve("beta", 0.10, 1.00, lease(), after).unwrap();
+
+        let alpha = store.position("alpha", after).unwrap();
+        assert!(
+            (alpha.reserved_usd - 0.90).abs() < 1e-9,
+            "one subject's day roll must not release another's authority: {alpha:?}"
+        );
+        assert!(
+            matches!(
+                store.reserve("alpha", 0.90, 1.00, lease(), after),
+                Err(DailySpendError::Exceeded { .. })
+            ),
+            "alpha's ceiling must still bind"
+        );
     }
 
     #[test]
