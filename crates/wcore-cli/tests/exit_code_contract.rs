@@ -80,21 +80,7 @@ async fn drive(
         .env("HOME", &home)
         .env("WAYLAND_HOME", &home)
         .env("NO_COLOR", "1");
-    // Windows only: these are OS prerequisites, not host configuration.
-    // Winsock loads its layered service providers from `%SystemRoot%`, so a
-    // child launched without it fails EVERY send with WSAEPROVIDERFAILEDINIT
-    // (os error 10106). The engine reads that as a transient connect failure
-    // and spends its full 900 s provider-outage budget, so the whole binary
-    // hung past the harness cap instead of grading an exit code. Measured on
-    // Windows; the same allowlist already exists in
-    // `wcore_cli::profile_router::ENV_PASSTHROUGH` and in the evaluator's
-    // `ChildEnvironment::build`.
-    #[cfg(windows)]
-    for name in ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT"] {
-        if let Some(value) = std::env::var_os(name) {
-            cmd.env(name, value);
-        }
-    }
+    pass_through_os_prerequisites(&mut cmd);
     cmd.args([
         "-p",
         "rec",
@@ -113,6 +99,33 @@ async fn drive(
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
+}
+
+/// Windows only: OS prerequisites, not host configuration.
+///
+/// Winsock loads its layered service providers from `%SystemRoot%`, so a child
+/// launched with a cleared environment fails EVERY send with
+/// WSAEPROVIDERFAILEDINIT (os error 10106). The engine reads that as a
+/// transient connect failure and spends its full 900 s provider-outage budget,
+/// so the whole test binary hangs past the harness cap instead of grading an
+/// exit code. Measured on Windows.
+///
+/// This lives in one function on purpose. It was previously inlined at a single
+/// `env_clear()` site; a second site added in the same round did not inherit it
+/// and its two tests hung exactly the way the original eight did. Every
+/// `env_clear()` in this file must call this.
+///
+/// The same allowlist exists in `wcore_cli::profile_router::ENV_PASSTHROUGH`
+/// and in the evaluator's `ChildEnvironment::build`.
+fn pass_through_os_prerequisites(cmd: &mut Command) {
+    #[cfg(windows)]
+    for name in ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(name) {
+            cmd.env(name, value);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }
 
 fn read(path: &str) -> OpenAiStep {
@@ -470,17 +483,18 @@ async fn drive_two_legs(name: &str, steps: Vec<OpenAiStep>, second_prompt: &str)
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &home)
             .env("WAYLAND_HOME", &home)
-            .env("NO_COLOR", "1")
-            .args([
-                "-p",
-                "rec",
-                "-m",
-                "fake",
-                "--no-color",
-                "--dangerously-skip-permissions",
-            ])
-            .args(extra)
-            .arg(prompt);
+            .env("NO_COLOR", "1");
+        pass_through_os_prerequisites(&mut cmd);
+        cmd.args([
+            "-p",
+            "rec",
+            "-m",
+            "fake",
+            "--no-color",
+            "--dangerously-skip-permissions",
+        ])
+        .args(extra)
+        .arg(prompt);
         let out = cmd.output().expect("spawn wayland-core");
         Run {
             code: out.status.code(),
