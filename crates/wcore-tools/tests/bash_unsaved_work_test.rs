@@ -35,7 +35,15 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 /// disk, reached through a real workspace grant rooted at that repo.
 fn repo_ctx() -> (ToolContext, std::path::PathBuf, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    // `std::fs::canonicalize` returns the verbatim `\\?\C:\...` form on
+    // Windows, and the file tools own path validation refuses that namespace
+    // outright. Production never hands the tools that spelling: `AgentBootstrap`
+    // reduces the workspace with `dunce::simplified` at its single ingress, so a
+    // fixture that canonicalizes raw models a workspace the product never builds
+    // and dies before it reaches this file subject. `dunce::canonicalize` is the
+    // idiom the sibling `unsaved_work_*` fixtures already use; it is a plain
+    // canonicalize on Unix.
+    let root = dunce::canonicalize(dir.path()).unwrap();
     git(&root, &["init", "-q"]);
     git(&root, &["config", "user.email", "t@example.com"]);
     git(&root, &["config", "user.name", "t"]);
