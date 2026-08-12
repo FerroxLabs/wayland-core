@@ -1012,6 +1012,7 @@ fn a_surgical_edit_that_rewrites_an_unsaved_line_is_not_refused() {
     ));
 }
 
+#[cfg(unix)] // uses the unix-only `recover` helper, like every other copy arm
 #[test]
 fn a_surgical_edit_that_removes_unsaved_work_copies_it() {
     let (f, p) = parser_fixture();
