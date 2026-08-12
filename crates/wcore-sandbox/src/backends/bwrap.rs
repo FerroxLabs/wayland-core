@@ -151,6 +151,13 @@ impl SandboxBackend for BubblewrapBackend {
         true
     }
 
+    /// bwrap builds the child's mount namespace from the manifest's grants
+    /// alone — an ungranted host path is simply not present in it — so a write
+    /// outside every granted root cannot land on the host.
+    fn confines_filesystem(&self) -> bool {
+        true
+    }
+
     fn owns_descendants_hard(&self) -> bool {
         true
     }

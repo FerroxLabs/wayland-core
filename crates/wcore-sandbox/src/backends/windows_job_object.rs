@@ -9,6 +9,7 @@
 //! | host environment scrubbed to `manifest.env` only | **ACTIVE** |
 //! | AppContainer profile + Low-integrity restricted token | not active |
 //! | `fs_read_allow` / `fs_write_allow` / `fs_read_deny` at the OS layer | not active |
+//! | filesystem confinement (`confines_filesystem`) | **`false` — a child can write anywhere this user can** |
 //! | `NetworkPolicy::Deny` at the OS layer | not active |
 //! | Job Object memory / CPU / active-process caps | not active |
 //!
@@ -85,9 +86,17 @@ impl Default for WindowsJobObjectBackend {
 }
 
 // NOTE: this backend deliberately overrides NOTHING that would raise a
-// containment claim. `enforces_read_deny`, `owns_descendants_hard`,
-// `binds_cwd_authority`, `binds_workspace_authority`, `blocks_powershell` and
-// `hard_containment_identity` all keep their trait defaults.
+// containment claim. `confines_filesystem`, `enforces_read_deny`,
+// `owns_descendants_hard`, `binds_cwd_authority`, `binds_workspace_authority`,
+// `blocks_powershell` and `hard_containment_identity` all keep their trait
+// defaults.
+//
+// `confines_filesystem == false` is not an oversight to be tidied up later: a
+// Windows Job Object bounds process LIFETIME and RESOURCE USE. It has no
+// filesystem filter and never had one, so this backend cannot confine a write
+// no matter how the manifest is written. The measured proof is
+// `wcore-cli/tests/sandbox_activeness.rs`, which runs the escape and asserts
+// the claim against what actually happened.
 //
 // `owns_descendants_hard` is the one that is arguably understated: a
 // kill-on-close Job Object with no breakaway really is a hard descendant
@@ -152,6 +161,11 @@ mod tests {
     #[test]
     fn relaxed_backend_claims_no_delegated_authority() {
         let backend = WindowsJobObjectBackend::new();
+        assert!(
+            !backend.confines_filesystem(),
+            "a Job Object has no filesystem filter; claiming confinement here \
+             would tell an operator a write cannot escape when it can"
+        );
         assert!(!backend.owns_descendants_hard());
         assert!(!backend.binds_cwd_authority());
         assert!(!backend.binds_workspace_authority());

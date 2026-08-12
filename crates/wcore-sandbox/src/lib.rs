@@ -386,6 +386,12 @@ impl SandboxRegistry {
     pub fn enforces_read_deny(&self) -> bool {
         self.backend.enforces_read_deny()
     }
+    /// Whether the OS confines a child to the manifest's filesystem grants.
+    /// See [`backends::SandboxBackend::confines_filesystem`] — this is NOT
+    /// [`Self::bypasses_containment`], which reports session authority.
+    pub fn confines_filesystem(&self) -> bool {
+        self.backend.confines_filesystem()
+    }
     pub fn owns_descendants_hard(&self) -> bool {
         self.backend.owns_descendants_hard()
     }
@@ -395,6 +401,15 @@ impl SandboxRegistry {
     pub fn binds_workspace_authority(&self) -> bool {
         self.backend.binds_workspace_authority()
     }
+    /// Whether this session is the operator's explicit no-sandbox (Dangerous)
+    /// launch.
+    ///
+    /// This is SESSION AUTHORITY, not a backend capability: only
+    /// [`Self::dangerous`] can set it, so it is `false` for every ordinary
+    /// session regardless of how much — or how little — the selected backend
+    /// enforces. `false` therefore means "a real backend was selected", NOT
+    /// "a child cannot escape its workspace". For the filesystem question ask
+    /// [`Self::confines_filesystem`].
     pub fn bypasses_containment(&self) -> bool {
         self.bypasses_containment
     }

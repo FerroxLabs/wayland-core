@@ -258,6 +258,12 @@ impl SandboxBackend for DockerBackend {
         true
     }
 
+    /// The child runs in a container filesystem; only the manifest's grants are
+    /// bind-mounted in, so a write outside them cannot reach the host.
+    fn confines_filesystem(&self) -> bool {
+        true
+    }
+
     #[cfg(feature = "live-docker")]
     fn owns_descendants_hard(&self) -> bool {
         true
