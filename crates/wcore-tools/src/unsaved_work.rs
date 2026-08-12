@@ -520,6 +520,28 @@ pub struct UnsavedWorkGuard {
 
 static SHARED: OnceLock<Arc<UnsavedWorkGuard>> = OnceLock::new();
 
+/// One spelling for every path this guard uses as a map key.
+///
+/// The two tools reach the guard with the same file spelled differently on
+/// Windows. `WriteTool` is handed the model's own `C:\...` path, the spelling
+/// `AgentBootstrap` puts in the prompt. `BashTool` derives its candidates from
+/// `WorkspacePolicy::root()`, and that root went through `canon`, which
+/// canonicalizes and so yields the verbatim `\\?\C:\...` form. Keyed raw, the
+/// authorship a write records is invisible to the shell lookup that has to
+/// honour it, and the agent is refused permission to delete or revert a file it
+/// wrote itself.
+///
+/// `dunce::simplified` is a pure string reduction — no I/O, no symlink
+/// resolution, no filesystem authority — so it cannot move a containment
+/// boundary; the workspace roots keep their canonical spelling untouched. It is
+/// a no-op on Unix, where the two spellings already coincide. And it declines to
+/// strip the prefix for reserved DOS names and over-long paths, exactly the
+/// cases where `\\?\C:\CON` and `C:\CON` are genuinely different files, so
+/// normalizing can never merge two distinct paths into one key.
+fn key(path: &Path) -> PathBuf {
+    dunce::simplified(path).to_path_buf()
+}
+
 impl UnsavedWorkGuard {
     /// The process-wide guard. Every Write and Edit tool shares it, including
     /// the ones sub-agents build, so one agent cannot escape a sibling's
@@ -904,6 +926,8 @@ impl UnsavedWorkGuard {
     /// user adds later of a line the agent wrote once, which is the
     /// granularity round 3 got wrong.
     pub fn note_written(&self, path: &Path, previous: &str, written: &str) {
+        let keyed = key(path);
+        let path = keyed.as_path();
         // Did the file move underneath the tool since it last wrote here? If
         // so nothing carried over from that write may be claimed any more:
         // only what *this* write introduces, judged against the bytes that
@@ -953,6 +977,8 @@ impl UnsavedWorkGuard {
     /// rewriting the file between two tool writes re-protects the agent's own
     /// lines until the tool writes again.
     fn authored_lines(&self, path: &Path, on_disk: &str) -> HashMap<String, usize> {
+        let keyed = key(path);
+        let path = keyed.as_path();
         let Ok(written) = self.last_written.lock() else {
             return HashMap::new();
         };

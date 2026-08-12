@@ -9,6 +9,13 @@ rust-version.workspace = true
 
 [dependencies]
 wcore-types.workspace         = true
+# `std::fs::canonicalize` returns the verbatim `\\?\C:\…` form on Windows, and
+# the tools' own path validation refuses that namespace, so nothing may hand it
+# such a path. `dunce::simplified` reduces that spelling to the ordinary one as a
+# pure string operation, which is how `unsaved_work` keys one file under one name
+# whichever tool reached it; `dunce::canonicalize` is the same reduction after a
+# real canonicalize. Both are plain no-ops on Unix.
+dunce                         = "1"
 wcore-protocol.workspace      = true
 wcore-config.workspace        = true
 wcore-repomap.workspace       = true
@@ -166,10 +173,6 @@ image-inspect = ["dep:image", "dep:kamadak-exif"]
 doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
 
 [dev-dependencies]
-# `std::fs::canonicalize` returns the verbatim `\\?\C:\…` form on Windows, and
-# the tools' own path validation refuses that namespace. `dunce::canonicalize`
-# reduces it to the ordinary form; it is a plain canonicalize on Unix.
-dunce = "1"
 # Backdates a loose object for the gc prune-window arm. `touch -d "3 weeks
 # ago"` is a GNU extension that the BSD touch macOS ships rejects.
 filetime = "0.2"
