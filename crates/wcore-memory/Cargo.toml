@@ -21,6 +21,10 @@ async-trait.workspace = true
 tracing.workspace    = true
 tokio        = { workspace = true }
 dirs.workspace       = true
+# Project-root resolution for the `<base>/projects/<key>/` memory layout.
+# `fs::canonicalize` returns a `\\?\`-prefixed path on Windows, which would
+# change the key for every existing install; dunce keeps the plain form.
+dunce        = "1"
 
 # W5 memory v2 deps
 rusqlite     = { workspace = true }

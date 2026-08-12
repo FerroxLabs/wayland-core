@@ -55,13 +55,39 @@ pub fn memory_base_dir() -> Option<PathBuf> {
 ///
 /// Path: `<base>/projects/<sanitized_project_root>/memory/`
 ///
-/// The project root is sanitized to produce a safe directory name:
-/// all non-alphanumeric characters become hyphens, and long paths
-/// are truncated with a hash suffix for uniqueness.
+/// The project root is resolved (see `project_key`) and then sanitized to
+/// produce a safe directory name: all non-alphanumeric characters become
+/// hyphens, and long paths are truncated with a hash suffix for uniqueness.
 pub fn auto_memory_dir(project_root: &Path) -> Option<PathBuf> {
     let base = memory_base_dir()?;
-    let sanitized = sanitize_path(&project_root.to_string_lossy());
-    Some(base.join("projects").join(sanitized).join("memory"))
+    Some(
+        base.join("projects")
+            .join(project_key(project_root))
+            .join("memory"),
+    )
+}
+
+/// The per-project directory name under `<base>/projects/`.
+///
+/// The path is resolved through the filesystem *before* it is sanitized. Two
+/// spellings of one directory -- a symlinked parent, a relative path, a
+/// trailing separator -- otherwise sanitize to two different names and so to
+/// two different memory DBs, which presents to the user as amnesia with no
+/// error to explain it.
+///
+/// macOS makes that the ordinary case rather than an exotic one: `/tmp` and
+/// `/var` are symlinks into `/private`, and `getcwd` hands back the resolved
+/// spelling. A caller that passes the path it was given and a caller that
+/// passes `std::env::current_dir()` are then naming the same directory two
+/// ways. `dunce::canonicalize` is used rather than `fs::canonicalize` so that
+/// Windows keeps the plain `C:\...` spelling instead of gaining a
+/// `\\?\` prefix, which would relocate every existing install.
+///
+/// A path that cannot be resolved -- it need not exist yet -- falls back to
+/// the spelling given, which is what this did before.
+fn project_key(project_root: &Path) -> String {
+    let resolved = dunce::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
+    sanitize_path(&resolved.to_string_lossy())
 }
 
 // ---------------------------------------------------------------------------
