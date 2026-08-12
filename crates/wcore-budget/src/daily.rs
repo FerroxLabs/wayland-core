@@ -530,6 +530,20 @@ mod tests {
         Duration::minutes(30)
     }
 
+    /// A fixed instant in the middle of a UTC day.
+    ///
+    /// Buckets are keyed by UTC calendar day, so a test that advances `now`
+    /// past a lease must not straddle midnight: the follow-up call would land
+    /// on the next day, where the bucket has already reset and the
+    /// reservation the test was written to observe no longer exists. Anchored
+    /// on `Utc::now()` the arm below failed for the last 29 minutes of every
+    /// UTC day, which is when CI happened to run it.
+    fn anchor() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-01-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
     #[test]
     fn missing_store_is_an_empty_ledger_and_admits_the_first_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -582,7 +596,7 @@ mod tests {
     #[test]
     fn an_expired_reservation_is_reclaimed_rather_than_leaked_forever() {
         let dir = tempfile::tempdir().unwrap();
-        let now = Utc::now();
+        let now = anchor();
         let store = store(dir.path());
 
         // Model a process that died between reserve and settle.
