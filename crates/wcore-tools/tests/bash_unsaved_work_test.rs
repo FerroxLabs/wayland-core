@@ -55,6 +55,71 @@ fn repo_ctx() -> (ToolContext, std::path::PathBuf, tempfile::TempDir) {
 
 /// The measured defect, driven through the tool the agent actually calls.
 #[tokio::test]
+async fn bash_refuses_a_truncating_redirect_over_uncommitted_work() {
+    // The reroute, measured. Job corpus row A-8 run `fix-r1`, 2026-08-12:
+    // Write refused the rewrite of `retry.py` twice and the model reached
+    // `cat > retry.py << 'PYEOF'` instead, which took the user's in-progress
+    // line off disk with nothing in the path to stop it.
+    let (ctx, root, _keep) = repo_ctx();
+
+    let result = BashTool
+        .execute_with_ctx(
+            json!({"command": "cat > file.py << 'PYEOF'\nrewritten\nPYEOF"}),
+            &ctx,
+        )
+        .await;
+
+    assert!(
+        result.is_error,
+        "a redirect that truncates unsaved work must be refused: {result:?}"
+    );
+    let on_disk = std::fs::read_to_string(root.join("file.py")).unwrap();
+    assert!(
+        on_disk.contains(USER_LINE),
+        "the user's uncommitted line must still be on disk, found: {on_disk:?}"
+    );
+}
+
+/// Negative controls on the same fixture. Appending keeps every byte the user
+/// left, and a redirect to somewhere else is not this surface's business —
+/// without these the test above could be passing because Bash refuses every
+/// command with a `>` in it.
+#[tokio::test]
+async fn bash_still_appends_to_a_file_holding_uncommitted_work() {
+    let (ctx, root, _keep) = repo_ctx();
+
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo appended >> file.py"}), &ctx)
+        .await;
+
+    assert!(!result.is_error, "an append destroys nothing: {result:?}");
+    let on_disk = std::fs::read_to_string(root.join("file.py")).unwrap();
+    assert!(on_disk.contains(USER_LINE), "found: {on_disk:?}");
+    assert!(on_disk.contains("appended"), "found: {on_disk:?}");
+}
+
+#[tokio::test]
+async fn bash_still_redirects_into_a_file_with_nothing_unsaved_in_it() {
+    let (ctx, root, _keep) = repo_ctx();
+
+    let result = BashTool
+        .execute_with_ctx(json!({"command": "echo generated > report.txt 2>&1"}), &ctx)
+        .await;
+
+    assert!(
+        !result.is_error,
+        "a redirect over a file that holds no unsaved work must run: {result:?}"
+    );
+    assert!(root.join("report.txt").exists(), "the command really ran");
+    assert!(
+        std::fs::read_to_string(root.join("file.py"))
+            .unwrap()
+            .contains(USER_LINE),
+        "and it left the user's file alone"
+    );
+}
+
+#[tokio::test]
 async fn bash_refuses_a_checkout_that_would_destroy_an_uncommitted_line() {
     let (ctx, root, _keep) = repo_ctx();
 

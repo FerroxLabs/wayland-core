@@ -71,6 +71,16 @@ pub fn shell_refusal(command: &str, cwd: &Path) -> Option<String> {
             }
             continue;
         }
+        for shown in truncating_targets(&segment) {
+            let abs = cwd.join(&shown);
+            if at_risk.iter().any(|(p, _)| *p == shown) {
+                continue;
+            }
+            let lines = guard.unsaved_lines(&abs);
+            if !lines.is_empty() {
+                at_risk.push((shown, lines));
+            }
+        }
         for operand in removing_operands(&segment) {
             for file in files_under(&cwd.join(&operand), RM_WALK_BUDGET) {
                 let shown = file
@@ -124,6 +134,110 @@ pub fn shell_refusal(command: &str, cwd: &Path) -> Option<String> {
 /// No glob expansion: a pattern reaches the filesystem as a literal here and
 /// resolves to nothing, so the refusal does not fire. That is the direction
 /// this surface takes everywhere else.
+/// The paths this segment would truncate in place, relative to the shell's
+/// working directory.
+///
+/// Measured, job corpus row A-8 run `fix-r1`, 2026-08-12: Write refused the
+/// rewrite of `retry.py` twice and the model rerouted to
+/// `cat > retry.py << 'PYEOF'`, which took the user's in-progress line off
+/// disk with no guard in the path. Closing Write and Edit without closing
+/// this one only moves the destruction to the route that is still open.
+///
+/// Deliberately narrow, in the direction this surface always errs:
+///
+/// * `>` and `>|` truncate, so they are covered; `>>` appends and is not.
+/// * `tee FILE` truncates; `tee -a FILE` appends and is not covered.
+/// * `sed -i` / `perl -i` rewrite their operands in place.
+/// * A redirection target that is not a plain relative or absolute path —
+///   a process substitution, a variable, a glob, `/dev/null` — is skipped
+///   rather than guessed at.
+fn truncating_targets(segment: &str) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    let push = |raw: &str, targets: &mut Vec<String>| {
+        let t = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+        if t.is_empty() || t.starts_with('$') || t.starts_with('&') || t.starts_with("/dev/") {
+            return;
+        }
+        if t.contains('*') || t.contains('?') || t.contains('`') || t.contains('$') {
+            return;
+        }
+        if !targets.iter().any(|e| e == t) {
+            targets.push(t.to_owned());
+        }
+    };
+
+    // Redirections. Scanned over the raw segment because the target is not
+    // always whitespace-separated from the operator (`cat >file`).
+    let bytes: Vec<char> = segment.chars().collect();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == '>' {
+            // `>>` appends: skip both characters and the operand after them.
+            if i + 1 < bytes.len() && bytes[i + 1] == '>' {
+                i += 2;
+                continue;
+            }
+            // `2>` and `1>` are the same truncation, and `>|` is the forced
+            // form of it.
+            let mut j = i + 1;
+            if j < bytes.len() && bytes[j] == '|' {
+                j += 1;
+            }
+            while j < bytes.len() && bytes[j] == ' ' {
+                j += 1;
+            }
+            let start = j;
+            while j < bytes.len() && !bytes[j].is_whitespace() && bytes[j] != ';' && bytes[j] != '|'
+            {
+                j += 1;
+            }
+            if j > start {
+                let raw: String = bytes[start..j].iter().collect();
+                push(&raw, &mut targets);
+            }
+            i = j.max(i + 1);
+            continue;
+        }
+        i += 1;
+    }
+
+    // In-place rewriters, and `tee` without `-a`.
+    let tokens: Vec<&str> = segment
+        .split_whitespace()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\''))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let program = tokens[idx];
+        let base = program.rsplit('/').next().unwrap_or(program);
+        if base == "tee" {
+            let rest = &tokens[idx + 1..];
+            let appending = rest
+                .iter()
+                .take_while(|t| t.starts_with('-'))
+                .any(|t| *t == "-a" || *t == "--append");
+            if !appending {
+                for t in rest.iter().filter(|t| !t.starts_with('-')) {
+                    push(t, &mut targets);
+                }
+            }
+        } else if base == "sed" || base == "perl" {
+            let rest = &tokens[idx + 1..];
+            if rest
+                .iter()
+                .any(|t| t.starts_with("-i") || *t == "--in-place")
+            {
+                for t in rest.iter().filter(|t| !t.starts_with('-')) {
+                    push(t, &mut targets);
+                }
+            }
+        }
+        idx += 1;
+    }
+    targets
+}
+
 fn removing_operands(segment: &str) -> Vec<String> {
     let mut tokens = segment
         .split_whitespace()
