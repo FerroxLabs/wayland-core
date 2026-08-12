@@ -186,6 +186,15 @@ async fn dubious_ownership_refuses_rather_than_calling_it_an_empty_baseline() {
             "--nocapture",
         ])
         .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+        // The variable only forces the *ownership* verdict. git then still
+        // consults `safe.directory`, which it reads from protected -- system
+        // and global -- config. The hosted macOS runner image ships
+        // `git config --global --add safe.directory "*"`, so git declared the
+        // repository safe anyway and the probe exited 0 with empty stderr,
+        // failing this arm on the runner while it passed everywhere else.
+        // Neither config file may participate in this arm.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("WCORE_DUBIOUS_ROOT", &root)
         .env("WCORE_DUBIOUS_FILE", &file)
         .env("WCORE_DUBIOUS_REPORT", &report_path)
