@@ -5418,6 +5418,18 @@ impl AgentEngine {
         self.web_search = enabled;
     }
 
+    /// Row B-3: is this session's outbound route to a human currently down?
+    ///
+    /// Reads the same latch the orchestration dispatcher's unreachable-human
+    /// freeze gates on (`ToolRegistry::human_unreachable`), so the refusals the
+    /// model saw and the code this process exits with are decided by ONE fact
+    /// rather than two that can disagree. True here means the run ended needing
+    /// a person it could not reach. The session is durable, and `--resume` is
+    /// itself a fresh human turn, so resuming clears the latch and carries on.
+    pub fn awaiting_human(&self) -> bool {
+        self.tools.human_unreachable()
+    }
+
     /// D014: release the explicit user model pin set by [`set_model`], so a
     /// subsequent skill/hook `switch_model` is honoured again. Does NOT change
     /// the active model — only the precedence. Exposed for hosts (e.g. the TUI

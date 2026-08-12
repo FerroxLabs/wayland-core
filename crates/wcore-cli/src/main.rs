@@ -1059,6 +1059,24 @@ fn main() -> anyhow::Result<ExitCode> {
             if let Err(error) = &outcome {
                 wcore_cli::startup_error::report_startup_refusal(error);
             }
+            // Row B-3 — a finished run must END the process.
+            //
+            // Dropping a Tokio runtime WAITS, without bound, for every task on
+            // the blocking pool to return, and `spawn_blocking` tasks cannot be
+            // aborted. The email channel runs its IMAP poll loop there
+            // (`wcore_channel_email::imap::imap_poll_blocking`), and that loop
+            // only returns when its shutdown watch flips. Measured: a one-shot
+            // run whose work was DONE (last stdout byte 03:02:31) sat here
+            // polling IMAP every 10s until the harness SIGKILLed it at 03:16:07
+            // — 13m36s of hang scored as `exit_code:-9, timed_out:true`, which
+            // is how every positive run of corpus row B-3 has ever ended.
+            //
+            // The exit paths below stop the channel manager explicitly, so in
+            // the ordinary case this returns at once. This is the backstop that
+            // makes "the process exits" a property of the entry point rather
+            // than of five exit paths each remembering to clean up: any future
+            // leaked blocking task costs a bounded delay, never the whole run.
+            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
             outcome
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn wcore-cli entry thread: {e}"))?;
@@ -2321,6 +2339,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
         wcore_cli::goal_cmd::print_canonical_transition(&driver, &goal_id, "direct", &cursor);
         engine.run_stop_hooks().await;
+        shut_down_channels(&result.channel_manager).await;
         for mgr in &result.mcp_managers {
             mgr.shutdown().await;
         }
@@ -2348,6 +2367,16 @@ async fn run() -> anyhow::Result<ExitCode> {
                     run_result.usage.cache_read_tokens,
                     run_result.finish_reason,
                 );
+                // Row B-3 — say out loud that this stop is waiting on a person,
+                // and how to pick it up. Without this the run is silent about
+                // the one thing the operator has to do, and its exit code is
+                // the only clue.
+                let awaiting_human = engine.awaiting_human();
+                if awaiting_human {
+                    terminal
+                        .formatter()
+                        .session_info(&awaiting_human_notice(engine.current_session_id()));
+                }
                 // B3: the one-shot path used to return SUCCESS for every
                 // completed `engine.run`, so a run stopped by the turn cap and
                 // one that gave up on a failing tool both reported 0. The
@@ -2355,6 +2384,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 ExitCode::from(wcore_cli::exit_code::for_run_outcome(
                     run_result.stop_reason,
                     run_result.ended_on_unrecovered_tool_failure,
+                    awaiting_human,
                 ))
             }
             SlashOrRun::Engine(Err(e)) => {
@@ -2368,11 +2398,60 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     engine.run_stop_hooks().await;
 
+    shut_down_channels(&result.channel_manager).await;
+
     for mgr in &result.mcp_managers {
         mgr.shutdown().await;
     }
 
     Ok(exit_code)
+}
+
+/// Stop every configured channel before this path returns.
+///
+/// Row B-3. `AgentBootstrap::enable_inbound_dispatch(true)` starts inbound
+/// polling for the one-shot and REPL paths, but only `gateway.rs` ever stopped
+/// it again. An email channel polls IMAP from a `spawn_blocking` task that
+/// returns only when its shutdown watch flips, and a blocking task that never
+/// returns holds the whole runtime open at drop — so a run whose work was
+/// finished never exited and was eventually killed. `stop_all` flips that
+/// watch; the poll loop re-checks it every 100ms, so this is fast, and each
+/// channel is bounded by its own grace period regardless.
+///
+/// Failures are logged, not propagated: this runs after the exit code is
+/// already decided, and a channel that will not shut down cleanly must not
+/// change the verdict on the work that was done.
+async fn shut_down_channels(
+    channels: &std::sync::Arc<
+        tokio::sync::RwLock<wcore_channels_registry::wcore_channels::ChannelManager>,
+    >,
+) {
+    if let Err(error) = channels.write().await.stop_all().await {
+        tracing::warn!(
+            target: "wcore_cli",
+            %error,
+            "channel shutdown reported an error; continuing to exit"
+        );
+    }
+}
+
+/// The operator-facing line for a run that stopped needing a human (row B-3).
+///
+/// Names the two things a person woken by this has to know: what the process
+/// is waiting for, and the exact command that carries the work on. The session
+/// is already durable — this reuses the ordinary `--resume` path rather than
+/// introducing a second kind of saved state.
+fn awaiting_human_notice(session_id: Option<String>) -> String {
+    let resume = session_id.map_or_else(
+        || "wayland-core --continue \"<your reply>\"".to_string(),
+        |id| format!("wayland-core --resume {id} \"<your reply>\""),
+    );
+    format!(
+        "Stopped: this run needs a person and the outbound route to one is \
+         down, so nothing that changes the world was allowed to run. The work \
+         so far is saved. Fix the channel or answer directly, then resume:\n  \
+         {resume}"
+    )
 }
 
 async fn repl_loop(

@@ -22,6 +22,7 @@
 //! | 3    | The run ended on an UNRECOVERED tool failure: the last tool results before the model's final answer contained an error and the model made no further tool call. |
 //! | 4    | The engine stopped the run at a limit (`max_turns`) instead of the model finishing. |
 //! | 5    | The model's response was cut off by the provider's OUTPUT token cap (`finish_reason=length`) — the answer, or a tool call it was writing, is incomplete. |
+//! | 6    | The run stopped because it needs a human and the outbound route to one is down. The session is durable; `--resume <id>` continues it. |
 //! | 130  | Interrupted (SIGINT / Ctrl-C). |
 //! | 143  | Terminated (SIGTERM). |
 //! | 129  | Hung up (SIGHUP). |
@@ -45,6 +46,18 @@ pub const LIMIT: u8 = 4;
 /// `max_turns` vs. raise `max_tokens` / ask for smaller writes), and while
 /// they shared one code no caller or harness could tell them apart.
 pub const OUTPUT_TRUNCATED: u8 = 5;
+
+/// The run stopped because it needs a human and could not reach one.
+///
+/// Row B-3. Distinct from [`TOOL_FAILURE`] on purpose: "the last tool call
+/// errored" is the symptom, "there is nobody to ask and I will not act
+/// unsupervised" is the diagnosis, and only the second one tells the operator
+/// that the remedy is to fix the channel (or answer) and resume rather than to
+/// debug a tool. Distinct from a hang for the reason this code exists at all:
+/// before it, a run in this state did not exit — the process sat with a live
+/// inbound poller until something killed it, so `$?` was 137/-9 and
+/// indistinguishable from a crash.
+pub const AWAITING_HUMAN: u8 = 6;
 
 /// Shell convention for a process killed by signal N.
 const SIGNALLED_BASE: u8 = 128;
@@ -86,10 +99,25 @@ impl ShutdownSignal {
 /// A limit stop wins over a tool failure: "we ran out of turns" is the more
 /// actionable fact, and the trailing tool state of a truncated run is not a
 /// verdict on the task.
-pub fn for_run_outcome(stop_reason: StopReason, unrecovered_tool_failure: bool) -> u8 {
+///
+/// `awaiting_human` is the engine's unreachable-human latch
+/// (`AgentEngine::awaiting_human`) read at the end of the run: the last word
+/// from the outbound human-contact route was a failure, so the dispatcher was
+/// refusing every state-changing call. A limit stop still wins over it — a run
+/// the engine cut short is not evidence about why the model would have
+/// stopped.
+pub fn for_run_outcome(
+    stop_reason: StopReason,
+    unrecovered_tool_failure: bool,
+    awaiting_human: bool,
+) -> u8 {
     match stop_reason {
         StopReason::MaxTurns => LIMIT,
         StopReason::MaxTokens => OUTPUT_TRUNCATED,
+        // Outranks TOOL_FAILURE: on the row this was measured on the two are
+        // the SAME event (the failed sends are the trailing tool errors), and
+        // of the two readings only this one names the remedy.
+        _ if awaiting_human => AWAITING_HUMAN,
         _ if unrecovered_tool_failure => TOOL_FAILURE,
         _ => OK,
     }
@@ -101,24 +129,24 @@ mod tests {
 
     #[test]
     fn a_clean_end_turn_is_zero() {
-        assert_eq!(for_run_outcome(StopReason::EndTurn, false), OK);
+        assert_eq!(for_run_outcome(StopReason::EndTurn, false, false), OK);
     }
 
     #[test]
     fn an_unrecovered_tool_failure_is_distinguishable_from_success() {
-        let failed = for_run_outcome(StopReason::EndTurn, true);
+        let failed = for_run_outcome(StopReason::EndTurn, true, false);
         assert_eq!(failed, TOOL_FAILURE);
         assert_ne!(
             failed,
-            for_run_outcome(StopReason::EndTurn, false),
+            for_run_outcome(StopReason::EndTurn, false, false),
             "a failed run must not share the success code"
         );
     }
 
     #[test]
     fn a_limit_stop_is_its_own_code_and_outranks_the_tool_state() {
-        assert_eq!(for_run_outcome(StopReason::MaxTurns, false), LIMIT);
-        assert_eq!(for_run_outcome(StopReason::MaxTurns, true), LIMIT);
+        assert_eq!(for_run_outcome(StopReason::MaxTurns, false, false), LIMIT);
+        assert_eq!(for_run_outcome(StopReason::MaxTurns, true, false), LIMIT);
         assert_ne!(LIMIT, TOOL_FAILURE);
         assert_ne!(LIMIT, OK);
     }
@@ -129,17 +157,53 @@ mod tests {
     #[test]
     fn an_output_cap_truncation_is_not_the_turn_cap() {
         assert_eq!(
-            for_run_outcome(StopReason::MaxTokens, false),
+            for_run_outcome(StopReason::MaxTokens, false, false),
             OUTPUT_TRUNCATED
         );
         assert_eq!(
-            for_run_outcome(StopReason::MaxTokens, true),
+            for_run_outcome(StopReason::MaxTokens, true, false),
             OUTPUT_TRUNCATED,
             "a limit stop still outranks the trailing tool state"
         );
         assert_ne!(OUTPUT_TRUNCATED, LIMIT);
         assert_ne!(OUTPUT_TRUNCATED, OK);
         assert_ne!(OUTPUT_TRUNCATED, TOOL_FAILURE);
+    }
+
+    /// The whole point of code 6: a run that stopped for want of a human must
+    /// not read as an ordinary success, nor as a plain tool failure, nor (the
+    /// pre-fix behaviour) as a signal death.
+    #[test]
+    fn needing_a_human_is_not_success_and_not_a_bare_tool_failure() {
+        let waiting = for_run_outcome(StopReason::EndTurn, true, true);
+        assert_eq!(waiting, AWAITING_HUMAN);
+        assert_ne!(waiting, OK);
+        assert_ne!(waiting, TOOL_FAILURE);
+        assert_ne!(
+            waiting, 137,
+            "the state this code names used to be reported as a SIGKILL"
+        );
+        // Same trailing tool state, latch clear: still the old answer.
+        assert_eq!(
+            for_run_outcome(StopReason::EndTurn, true, false),
+            TOOL_FAILURE
+        );
+        // Latch armed with a clean tool tail still reports the latch.
+        assert_eq!(
+            for_run_outcome(StopReason::EndTurn, false, true),
+            AWAITING_HUMAN
+        );
+    }
+
+    /// A run the ENGINE cut short says nothing about whether the model would
+    /// have ended needing a person, so the limit keeps precedence.
+    #[test]
+    fn a_limit_stop_outranks_the_human_latch() {
+        assert_eq!(for_run_outcome(StopReason::MaxTurns, false, true), LIMIT);
+        assert_eq!(
+            for_run_outcome(StopReason::MaxTokens, false, true),
+            OUTPUT_TRUNCATED
+        );
     }
 
     #[test]
@@ -150,6 +214,7 @@ mod tests {
             TOOL_FAILURE,
             LIMIT,
             OUTPUT_TRUNCATED,
+            AWAITING_HUMAN,
             INTERRUPTED,
             TERMINATED,
             HUNG_UP,
