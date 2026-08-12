@@ -1330,9 +1330,16 @@ fn sandbox_denial_names_the_policy_denied_path_and_a_remedy() {
             is_error: true,
         },
     );
+    // Built with the same `Path::join` the product renders, rather than a
+    // POSIX literal: the annotation joins the token git reported (`.git/config`)
+    // onto the scope cwd, so on Windows it renders `\` at the join and the
+    // literal never matched. The assertion is unchanged in kind — the denied
+    // path must be named.
+    let denied = Path::new("/w/repo").join(".git/config");
+    let denied = denied.display().to_string();
     assert!(
-        result.content.contains("/w/repo/.git/config"),
-        "the denied path must be named; got:\n{}",
+        result.content.contains(&denied),
+        "the denied path {denied} must be named; got:\n{}",
         result.content
     );
     assert!(

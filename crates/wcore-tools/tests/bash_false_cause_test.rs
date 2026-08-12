@@ -40,6 +40,13 @@ const QUOTED_CAUSE_MARKER: &str = "reports a different failure:\n";
 /// The command must actually have reached a shell. A pre-exec refusal (the
 /// exec-time capability gate) also produces `is_error` with no egress claim in
 /// it, which would pass every assertion below while proving nothing.
+///
+/// This is why the legs below carry `with_local_operator_principal()`. A bare
+/// `Contained` policy sets `secret_read_deny_required`, and on Windows the
+/// default `windows_job_object` backend cannot enforce read-deny, so Bash is
+/// refused before it ever reaches a shell and this guard fired. The principal
+/// lifts only that gate: the sandbox, the manifest and the egress denial the
+/// legs actually grade are unchanged on every platform.
 fn assert_the_shell_actually_ran(content: &str) {
     assert!(
         content.starts_with("Exit code:"),
@@ -64,7 +71,7 @@ fn assert_no_forbidding_clause(content: &str) {
 #[serial]
 async fn filesystem_failure_under_the_real_sandbox_is_not_blamed_on_egress() {
     let dir = tempfile::tempdir().unwrap();
-    let policy = Arc::new(WorkspacePolicy::contained(dir.path()));
+    let policy = Arc::new(WorkspacePolicy::contained(dir.path()).with_local_operator_principal());
     assert_eq!(
         policy.network(),
         wcore_sandbox::NetworkPolicy::Deny,
@@ -101,7 +108,7 @@ async fn filesystem_failure_under_the_real_sandbox_is_not_blamed_on_egress() {
 #[serial]
 async fn filesystem_failure_on_the_streaming_path_is_not_blamed_on_egress() {
     let dir = tempfile::tempdir().unwrap();
-    let policy = Arc::new(WorkspacePolicy::contained(dir.path()));
+    let policy = Arc::new(WorkspacePolicy::contained(dir.path()).with_local_operator_principal());
     let ctx = ToolContext::test_default().with_workspace(policy);
 
     let result = BashTool

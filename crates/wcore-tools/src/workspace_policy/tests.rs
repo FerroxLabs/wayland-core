@@ -9,13 +9,37 @@ use std::path::Path;
 /// inside the bootstrap future that blocks the TUI's first paint, so on a large
 /// tree it cost seconds of dead startup time.
 ///
-/// This asserts construction no longer walks, and it is stated as a RATIO
-/// against the walk it must not be doing rather than an absolute duration, so
-/// the machine's speed and any concurrent build load cancel out. If someone
-/// reintroduces an eager walk, construction and the explicit walk converge and
-/// the ratio collapses toward 1.
+/// Stated against baselines taken over an EMPTY tree rather than as a bare
+/// `walk > construct * 10` ratio, because construction carries a per-platform
+/// CONSTANT — canonicalization plus a handful of well-known-path probes — that
+/// the old form silently assumed was zero. MEASURED on Windows, where that
+/// constant is the same order as the walk itself at this tree size:
+///
+/// ```text
+///   dirs   construct     walk
+///    300    12.4 ms    11.6 ms
+///   3000    10.4 ms   112.7 ms
+///  12000    25.7 ms  1011.9 ms
+/// ```
+///
+/// Construction is FLAT while the walk is linear, so the property holds — but
+/// the ratio at 3000 sat on the 10x line and flapped (a failing CI run
+/// measured 6.5x). Comparing construction against construction removes the
+/// constant instead of pretending it is absent, and an eager walk still cannot
+/// pass: it would add a whole walk to the big-tree construction.
 #[test]
 fn contained_construction_does_not_walk_the_workspace() {
+    // Baselines over an empty tree. Taken FIRST so they absorb the cold cost
+    // of the fixed path probes, which would otherwise land on the measurement
+    // below and flatter it.
+    let empty = tempfile::tempdir().unwrap();
+    let t = std::time::Instant::now();
+    let baseline = WorkspacePolicy::contained(empty.path());
+    let construct_empty = t.elapsed();
+    let t = std::time::Instant::now();
+    let _ = baseline.secret_deny_paths_dynamic();
+    let walk_empty = t.elapsed();
+
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // Enough directories that a walk is unmistakably more expensive than not
@@ -31,18 +55,27 @@ fn contained_construction_does_not_walk_the_workspace() {
     let construct = t0.elapsed();
 
     // Known-positive control in the same test: the walk this construction must
-    // NOT be doing is still reachable, still happens, and is measurably slow.
-    // Without this the assertion below could pass on a machine where BOTH are
-    // instant — i.e. where the instrument is dead.
+    // NOT be doing is still reachable, still happens, and its cost really is
+    // driven by the tree. Without this the assertion below could pass on a
+    // machine where BOTH are instant — i.e. where the instrument is dead.
     let t1 = std::time::Instant::now();
     let dynamic = p.secret_deny_paths_dynamic();
     let walk = t1.elapsed();
     let _ = dynamic;
 
     assert!(
-        walk > construct * 10,
+        walk > walk_empty * 10 && walk > construct_empty,
+        "instrument is dead: the walk must be reachable and tree-driven; \
+         walk={walk:?} walk_empty={walk_empty:?} construct_empty={construct_empty:?}"
+    );
+
+    // An eager walk would put a whole `walk` inside `construct`. Half of one is
+    // far below that and far above the noise on the constant.
+    assert!(
+        construct < construct_empty + walk / 2,
         "construction must not walk the workspace: construct={construct:?} \
-         walk={walk:?} (an eager walk makes these converge)"
+         construct_empty={construct_empty:?} walk={walk:?} \
+         (an eager walk adds a whole walk to construction)"
     );
 }
 

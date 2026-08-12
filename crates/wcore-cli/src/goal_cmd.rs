@@ -2050,19 +2050,35 @@ mod tests {
     /// effect log does — `task=… msg_id=…`. Two runs leave two records that
     /// differ byte for byte.
     fn identifying_worker() -> Vec<String> {
-        vec![
-            if cfg!(windows) { "cmd" } else { "sh" }.to_owned(),
-            if cfg!(windows) { "/c" } else { "-c" }.to_owned(),
-            if cfg!(windows) {
-                "echo task=%WAYLAND_GOAL_TASK% msg_id=%RANDOM%%RANDOM% > \
-                 \"%WAYLAND_GOAL_EFFECT_SINK%\\r.%RANDOM%%RANDOM%\""
-                    .to_owned()
-            } else {
+        // Windows deliberately does NOT use `cmd` + `%RANDOM%`. MEASURED on
+        // Windows: six back-to-back `cmd /c` processes every one printed
+        // `%RANDOM%%RANDOM%` = 3239824204. cmd seeds its PRNG once per process
+        // from the system clock, whose granularity is one ~15.6 ms timer tick,
+        // so two workers launched inside one tick draw the identical sequence —
+        // identical record text AND identical file name, and the second `>`
+        // truncated the first, leaving one record where the test needs two.
+        // PowerShell's `$PID` is the faithful analogue of the Unix `$$`: two
+        // live processes can never share it.
+        if cfg!(windows) {
+            vec![
+                "powershell".to_owned(),
+                "-NoProfile".to_owned(),
+                "-Command".to_owned(),
+                "$id = \"$PID-$([DateTime]::UtcNow.Ticks)\"; \
+                 Set-Content -LiteralPath \
+                 \"$env:WAYLAND_GOAL_EFFECT_SINK\\r.$id\" \
+                 -Value \"task=$env:WAYLAND_GOAL_TASK msg_id=$id\""
+                    .to_owned(),
+            ]
+        } else {
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
                 "printf 'task=%s msg_id=%s\\n' \"$WAYLAND_GOAL_TASK\" \"$$-$(date +%s%N)\" \
                  > \"$WAYLAND_GOAL_EFFECT_SINK/r.$$.$(date +%s%N)\""
-                    .to_owned()
-            },
-        ]
+                    .to_owned(),
+            ]
+        }
     }
 
     fn observed(dir: &std::path::Path) -> (usize, usize) {
