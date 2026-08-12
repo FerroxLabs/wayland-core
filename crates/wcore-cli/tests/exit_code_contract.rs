@@ -79,17 +79,32 @@ async fn drive(
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", &home)
         .env("WAYLAND_HOME", &home)
-        .env("NO_COLOR", "1")
-        .args([
-            "-p",
-            "rec",
-            "-m",
-            "fake",
-            "--no-color",
-            "--dangerously-skip-permissions",
-        ])
-        .args(extra_args)
-        .arg("do the thing");
+        .env("NO_COLOR", "1");
+    // Windows only: these are OS prerequisites, not host configuration.
+    // Winsock loads its layered service providers from `%SystemRoot%`, so a
+    // child launched without it fails EVERY send with WSAEPROVIDERFAILEDINIT
+    // (os error 10106). The engine reads that as a transient connect failure
+    // and spends its full 900 s provider-outage budget, so the whole binary
+    // hung past the harness cap instead of grading an exit code. Measured on
+    // Windows; the same allowlist already exists in
+    // `wcore_cli::profile_router::ENV_PASSTHROUGH` and in the evaluator's
+    // `ChildEnvironment::build`.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT"] {
+        if let Some(value) = std::env::var_os(name) {
+            cmd.env(name, value);
+        }
+    }
+    cmd.args([
+        "-p",
+        "rec",
+        "-m",
+        "fake",
+        "--no-color",
+        "--dangerously-skip-permissions",
+    ])
+    .args(extra_args)
+    .arg("do the thing");
     let out = cmd.output().expect("spawn wayland-core");
 
     let _ = std::fs::remove_dir_all(&root);
