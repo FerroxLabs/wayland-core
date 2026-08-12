@@ -387,8 +387,13 @@ mod windows_cmd_delivery_tests {
             .await
             .expect_err("a payload cmd.exe cannot carry whole must not be run at all");
 
+        // `RequestRefused`, not `ExecFailed`: a payload the OS command line
+        // cannot carry is a refused REQUEST, and callers that track tool health
+        // must not count it as an execution failure (see `error.rs`). The
+        // co-located test in `windows_cmdline.rs` was re-pinned when the variant
+        // changed; this cfg(windows) one was not, so no non-Windows leg saw it.
         assert!(
-            matches!(error, SandboxError::ExecFailed(_)),
+            matches!(error, SandboxError::RequestRefused(_)),
             "got {error:?}"
         );
         assert!(

@@ -745,9 +745,14 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
     let registry =
         crate::SandboxRegistry::required_for_session(None).expect("session selection must resolve");
 
+    // The Windows default is the relaxed Job Object backend; AppContainer stays
+    // reachable only through `WAYLAND_SANDBOX=appcontainer`, which this test
+    // asserts is unset. What matters here is that selection resolves to a REAL
+    // backend rather than the fail-closed placeholder, and does so without
+    // touching the probe.
     assert_eq!(
         registry.backend_name(),
-        "appcontainer",
+        "windows_job_object",
         "the session must take the real Windows backend, not a fail-closed placeholder"
     );
     assert_eq!(
@@ -759,7 +764,9 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
 
     // Anti-vacuity: the verdict IS reachable through the production path, so
     // "still None above" is an observation, not an inability to observe.
-    let available = registry.is_available();
+    // Driven off AppContainer directly, because the session no longer selects
+    // it and `registry.is_available()` would now settle nothing.
+    let available = AppContainerBackend::new().is_available();
     assert_eq!(
         settled_verdict(),
         Some(available),
