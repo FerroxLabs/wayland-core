@@ -10423,6 +10423,11 @@ impl AgentEngine {
         // failures simply re-open the breaker again within this turn.
         if !resume_from_checkpoint {
             self.tools.reset_all_breakers();
+            // Row B-3: lift the unreachable-human freeze here too. A fresh
+            // user turn is a human speaking to this session, which is the
+            // supervision the freeze exists to protect; holding it past that
+            // would wedge an interactive session over one failed send.
+            self.tools.clear_human_unreachable();
         }
         // #279(c): mint a stable per-run correlation id on the first run()
         // of the session and reuse it for every subsequent turn/message.

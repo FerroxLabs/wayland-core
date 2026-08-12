@@ -321,6 +321,12 @@ impl Tool for SendMessageTool {
         ToolEffectContract::default()
     }
 
+    fn reaches_a_human(&self) -> bool {
+        // This IS the outbound route to a person. A failure here is the
+        // session losing its supervision, not just one tool erroring.
+        true
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let target_str = match input.get("target").and_then(Value::as_str) {
             Some(s) if !s.trim().is_empty() => s,

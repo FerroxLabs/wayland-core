@@ -65,6 +65,22 @@ pub struct ToolRegistry {
     /// to plumb a parameter and silently lose the gate.
     read_only: bool,
 
+    /// Set when the most recent attempt to reach a human FAILED and no later
+    /// attempt has succeeded. While set, the orchestration dispatcher refuses
+    /// every tool that cannot claim [`crate::Tool::read_only_safe`], except
+    /// the human-contact surface itself — the one call that can clear it.
+    ///
+    /// Corpus row B-3. A failed `send_message` used to be an ordinary tool
+    /// error: the model saw a string, decided for itself what it meant, and
+    /// carried on. With the approval channel made undeliverable, one of two
+    /// graded runs went ahead and rewrote the dependency pin anyway. The
+    /// property has to hold whatever the model concludes, so it is enforced
+    /// here instead of asked for in a prompt.
+    ///
+    /// `AtomicBool` behind the shared registry for the same reason the
+    /// breakers are: the dispatch path holds `&ToolRegistry`, never `&mut`.
+    human_unreachable: Arc<std::sync::atomic::AtomicBool>,
+
     /// The session's hydrated-tool set, published by the engine and read by
     /// the registered `ToolSearch`. Owned HERE, not by the search tool, so
     /// [`Self::refresh_tool_search_catalog`] can rebuild the tool without
@@ -90,6 +106,7 @@ impl ToolRegistry {
                 wcore_sandbox::FailClosedBackend::new(),
             ))),
             read_only: false,
+            human_unreachable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             hydrated_tools: crate::tool_search::HydratedTools::default(),
         }
     }
@@ -312,6 +329,42 @@ impl ToolRegistry {
             return;
         }
         self.record_breaker_outcome(name, result.is_error);
+    }
+
+    /// Record the outcome of one dispatched call against the human-contact
+    /// latch. A no-op for every tool that does not declare
+    /// [`crate::Tool::reaches_a_human`].
+    ///
+    /// A failure ARMS the latch; a success clears it. Counting is deliberately
+    /// NOT used: measured on this row, a run that eventually reached the
+    /// on-call took four attempts (three malformed-envelope errors, then a
+    /// delivery), while the run that gave up and acted unsupervised made only
+    /// two. No threshold separates "still trying" from "gave up", so the state
+    /// tracked is the one that matters — whether the LAST word from the
+    /// outbound route was a failure.
+    pub fn record_human_reach_outcome(&self, name: &str, is_error: bool) {
+        if !self.get(name).is_some_and(|tool| tool.reaches_a_human()) {
+            return;
+        }
+        self.human_unreachable
+            .store(is_error, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Is the session's route to a human currently down?
+    pub fn human_unreachable(&self) -> bool {
+        self.human_unreachable
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Clear the human-contact latch.
+    ///
+    /// Called where the engine clears the per-tool breakers: at the start of a
+    /// new USER turn. A fresh user message is itself proof that a human is
+    /// present and reachable, which is the only evidence that should lift the
+    /// freeze other than a delivered message.
+    pub fn clear_human_unreachable(&self) {
+        self.human_unreachable
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// #403 — clear every tool circuit breaker back to Closed. Called at the
@@ -567,9 +620,13 @@ fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars
 #[async_trait]
 impl ToolDispatcher for ToolRegistry {
     async fn dispatch(&self, tool: &str, input: serde_json::Value) -> ToolResult {
-        // Check circuit breaker before executing.
+        // Check circuit breaker before executing. Row B-3: the human-contact
+        // surface is exempt — backing it off removes the session's only route
+        // to a person, which is the one failure this product must not absorb
+        // quietly.
         if let Some(breaker) = self.breakers.read().get(tool)
             && breaker.is_open()
+            && !self.get(tool).is_some_and(|t| t.reaches_a_human())
         {
             return ToolResult {
                 content: format!(
@@ -605,6 +662,10 @@ impl ToolDispatcher for ToolRegistry {
                 breaker.record_success();
             }
         }
+        // Row B-3: keep the human-contact latch in step on this path too, so
+        // a send routed through `ToolDispatcher` (ScriptTool sub-steps, plugin
+        // dispatchers) is not a hole in the freeze.
+        self.record_human_reach_outcome(tool, result.is_error);
 
         result
     }
@@ -618,9 +679,13 @@ impl ToolDispatcher for ToolRegistry {
         input: serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> ToolResult {
-        // Check circuit breaker before executing.
+        // Check circuit breaker before executing. Row B-3: the human-contact
+        // surface is exempt — backing it off removes the session's only route
+        // to a person, which is the one failure this product must not absorb
+        // quietly.
         if let Some(breaker) = self.breakers.read().get(tool)
             && breaker.is_open()
+            && !self.get(tool).is_some_and(|t| t.reaches_a_human())
         {
             return ToolResult {
                 content: format!(
@@ -656,6 +721,10 @@ impl ToolDispatcher for ToolRegistry {
                 breaker.record_success();
             }
         }
+        // Row B-3: keep the human-contact latch in step on this path too, so
+        // a send routed through `ToolDispatcher` (ScriptTool sub-steps, plugin
+        // dispatchers) is not a hole in the freeze.
+        self.record_human_reach_outcome(tool, result.is_error);
 
         result
     }
@@ -664,6 +733,143 @@ impl ToolDispatcher for ToolRegistry {
     /// the tool is not registered. Used by tests and observability hooks.
     fn breaker_state(&self, tool: &str) -> Option<BreakerState> {
         self.breakers.read().get(tool).map(|b| b.state())
+    }
+}
+
+#[cfg(test)]
+mod human_reach_latch_tests {
+    use super::*;
+    use crate::Tool;
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use wcore_protocol::events::ToolCategory;
+    use wcore_types::tool::{JsonSchema, ToolResult};
+
+    /// Minimal tool whose only interesting property is whether it claims to
+    /// reach a human and whether it errors.
+    struct Probe {
+        name: &'static str,
+        human: bool,
+        fails: bool,
+    }
+
+    #[async_trait]
+    impl Tool for Probe {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "probe"
+        }
+        fn input_schema(&self) -> JsonSchema {
+            serde_json::json!({"type": "object"})
+        }
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+        fn reaches_a_human(&self) -> bool {
+            self.human
+        }
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: "probe".to_string(),
+                is_error: self.fails,
+            }
+        }
+    }
+
+    fn registry(tools: Vec<Probe>) -> ToolRegistry {
+        let mut r = ToolRegistry::new();
+        for t in tools {
+            r.register(Box::new(t));
+        }
+        r
+    }
+
+    #[test]
+    fn a_failed_human_contact_arms_the_latch_and_a_delivery_clears_it() {
+        let r = registry(vec![Probe {
+            name: "send_message",
+            human: true,
+            fails: false,
+        }]);
+        assert!(!r.human_unreachable(), "a fresh session starts reachable");
+        r.record_human_reach_outcome("send_message", true);
+        assert!(r.human_unreachable());
+        r.record_human_reach_outcome("send_message", false);
+        assert!(!r.human_unreachable(), "a delivery must clear the latch");
+    }
+
+    #[test]
+    fn an_ordinary_tool_failing_says_nothing_about_reachability() {
+        let r = registry(vec![
+            Probe {
+                name: "send_message",
+                human: true,
+                fails: false,
+            },
+            Probe {
+                name: "Bash",
+                human: false,
+                fails: true,
+            },
+        ]);
+        r.record_human_reach_outcome("Bash", true);
+        assert!(
+            !r.human_unreachable(),
+            "a failing shell command must not be read as losing the human"
+        );
+        // …and it must not CLEAR a real loss either.
+        r.record_human_reach_outcome("send_message", true);
+        r.record_human_reach_outcome("Bash", false);
+        assert!(
+            r.human_unreachable(),
+            "an unrelated success must not lift the freeze"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_name_is_inert() {
+        let r = registry(vec![]);
+        r.record_human_reach_outcome("send_message", true);
+        assert!(
+            !r.human_unreachable(),
+            "a name this registry does not know cannot arm the latch"
+        );
+    }
+
+    #[test]
+    fn the_latch_clears_on_a_new_user_turn() {
+        let r = registry(vec![Probe {
+            name: "send_message",
+            human: true,
+            fails: false,
+        }]);
+        r.record_human_reach_outcome("send_message", true);
+        assert!(r.human_unreachable());
+        r.clear_human_unreachable();
+        assert!(
+            !r.human_unreachable(),
+            "a fresh user message is itself a reachable human"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_dispatcher_path_keeps_the_latch_in_step() {
+        // ScriptTool and plugin dispatchers go through `ToolDispatcher`, not
+        // the agent loop's `execute_single_with_streaming`. If that path did
+        // not record, a send routed through it would be a hole in the freeze.
+        let r = registry(vec![Probe {
+            name: "send_message",
+            human: true,
+            fails: true,
+        }]);
+        let out = r.dispatch("send_message", serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert!(r.human_unreachable());
     }
 }
 

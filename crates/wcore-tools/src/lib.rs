@@ -590,6 +590,23 @@ pub trait Tool: Send + Sync {
         ToolEffectContract::default()
     }
 
+    /// Whether a call to this tool is an attempt to reach a human being.
+    ///
+    /// Corpus row B-3. A job running unattended has exactly one way to get a
+    /// decision it is not allowed to make on its own: send the question
+    /// somewhere a person will read it. When that send fails the session has
+    /// lost its only supervision, and the product has to know that as a fact
+    /// rather than hope the model reads the failure and stops of its own
+    /// accord. Measured, it does not: with the approval mail made
+    /// undeliverable, the model tried twice, was refused twice, and then made
+    /// the change anyway.
+    ///
+    /// Default `false` — an ordinary tool failing says nothing about whether a
+    /// human can be reached. Only the outbound-messaging surface overrides it.
+    fn reaches_a_human(&self) -> bool {
+        false
+    }
+
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     /// Override to `true` for tools with large schemas or infrequent use.
     fn is_deferred(&self) -> bool {
@@ -707,6 +724,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     }
     fn effect_contract(&self, input: &Value) -> ToolEffectContract {
         (**self).effect_contract(input)
+    }
+    fn reaches_a_human(&self) -> bool {
+        (**self).reaches_a_human()
     }
     fn is_deferred(&self) -> bool {
         (**self).is_deferred()

@@ -22,7 +22,7 @@ use wcore_channels::event::{ChannelEvent, ConnectionState, MessageReceipt};
 use wcore_channels::outgoing::OutgoingMessage;
 use wcore_config::credentials::CredentialsStore;
 
-pub use crate::config::{EmailConfig, ImapConfig, SmtpConfig};
+pub use crate::config::{EmailConfig, ImapConfig, MailSecurity, SmtpConfig, is_loopback_host};
 pub use crate::error::EmailError;
 pub use crate::smtp::{LettreSender, MailSender, SendError};
 
@@ -176,6 +176,7 @@ impl EmailChannel {
         let args = crate::imap::ImapPollArgs {
             host: imap_cfg.host,
             port: imap_cfg.port,
+            security: imap_cfg.security,
             user: imap_user,
             pass: imap_pass,
             mailbox: imap_cfg.mailbox,
@@ -289,6 +290,7 @@ impl Channel for EmailChannel {
                     smtp_user.clone(),
                     smtp_pass,
                     self.config.smtp.tls_root_cert_path.as_deref(),
+                    self.config.smtp.security,
                 )
                 .map_err(ChannelError::from)?,
             )
@@ -696,6 +698,7 @@ mod tests {
                 user_credential_handle: "email.test.smtp_user".to_string(),
                 password_credential_handle: "email.test.smtp_pass".to_string(),
                 tls_root_cert_path: None,
+                security: Default::default(),
             },
             imap: None,
         }
