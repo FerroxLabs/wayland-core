@@ -25,7 +25,10 @@ pub const CONTRACT_MAJOR: u64 = 1;
 // host can validate got strictly wider, which is exactly what a minor bump is
 // for; `protocol_sink.rs` already states the converse rule (a change that adds
 // no manifest entry implies no bump).
-pub const CONTRACT_MINOR: u64 = 13;
+// 13 -> 14: `call_announced` added. Additive only - no field on an existing
+// event changed shape, and `major` therefore holds at 1. Hosts that pin the
+// descriptor must re-pin; hosts that ignore unknown types are unaffected.
+pub const CONTRACT_MINOR: u64 = 14;
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/14";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 

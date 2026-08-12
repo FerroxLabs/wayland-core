@@ -3326,6 +3326,33 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                     return Err(ExecutionControl::Quit);
                 }
             }
+        } else {
+            // The call skipped the approval gate, so no `tool_request` went out
+            // - but the host still needs the call announced before any
+            // `tool_running`, or it has no `call_id` to match later frames
+            // against and fails the session closed mid-turn.
+            //
+            // Measured against published 0.12.26 by the desktop lane: two
+            // parallel `ToolSearch` calls 4 ms apart, the first gated and
+            // answered `Always`, which flipped `is_tool_name_auto_approved` for
+            // the second. The second dispatched with nothing on the wire and
+            // the engine exited mid-turn, blocking the Smart Trader setup path.
+            //
+            // This is `call_announced` and NOT a second `tool_request` on
+            // purpose: `tool_request` renders an approve/deny card, so reusing
+            // it would ask the operator to confirm a tool they already granted
+            // permanently. See `ProtocolEvent::CallAnnounced` for the full
+            // reasoning, including why the type name has no `tool_` prefix.
+            let _ = writer.emit(&ProtocolEvent::CallAnnounced {
+                msg_id: msg_id.to_string(),
+                call_id: id.clone(),
+                tool: ToolInfo {
+                    name: name.clone(),
+                    category,
+                    args: input.clone(),
+                    description,
+                },
+            });
         }
 
         // Emit tool_running
@@ -5019,6 +5046,133 @@ mod tests {
                 events.push(event.clone());
             }
             Ok(())
+        }
+    }
+
+    /// Desktop -> Core, 2026-08-12: an auto-approved call emitted `tool_running`
+    /// with NO `tool_request` ever on the wire. The desktop host requires a
+    /// request matching on both `call_id` and `msg_id` before any running
+    /// frame, so it failed closed and the engine exited mid-turn - blocking
+    /// the entire Smart Trader setup path.
+    ///
+    /// Root cause: `tool_request` was emitted only inside the `needs_approval`
+    /// branch, so force mode, an allow-listed tool, a command-scoped grant, a
+    /// recovered approval, or a tool just granted `ApprovalScope::Always` all
+    /// dispatched straight to `tool_running` with no request.
+    ///
+    /// WHY THE SIBLING TEST BELOW DID NOT CATCH IT: it approves BOTH calls
+    /// `Once`, so both take the gated branch and both emit a request. An
+    /// invariant named "every call must emit tool_request" only ever exercised
+    /// the branch where that was already true.
+    ///
+    /// Here the first call is approved `Always`, which flips
+    /// `is_tool_name_auto_approved` for the second call in the SAME batch -
+    /// reproducing the measured 4 ms double-`ToolSearch` exactly.
+    ///
+    /// RESOLVED by `ProtocolEvent::CallAnnounced`. The naive fix - emit a second
+    /// `tool_request` - was written, proven red-then-green, and REVERTED: the
+    /// desktop host renders `tool_request` as an approve/deny card, so it would
+    /// have asked the operator to confirm a tool they already granted
+    /// permanently. `scoped_auto_approval_is_bound_to_original_tool_input`
+    /// asserts that absence and is correct; it still passes untouched.
+    #[tokio::test]
+    async fn an_auto_approved_call_is_announced_before_it_runs() {
+        use wcore_protocol::events::ProtocolEvent;
+        use wcore_protocol::{ToolApprovalManager, commands::ApprovalScope};
+
+        let registry = make_registry_with_deferred();
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        let call_ids = ["call_always_a", "call_always_b"];
+        let calls: Vec<ContentBlock> = call_ids
+            .iter()
+            .map(|id| ContentBlock::ToolUse {
+                id: (*id).into(),
+                name: "MockNonDeferred".into(),
+                input: json!({"cmd": *id}),
+                extra: None,
+            })
+            .collect();
+
+        let mgr_clone = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                for id in call_ids {
+                    mgr_clone.approve(id, ApprovalScope::Always, None);
+                }
+            }
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            execute_tool_calls_with_approval(
+                &registry,
+                &calls,
+                &mgr,
+                &writer,
+                "msg-always",
+                &[],
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("approval round-trip timed out - approve-nudger exhausted")
+        .expect("should not return ExecutionControl");
+        assert_eq!(outcome.results.len(), 2, "both tools must produce results");
+
+        // CONTROL. If the `Always` grant never landed, both calls took the
+        // gated branch, the auto-approval path was never entered, and the
+        // assertions below would pass against the very build this test exists
+        // to catch. Fail loud rather than pass vacuously.
+        assert!(
+            mgr.is_tool_name_auto_approved("MockNonDeferred"),
+            "control failed: the Always grant never landed, so no call took the \
+             auto-approval path and this test proves nothing"
+        );
+
+        let events = emitter.0.lock().expect("emitter mutex").clone();
+
+        // SECOND CONTROL. At least one call must have taken the auto-approval
+        // path and been ANNOUNCED rather than requested. Without this, a build
+        // that gated both calls would satisfy the loop below while never
+        // exercising the defect at all.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProtocolEvent::CallAnnounced { .. })),
+            "control failed: no call was auto-approved, so the announce path was              never exercised and this test proves nothing"
+        );
+
+        for expected in call_ids {
+            // Every dispatched call owes the host an anchor frame carrying its
+            // call_id BEFORE tool_running - `tool_request` when the operator was
+            // asked, `call_announced` when they were not. Either satisfies the
+            // host sequence rule; neither being present kills the turn.
+            let anchor = events.iter().position(|e| {
+                matches!(e, ProtocolEvent::ToolRequest { call_id, msg_id, .. }
+                    | ProtocolEvent::CallAnnounced { call_id, msg_id, .. }
+                    if call_id == expected && msg_id == "msg-always")
+            });
+            let run = events.iter().position(|e| {
+                matches!(e, ProtocolEvent::ToolRunning { call_id, msg_id, .. }
+                    if call_id == expected && msg_id == "msg-always")
+            });
+            let run = run.unwrap_or_else(|| panic!("tool_running missing for {expected}"));
+            let anchor = anchor.unwrap_or_else(|| {
+                panic!("no tool_request and no call_announced for {expected} - the host fails closed")
+            });
+            assert!(
+                anchor < run,
+                "the anchor frame for {expected} must precede tool_running (anchor={anchor}, run={run})"
+            );
         }
     }
 

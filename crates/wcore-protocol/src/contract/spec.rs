@@ -483,6 +483,19 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "call_id",
         "available"
     ),
+    // Sibling of `tool_request` for a call that runs WITHOUT being asked
+    // about. Same payload shape on purpose: a host registers the `call_id`
+    // from either frame, and must be able to render the same card. Classified
+    // `Safety` rather than `Observational` because it is the only wire record
+    // that a tool executed with no operator prompt.
+    wire!(
+        "call_announced",
+        "events/call_announced.json",
+        ["msg_id", "call_id", "tool"],
+        Safety,
+        "call_id",
+        "available"
+    ),
     wire!(
         "tool_running",
         "events/tool_running.json",
@@ -1014,6 +1027,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "text_delta",
     "thinking",
     "tool_request",
+    "call_announced",
     "tool_running",
     "tool_result",
     "tool_cancelled",
@@ -2152,6 +2166,19 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::ToolRequest {
                 msg_id: "msg-001".into(),
                 call_id: "call-tool-001".into(),
+                tool: ToolInfo {
+                    name: "Bash".into(),
+                    category: ToolCategory::Exec,
+                    args: json!({"command":"cargo test"}),
+                    description: "Run the test suite".into(),
+                },
+            },
+        ),
+        (
+            "events/call_announced.json".into(),
+            ProtocolEvent::CallAnnounced {
+                msg_id: "msg-001".into(),
+                call_id: "call-tool-002".into(),
                 tool: ToolInfo {
                     name: "Bash".into(),
                     category: ToolCategory::Exec,
