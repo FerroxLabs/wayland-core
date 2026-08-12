@@ -394,6 +394,67 @@ async fn editing_out_the_line_a_write_refusal_named_preserves_it_elsewhere() {
 }
 
 #[tokio::test]
+async fn an_edit_that_rewrites_the_code_around_the_users_line_is_refused() {
+    // The call the job corpus actually measured. A-2 run `fix-r1`, tool_use
+    // `toolu_012G5ccwP6e9VCx8FioHzhXf`, recovered from the run's own captured
+    // request body: one Edit on `src/receipts/parser.py` whose `old_string`
+    // was the whole 1171-byte file down to and including the user's unsaved
+    // trailing line, and whose 2003-byte `new_string` rebuilt the parser
+    // without it. Five of six A-2 runs and one of six A-8 runs failed INV-2
+    // this way and no other; the guard had made and anchored the recovery
+    // copy every time, and the bytes still left the disk.
+    let (ws, file) = workspace_with_unsaved_work();
+    let before = ws.text("parser.py");
+
+    let refused = ws
+        .editor()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(),
+            "old_string": format!("{COMMITTED}{UNSAVED_LINE}\n"),
+            "new_string": "def parse(text):\n    return [l for l in text.splitlines() if l.strip()]\n",
+        }))
+        .await;
+
+    assert!(
+        refused.is_error,
+        "an Edit that takes the user's unsaved line out on its way to \
+         rewriting the parser must be refused: {}",
+        refused.content
+    );
+    assert_eq!(
+        ws.text("parser.py"),
+        before,
+        "a refused edit must leave every byte where the user left it"
+    );
+    assert!(
+        refused.content.contains("in no commit"),
+        "the refusal must name what it is protecting: {}",
+        refused.content
+    );
+    // Wrong-direction, same call site: the work is not blocked, only the
+    // collateral. Carrying the line through is accepted.
+    let carried = ws
+        .editor()
+        .execute(json!({
+            "file_path": file.to_str().unwrap(),
+            "old_string": format!("{COMMITTED}{UNSAVED_LINE}\n"),
+            "new_string": format!(
+                "def parse(text):\n    return [l for l in text.splitlines() if l.strip()]\n{UNSAVED_LINE}\n"
+            ),
+        }))
+        .await;
+    assert!(!carried.is_error, "got: {}", carried.content);
+    assert!(
+        ws.text("parser.py").contains(UNSAVED_LINE),
+        "the user's line is still on disk"
+    );
+    assert!(
+        ws.text("parser.py").contains("if l.strip()"),
+        "and the agent's fix landed"
+    );
+}
+
+#[tokio::test]
 async fn an_edit_that_leaves_unsaved_work_alone_says_nothing() {
     let (ws, file) = workspace_with_unsaved_work();
     let edited = ws

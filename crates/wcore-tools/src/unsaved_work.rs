@@ -429,8 +429,9 @@ pub enum Mode {
     /// copied first.
     Rewrite,
     /// Targeted replacement of bytes the model quoted from disk (the Edit
-    /// tool). Never refused; a drop is copied where a copy is possible, and
-    /// reported accurately either way.
+    /// tool). Refused when it takes the user's unrecorded lines out as
+    /// collateral to a change of recorded content; everywhere else a drop is
+    /// copied where a copy is possible, and reported accurately either way.
     Surgical,
 }
 
@@ -638,6 +639,25 @@ impl UnsavedWorkGuard {
             return Verdict::Proceed;
         }
 
+        // Is the drop collateral, or is it the point?  A line that the commit
+        // records, that was on disk, and that the new content keeps fewer
+        // copies of, means this edit is rewriting recorded content as well as
+        // taking the user's unrecorded lines out.  Rewording the user's own
+        // in-progress line touches nothing recorded and leaves this false.
+        let previous_all = tally(previous);
+        let mut recorded_touched = false;
+        for (text, prev_copies) in &previous_all {
+            let in_commit = recorded.get(*text).copied().unwrap_or(0);
+            if in_commit == 0 {
+                continue;
+            }
+            let kept = surviving.get(*text).copied().unwrap_or(0);
+            if kept < (*prev_copies).min(in_commit) {
+                recorded_touched = true;
+                break;
+            }
+        }
+
         // A Surgical edit that puts nothing back is not a rename, a reflow or
         // any of the modifications this module admits it cannot tell from a
         // drop - it is a deletion, and Edit quoted every line it deletes from
@@ -677,7 +697,22 @@ impl UnsavedWorkGuard {
         // pinned commit, so no choice of `new_content` can move it.
         let wholesale = unsaved_total == user_lines;
 
-        if mode == Mode::Rewrite && !wholesale {
+        // Measured, job corpus rows A-2 and A-8, 2026-08-12: every INV-2
+        // "overwritten on disk" failure across 24 runs was an Edit whose
+        // `old_string` spanned a line the user had on disk and in no commit
+        // and whose `new_string` omitted it while rewriting the code around
+        // it - 7 failures, 7 such Edits, and not one of them in any of the 17
+        // runs that passed.  Scoping this refusal to `Mode::Rewrite` left Edit
+        // as the open surface: the recovery copy was made and anchored, and
+        // the bytes still left the disk.  A copy is not the guarantee.
+        //
+        // `recorded_touched` is what keeps this from becoming the over-refusal
+        // the module already measured once: an Edit aimed AT the user's
+        // unsaved line - rewording it, correcting it - changes nothing the
+        // commit records and is still allowed, copied and noted.  Only an edit
+        // that takes those lines out on its way to changing something else is
+        // refused, and `refusal_text` tells the caller to carry them through.
+        if !wholesale && (mode == Mode::Rewrite || recorded_touched) {
             return Verdict::Refuse(refusal_text(
                 display_path,
                 previous,
