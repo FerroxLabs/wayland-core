@@ -911,14 +911,24 @@ async fn on_windows_a_copy_that_cannot_be_bounded_is_never_made() {
     assert_eq!(object_ids(&root), before, "the object store grew");
     assert!(!object_store_contains(&root, "WINCANARY-77"));
 
-    // Edit is never refused, and must say plainly that it copied nothing
-    // rather than falling silent about it.
+    // Edit is not refused for THIS shape, and must say plainly that it copied
+    // nothing rather than falling silent about it.
+    //
+    // The edit REWRITES the unsaved line rather than only deleting it. Round 5
+    // added `deletion_refusal`, so a delete-only edit over unsaved work is now
+    // refused outright on every platform - see the unit arm
+    // `a_surgical_edit_that_only_deletes_the_users_unsaved_line_is_refused`.
+    // Written as a deletion this would grade that refusal instead of the thing
+    // this arm exists to pin, which is that Windows makes no copy AND says so.
+    // The sibling unit arm `a_surgical_edit_that_removes_unsaved_work_copies_it`
+    // was adapted the same way when the rule landed; this `cfg(windows)` arm was
+    // missed because no Linux run could reach it.
     let r = EditTool::new(None)
         .with_unsaved_guard(ws.guard.clone())
         .execute(json!({
             "file_path": file.to_str().unwrap(),
             "old_string": "second line",
-            "new_string": "",
+            "new_string": "second line, rewritten",
         }))
         .await;
     assert!(!r.is_error, "{}", r.content);
