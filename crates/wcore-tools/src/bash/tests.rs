@@ -943,7 +943,22 @@ fn build_sandbox_pieces_trusted_sets_cwd_and_no_cache_redirect() {
     // bootstrap for genuinely-local sessions via `with_network`; see the
     // trusted-local-grant assertion below. No CARGO_HOME redirect either way.
     assert_eq!(m.network, default_bash_network_policy());
-    assert!(!m.env.iter().any(|(k, _)| k == "CARGO_HOME"));
+    // No CARGO_HOME *redirect* — Trusted reuses the global caches. The name
+    // itself IS forwarded now (it is how the rustup shim finds a toolchain
+    // installed outside `$HOME`; see `env_passthrough`), so the invariant is
+    // that the child receives the HOST value unchanged and never a path inside
+    // the workspace. Asserting the name was simply absent stopped measuring the
+    // redirect the moment the variable became legitimately passthrough.
+    let cargo_home = m.env.iter().find(|(k, _)| k == "CARGO_HOME");
+    assert_eq!(
+        cargo_home.map(|(_, v)| v.as_str()),
+        std::env::var("CARGO_HOME").ok().as_deref(),
+        "Trusted must forward the host CARGO_HOME unchanged, never redirect it"
+    );
+    assert!(
+        cargo_home.is_none_or(|(_, v)| !std::path::Path::new(v).starts_with(policy.root())),
+        "Trusted redirected CARGO_HOME into the workspace: {cargo_home:?}"
+    );
     // secrets still stripped from base env (unchanged)
     assert!(!m.env.iter().any(|(k, _)| k.contains("TOKEN")));
     // The bootstrap local-grant path (with_network Inherit) reaches the

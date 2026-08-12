@@ -353,12 +353,21 @@ async fn bwrap_still_runs_the_host_toolchains() {
                 .env
                 .push(("HOME".into(), root.to_string_lossy().into_owned()));
             for (var, sub) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
-                let p = Path::new(&home).join(sub);
+                // `RUSTUP_HOME` / `CARGO_HOME` FIRST, `$HOME/<sub>` only as the
+                // fallback — the same order `minimal_toolchain_read_dirs` uses,
+                // and for the same reason. The `$HOME`-only spelling this
+                // replaced found nothing on the CI image
+                // (`rust:1.95-slim-bookworm`, `RUSTUP_HOME=/usr/local/rustup`),
+                // so it granted neither the env pointer nor the read mount and
+                // this test reported the product defect as `cargo` exit 1,
+                // "rustup could not choose a version of cargo to run".
+                let p = std::env::var_os(var)
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| Path::new(&home).join(sub));
                 if p.exists() {
-                    manifest.env.push((
-                        var.into(),
-                        std::env::var(var).unwrap_or_else(|_| p.to_string_lossy().into_owned()),
-                    ));
+                    manifest
+                        .env
+                        .push((var.into(), p.to_string_lossy().into_owned()));
                     manifest.fs_read_allow.push(p);
                 }
             }

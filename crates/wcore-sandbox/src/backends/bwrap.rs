@@ -778,6 +778,16 @@ const SYNTHETIC_ETC_FILES: [&str; 4] = ["passwd", "group", "hosts", "nsswitch.co
 /// `BASE_SANDBOX_ENV_ALLOWLIST`, so every `BashTool` child receives a real
 /// `HOME`; cargo exit 0 was re-proved through the real env builder. A caller
 /// that builds a manifest by hand and omits `HOME` will hit it.
+///
+/// NOT to be confused with the toolchain-outside-`$HOME` defect, which printed
+/// the SAME rustup message from a completely different cause and WAS reachable
+/// through `BashTool`: `HOME` set and correct, but the toolchain living at
+/// `RUSTUP_HOME=/usr/local/rustup` (the official `rust:*` images, most
+/// devcontainers, Nix) while both the env allowlist and
+/// `minimal_toolchain_read_dirs` derived only from `$HOME`. Closed — see
+/// `crates/wcore-tools/tests/toolchain_outside_home.rs`. A future sighting of
+/// this error string should check `RUSTUP_HOME` before assuming it is the
+/// residual above.
 #[cfg(target_os = "linux")]
 fn synthetic_etc_scaffold() -> Result<tempfile::TempDir> {
     // SAFETY: getuid/getgid are always-successful, thread-safe syscalls that

@@ -3,7 +3,8 @@
 //!
 //! The product's default for an untrusted workspace is
 //! [`WorkspacePolicy::contained`], whose read grant set is the workspace root,
-//! the scratch dirs, and `minimal_toolchain_read_dirs()` (`~/.rustup`,
+//! the scratch dirs, and `minimal_toolchain_read_dirs()`
+//! (`%RUSTUP_HOME%` / `%CARGO_HOME%\\bin`, defaulting to `~/.rustup` /
 //! `~/.cargo/bin`). Before the window-station repair the measured behaviour on
 //! SEANDESKTOP was: `cmd` builtins run, and every USER32-linked image —
 //! `where`, `git`, `cargo`, `rustc`, `node` — dies at load with

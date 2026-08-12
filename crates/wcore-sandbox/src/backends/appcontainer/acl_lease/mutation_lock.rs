@@ -34,7 +34,8 @@ const LOCAL_SYSTEM_RID: u32 = 18;
 ///    foreign DACLs, and could each try to reclaim the same abandoned lease.
 ///
 /// 2. **Grant sets are never workspace-disjoint.** Every Contained execution
-///    grants `minimal_toolchain_read_dirs()` (`~/.rustup`, `~/.cargo/bin`) and
+///    grants `minimal_toolchain_read_dirs()` (`%RUSTUP_HOME%` /
+///    `%CARGO_HOME%\\bin`, defaulting to `~/.rustup` / `~/.cargo/bin`) and
 ///    the shared `%TEMP%\wayland-scratch` tree no matter which workspace it
 ///    runs in — see `wcore_tools::workspace_policy`. `apply_explicit_access` is
 ///    a read-modify-write of one object's DACL
