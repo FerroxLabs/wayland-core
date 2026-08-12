@@ -9699,6 +9699,7 @@ impl AgentEngine {
             pre_plan_allow_list: self.plan_state.pre_plan_allow_list.clone(),
             effective_allow_list: self.allow_list.clone(),
             conservatively_open_breakers: self.tools.breakers_requiring_conservative_restore(),
+            human_unreachable: self.tools.human_unreachable(),
             authority_digest,
             authority_component_digests,
             tool_hook_authority_version: crate::recovery::TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -9738,6 +9739,15 @@ impl AgentEngine {
         self.tools
             .restore_breakers_conservatively(&posture.conservatively_open_breakers)
             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        // Row B-3 — re-enter the resumed turn frozen if the crashed one was.
+        // ARM ONLY: a restore may re-freeze, and may never lift a freeze this
+        // process has armed. The deliberate clear belongs to the two events
+        // that earn it — a delivery, and a fresh user turn (`run_inner_impl`
+        // calls `clear_human_unreachable` only when NOT resuming from a
+        // checkpoint), and neither of those is reached from here.
+        if posture.human_unreachable {
+            self.tools.arm_human_unreachable();
+        }
         let recovered_pre_plan_allow_list =
             intersect_recovery_allow_list(&posture.pre_plan_allow_list, &self.allow_list);
         let recovered_effective_allow_list =
@@ -13345,6 +13355,13 @@ impl AgentEngine {
                 // during the assistant's final turn still surface as a
                 // user-visible Info event (and into the message tail in
                 // case the host resumes the session).
+                //
+                // B3: decide the run's outcome from the tool loop BEFORE the
+                // drain below. That note is a User-role message carrying no
+                // tool results, which is exactly the run boundary the outcome
+                // scan stops at — appended first, it would mask the failure
+                // this code exists to report.
+                let unrecovered_tool_failure = ended_on_unrecovered_tool_failure(&self.messages);
                 self.drain_and_inject_external_edits();
                 if journal_turn_id.is_none() {
                     self.prepare_durable_conversation().await?;
@@ -13378,10 +13395,9 @@ impl AgentEngine {
                     agent_run_id: self.current_agent_run_id.clone(),
                     // B3: this is the natural end of the tool loop — the model
                     // answered instead of calling another tool — so the last
-                    // committed tool batch is the one it answered off.
-                    ended_on_unrecovered_tool_failure: ended_on_unrecovered_tool_failure(
-                        &self.messages,
-                    ),
+                    // committed tool batch is the one it answered off. Decided
+                    // above, before the external-edit drain.
+                    ended_on_unrecovered_tool_failure: unrecovered_tool_failure,
                 };
                 if let Some(turn_id) = journal_turn_id {
                     self.commit_terminal_recovery_checkpoint(
@@ -23081,6 +23097,27 @@ pub struct AgentResult {
 /// error. Reading the committed history rather than threading engine state
 /// keeps the answer identical on the fresh-run, resumed and recovered paths,
 /// which all rebuild `messages` and none of which share a counter.
+///
+/// The walk STOPS at the run boundary. A `User` message carrying no tool
+/// results at all opens a user turn, and every batch below it belongs to an
+/// earlier run. Unbounded, this scan reported the previous run's outcome as
+/// this one's: the unreachable-human freeze ends a run on a refusal by
+/// construction, so the very next `--continue` starts from a history whose
+/// trailing batch is that refusal, and a resumed turn that answered
+/// conversationally — making no tool call of its own — exited 3 on a
+/// successful run. Every supervisor, CI wrapper and recovery script reading
+/// `$?` got it wrong.
+///
+/// The test is the ABSENCE of tool results, not the presence of text: a tool
+/// batch may legitimately carry `Text` blocks too (the mid-flight monitor
+/// directive, the external-edit note), so keying on text would silently stop
+/// the walk inside the run.
+///
+/// One case still reports an earlier run's tool call: a user turn that had to
+/// carry synthetic error `tool_result`s repairing an orphaned `tool_use` left
+/// by a crashed predecessor (see `orphan_repair_results`). Those results are
+/// in this turn's own message and they are genuinely unrecovered, so
+/// reporting them is the honest reading rather than a residue of the defect.
 fn ended_on_unrecovered_tool_failure(messages: &[Message]) -> bool {
     for message in messages.iter().rev() {
         let mut saw_result = false;
@@ -23093,6 +23130,9 @@ fn ended_on_unrecovered_tool_failure(messages: &[Message]) -> bool {
         }
         if saw_result {
             return saw_error;
+        }
+        if matches!(message.role, Role::User) {
+            return false;
         }
     }
     false
@@ -32702,6 +32742,257 @@ mod retry_wedge_protection_tests {
             fp("m", "sys", &a, &tools),
             fp("m", "sys", &a, &deferred_tools),
             "deferral changes the schema actually sent, so it changes the identity"
+        );
+    }
+}
+
+/// Row B-3 — the unreachable-human latch across a crash and a resume.
+///
+/// The latch lives in `ToolRegistry` as an `AtomicBool`. A SIGKILL mid-turn
+/// destroys it, and the recovery checkpoint that restores every other
+/// continuation authority (plan state, allow list, conservatively-reopened
+/// breakers) did not carry it — so the resumed process re-entered the SAME
+/// frozen turn with the freeze lifted and would act unsupervised. That is a
+/// fail-open window, and it is distinct from the DELIBERATE clear on a fresh
+/// user turn: a new user message is a reachable human, and lifting the freeze
+/// there is the designed behaviour, guarded below.
+#[cfg(test)]
+mod b3_latch_recovery_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_tools::send_message::{MessageTransport, ParsedTarget, SendMessageTool, SendOutcome};
+
+    use crate::test_utils::ScriptedProvider;
+
+    struct DeadTransport;
+
+    #[async_trait]
+    impl MessageTransport for DeadTransport {
+        async fn send(&self, _target: &ParsedTarget, _message: &str) -> SendOutcome {
+            SendOutcome::Err {
+                message: "transport: Connection error: Connection refused (os error 111)"
+                    .to_string(),
+            }
+        }
+    }
+
+    fn registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(SendMessageTool::new(Arc::new(DeadTransport))));
+        registry
+    }
+
+    fn engine() -> super::AgentEngine {
+        super::AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            wcore_config::config::Config::default(),
+            registry(),
+            Arc::new(crate::output::null_sink::NullSink),
+        )
+    }
+
+    /// The uncovered case: crash mid-turn with the freeze armed, then resume
+    /// that same turn from its recovery checkpoint.
+    #[test]
+    fn a_recovery_checkpoint_carries_the_unreachable_human_freeze() {
+        let crashed = engine();
+        crashed
+            .tools
+            .record_human_reach_outcome("send_message", true);
+        assert!(
+            crashed.awaiting_human(),
+            "precondition: the failed send must arm the latch, otherwise this \
+             test proves nothing"
+        );
+
+        // Through the real journal encoding, not an in-memory struct move.
+        let posture = crashed.recovery_posture().expect("posture");
+        let encoded = serde_json::to_value(&posture).expect("encode posture");
+        let posture: crate::recovery::RecoveryPosture =
+            serde_json::from_value(encoded).expect("decode posture");
+
+        let mut resumed = engine();
+        assert!(
+            !resumed.awaiting_human(),
+            "precondition: a fresh process starts with the latch clear — that \
+             is exactly what the crash destroys"
+        );
+        resumed
+            .restore_recovery_posture(&posture)
+            .expect("restore posture");
+
+        assert!(
+            resumed.awaiting_human(),
+            "a turn resumed from its own recovery checkpoint must re-enter \
+             frozen. Without this the process restarts with the freeze lifted \
+             and takes the world-changing action it had refused."
+        );
+    }
+
+    /// The other direction. Restoring a checkpoint taken while the route was
+    /// UP must not invent a freeze, and must not clear one this process has
+    /// since armed — the restore is an arm, never a clear.
+    #[test]
+    fn restoring_a_reachable_checkpoint_neither_invents_nor_clears_a_freeze() {
+        let healthy = engine();
+        healthy
+            .tools
+            .record_human_reach_outcome("send_message", false);
+        assert!(!healthy.awaiting_human());
+        let posture = healthy.recovery_posture().expect("posture");
+
+        let mut fresh = engine();
+        fresh.restore_recovery_posture(&posture).expect("restore");
+        assert!(
+            !fresh.awaiting_human(),
+            "a checkpoint taken with the route up must not freeze the resumed run"
+        );
+
+        let mut frozen = engine();
+        frozen
+            .tools
+            .record_human_reach_outcome("send_message", true);
+        frozen.restore_recovery_posture(&posture).expect("restore");
+        assert!(
+            frozen.awaiting_human(),
+            "restoring a reachable checkpoint must not CLEAR a freeze this \
+             process armed — only a delivery or a fresh user turn may do that"
+        );
+    }
+
+    /// The deliberate behaviour this fix must not trade away: a fresh user
+    /// turn IS a reachable human and clears the latch.
+    #[test]
+    fn a_fresh_user_turn_still_clears_the_freeze() {
+        let engine = engine();
+        engine
+            .tools
+            .record_human_reach_outcome("send_message", true);
+        assert!(engine.awaiting_human());
+        // The exact call `run_inner_impl` makes on every non-recovery turn.
+        engine.tools.clear_human_unreachable();
+        assert!(
+            !engine.awaiting_human(),
+            "a new user message must still lift the freeze"
+        );
+    }
+
+    /// The run boundary, unit-level. Also the reason the natural-end call
+    /// site takes this verdict BEFORE `drain_and_inject_external_edits`: that
+    /// drain appends a User-role note carrying no tool results, which is
+    /// indistinguishable from a user turn and would mask the failure.
+    #[test]
+    fn the_scan_stops_at_a_user_turn_and_a_trailing_note_looks_like_one() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        let failing_batch = || {
+            vec![
+                Message::now(
+                    Role::User,
+                    vec![ContentBlock::Text {
+                        text: "do it".into(),
+                    }],
+                ),
+                Message::now(
+                    Role::Assistant,
+                    vec![ContentBlock::ToolUse {
+                        id: "c1".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    }],
+                ),
+                Message::now(
+                    Role::User,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: "c1".into(),
+                        content: "no such file".into(),
+                        is_error: true,
+                    }],
+                ),
+                Message::now(
+                    Role::Assistant,
+                    vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                ),
+            ]
+        };
+
+        assert!(
+            super::ended_on_unrecovered_tool_failure(&failing_batch()),
+            "control: a run whose last batch errored must still report it"
+        );
+
+        // The next run over the same session, answering with no tool call.
+        let mut resumed = failing_batch();
+        resumed.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "just say hi".into(),
+            }],
+        ));
+        resumed.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        ));
+        assert!(
+            !super::ended_on_unrecovered_tool_failure(&resumed),
+            "the scan must stop at the resumed run's user turn instead of \
+             inheriting the previous run's trailing refusal"
+        );
+
+        // A tool batch that also carries text is NOT a boundary — keying the
+        // stop on text rather than on the absence of tool results would stop
+        // the walk inside the run.
+        let mut with_text = failing_batch();
+        with_text[2].content.push(ContentBlock::Text {
+            text: "Mid-flight monitor directive: change strategy.".into(),
+        });
+        assert!(
+            super::ended_on_unrecovered_tool_failure(&with_text),
+            "a tool-result batch carrying Text blocks is still a tool batch"
+        );
+
+        // And the hazard the call-site ordering exists for.
+        let mut with_note = failing_batch();
+        with_note.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "User edited 3 files while I was thinking…".into(),
+            }],
+        ));
+        assert!(
+            !super::ended_on_unrecovered_tool_failure(&with_note),
+            "an external-edit note appended after the loop reads as a run \
+             boundary — so the verdict must be taken before the drain, not \
+             after it"
+        );
+    }
+
+    /// A posture written by a binary that predates the field must still
+    /// decode — `RecoveryPosture` is `deny_unknown_fields`, so the new field
+    /// has to be `#[serde(default)]` or every journal already on disk breaks.
+    #[test]
+    fn a_posture_written_before_this_field_still_decodes() {
+        let legacy = serde_json::json!({
+            "plan_active": false,
+            "pre_plan_allow_list": [],
+            "effective_allow_list": [],
+            "conservatively_open_breakers": [],
+            "authority_digest": "deadbeef",
+            "authority_component_digests": {},
+            "tool_hook_authority_version":
+                crate::recovery::TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
+        });
+        let posture: crate::recovery::RecoveryPosture =
+            serde_json::from_value(legacy).expect("legacy posture must still decode");
+        assert!(
+            !posture.human_unreachable,
+            "an absent latch decodes as reachable, which is what those \
+             journals recorded"
         );
     }
 }

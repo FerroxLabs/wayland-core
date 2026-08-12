@@ -356,6 +356,18 @@ impl ToolRegistry {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Re-arm the human-contact latch from durable recovery state.
+    ///
+    /// Deliberately arm-only, with no clearing counterpart. Restoring a
+    /// recovery checkpoint must be able to re-freeze a turn resumed after a
+    /// crash, and must never be able to LIFT a freeze this process has
+    /// already armed. Clearing stays with the two events that earn it: a
+    /// delivery, and a fresh user turn.
+    pub fn arm_human_unreachable(&self) {
+        self.human_unreachable
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     /// Clear the human-contact latch.
     ///
     /// Called where the engine clears the per-tool breakers: at the start of a
