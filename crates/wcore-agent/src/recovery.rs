@@ -193,6 +193,20 @@ pub(crate) struct RecoveryPosture {
     /// conservatively after process restart. This may narrow availability for
     /// one cooldown, but can never erase an original same-turn denial.
     pub conservatively_open_breakers: Vec<String>,
+    /// Row B-3: the unreachable-human freeze, armed when the last word from
+    /// the outbound human-contact route was a failure.
+    ///
+    /// It lives in an in-memory `AtomicBool` on the tool registry, which a
+    /// crash destroys. Every other continuation authority here survived the
+    /// restart and this one did not, so a turn resumed from its own
+    /// checkpoint re-entered UNFROZEN and could take the world-changing
+    /// action it had just refused — a fail-open window.
+    ///
+    /// `default` keeps checkpoints written before this field decodable under
+    /// `deny_unknown_fields`. They decode as reachable, which is what they
+    /// recorded.
+    #[serde(default)]
+    pub human_unreachable: bool,
     /// Digest of independently reconstructed policy, workspace, cwd and tool
     /// inventory data. It is compared before any continuation authority is
     /// restored.
@@ -1887,6 +1901,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2274,6 +2289,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2357,6 +2373,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2440,6 +2457,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2539,6 +2557,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,

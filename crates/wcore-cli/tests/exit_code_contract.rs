@@ -400,3 +400,171 @@ async fn a_run_stopped_at_the_turn_cap_reports_the_limit() {
         run.stderr
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// The RESUMED turn. `drive` above runs one process with sessions off, which
+// cannot see the defect these two cover: `ended_on_unrecovered_tool_failure`
+// walked the whole message history with no bound at the run boundary, so a
+// second run over the same session inherited the FIRST run's trailing tool
+// error. The freeze flow makes that the common case — it ends a run on a
+// refusal by construction, so the very next `--continue` starts from a
+// trailing refusal.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Two sequential real processes over ONE durable session, driven by one
+/// scripted provider whose script continues across the restart. Returns the
+/// exit status of each leg.
+async fn drive_two_legs(name: &str, steps: Vec<OpenAiStep>, second_prompt: &str) -> (Run, Run) {
+    let root = std::env::temp_dir().join(format!("wlc-exit-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let work = root.join("work");
+    std::fs::create_dir_all(&home).expect("home");
+    std::fs::create_dir_all(&work).expect("work");
+
+    let script_json = serde_json::to_string(&steps)
+        .expect("serialize script")
+        .replace(
+            "{WORK}",
+            work.to_string_lossy().replace('\\', "\\\\").as_str(),
+        );
+    let steps: Vec<OpenAiStep> = serde_json::from_str(&script_json).expect("re-parse script");
+    let fixture = OpenAiFixtureScript::new(steps)
+        .start()
+        .await
+        .expect("start scripted provider");
+
+    // Sessions ON — without a durable session there is nothing to resume and
+    // the defect is unreachable.
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "[session]\nenabled = true\n\n[memory]\nenabled = false\n\n\
+             [providers.rec]\nprovider = \"openai\"\n\
+             base_url = \"{}\"\nmodel = \"fake\"\napi_key = \"unused\"\n",
+            fixture.base_url()
+        ),
+    )
+    .expect("config");
+
+    let invoke = |extra: &[&str], prompt: &str| {
+        let bin = PathBuf::from(env!("CARGO_BIN_EXE_wayland-core"));
+        let mut cmd = Command::new(bin);
+        cmd.current_dir(&work)
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &home)
+            .env("WAYLAND_HOME", &home)
+            .env("NO_COLOR", "1")
+            .args([
+                "-p",
+                "rec",
+                "-m",
+                "fake",
+                "--no-color",
+                "--dangerously-skip-permissions",
+            ])
+            .args(extra)
+            .arg(prompt);
+        let out = cmd.output().expect("spawn wayland-core");
+        Run {
+            code: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    };
+
+    let first = invoke(&[], "do the thing");
+    let second = invoke(&["--continue"], second_prompt);
+
+    let _ = std::fs::remove_dir_all(&root);
+    (first, second)
+}
+
+/// The defect. Run 1 ends on an unrecovered tool failure (exit 3, correctly).
+/// Run 2 resumes that session and answers CONVERSATIONALLY — it calls no tool
+/// at all, so it has no tool outcome of its own and succeeded. It exited 3.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_turn_that_calls_no_tool_does_not_inherit_the_previous_failure() {
+    let (first, second) = drive_two_legs(
+        "resume-clean",
+        vec![
+            read("{WORK}/absent.txt"),
+            OpenAiStep::text("Done. Everything succeeded."),
+            OpenAiStep::text("Nothing to do — you are all set."),
+        ],
+        "just answer me, do not touch anything",
+    )
+    .await;
+
+    assert_eq!(
+        first.code,
+        Some(exit_code::TOOL_FAILURE as i32),
+        "precondition: leg 1 must genuinely end on an unrecovered tool \
+         failure, or leg 2 has nothing to inherit and this test is vacuous; \
+         stdout={:?} stderr={:?}",
+        first.stdout,
+        first.stderr
+    );
+    assert!(
+        second.stderr.contains("Resumed session"),
+        "precondition: leg 2 must actually have resumed leg 1's session; \
+         stderr={:?}",
+        second.stderr
+    );
+    assert!(
+        second.stdout.contains("Nothing to do"),
+        "precondition: leg 2 must have produced its own answer; stdout={:?}",
+        second.stdout
+    );
+    assert_eq!(
+        second.code,
+        Some(exit_code::OK as i32),
+        "a resumed turn that made no tool call of its own succeeded, and must \
+         exit 0. Inheriting the previous run's trailing refusal reports \
+         failure on success to every supervisor reading $?; \
+         stdout={:?} stderr={:?}",
+        second.stdout,
+        second.stderr
+    );
+}
+
+/// THE OTHER DIRECTION. Without this the fix above could be satisfied by a
+/// resumed turn that never reports a tool failure at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_turn_that_ends_on_its_own_unrecovered_failure_still_reports_it() {
+    let (first, second) = drive_two_legs(
+        "resume-fails",
+        vec![
+            read("{WORK}/absent.txt"),
+            OpenAiStep::text("Done. Everything succeeded."),
+            read("{WORK}/also-absent.txt"),
+            OpenAiStep::text("Done again. Everything succeeded."),
+        ],
+        "try the other path",
+    )
+    .await;
+
+    assert_eq!(
+        first.code,
+        Some(exit_code::TOOL_FAILURE as i32),
+        "precondition: leg 1 still reports its own failure; stdout={:?} stderr={:?}",
+        first.stdout,
+        first.stderr
+    );
+    assert!(
+        second.stderr.contains("also-absent.txt"),
+        "precondition: leg 2 must actually have made its own failing tool \
+         call, or this control proves nothing; stderr={:?}",
+        second.stderr
+    );
+    assert_eq!(
+        second.code,
+        Some(exit_code::TOOL_FAILURE as i32),
+        "a resumed turn that ends on its OWN unrecovered tool failure must \
+         still exit 3 — bounding the scan at the run boundary must not blind \
+         it to the current run; stdout={:?} stderr={:?}",
+        second.stdout,
+        second.stderr
+    );
+}
