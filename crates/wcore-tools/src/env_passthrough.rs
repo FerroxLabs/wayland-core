@@ -58,6 +58,24 @@ const BASE_SANDBOX_ENV_ALLOWLIST: &[&str] = &[
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
     "CURL_CA_BUNDLE",
+    // Rust toolchain discovery. The rustup shims (`cargo`, `rustc`) resolve
+    // WHICH toolchain to run out of `RUSTUP_HOME`, and cargo finds its registry
+    // and config under `CARGO_HOME`. Both default to `$HOME/.rustup` /
+    // `$HOME/.cargo`, so stripping them is only survivable on a host that
+    // installs the toolchain under `$HOME`. On the official `rust:*` images
+    // (`RUSTUP_HOME=/usr/local/rustup`, `CARGO_HOME=/usr/local/cargo`), on most
+    // devcontainers and under Nix the shim then finds no toolchain and EVERY
+    // sandboxed `cargo` exits 1 with "rustup could not choose a version of
+    // cargo to run, because one wasn't specified explicitly". Measured under
+    // real bwrap on `rust:1.95-slim-bookworm` with HOME set and correct.
+    //
+    // Path pointers, not secret material. Forwarding a path grants no
+    // filesystem access by itself — the sandbox mount set decides that, and
+    // `workspace_policy`'s `minimal_toolchain_read_dirs` derives the matching
+    // read grants from these same two variables (`CARGO_HOME/bin` only, so a
+    // relocated `credentials.toml` is still never bound).
+    "RUSTUP_HOME",
+    "CARGO_HOME",
     "SYSTEMROOT", // Windows: required for most native binaries to start.
     // Windows: the constant `C:` that `SYSTEMROOT` is rooted in. Measured on
     // Windows 11 26200: `python3 -c "open('p.txt','w').write('ok')"` run under

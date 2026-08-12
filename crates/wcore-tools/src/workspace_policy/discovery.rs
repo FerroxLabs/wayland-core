@@ -3,17 +3,45 @@
 use super::*;
 
 /// Minimal read/exec toolchain dirs for a contained shell to run compilers.
+///
+/// `RUSTUP_HOME` / `CARGO_HOME` FIRST, `$HOME/.rustup` / `$HOME/.cargo/bin`
+/// only as the fallback. A `$HOME`-only derivation grants nothing on the hosts
+/// that install the toolchain elsewhere — the official `rust:*` images
+/// (`RUSTUP_HOME=/usr/local/rustup`), most devcontainers, Nix — and the rustup
+/// shim then cannot reach the toolchain it was pointed at. Measured under real
+/// bwrap: with the store unbound, `cargo --version` exits 1 even when
+/// `RUSTUP_HOME` IS forwarded.
+///
+/// Only `CARGO_HOME/bin` is granted, never the whole of `CARGO_HOME`, so a
+/// relocated `credentials.toml` is not handed to the child.
 pub(super) fn minimal_toolchain_read_dirs() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        for sub in [".rustup", ".cargo/bin"] {
-            let p = home.join(sub);
-            if p.exists() {
-                v.push(p);
-            }
-        }
-    }
-    v
+    let home = dirs::home_dir();
+    let rustup =
+        toolchain_dir_from_env("RUSTUP_HOME").or_else(|| home.as_ref().map(|h| h.join(".rustup")));
+    let cargo_bin = toolchain_dir_from_env("CARGO_HOME")
+        .map(|c| c.join("bin"))
+        .or_else(|| home.as_ref().map(|h| h.join(".cargo/bin")));
+    [rustup, cargo_bin]
+        .into_iter()
+        .flatten()
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// Read a toolchain store location out of the process environment, refusing a
+/// value that cannot honestly be turned into a read grant.
+///
+/// A relative path is meaningless as a mount source, and the filesystem root
+/// would bind the entire host read-only — the exact opposite of containment.
+/// The value is operator-supplied PROCESS environment, the same trust class as
+/// `PATH` and `HOME`, which already steer these grants (`capability_roots`
+/// resolves `cargo` through `PATH`); model-supplied data never reaches here,
+/// because a command's own `export` only mutates the child it runs in, long
+/// after the mount set was computed. The root refusal is one branch and
+/// nothing legitimate sets it, so it is taken rather than argued about.
+fn toolchain_dir_from_env(var: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os(var)?);
+    (path.is_absolute() && path.parent().is_some()).then_some(path)
 }
 
 /// Interpreters whose PROGRAM FILES the contained profile grants, on top of
@@ -304,14 +332,18 @@ pub(super) fn capability_roots(executable: &Path) -> Vec<PathBuf> {
             roots.push(canon(developer));
         }
     }
-    if let Some(home) = dirs::home_dir()
-        && executable.starts_with(home.join(".cargo/bin"))
-    {
-        for path in [home.join(".cargo/bin"), home.join(".rustup")] {
-            if path.exists() {
-                roots.push(canon(path));
-            }
-        }
+    // A rustup shim resolves its toolchain out of a store (`RUSTUP_HOME`,
+    // default `$HOME/.rustup`) that is a DIFFERENT tree from the shim's own bin
+    // directory, so `executable.parent()` above is not enough on its own. Same
+    // env-first derivation as the contained profile uses; the `$HOME`-anchored
+    // spelling this replaced granted nothing when the toolchain lived outside
+    // `$HOME`.
+    let stores = minimal_toolchain_read_dirs()
+        .into_iter()
+        .map(canon)
+        .collect::<Vec<_>>();
+    if stores.iter().any(|dir| executable.starts_with(dir)) {
+        roots.extend(stores);
     }
     roots
 }
