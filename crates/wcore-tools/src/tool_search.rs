@@ -265,6 +265,28 @@ impl Tool for ToolSearchTool {
         "ToolSearch"
     }
 
+    /// This body must never be byte-sliced, so it is given room the default
+    /// 50 000 cannot guarantee.
+    ///
+    /// `truncate_result` runs BEFORE compaction and cuts on a character
+    /// count, not a record boundary. A ToolSearch result cut mid-object is no
+    /// longer parseable JSON, and `AgentEngine::record_hydrated_tools` parses
+    /// this exact body to decide which deferred tools to force-admit into
+    /// `tools[]` -- so a sliced catalogue hydrates NOTHING, and the tool the
+    /// model just searched for never becomes callable. Measured: ten matches
+    /// carrying twenty-property schemas serialise to 66 712 chars, comfortably
+    /// past the default, and the slice lands mid-object.
+    ///
+    /// The body is already bounded by construction -- [`MAX_MATCHES`] caps it
+    /// at ten ranked matches -- so raising the ceiling cannot unbound it. This
+    /// buys headroom for those ten to carry full schemas intact rather than
+    /// arrive as unparseable wreckage. Dropping whole matches would also work,
+    /// but silently returning fewer tools than matched is the failure mode
+    /// this tool exists to avoid.
+    fn max_result_size(&self) -> usize {
+        100_000
+    }
+
     fn description(&self) -> &str {
         "Search for deferred tools and load their full schema. Returns the \
          best-matching tools, most relevant first (up to 10). \
