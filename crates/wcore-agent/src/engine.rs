@@ -17016,6 +17016,28 @@ impl AgentEngine {
         let Ok(serde_json::Value::Array(matches)) =
             serde_json::from_str::<serde_json::Value>(content)
         else {
+            // A no-match result is deliberately plain prose (`miss_message`
+            // opens "No deferred tools matching ..."), so it parses to nothing
+            // and records nothing. That path stays silent.
+            //
+            // A body that OPENS like JSON and still fails to parse is a
+            // different animal: some transform between ToolSearch and here
+            // mangled it. That is not hypothetical -- compaction's line fold
+            // collapsed the pretty-printed catalogue to
+            // `[\n  {\n[... N similar lines]\n  }\n]`, which destroyed every
+            // tool name AND silently no-opped this admission step, so even a
+            // correctly guessed name was never force-included in `tools[]`.
+            // Say it out loud, or the next such transform breaks hydration
+            // with no trace, exactly as that one did.
+            let head = content.trim_start();
+            if head.starts_with('[') || head.starts_with('{') {
+                tracing::warn!(
+                    target: "wcore_agent::engine",
+                    "ToolSearch result opens like JSON but did not parse as an \
+                     array; no tools were hydrated. A transform between the \
+                     tool and the engine corrupted the body."
+                );
+            }
             return;
         };
         for m in matches {
@@ -18495,6 +18517,61 @@ mod set_config_tests {
             result.content
         );
         result.content
+    }
+
+    /// The defect no unit test in `wcore-compact` OR `wcore-tools` could
+    /// catch, because it lives in the COMPOSITION of the two: `ToolSearch`
+    /// emits a perfectly good catalogue, and the orchestrator then runs every
+    /// tool result through `wcore_compact::compact_output` before the engine
+    /// ever sees it.
+    ///
+    /// At `CompactionLevel::Full` the line fold collapsed that catalogue to
+    /// `[\n  {\n[... N similar lines]\n  }\n]`. The visible half of the damage
+    /// was that the model could not read a single tool name. The invisible
+    /// half is here: the body no longer parses, so `record_hydrated_tools`
+    /// took its silent bail and hydrated NOTHING, force-admission never added
+    /// the tool to the outbound `tools[]`, and `publish_hydrated_tools` never
+    /// updated the set `ToolSearch` reads -- so every repeat search returned a
+    /// byte-identical body. That is this engine's own documented
+    /// ten-identical-searches loop, arrived at from the other end.
+    #[tokio::test]
+    async fn a_compacted_tool_search_result_still_hydrates() {
+        let names = ["chart_set_symbol", "indicator_add_from_search"];
+
+        // CONTROL. The UNCOMPACTED body must hydrate. Without this the
+        // assertion below could pass on an engine that hydrates nothing at
+        // all, and would prove nothing about compaction.
+        let mut control = engine_with_live_tool_search(&names);
+        let raw = registered_tool_search(&control, "chart_set_symbol").await;
+        control.record_hydrated_tools(&raw);
+        assert!(
+            control
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "chart_set_symbol"),
+            "control failed: the raw body does not hydrate, so this test \
+             cannot say anything about compaction"
+        );
+
+        // The real pipeline: the same body, through the same compaction the
+        // orchestrator applies to every tool result.
+        let mut engine = engine_with_live_tool_search(&names);
+        let body = registered_tool_search(&engine, "chart_set_symbol").await;
+        let compacted = wcore_compact::compact_output(&body, wcore_compact::CompactionLevel::Full);
+
+        assert!(
+            compacted.contains("chart_set_symbol"),
+            "compaction destroyed the tool name: {compacted}"
+        );
+        engine.record_hydrated_tools(&compacted);
+        assert!(
+            engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "chart_set_symbol"),
+            "compacted ToolSearch result hydrated nothing; the model can \
+             never call the tool it just searched for: {compacted}"
+        );
     }
 
     /// C-5 (hydration-aware catalog). `ToolSearch` answers from a
