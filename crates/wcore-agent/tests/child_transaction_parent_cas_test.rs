@@ -239,7 +239,7 @@ async fn lands_and_journals_full_lifecycle_then_rolls_back() {
 
     let state = tempfile::tempdir().unwrap();
     let manager = open_manager(source.path(), state.path());
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
 
     let accepted = accept_candidate(
         &store,
@@ -351,7 +351,7 @@ async fn restart_recovery_replays_landed_state_from_disk() {
 
     let state = tempfile::tempdir().unwrap();
     let manager = open_manager(source.path(), state.path());
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let accepted = accept_candidate(
         &store,
         &manager,
@@ -436,7 +436,7 @@ async fn concurrent_second_lander_cannot_double_land() {
 
     let state = tempfile::tempdir().unwrap();
     let manager = open_manager(source.path(), state.path());
-    let capacity = manager.workspace_capacity(2).await.expect("capacity");
+    let capacity = manager.workspace_capacity(2, 2).await.expect("capacity");
 
     let accepted_a = accept_candidate(
         &store,
@@ -566,7 +566,7 @@ async fn rollback_refuses_after_foreign_change() {
 
     let state = tempfile::tempdir().unwrap();
     let manager = open_manager(source.path(), state.path());
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let accepted = accept_candidate(
         &store,
         &manager,

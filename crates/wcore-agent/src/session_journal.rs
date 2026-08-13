@@ -294,6 +294,17 @@ struct JournalWriter {
     _lease: WriterLease,
 }
 
+/// Release the journal data-file lock when the writer dies.
+///
+/// Mirrors `WriterLease::drop`, which has always done this for the
+/// `.writer.lock` sentinel. See [`lease::unlock_data_file`] for why `close(2)`
+/// alone is not sufficient.
+impl Drop for JournalWriter {
+    fn drop(&mut self) {
+        lease::unlock_data_file(&self.file);
+    }
+}
+
 type SharedWriter = Arc<Mutex<JournalWriter>>;
 
 #[derive(Debug, Clone)]
@@ -441,6 +452,17 @@ pub(crate) struct SessionStorageLease {
     session_id: String,
     _journal_file: Option<File>,
     _lease: WriterLease,
+}
+
+/// Release the journal data-file lock when the storage lease dies.
+///
+/// Same reasoning as `Drop for JournalWriter`.
+impl Drop for SessionStorageLease {
+    fn drop(&mut self) {
+        if let Some(file) = &self._journal_file {
+            lease::unlock_data_file(file);
+        }
+    }
 }
 
 impl SessionJournal {
@@ -959,7 +981,11 @@ pub fn write_snapshot(
     path: impl AsRef<Path>,
     snapshot: &SessionSnapshot,
 ) -> Result<(), JournalError> {
-    snapshot::write_snapshot(path, snapshot).map(|_| ())
+    // The published inode is locked by `write_snapshot`. This entry point
+    // grants no durable authority, so the guard releases it here rather than
+    // leaving it to `close(2)` - see [`lease::unlock_data_file`].
+    drop(snapshot::write_snapshot(path, snapshot)?);
+    Ok(())
 }
 
 /// Reduce a suffix from self-consistent snapshot data for offline use.
@@ -1614,7 +1640,14 @@ impl JournalWriter {
         })();
         let snapshot_file = match publication {
             Ok((file, snapshot_file)) => {
-                self.file = file;
+                // The outgoing handle names the pre-compaction inode, which the
+                // rename has already displaced. Release its lock rather than
+                // letting the handle close: a subprocess forked while it was
+                // open still references the locked open file description, and
+                // `close(2)` cannot reach a duplicate. `JournalWriter::drop`
+                // then owns the incoming handle's lock.
+                lease::unlock_data_file(&self.file);
+                self.file = file.into_locked_inner();
                 snapshot_file
             }
             Err(error) => {

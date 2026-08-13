@@ -34,6 +34,16 @@ impl MockChannel {
         }
     }
 
+    /// Set the platform this mock reports, independently of its name.
+    ///
+    /// Name and platform are separate facts about a channel and a test that
+    /// cannot vary them independently cannot cover the case where they differ
+    /// — which is the ordinary case for an operator-named channel.
+    pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = platform.into();
+        self
+    }
+
     /// Queue an inbound event for the next `poll_events`.
     pub fn inject(&mut self, ev: ChannelEvent) {
         self.inbound.push_back(ev);

@@ -15,6 +15,30 @@ use crate::attempt_lifecycle::{
 pub const DEFAULT_MAX_RETRIES: u32 = 2; // 1 initial + 2 retries = 3 total attempts
 pub const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 
+/// Wall-clock window over which a connection that was established and then
+/// destroyed before any response head arrived (peer reset / abort / broken
+/// pipe) keeps being re-sent.
+///
+/// A request COUNT is the wrong unit. What is being ridden out is an interval
+/// during which the peer will not complete a request, and an interval has a
+/// duration; how many sends fit inside it is an artefact of how fast each one
+/// fails, not a property of the failure. Any count is therefore a guess about
+/// the shape of the next outage.
+///
+/// This is the INNER of two bounds and owns only the smallest failure: a
+/// single physical send losing its socket — a proxy recycling a worker, a load
+/// balancer dropping connections through a rollover, a keep-alive raced to
+/// close. The window has to contain at least one full re-establishment of the
+/// connection, and the product already states how long that may take:
+/// [`crate::http_client::CONNECT_TIMEOUT`] is 30 s. Anything longer than one
+/// re-establishment is not a blip and belongs to the OUTER bound — the
+/// engine's per-turn unserved-request budget, which is an order of magnitude
+/// longer and rebuilds the whole request.
+///
+/// Holding the window open is cheap: nothing was served on these attempts and
+/// nothing was billed, so a re-send costs a socket rather than tokens.
+pub const BROKEN_CONNECTION_RETRY_WINDOW: Duration = Duration::from_secs(30);
+
 /// One physical provider HTTP attempt observed by the retry ring.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAttemptEvidence {
@@ -245,10 +269,137 @@ pub fn mark_last_attempt_retrying() {
     });
 }
 
+/// Failure code for a connect-phase failure whose cause proves the configured
+/// endpoint cannot be reached, however long the caller keeps trying: the host
+/// name does not exist.
+pub const FAILURE_DNS: &str = "dns_failure";
+
+/// Failure code for a connect-phase failure where the host resolved and the
+/// port actively rejected the connection.
+pub const FAILURE_CONNECTION_REFUSED: &str = "connection_refused";
+
+/// Failure code for every other connect-phase failure — the ambiguous residue
+/// (network unreachable, connect reset, a resolver that answered "try again").
+pub const FAILURE_CONNECTION: &str = "connection";
+
+/// Split a connect-phase failure by whether another send can plausibly change
+/// the outcome.
+///
+/// `reqwest::Error::is_connect()` collapses three very different events into
+/// one code. A name that does not resolve is a PERMANENT property of the
+/// configuration — one typo in `base_url` and no number of re-sends will ever
+/// reach a different answer. A port that refuses is a property of the peer
+/// right now. A network that is momentarily unreachable is a property of the
+/// link. Only the last two can heal inside one turn.
+///
+/// That distinction was not available above this function, and the engine's
+/// unserved-outage window (`wcore_agent`'s `UNSERVED_OUTAGE_BUDGET`) admitted
+/// all three: a `base_url` typo cost a MEASURED 902 s and 36 sends before the
+/// run gave up, which a user cannot tell apart from a hang.
+///
+/// Classified from the error's own source chain rather than its `Display`,
+/// because the top-level text is the same `error sending request` for a DNS
+/// failure and for a peer that reset an established socket — measured on this
+/// tree, not assumed. The chain is only READ here; nothing from it is stored
+/// or surfaced, so the H-2 URL-stripping guarantee above is untouched.
+///
+/// Conservative in the same direction as [`is_http_4xx_error`]: an unrecognised
+/// chain returns [`FAILURE_CONNECTION`] and keeps the existing generous budget.
+/// The cost of a missed permanent failure is the old behaviour; the cost of a
+/// false positive is a transient outage that no longer heals.
+fn connect_failure_code(error: &reqwest::Error) -> &'static str {
+    let mut refused = false;
+    let mut chain = Vec::new();
+    let mut cursor: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    // Bounded so a self-referential chain (a `source()` cycle through a shared
+    // error) cannot spin here.
+    for _ in 0..16 {
+        let Some(current) = cursor else { break };
+        if let Some(io) = current.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::ConnectionRefused
+        {
+            refused = true;
+        }
+        chain.push(current.to_string());
+        cursor = current.source();
+    }
+    classify_connect_chain(refused, &chain)
+}
+
+/// The decision half of [`connect_failure_code`], split out so it can be
+/// tested against the chains reqwest really produces.
+///
+/// The two shapes below were MEASURED on this tree (see
+/// `tests/connect_failure_classification.rs`), not imagined:
+///
+/// ```text
+/// dns:     error sending request … / client error (Connect) / dns error /
+///          failed to lookup address information: Name or service not known
+/// refused: error sending request … / client error (Connect) / tcp connect error /
+///          Connection refused (os error 111)        [io kind ConnectionRefused]
+/// ```
+///
+/// `chain_text[0]` is the top-level `Display`, which still carries the request
+/// URL. It is matched against and then dropped — nothing here is stored or
+/// surfaced, so the H-2 URL-stripping guarantee is untouched.
+fn classify_connect_chain(refused_io_kind: bool, chain_text: &[String]) -> &'static str {
+    let mut refused = refused_io_kind;
+    let mut name_lookup_failed = false;
+    let mut name_lookup_may_heal = false;
+    for text in chain_text {
+        let text = text.to_ascii_lowercase();
+        // hyper-util's connector labels the resolver leg `dns error`; std's
+        // `getaddrinfo` wrapper contributes the `failed to lookup address
+        // information: <gai_strerror>` detail underneath it.
+        if text.contains("dns error") || text.contains("failed to lookup address information") {
+            name_lookup_failed = true;
+        }
+        // Windows. The markers above are Unix text: `with_transport_cause`
+        // keeps only the INNERMOST link, and on Windows that is the bare OS
+        // error — MEASURED on this tree as `No such host is known. (os error
+        // 11001)`, with the `dns error` label sitting one link further out
+        // where nothing reads it. Matched on the numeric suffix, which Rust
+        // appends itself and is therefore locale-invariant, unlike the
+        // FormatMessage prose in front of it.
+        //   11001 WSAHOST_NOT_FOUND, 11004 WSANO_DATA — the name is absent.
+        if text.contains("(os error 11001)") || text.contains("(os error 11004)") {
+            name_lookup_failed = true;
+        }
+        // EAI_AGAIN — the RESOLVER was unavailable, not the name absent. That
+        // is the transient case (a laptop between networks, a container whose
+        // DNS is not up yet) and it must keep the full outage budget.
+        // 11002 WSATRY_AGAIN is the Windows spelling of the same event.
+        if text.contains("temporary failure in name resolution")
+            || text.contains("try again")
+            || text.contains("(os error 11002)")
+        {
+            name_lookup_may_heal = true;
+        }
+        // Text fallback for the refusal. The io ERROR KIND above is the
+        // primary signal and is locale-proof; this catches the path where all
+        // that survives is a rendered message (see `provider_failure_code`'s
+        // `Connection` arm, which has only a `String`).
+        // 10061 WSAECONNREFUSED is the Windows spelling; its prose ("the
+        // target machine actively refused it") shares no substring with the
+        // Unix message, and the io ERROR KIND is unavailable on the
+        // `ProviderError::Connection` path, which has only a rendered string.
+        if text.contains("connection refused") || text.contains("(os error 10061)") {
+            refused = true;
+        }
+    }
+    if name_lookup_failed && !name_lookup_may_heal {
+        return FAILURE_DNS;
+    }
+    if refused {
+        return FAILURE_CONNECTION_REFUSED;
+    }
+    FAILURE_CONNECTION
+}
+
 fn egress_failure_code(error: &EgressError) -> &'static str {
     match error {
         EgressError::Transport(error) if error.is_timeout() => "timeout",
-        EgressError::Transport(error) if error.is_connect() => "connection",
+        EgressError::Transport(error) if error.is_connect() => connect_failure_code(error),
         EgressError::Transport(error) if error.is_body() || error.is_decode() => "stream_body",
         EgressError::Transport(_) => "transport",
         EgressError::Denied(_) => "egress_denied",
@@ -281,7 +432,7 @@ fn provider_not_started_reason(error: &EgressError) -> ProviderAttemptNotStarted
 pub fn provider_failure_code(error: &ProviderError) -> String {
     match error {
         ProviderError::Http(error) if error.is_timeout() => "timeout".to_string(),
-        ProviderError::Http(error) if error.is_connect() => "connection".to_string(),
+        ProviderError::Http(error) if error.is_connect() => connect_failure_code(error).to_string(),
         ProviderError::Http(_) => "http_transport".to_string(),
         ProviderError::Egress(error) => egress_failure_code(error).to_string(),
         ProviderError::Api { status, .. } => format!("http_{status}"),
@@ -293,7 +444,11 @@ pub fn provider_failure_code(error: &ProviderError) -> String {
         {
             "timeout".to_string()
         }
-        ProviderError::Connection(_) => "connection".to_string(),
+        // Only a rendered message survives here; classify what it says. See
+        // `with_transport_cause` for why the message carries enough to do so.
+        ProviderError::Connection(message) => {
+            classify_connect_chain(false, std::slice::from_ref(message)).to_string()
+        }
         ProviderError::MissingApiKey => "missing_api_key".to_string(),
         ProviderError::NotAttempted { .. } => "provider_not_attempted".to_string(),
         ProviderError::PremiumLocked { .. } => "premium_locked".to_string(),
@@ -402,15 +557,99 @@ fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
     // `is_body()`/`is_decode()` cover "error decoding response body" — almost
     // always a half-closed pooled connection dropped mid-body under bursty
     // load, which is transient and succeeds on a fresh connection. Treat them
-    // as retryable alongside timeout/connect. `is_request()` stays excluded
-    // (invalid URL/header — permanent, must not retry).
-    let is_transient = e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode();
+    // as retryable alongside timeout/connect. A bare `is_request()` stays
+    // excluded (invalid URL/header — permanent, must not retry); only the
+    // request-phase errors that carry a transport I/O cause are admitted, via
+    // `is_broken_established_connection`.
+    let is_transient = e.is_timeout()
+        || e.is_connect()
+        || e.is_body()
+        || e.is_decode()
+        || is_broken_established_connection(&e);
     let e = e.without_url();
     if is_transient {
-        ProviderError::Connection(e.to_string())
+        ProviderError::Connection(with_transport_cause(&e))
     } else {
         ProviderError::Http(e)
     }
+}
+
+/// Render a transport error together with its innermost cause.
+///
+/// Two reasons, and the first is the user-facing one. `reqwest`'s own
+/// `Display` for every connect-phase failure is the bare `error sending
+/// request` — measured identical for a host that does not exist and for a peer
+/// that reset an established socket — so the message the product printed
+/// during a 902 s retry storm told the operator nothing at all about why.
+///
+/// Second, it keeps the two failure-code paths in agreement.
+/// [`egress_failure_code`] classifies from the live source chain, but
+/// [`ProviderError::Connection`] carries only a `String`, so
+/// [`provider_failure_code`] can only classify what the string says. Without
+/// the cause, the same failure gets `dns_failure` down one path and
+/// `connection` down the other, and only one of them fails fast.
+///
+/// H-2: the cause is the innermost link, which for this class is an OS error
+/// (`getaddrinfo` / `connect(2)`) and cannot carry a URL. A link that
+/// nonetheless looks like one is dropped rather than trusted.
+fn with_transport_cause(error: &reqwest::Error) -> String {
+    let base = error.to_string();
+    let mut innermost: Option<String> = None;
+    let mut cursor = std::error::Error::source(error);
+    for _ in 0..16 {
+        let Some(current) = cursor else { break };
+        innermost = Some(current.to_string());
+        cursor = current.source();
+    }
+    match innermost {
+        Some(cause) if !cause.contains("://") && !base.contains(&cause) => {
+            format!("{base}: {cause}")
+        }
+        _ => base,
+    }
+}
+
+/// True when a reqwest error means the request was dispatched onto an
+/// established connection and the transport then failed before a response
+/// head arrived.
+///
+/// `reqwest::Error::is_connect()` covers only a failure to ESTABLISH the
+/// connection. A peer that accepts the request and then destroys the socket —
+/// with a TCP RST, or with an orderly close after hanging — reports neither
+/// `is_connect()` nor `is_timeout()` nor `is_body()` nor `is_decode()`: it
+/// reports `kind: Request`. Job corpus row B-2 measured the consequence twice.
+/// `fault-reset` broke one request mid-task and `fault-timeout` hung one and
+/// then closed it; both were classified as the terminal `ProviderError::Http`,
+/// neither cost a single retry, and both runs exited 1 with the month-end
+/// report unwritten.
+///
+/// `is_request()` is the base signal, and the exclusion this code used to
+/// carry ("`is_request()` covers invalid URL / invalid header value") is not
+/// true of this reqwest: both of those are BUILDER errors (`is_builder()`,
+/// `is_request() == false`), verified against the linked version in
+/// `tests/provider_transport_reset_test.rs`.
+///
+/// Two request-phase shapes are subtracted so the classification matches what
+/// this doc claims:
+///
+/// - `is_connect()` — the host was never reached. Keeping it on
+///   [`DEFAULT_MAX_RETRIES`] lets a provider chain with a fallback fail over
+///   promptly instead of waiting out the window.
+/// - `is_timeout()` — in the pinned reqwest a client-side timeout is ALSO
+///   reported as `Kind::Request` (the total-timeout path constructs
+///   `error::request(error::TimedOut)`). A request that ran out of clock is
+///   not a destroyed socket: the peer may well have been serving it, so it
+///   keeps [`DEFAULT_MAX_RETRIES`] like every other served-or-maybe-served
+///   outcome. It is still retryable — `is_timeout()` is admitted by
+///   `is_transient` above — only not on the longer window.
+fn is_broken_established_connection(e: &reqwest::Error) -> bool {
+    e.is_request() && !e.is_connect() && !e.is_timeout()
+}
+
+/// True when an [`EgressError`] is a destroyed-mid-request transport failure.
+/// Read before the error is consumed by [`provider_error_from_egress`].
+fn egress_is_broken_established_connection(e: &EgressError) -> bool {
+    matches!(e, EgressError::Transport(inner) if is_broken_established_connection(inner))
 }
 
 /// Map an [`EgressError`] from the chokepoint to a `ProviderError`.
@@ -505,9 +744,17 @@ pub async fn builder_send_with_retry(
     builder: EgressRequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
     let max_retries = effective_max_retries(DEFAULT_MAX_RETRIES);
+    // A destroyed-mid-request connection is bounded by wall clock, not by a
+    // request count — see `BROKEN_CONNECTION_RETRY_WINDOW`. A caller that
+    // pinned the ceiling for this scope (`scope_max_retries`, which the engine
+    // uses to make one engine attempt exactly one physical send) still wins:
+    // asking for `u32::MAX` yields the scoped value when one is set, and "no
+    // count bound" when none is.
+    let broken_connection_attempt_cap = effective_max_retries(u32::MAX);
+    let broken_connection_deadline = tokio::time::Instant::now() + BROKEN_CONNECTION_RETRY_WINDOW;
     let mut backoff = INITIAL_BACKOFF;
     let mut last_err: Option<ProviderError> = None;
-    for attempt in 0..=max_retries {
+    for attempt in 0u32.. {
         // M2: a non-cloneable body cannot be retried — send the original
         // builder exactly once instead of failing with a misleading
         // "Connection" error. `try_clone()` is deterministic, so it fails
@@ -631,6 +878,9 @@ pub async fn builder_send_with_retry(
                 return Err(provider_error_from_egress(e));
             }
             Err(e) => {
+                // Classify before `provider_error_from_egress` consumes it: a
+                // socket destroyed mid-request earns the longer ceiling.
+                let broken_connection = egress_is_broken_established_connection(&e);
                 let failure_code = egress_failure_code(&e).to_string();
                 finish_physical_attempt(
                     lifecycle_attempt.as_ref(),
@@ -648,22 +898,33 @@ pub async fn builder_send_with_retry(
                     // exactly as before — only now URL-stripped.
                     other => return Err(other),
                 };
-                if attempt < max_retries {
+                let retrying = if broken_connection {
+                    attempt < broken_connection_attempt_cap
+                        && tokio::time::Instant::now() < broken_connection_deadline
+                } else {
+                    attempt < max_retries
+                };
+                if retrying {
                     record_attempt(Some(failure_code.clone()), true);
-                    // M3 fix: 1-based attempt over total attempts.
+                    // M3 fix: 1-based attempt. A broken connection has no
+                    // total to report — its bound is the window, not a count.
                     tracing::warn!(
                         attempt = attempt + 1,
-                        total = max_retries + 1,
+                        bound = if broken_connection {
+                            "outage_window"
+                        } else {
+                            "max_retries"
+                        },
                         error = %provider_err,
                         "connection error; retrying"
                     );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 4).min(Duration::from_secs(4));
+                    last_err = Some(provider_err);
+                    continue;
                 }
-                if attempt == max_retries {
-                    record_attempt(Some(failure_code), false);
-                }
-                last_err = Some(provider_err);
+                record_attempt(Some(failure_code), false);
+                return Err(provider_err);
             }
         }
     }
@@ -836,6 +1097,58 @@ mod tests {
 
     use serde_json::json;
     use wiremock::matchers::method;
+
+    /// The chains below are transcribed from a live run against a real
+    /// NXDOMAIN host and a real closed port — see the module doc on
+    /// `classify_connect_chain`. If reqwest/hyper-util reword them, the live
+    /// test in `tests/connect_failure_classification.rs` fails and these
+    /// fixtures must be re-measured, not adjusted to match the new guess.
+    #[test]
+    fn a_name_that_does_not_exist_is_permanent_and_a_resolver_outage_is_not() {
+        let nxdomain = [
+            "error sending request for url (https://unreachable.invalid.localdomain:9999/v1/chat/completions)".to_owned(),
+            "client error (Connect)".to_owned(),
+            "dns error".to_owned(),
+            "failed to lookup address information: Name or service not known".to_owned(),
+        ];
+        assert_eq!(classify_connect_chain(false, &nxdomain), FAILURE_DNS);
+
+        // EAI_AGAIN keeps the generous budget: the name may well exist, the
+        // resolver just could not say so yet.
+        let resolver_down = [
+            "error sending request for url (https://api.example.com/v1)".to_owned(),
+            "client error (Connect)".to_owned(),
+            "dns error".to_owned(),
+            "failed to lookup address information: Temporary failure in name resolution".to_owned(),
+        ];
+        assert_eq!(
+            classify_connect_chain(false, &resolver_down),
+            FAILURE_CONNECTION,
+            "a resolver outage is transient and must not be classified permanent"
+        );
+
+        let refused = [
+            "error sending request for url (http://127.0.0.1:1/v1/chat/completions)".to_owned(),
+            "client error (Connect)".to_owned(),
+            "tcp connect error".to_owned(),
+            "Connection refused (os error 111)".to_owned(),
+        ];
+        assert_eq!(
+            classify_connect_chain(true, &refused),
+            FAILURE_CONNECTION_REFUSED
+        );
+
+        // An unrecognised connect failure keeps the OLD behaviour. The cost of
+        // a miss is the status quo; the cost of a false positive is a
+        // transient outage that stops healing.
+        let unknown = [
+            "error sending request".to_owned(),
+            "client error (Connect)".to_owned(),
+            "Network is unreachable (os error 101)".to_owned(),
+        ];
+        assert_eq!(classify_connect_chain(false, &unknown), FAILURE_CONNECTION);
+    }
+
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -1182,6 +1495,70 @@ mod tests {
             !formatted.contains("SUPER_SECRET_KEY"),
             "formatted ProviderError must not contain the secret value: {formatted} (raw was: {raw})"
         );
+    }
+
+    /// Finding 5, round 2. In the pinned reqwest a client-side TOTAL timeout
+    /// is ALSO reported as `Kind::Request`, so `is_request()` alone matches
+    /// it. It has to be subtracted: a request that ran out of clock is not a
+    /// destroyed socket — the peer may have been serving it — and the doc on
+    /// `BROKEN_CONNECTION_RETRY_WINDOW` promises it keeps the short ceiling.
+    /// It stays retryable either way; only the bound differs.
+    ///
+    /// A bare reqwest client is the point of the test: it pins how reqwest
+    /// itself shapes the error, then checks our classifier against that.
+    #[allow(clippy::disallowed_methods)]
+    #[tokio::test]
+    async fn a_client_side_request_timeout_is_not_a_destroyed_socket() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        // Accept, read the request, then hold the socket open answering
+        // nothing — so the client's own total timeout is what fires, not a
+        // close and not a connect failure.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+                let mut sink = [0u8; 8192];
+                let mut handle = &stream;
+                let _ = handle.read(&mut sink);
+                held.push(stream);
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .expect("client builds");
+        let err = client
+            .post(format!("http://{addr}/v1/chat/completions"))
+            .body("{}")
+            .send()
+            .await
+            .expect_err("a server that never answers cannot complete the request");
+
+        // The premise — this is exactly what makes it a trap.
+        assert!(
+            err.is_request(),
+            "a total timeout must be `Kind::Request` in the pinned reqwest; \
+             got {err:?}"
+        );
+        assert!(!err.is_connect(), "the connection was established");
+        assert!(err.is_timeout(), "it is a timeout; got {err:?}");
+
+        // The classification that actually matters.
+        assert!(
+            !super::is_broken_established_connection(&err),
+            "a client-side timeout must NOT earn the broken-connection window"
+        );
+        // ...and it is still retryable, on the default ceiling.
+        assert!(matches!(
+            super::provider_error_from_reqwest(err),
+            ProviderError::Connection(_)
+        ));
     }
 
     #[test]

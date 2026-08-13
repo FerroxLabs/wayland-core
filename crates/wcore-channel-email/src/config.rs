@@ -8,6 +8,69 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Transport security for one mail connection.
+///
+/// Before this existed the connector hardcoded exactly one mode per path:
+/// IMAP always opened with implicit TLS (`imap::connect`, a ClientHello at
+/// byte 0) and SMTP always demanded STARTTLS (`Tls::Required`). Neither was
+/// configurable, so a STARTTLS-only IMAP server was unreachable — the client
+/// spoke TLS onto a plaintext port and the server reset every attempt — and a
+/// loopback development or test relay was unreachable on both paths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MailSecurity {
+    /// Infer the mode: see [`MailSecurity::resolve`].
+    #[default]
+    Auto,
+    /// Wrap the socket in TLS before the greeting (IMAPS 993 / SMTPS 465).
+    Implicit,
+    /// Connect in the clear, then upgrade with `STARTTLS` before authenticating.
+    Starttls,
+    /// No TLS at all. Refused at connect time for a non-loopback host.
+    Plaintext,
+}
+
+impl MailSecurity {
+    /// Resolve [`MailSecurity::Auto`] to a concrete mode.
+    ///
+    /// * A loopback host gets `Plaintext`. The bytes never leave the machine,
+    ///   so there is no network to protect them from, and requiring TLS there
+    ///   only makes a local relay unreachable.
+    /// * Otherwise the conventional implicit-TLS port (`implicit_port`: 993
+    ///   for IMAP, 465 for SMTP) gets `Implicit`, and every other port gets
+    ///   `Starttls`. Both keep certificate and hostname verification on.
+    ///
+    /// Any explicit mode is returned unchanged — `Auto` is the only value this
+    /// function decides anything about.
+    pub fn resolve(self, host: &str, port: u16, implicit_port: u16) -> MailSecurity {
+        match self {
+            Self::Auto if is_loopback_host(host) => Self::Plaintext,
+            Self::Auto if port == implicit_port => Self::Implicit,
+            Self::Auto => Self::Starttls,
+            other => other,
+        }
+    }
+}
+
+/// Whether `host` names the local machine, so an unencrypted connection to it
+/// never reaches a network.
+///
+/// Accepts the literal `localhost`, any loopback IPv4 (`127.0.0.0/8`) or IPv6
+/// (`::1`) address, and the bracketed IPv6 form. A name that merely *resolves*
+/// to loopback is NOT accepted: DNS is attacker-influenceable and this
+/// predicate gates whether credentials may cross the wire in the clear, so it
+/// is deliberately syntactic and fails closed on anything it cannot prove.
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim();
+    let h = h.strip_prefix('[').unwrap_or(h);
+    let h = h.strip_suffix(']').unwrap_or(h);
+    if h.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    h.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Per-channel email config. Parsed from the `[options]` table of
 /// `~/.wayland/channels/<name>.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +120,12 @@ pub struct SmtpConfig {
     /// decisions, and only the first one is offered here.
     #[serde(default)]
     pub tls_root_cert_path: Option<String>,
+
+    /// Transport security. Defaults to [`MailSecurity::Auto`], which picks
+    /// implicit TLS on port 465, plaintext to a loopback host, and STARTTLS
+    /// everywhere else.
+    #[serde(default)]
+    pub security: MailSecurity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,6 +158,12 @@ pub struct ImapConfig {
     /// `author` as a verified identity downstream.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
+
+    /// Transport security. Defaults to [`MailSecurity::Auto`], which picks
+    /// implicit TLS on port 993, plaintext to a loopback host, and STARTTLS
+    /// everywhere else.
+    #[serde(default)]
+    pub security: MailSecurity,
 }
 
 fn default_smtp_port() -> u16 {
@@ -107,6 +182,126 @@ fn default_poll_interval_secs() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn security_defaults_to_auto_and_is_absent_from_minimal_toml() {
+        let cfg: EmailConfig = toml::from_str(
+            r#"
+from_address = "bot@acme.com"
+[smtp]
+host = "smtp.acme.com"
+user_credential_handle = "u"
+password_credential_handle = "p"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.smtp.security, MailSecurity::Auto);
+    }
+
+    #[test]
+    fn security_round_trips_every_explicit_mode() {
+        let cfg: EmailConfig = toml::from_str(
+            r#"
+from_address = "bot@acme.com"
+[smtp]
+host = "smtp.acme.com"
+port = 465
+user_credential_handle = "u"
+password_credential_handle = "p"
+security = "implicit"
+[imap]
+host = "imap.acme.com"
+port = 143
+user_credential_handle = "u"
+password_credential_handle = "p"
+security = "starttls"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.smtp.security, MailSecurity::Implicit);
+        assert_eq!(cfg.imap.unwrap().security, MailSecurity::Starttls);
+    }
+
+    /// `Auto` must not put TLS on the wire toward the local machine. This is
+    /// the resolution the B-3 corpus row depends on: its hermetic mail host
+    /// listens in the clear on 127.0.0.1 on an ephemeral port.
+    #[test]
+    fn auto_resolves_loopback_to_plaintext_on_any_port() {
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]", "127.0.0.53"] {
+            for port in [143u16, 993, 25, 465, 587, 44293] {
+                assert_eq!(
+                    MailSecurity::Auto.resolve(host, port, 993),
+                    MailSecurity::Plaintext,
+                    "host {host} port {port} must resolve to plaintext"
+                );
+            }
+        }
+    }
+
+    /// Off the loopback, `Auto` keeps TLS mandatory: the conventional
+    /// implicit port stays implicit and EVERY other port gets STARTTLS. No
+    /// remote arm may ever resolve to plaintext.
+    #[test]
+    fn auto_never_resolves_a_remote_host_to_plaintext() {
+        assert_eq!(
+            MailSecurity::Auto.resolve("imap.acme.com", 993, 993),
+            MailSecurity::Implicit
+        );
+        assert_eq!(
+            MailSecurity::Auto.resolve("imap.acme.com", 143, 993),
+            MailSecurity::Starttls
+        );
+        assert_eq!(
+            MailSecurity::Auto.resolve("smtp.acme.com", 465, 465),
+            MailSecurity::Implicit
+        );
+        for port in [25u16, 143, 587, 993, 2525, 44293] {
+            assert_ne!(
+                MailSecurity::Auto.resolve("mail.acme.com", port, 465),
+                MailSecurity::Plaintext,
+                "port {port} on a remote host must never resolve to plaintext"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_modes_are_returned_unchanged() {
+        for mode in [
+            MailSecurity::Implicit,
+            MailSecurity::Starttls,
+            MailSecurity::Plaintext,
+        ] {
+            assert_eq!(mode.resolve("imap.acme.com", 993, 993), mode);
+            assert_eq!(mode.resolve("127.0.0.1", 143, 993), mode);
+        }
+    }
+
+    #[test]
+    fn loopback_predicate_accepts_only_provable_loopback() {
+        for h in [
+            "127.0.0.1",
+            "127.1.2.3",
+            "localhost",
+            "LocalHost",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(is_loopback_host(h), "{h} is loopback");
+        }
+        // Not provably loopback. `localhost.evil.com` and `127.0.0.1.evil.com`
+        // are the classic rebinding shapes; a bare hostname is unknowable
+        // without DNS, which this predicate deliberately does not consult.
+        for h in [
+            "localhost.evil.com",
+            "127.0.0.1.evil.com",
+            "imap.acme.com",
+            "0.0.0.0",
+            "10.0.0.1",
+            "",
+        ] {
+            assert!(!is_loopback_host(h), "{h} must not be treated as loopback");
+        }
+    }
 
     #[test]
     fn minimal_outbound_only_config_uses_defaults() {

@@ -33,20 +33,45 @@
 //! transitive and this surface degrades into a test hook that proves only
 //! itself.
 //!
+//! THE SHELL PRINCIPAL. This verb is reachable from exactly one place —
+//! `TopCmd::Sandbox`, parsed from this host's argv in `main.rs`. There is no
+//! channel, host-protocol, slash-command or MCP route to it, so the principal
+//! driving it IS the local operator, the same principal as the CLI / TUI
+//! session beside it. It therefore takes the same local-operator shell
+//! carve-out the session takes, through the SAME predicate —
+//! `WorkspacePolicy::with_shell_principal` — and not a second copy of the
+//! condition. Before that, this verb refused every shell on a backend that
+//! cannot enforce OS secret-read-deny (the Windows relaxed default) while the
+//! session it is supposed to be evidence ABOUT ran fine, so the containment
+//! differential it exists to produce could not be produced on the one platform
+//! that most needed it. The administrator's Managed floor is honoured here
+//! exactly as it is in a session: without that, this verb would be a
+//! one-command way to obtain the shell a Managed policy refuses.
+//!
 //! NOT A BYPASS. The selector is `required_for_session`, which refuses the
 //! `none` backend outright (`WAYLAND_SANDBOX=none` is an error, not a
 //! downgrade) and falls closed to `FailClosedBackend` when the platform offers
-//! no real containment. The child receives strictly LESS authority than the
-//! caller's own shell — deny-default filesystem scoped to the workspace, and
-//! the `contained` profile's fail-safe network Deny. A caller who can run this
-//! verb can already run the same command unsandboxed; this only ever removes
-//! authority.
+//! no real containment. A caller who can run this verb can already run the same
+//! command unsandboxed; this only ever removes authority, never adds it.
+//!
+//! HOW MUCH authority it removes is the backend's answer, not this verb's, and
+//! `status` reports it field by field rather than as one word. On Linux
+//! (bubblewrap) and macOS (`sandbox-exec`) the child gets a deny-default
+//! filesystem scoped to the workspace and the `contained` profile's fail-safe
+//! network Deny, both enforced by the OS. On the Windows session default
+//! (`windows_job_object`) NEITHER is enforced: a Job Object bounds process
+//! lifetime and resource use and has no filesystem filter, so a child there can
+//! read and write anywhere this user account can. That is why `status` reports
+//! `confines_filesystem` separately from `bypasses_containment` — the latter is
+//! session authority ("is this the operator's Dangerous launch") and is `false`
+//! on Windows while a write still escapes.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::{Args, Subcommand};
 use tokio_util::sync::CancellationToken;
+use wcore_config::config::CliArgs;
 use wcore_sandbox::SandboxRegistry;
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
@@ -63,6 +88,11 @@ pub struct SandboxArgs {
 pub enum SandboxCmd {
     /// Report the platform containment backend selected for this host, and
     /// the containment properties it does and does not provide.
+    ///
+    /// Read `confines_filesystem` for "can a command escape my workspace".
+    /// `bypasses_containment` does NOT answer that: it reports whether this is
+    /// the operator's explicit no-sandbox launch, and is `false` even on a
+    /// backend that enforces no filesystem boundary at all.
     Status {
         /// Emit a single JSON object instead of human-readable lines.
         #[arg(long)]
@@ -75,8 +105,10 @@ pub enum SandboxCmd {
     /// containment applied is the containment the agent applies.
     Exec {
         /// Workspace root the sandbox is scoped to. Defaults to the current
-        /// directory. The child may read and write here and, by construction
-        /// of the `contained` profile, little else.
+        /// directory. The child may always read and write here; whether it is
+        /// stopped from reaching anything ELSE depends on the backend, and is
+        /// reported by `sandbox status` as `confines_filesystem`. That is
+        /// `false` on the Windows default.
         #[arg(long)]
         workspace: Option<PathBuf>,
 
@@ -97,7 +129,13 @@ pub enum SandboxCmd {
 pub struct SandboxStatus {
     pub backend: String,
     pub available: bool,
+    /// Session authority — whether this is the operator's explicit no-sandbox
+    /// launch. NOT a statement that a child is confined; see
+    /// [`Self::confines_filesystem`].
     pub bypasses_containment: bool,
+    /// Whether the OS stops a child writing outside the workspace policy's
+    /// granted roots. `false` on the Windows session default.
+    pub confines_filesystem: bool,
     pub enforces_read_deny: bool,
     pub owns_descendants_hard: bool,
     pub binds_cwd_authority: bool,
@@ -112,6 +150,7 @@ impl SandboxStatus {
             backend: registry.backend_name().to_owned(),
             available: registry.is_available(),
             bypasses_containment: registry.bypasses_containment(),
+            confines_filesystem: registry.confines_filesystem(),
             enforces_read_deny: registry.enforces_read_deny(),
             owns_descendants_hard: registry.owns_descendants_hard(),
             binds_cwd_authority: registry.binds_cwd_authority(),
@@ -124,6 +163,7 @@ impl SandboxStatus {
             "backend": self.backend,
             "available": self.available,
             "bypasses_containment": self.bypasses_containment,
+            "confines_filesystem": self.confines_filesystem,
             "enforces_read_deny": self.enforces_read_deny,
             "owns_descendants_hard": self.owns_descendants_hard,
             "binds_cwd_authority": self.binds_cwd_authority,
@@ -146,14 +186,34 @@ fn resolve_workspace(workspace: Option<PathBuf>) -> anyhow::Result<PathBuf> {
         .map_err(|error| anyhow::anyhow!("sandbox workspace {}: {error}", raw.display()))
 }
 
+/// Build the workspace policy the sandboxed child runs under.
+///
+/// The same strict `contained` profile a hosted session builds, carrying the
+/// same shell-principal decision — see the module docs. `channel_posture_present`
+/// is passed as a literal `false` because it is structurally false for this
+/// verb, not because it was forgotten: argv is the only route in.
+///
+/// Exposed so `sandbox_exec_principal_parity` can compare it against the policy
+/// the production bootstrap installs for the same inputs.
+pub fn sandbox_policy(
+    workspace: &std::path::Path,
+    managed_execution_floor: bool,
+) -> WorkspacePolicy {
+    WorkspacePolicy::contained(workspace).with_shell_principal(false, managed_execution_floor)
+}
+
 /// Build the tool context the sandboxed child runs under.
 ///
 /// This is the same shape a hosted agent session builds: the strict
 /// `contained` workspace profile, plus the registry-owned, containment-required
 /// session runtime. Exposed (rather than inlined) so its properties are
 /// directly assertable in tests.
-pub fn sandbox_context(workspace: &std::path::Path, registry: Arc<SandboxRegistry>) -> ToolContext {
-    let policy = Arc::new(WorkspacePolicy::contained(workspace));
+pub fn sandbox_context(
+    workspace: &std::path::Path,
+    registry: Arc<SandboxRegistry>,
+    managed_execution_floor: bool,
+) -> ToolContext {
+    let policy = Arc::new(sandbox_policy(workspace, managed_execution_floor));
     ToolContext::new(
         "sandbox-exec",
         CancellationToken::new(),
@@ -190,6 +250,7 @@ fn run_status(json: bool) -> anyhow::Result<()> {
     println!("backend                   {}", status.backend);
     println!("available                 {}", status.available);
     println!("bypasses containment      {}", status.bypasses_containment);
+    println!("confines filesystem       {}", status.confines_filesystem);
     println!("enforces read deny        {}", status.enforces_read_deny);
     println!("owns descendants hard     {}", status.owns_descendants_hard);
     println!("binds cwd authority       {}", status.binds_cwd_authority);
@@ -197,6 +258,28 @@ fn run_status(json: bool) -> anyhow::Result<()> {
         "binds workspace authority {}",
         status.binds_workspace_authority
     );
+    // A row of booleans is not readable as a security posture. Say the
+    // consequence of the one that decides whether a command can leave the
+    // workspace, naming the mechanism so an operator can act on it.
+    if status.available && !status.bypasses_containment && !status.confines_filesystem {
+        println!();
+        println!(
+            "NOTE: backend `{}` does NOT confine the filesystem.",
+            status.backend
+        );
+        println!("      A command run through this sandbox — including the agent's Bash tool —");
+        println!("      can read and write anywhere this user account can.");
+        println!("      `bypasses containment false` means a real backend was selected, NOT");
+        println!("      that a write cannot escape the workspace.");
+        if cfg!(windows) {
+            println!("      In force:     kill-on-close Job Object process-tree ownership;");
+            println!("                    child environment scrubbed to the manifest.");
+            println!("      NOT in force: OS filesystem confinement, OS network denial,");
+            println!("                    OS secret read-deny.");
+            println!("      `WAYLAND_SANDBOX=appcontainer` selects the STRICT backend that");
+            println!("      enforces them.");
+        }
+    }
     Ok(())
 }
 
@@ -213,7 +296,14 @@ async fn run_exec(
         SandboxRegistry::required_for_session(None)
             .map_err(|error| anyhow::anyhow!("sandbox selection: {error}"))?,
     );
-    let ctx = sandbox_context(&workspace, registry);
+    // Read the administrator's Managed floor from the merged config files. Not
+    // `Config::resolve` — this verb runs no model and must work on a host that
+    // has never been onboarded. An unreadable config is refused rather than
+    // treated as "unmanaged".
+    let managed_execution_floor =
+        wcore_config::config::Config::resolve_managed_execution_floor(&CliArgs::default())
+            .map_err(|error| anyhow::anyhow!("execution policy: {error}"))?;
+    let ctx = sandbox_context(&workspace, registry, managed_execution_floor);
 
     // THE agent shell tool, not a copy of it. See the module docs.
     let result = wcore_tools::bash::BashTool
@@ -279,7 +369,7 @@ mod tests {
             Arc::new(SandboxRegistry::required_for_session(None).expect("select a backend"));
         let expected_backend = registry.backend_name().to_owned();
 
-        let ctx = sandbox_context(&root, registry);
+        let ctx = sandbox_context(&root, registry, false);
 
         let policy = ctx.workspace.as_deref().expect("workspace policy attached");
         assert_eq!(policy.root(), root.as_path());
@@ -288,13 +378,15 @@ mod tests {
             "the workspace must be writable by the child: {:?}",
             policy.writable_roots()
         );
-        // The fail-safe network posture: a sandboxed child gets no egress
-        // unless the operator opted in. This is what makes a DNS reachability
-        // difference a usable containment signal.
+        // The fail-safe network posture: a sandboxed child gets no egress.
+        // This is what makes a DNS reachability difference a usable
+        // containment signal. SEC-11 — the assertion used to carry an
+        // `|| env::var("WAYLAND_BASH_ALLOW_NETWORK").is_ok()` escape clause;
+        // that env lever is gone, so the posture here is unconditional.
         assert!(
-            matches!(policy.network(), wcore_sandbox::NetworkPolicy::Deny)
-                || std::env::var("WAYLAND_BASH_ALLOW_NETWORK").is_ok(),
-            "contained profile must default to network Deny"
+            matches!(policy.network(), wcore_sandbox::NetworkPolicy::Deny),
+            "contained profile must default to network Deny, got {:?}",
+            policy.network()
         );
         assert_eq!(ctx.sandbox.backend_name(), expected_backend);
         assert_ne!(
@@ -315,11 +407,46 @@ mod tests {
         assert_eq!(status.available, registry.is_available());
         assert_eq!(status.bypasses_containment, registry.bypasses_containment());
         assert!(!status.bypasses_containment);
+        assert_eq!(status.confines_filesystem, registry.confines_filesystem());
         let json = status.to_json();
         assert_eq!(json["backend"], serde_json::json!(status.backend));
         assert_eq!(
             json["owns_descendants_hard"],
             serde_json::json!(status.owns_descendants_hard)
+        );
+        // The two containment words must both reach the wire. A consumer that
+        // sees only `bypasses_containment` reads `false` as "contained", which
+        // is what the Windows default made untrue.
+        assert!(json["bypasses_containment"].is_boolean());
+        assert_eq!(
+            json["confines_filesystem"],
+            serde_json::json!(status.confines_filesystem)
+        );
+    }
+
+    /// The two fields answer different questions, and on the Windows default
+    /// they answer them differently. Asserted against the real backends rather
+    /// than the live host's, so every platform runs the check.
+    #[test]
+    fn filesystem_confinement_is_reported_independently_of_session_authority() {
+        use wcore_sandbox::backends::bwrap::BubblewrapBackend;
+        use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
+
+        let relaxed = SandboxRegistry::new(Arc::new(WindowsJobObjectBackend::new()));
+        let relaxed = SandboxStatus::project(&relaxed);
+        assert!(
+            !relaxed.bypasses_containment && !relaxed.confines_filesystem,
+            "the Windows default is not a bypass AND does not confine the \
+             filesystem; a surface that reports only the first tells an \
+             operator a write cannot escape when it can: {relaxed:?}"
+        );
+
+        let confining = SandboxRegistry::new(Arc::new(BubblewrapBackend::new()));
+        let confining = SandboxStatus::project(&confining);
+        assert!(
+            confining.confines_filesystem,
+            "positive control: bwrap confines the filesystem, or the row above \
+             proves nothing: {confining:?}"
         );
     }
 

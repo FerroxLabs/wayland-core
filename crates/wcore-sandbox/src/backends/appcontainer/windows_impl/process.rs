@@ -316,6 +316,14 @@ impl SandboxBackend for AppContainerBackend {
         !containment_withdrawn()
     }
 
+    /// The Low-integrity restricted token plus the per-root DACL grants confine
+    /// the child to the manifest's filesystem grants. Withdrawn on the same
+    /// predicate as the sibling claims above: a backend this host has disproved
+    /// must not keep advertising confinement it cannot apply.
+    fn confines_filesystem(&self) -> bool {
+        !containment_withdrawn()
+    }
+
     /// True because [`Self::execute_with_cwd_authority`] establishes an
     /// OS-ENFORCED PIN on the retained directory's name before the pathname is
     /// used, and holds it for the whole execution — see [`bind_retained_cwd`].
@@ -730,6 +738,13 @@ pub(super) fn execute_blocking(
     if cmd.argv.is_empty() {
         return Err(SandboxError::ExecFailed("empty argv".into()));
     }
+    // A `cmd /c` payload with a line break is undeliverable through ANY
+    // Windows command line, so refuse it here for the same reason the relaxed
+    // Job Object path does: cmd would run only the prefix and hand back its
+    // exit status, reporting success for work that never happened.
+    if let Some(idx) = crate::backends::windows_cmdline::cmd_payload_index(&cmd.argv) {
+        crate::backends::windows_cmdline::reject_undeliverable_cmd_payload(&cmd.argv[idx])?;
+    }
 
     let cwd_w: Option<Vec<u16>> = resolve_cwd(cmd.cwd.as_deref())?;
 
@@ -900,6 +915,14 @@ pub(super) fn execute_blocking(
             // jobs, system parameter changes, display changes, global atoms,
             // desktop switches, and shutdown calls. AppContainer SIDs gate
             // KERNEL objects but not USER32 surfaces; these flags close that.
+            // These flags are NOT what makes a user32-linked child fail image
+            // initialization with 0xC0000142. Measured on SeanDesktop
+            // 2026-08-10 by A/B'ing the mask over one run: 0xff (this set),
+            // 0x00 (no UI restrictions at all), 0xfe (no HANDLES), 0xbf (no
+            // DESKTOP), 0xdf (no GLOBALATOMS), 0xbe and 0x9e all produced the
+            // SAME verdict — `where.exe` dead, `cmd`/`hostname`/`attrib`/`find`
+            // alive. The cause is the parent's window station; see
+            // `crates/wcore-tools/tests/win_toolchain_launch.rs`.
             let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
                 UIRestrictionsClass: JOB_OBJECT_UILIMIT_HANDLES
                     | JOB_OBJECT_UILIMIT_READCLIPBOARD
@@ -1022,9 +1045,26 @@ pub(super) fn execute_blocking(
             }
 
             // ---- 7. STARTUPINFOEXW ----
+            //
+            // `lpDesktop` names the engine's OWN window station and desktop.
+            // Leaving it NULL makes the child inherit the engine's, and a
+            // non-interactive station (`Service-0x1-…$` under OpenSSH, a
+            // service, or a scheduled task) carries no ALL APPLICATION
+            // PACKAGES ACE — so USER32's process-attach cannot open it and
+            // every USER32-linked image dies at load with 0xC0000142
+            // STATUS_DLL_INIT_FAILED. See `window_station` for the measured
+            // descriptors and for why a private station is TIGHTER than
+            // inheriting the interactive `WinSta0`. Declared before `sinfo`
+            // so the buffer outlives the `CreateProcessAsUserW` that reads it.
+            let mut desktop_w: Option<Vec<u16>> =
+                super::window_station::sandbox_desktop().map(<[u16]>::to_vec);
             let mut sinfo: STARTUPINFOEXW = mem::zeroed();
             sinfo.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;
             sinfo.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            sinfo.StartupInfo.lpDesktop = desktop_w
+                .as_mut()
+                .map(|d| d.as_mut_ptr())
+                .unwrap_or(ptr::null_mut());
             sinfo.StartupInfo.hStdInput = std::ptr::null_mut();
             sinfo.StartupInfo.hStdOutput = stdout_w.as_raw();
             sinfo.StartupInfo.hStdError = stderr_w.as_raw();
@@ -1488,8 +1528,62 @@ pub(super) fn execute_blocking(
     let cleanup = identity
         .mark_process_exited()
         .and_then(|()| identity.cleanup());
-    match (execution, cleanup) {
-        (_, Err(cleanup_error)) => Err(cleanup_error),
-        (result, Ok(())) => result,
+    join_execution_and_cleanup(execution, cleanup)
+}
+
+/// Marker every post-execution cleanup fault carries into the caller's stderr.
+///
+/// It exists so the *reader* of a tool result — a human or an agent — can tell
+/// "your command did not run" apart from "your command ran, its effects have
+/// already happened, and only the sandbox's own teardown failed". The
+/// distinction is the whole point: an agent told a non-idempotent command
+/// failed will re-issue it, and the second run is real damage.
+pub(super) const CLEANUP_FAULT_PREFIX: &str = "wcore-sandbox: the command RAN TO COMPLETION and \
+     its effects have already happened; only post-execution sandbox cleanup failed, so do NOT \
+     retry the command. Cleanup fault: ";
+
+/// Combine the execution outcome with the post-execution ACL/profile teardown
+/// outcome.
+///
+/// A teardown fault is NOT an execution failure. Before this existed the join
+/// was `(_, Err(cleanup_error)) => Err(cleanup_error)`, which threw away a
+/// successful `SandboxOutput` — exit code, stdout and stderr — and reported the
+/// teardown fault as though the command had never run. Under machine-wide ACL
+/// mutation-lock contention that is exactly what happened: the child had
+/// already written its files and the caller was told "Failed to execute
+/// command".
+///
+/// The rules:
+/// * teardown clean — pass the execution result through untouched;
+/// * teardown faulted, command succeeded — return the REAL exit code and
+///   output, with the fault appended to stderr behind [`CLEANUP_FAULT_PREFIX`];
+/// * teardown faulted, command also failed — return the EXECUTION error, whose
+///   typed variant (`Timeout`, `OutputLimitExceeded`, …) callers match on. The
+///   teardown fault is logged rather than substituted, because the execution
+///   failure is the cause and the teardown fault is a consequence of it.
+///
+/// Either way the fault is logged at `error` level, so a stranded lease is
+/// never silent just because the command it belonged to succeeded.
+pub(super) fn join_execution_and_cleanup(
+    execution: Result<SandboxOutput>,
+    cleanup: Result<()>,
+) -> Result<SandboxOutput> {
+    let Err(cleanup_error) = cleanup else {
+        return execution;
+    };
+    tracing::error!(
+        target: "wcore_sandbox",
+        error = %cleanup_error,
+        command_succeeded = execution.is_ok(),
+        "AppContainer post-execution cleanup failed; the command's own outcome is unaffected"
+    );
+    match execution {
+        Ok(mut output) => {
+            output
+                .stderr
+                .extend_from_slice(format!("\n{CLEANUP_FAULT_PREFIX}{cleanup_error}\n").as_bytes());
+            Ok(output)
+        }
+        Err(execution_error) => Err(execution_error),
     }
 }

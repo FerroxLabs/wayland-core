@@ -392,7 +392,23 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         }
 
         // ── Tool-call lifecycle ──────────────────────────────────────
-        ProtocolEvent::ToolRequest { call_id, tool, .. } => {
+        // `CallAnnounced` shares this arm verbatim. In the TUI these two frames
+        // mean the same thing: a call exists and is about to run. Approval state
+        // is NOT carried by either - the card is created `Running` and only the
+        // later `ApprovalRequired` downgrades it to `AwaitingApproval` (see the
+        // status comment below). The desktop host is the one that conflates
+        // `tool_request` with an approve/deny card, which is exactly why the
+        // engine emits a separate `call_announced` for auto-approved calls.
+        //
+        // Sharing the arm also closes two TUI defects that had the same root
+        // cause as the desktop one and were never reported: before this, an
+        // auto-approved call (force mode, allow-listed tool, command-scoped
+        // grant, or a tool already granted `Always`) emitted no `tool_request`,
+        // so it got NO tool card at all - `ToolRunning` only mutates a card that
+        // already exists - and its touched path was never staged, leaving files
+        // it modified out of the right-rail tree and out of `/rewind`.
+        ProtocolEvent::ToolRequest { call_id, tool, .. }
+        | ProtocolEvent::CallAnnounced { call_id, tool, .. } => {
             let summary = summarize_args(&tool.name, &tool.args);
             let edit_preview = edit_preview_from_args(&tool.name, &tool.args);
             // Host-derive the path map: any file-touching tool feeds the
@@ -1703,7 +1719,7 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                         ContentBlock::Text { text } => {
                             turn.elements.push(TurnElement::Markdown(text.clone()));
                         }
-                        ContentBlock::Thinking { thinking } => {
+                        ContentBlock::Thinking { thinking, .. } => {
                             turn.elements.push(TurnElement::Thinking {
                                 body: thinking.clone(),
                                 secs: 0,
@@ -2250,6 +2266,7 @@ mod tests {
             vec![
                 ContentBlock::Thinking {
                     thinking: "let me reason".into(),
+                    extra: None,
                 },
                 ContentBlock::Text {
                     text: "the answer".into(),

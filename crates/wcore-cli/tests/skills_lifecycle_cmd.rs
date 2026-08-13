@@ -1,6 +1,6 @@
 //! W9.1 T4 (T11): CLI integration tests for `--skills-promote` and
 //! `--skills-archive` against a fixture project. Pre-seeds a `Staged`
-//! procedure into the project's `.wayland-core/memory/memory.db`,
+//! procedure into the project's memory DB (`paths::project_db_path`),
 //! invokes the CLI binary with the lifecycle flag, then re-opens
 //! memory and asserts the procedure's status transitioned correctly.
 //!

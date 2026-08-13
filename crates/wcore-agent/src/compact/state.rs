@@ -19,6 +19,18 @@ pub struct CompactState {
     /// pressure here — rather than the inflated `max()` — stops auto
     /// compaction from firing prematurely.
     pub last_real_input_tokens: u64,
+    /// B7 — the user's ORIGINAL instruction, captured once and re-folded
+    /// verbatim into every compaction.
+    ///
+    /// The engine's other verbatim carve-out is the TRAILING user message,
+    /// which in a tool-driven run is a `tool_result` and carries none of the
+    /// user's intent. Without this pin the instruction is handed wholesale to
+    /// the summarizer, and measurement showed it gone from the wire and from
+    /// the resumable session mirror after the first compaction.
+    ///
+    /// Captured on the first compaction and never overwritten, so repeated
+    /// compactions re-fold the same string instead of nesting summaries.
+    pub pinned_instruction: Option<String>,
 }
 
 impl CompactState {
@@ -27,6 +39,7 @@ impl CompactState {
             consecutive_failures: 0,
             last_input_tokens: 0,
             last_real_input_tokens: 0,
+            pinned_instruction: None,
         }
     }
 

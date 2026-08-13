@@ -62,6 +62,27 @@ pub struct CompactConfig {
     #[serde(default = "default_micro_gap_seconds")]
     pub micro_gap_seconds: u64,
 
+    /// Microcompact: share of the autocompact threshold that REAL input
+    /// pressure must reach before the COUNT trigger may fire.
+    ///
+    /// The count trigger alone ("more than `micro_keep_recent * 2` tool
+    /// results exist") is not a pressure signal — it fires on the eleventh
+    /// tool result of a session regardless of how empty the context window
+    /// is. Corpus row A-6 died of exactly that: 25 microcompacts inside 60
+    /// turns freed ~2k tokens each while real pressure never exceeded ~10%
+    /// of the window, and the agent spent every turn re-reading the thirteen
+    /// files whose results had just been erased. It made no edit at all.
+    ///
+    /// Gating the count trigger on the SAME watermark autocompact reads
+    /// (`CompactState::last_real_input_tokens`) keeps microcompact as the
+    /// cheap early relief valve — it still fires well before the summarizer —
+    /// without erasing a working set the model has room to hold.
+    ///
+    /// `0.0` restores the old unconditional count trigger. Clamped to
+    /// `0.0..=1.0` at the use site.
+    #[serde(default = "default_micro_pressure_fraction")]
+    pub micro_pressure_fraction: f64,
+
     /// Tool names whose results are eligible for microcompact content clearing.
     #[serde(default = "default_compactable_tools")]
     pub compactable_tools: Vec<String>,
@@ -253,6 +274,7 @@ impl Default for CompactConfig {
             max_failures: default_max_failures(),
             micro_keep_recent: default_micro_keep_recent(),
             micro_gap_seconds: default_micro_gap_seconds(),
+            micro_pressure_fraction: default_micro_pressure_fraction(),
             compactable_tools: default_compactable_tools(),
             enabled: default_true(),
             cache_diagnostics: false,
@@ -289,6 +311,9 @@ fn default_micro_keep_recent() -> usize {
 }
 fn default_micro_gap_seconds() -> u64 {
     3600
+}
+fn default_micro_pressure_fraction() -> f64 {
+    0.5
 }
 fn default_compactable_tools() -> Vec<String> {
     vec![

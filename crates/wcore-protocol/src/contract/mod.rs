@@ -22,8 +22,8 @@ pub use observation::{
     HostObservationError, producer_contract_descriptor,
 };
 pub use spec::{
-    COMMAND_SPECS, ContractCriticality, EVENT_SPECS, SOURCE_INPUTS, WireSpec,
-    command_fixture_values, event_fixture_values,
+    COMMAND_SPECS, ContractCriticality, EVENT_SPECS, PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES,
+    SOURCE_INPUTS, WireSpec, command_fixture_values, event_fixture_values,
 };
 
 pub type ContractResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

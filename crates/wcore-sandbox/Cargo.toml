@@ -35,6 +35,11 @@ tar.workspace = true
 
 [features]
 default = []
+# Containment-probe assertion helpers (`test_support`), shared by this crate's
+# own integration tests and by downstream crates that make containment claims.
+# Off by default so the helpers never ship in a release binary; this crate's
+# tests get it via the self dev-dependency below.
+test-support = []
 live-docker = ["dep:bollard", "dep:futures"]
 # S3 — Landlock LSM ruleset applied to bwrap child via `pre_exec` (Linux-only).
 # Gated so macOS/Windows CI does not need to depend on the Linux-only crate.
@@ -64,11 +69,19 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Threading",
   "Win32_System_JobObjects",
+  "Win32_System_StationsAndDesktops",
+  # `CreateDesktopW` takes a `DEVMODEW*`, so windows-sys gates it on the GDI
+  # feature even though this crate passes NULL and links no GDI symbol.
+  "Win32_Graphics_Gdi",
   "Win32_System_Pipes",
   "Win32_System_SystemInformation",
   "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]
+# Self dev-dependency so this crate's own integration tests (which do not get
+# `cfg(test)`) can reach `wcore_sandbox::test_support` under a plain
+# `cargo test`, without the helpers being compiled into a release build.
+wcore-sandbox = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

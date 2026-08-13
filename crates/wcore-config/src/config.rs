@@ -299,8 +299,39 @@ pub struct SecurityConfig {
     /// their subdomains, e.g. `"example.com"`) or exact hosts (for shared-
     /// platform hosts that can't be apex-allowed, e.g. `"myapp.workers.dev"`).
     /// Added on top of the auto-derived provider + first-party defaults.
+    ///
+    /// This list governs the in-process HTTP egress gate
+    /// (`wcore_agent::egress`) — host by host, exactly as written — and
+    /// NOTHING ELSE. In particular it does **not** decide whether the
+    /// sandboxed shell has network; see `allow_sandboxed_shell_network`, which
+    /// is a separate switch precisely because this one is a per-host permit
+    /// and that one is all-or-nothing.
+    ///
+    /// It is trust-gated: `restrict_untrusted_project_config` drops a project
+    /// file's entries until the operator has granted that workspace
+    /// fingerprint, so a cloned repository cannot widen the gate.
     #[serde(default)]
     pub egress_allow: Vec<String>,
+    /// Master switch for the SANDBOXED SHELL's network. Off by default.
+    ///
+    /// Like `enabled`, this is **config-file only and read from the TRUSTED
+    /// (global) layer alone** — never a bare env var (supply-chain hazard, C8)
+    /// and never a project file, which travels with a cloned repository. See
+    /// the `security` block of `merge_config_files_with_trust`.
+    ///
+    /// A `Contained` session (untrusted workspace, or the Managed execution
+    /// floor) runs Bash with `NetworkPolicy::Deny` until the operator sets this
+    /// to `true`. No sandbox backend in this repo can filter an arbitrary
+    /// shell's egress by host — bwrap, sandbox-exec, AppContainer and Docker
+    /// all reject `NetworkPolicy::AllowHosts` — so the grant is
+    /// **all-or-nothing: the whole host network**. That is why it is its own
+    /// boolean rather than a side effect of `egress_allow`: an operator who
+    /// permits one host for the HTTP gate must not thereby hand an untrusted
+    /// repository's shell arbitrary outbound TCP. It is logged at `warn` every
+    /// time it applies. A channel-attached (remote sender) session never
+    /// receives the grant.
+    #[serde(default)]
+    pub allow_sandboxed_shell_network: bool,
 }
 
 impl Default for SecurityConfig {
@@ -308,6 +339,7 @@ impl Default for SecurityConfig {
         Self {
             enabled: true,
             egress_allow: Vec::new(),
+            allow_sandboxed_shell_network: false,
         }
     }
 }
@@ -667,11 +699,25 @@ pub struct ProviderRoutingPolicyConfig {
     pub require_priced: bool,
 }
 
+/// Consecutive provider-side failures the circuit breaker requires before it
+/// will call a provider broken.
+///
+/// Exported as a named constant because another crate now DERIVES a bound from
+/// it (`wcore_agent`'s unserved-outage budget). A bare literal there and a bare
+/// literal here can drift apart silently; a shared constant cannot.
+pub const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
+
+/// Base cooldown, in seconds, before an open breaker will probe again.
+///
+/// Exported for the same reason as [`DEFAULT_FAILURE_THRESHOLD`]: it is the
+/// recovery cadence `wcore_agent` paces its unserved-retry backoff to.
+pub const DEFAULT_RECOVERY_TIMEOUT_SECS: u64 = 30;
+
 fn default_failure_threshold() -> u32 {
-    3
+    DEFAULT_FAILURE_THRESHOLD
 }
 fn default_recovery_timeout_secs() -> u64 {
-    30
+    DEFAULT_RECOVERY_TIMEOUT_SECS
 }
 
 /// Engine observability toggles. Most are off by default (opt-in via
@@ -2237,6 +2283,22 @@ impl Config {
         Self::resolve_inner(cli, true)
     }
 
+    /// Is an administrator-imposed Managed execution floor installed?
+    ///
+    /// Resolved from the merged config FILES alone. This deliberately does not
+    /// go through [`Self::resolve`], which also resolves a provider and a
+    /// credential and fails with `MissingApiKey` when there is none — a
+    /// diagnostic verb that runs no LLM (`wayland-core sandbox exec`) must be
+    /// able to read the floor on a machine that has never been onboarded, and
+    /// must not be turned into a provider-dependent command by asking.
+    ///
+    /// A config that cannot be parsed is an error, not a `false`: silently
+    /// reporting "no Managed floor" for an unreadable config would relax the
+    /// shell gate on exactly the hosts whose policy could not be read.
+    pub fn resolve_managed_execution_floor(cli: &CliArgs) -> Result<bool, ConfigResolutionError> {
+        Ok(resolve_config_files(cli)?.merged.execution.managed)
+    }
+
     /// Load and merge config while retaining source identity and disposition.
     pub fn resolve_with_provenance(
         cli: &CliArgs,
@@ -2937,7 +2999,41 @@ fn warn_replay_protection_unavailable_once() {
              descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE. To refuse to run this \
              way at all, set [session] require_durability = true."
         );
+        // AFTER the print, never before: a reader that saw the flag without
+        // the notice having reached stderr would suppress a message nobody
+        // had been given.
+        REPLAY_NOTICE_PRINTED.store(true, std::sync::atomic::Ordering::Release);
     });
+}
+
+/// Set once [`warn_replay_protection_unavailable_once`] has actually printed.
+static REPLAY_NOTICE_PRINTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Has the operator already been told, in prose on this process's stderr, that
+/// crash replay is off for this run?
+///
+/// [`replay_protection_unavailable`] answers the HOST question — can this host
+/// seal a request. This answers the REPORTING question, and the two are not the
+/// same: the host fact is true from the first `Config::resolve`, while the
+/// notice is printed by exactly one of them.
+///
+/// It exists because a second surface used to restate the same fact in its own
+/// words. The engine announces per turn through
+/// `OutputSink::emit_durability_degraded`, which a protocol host needs (its
+/// frame is machine-consumed and correlated to a `msg_id`) and a human does
+/// not. `TerminalSink` already suppressed its own repeats, but it could not see
+/// this notice, so a trivial headless run printed the same fact twice in two
+/// different wordings — measured at 1,333 of 2,019 stderr bytes, 66% of the
+/// whole run's stderr. The terminal sink now asks this before printing.
+///
+/// `Release`/`Acquire` rather than `Relaxed`: the store is sequenced after the
+/// `eprintln!`, and the pairing is what makes that ordering visible to another
+/// thread. A reader that observed the flag without observing the print would
+/// suppress a notice nobody had been given.
+#[must_use]
+pub fn replay_protection_notice_printed() -> bool {
+    REPLAY_NOTICE_PRINTED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Wave SD — path used by the plaintext credentials backend. Lives next
@@ -5087,9 +5183,19 @@ fn merge_config_files_with_trust(
     // entries entirely until the operator has granted the workspace
     // fingerprint, exactly like project `[providers]`, `[mcp.servers]` and
     // `tools.skills.allow`.
+    //
+    // `allow_sandboxed_shell_network` takes the SAME shape as `enabled`, and for
+    // the same reason: it is read from the trusted layer alone. It is a
+    // whole-host-network grant for the sandboxed shell, so the untrusted layer
+    // gets no say at all — not `||` (a project could mint it), not `&&` (a
+    // project could revoke a grant the operator deliberately made, and a project
+    // silent on `[security]` deserializes to the `false` default, which is
+    // absorbing for `&&`). The default-FALSE polarity means the field is
+    // fail-safe: absence anywhere is "no network".
     let security = SecurityConfig {
         enabled: global.security.enabled,
         egress_allow: [global.security.egress_allow, project.security.egress_allow].concat(),
+        allow_sandboxed_shell_network: global.security.allow_sandboxed_shell_network,
     };
 
     // M5.bootstrap-wiring — session_cap is an opt-in `Option<BudgetConfig>`:

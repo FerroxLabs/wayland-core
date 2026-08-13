@@ -264,9 +264,41 @@ policy object, set once at engine bootstrap.
 | **`Trusted`** | Local CLI / desktop sessions on the user's own machine | `RealFs` (no jail) | Rooted at workspace; toolchain dirs + global caches readable | Reused from `~/.cargo`, `~/.npm`, etc. — no redirect |
 | **`Contained`** | Remote `Workspace` posture | `SandboxedFs ∘ SecretDenyFs` (write-scoped + secret deny) | Rooted at workspace; tight write scope; toolchain read-only | Redirected into `<root>/.wcache/{cargo,npm,pip}` |
 
-Both modes seed network policy from `default_bash_network_policy()`, which
-honors the `WAYLAND_BASH_ALLOW_NETWORK` env var. Network access is never
-hardcoded inside `WorkspacePolicy`.
+Both modes seed network policy from `default_bash_network_policy()`, an
+unconditional `Deny`. Network access is never hardcoded inside
+`WorkspacePolicy`; it is widened only by an explicit `with_network` at the
+bootstrap seam:
+
+* a genuinely-local session (no channel posture) gets `Inherit` via
+  `local_bash_network`;
+* a sandboxed (`Contained`) session gets network **only** when the operator's
+  config file sets `[security] allow_sandboxed_shell_network = true`, via
+  `operator_bash_network`. It defaults to `false` and, like `[security]
+  enabled`, is read from the trusted global layer alone — a project file that
+  travels with a cloned repository cannot mint it. Because no sandbox backend
+  can filter an arbitrary shell's egress by host, that grant is the whole host
+  network, and it is logged at `warn` whenever it applies. A channel-attached
+  (remote-sender) session never receives it.
+
+  It is deliberately **not** derived from `[security] egress_allow`.
+  `egress_allow` is a per-host permit for the in-process HTTP gate; the
+  `Contained` branch is the default for any repo the operator has not
+  fingerprint-trusted; and the shell grant is all-or-nothing. Tying them
+  together meant that permitting one host for the HTTP gate handed an untrusted
+  cloned repository's shell arbitrary outbound TCP (measured:
+  `egress_allow = ["docs.rs"]` opened `127.0.0.1:44755`).
+
+  Under bwrap the grant also binds the host's resolver file into the namespace
+  (see `wcore-sandbox::backends::bwrap`), because `/etc/resolv.conf` is a
+  symlink into `/run` on systemd distributions and a `Contained` namespace does
+  not carry `/run` — without that bind `Inherit` yielded a network with no name
+  resolution and `curl` exited 6.
+
+There is deliberately **no environment variable** that opens the sandboxed
+shell. `WAYLAND_BASH_ALLOW_NETWORK` used to, and was removed (SEC-11): the
+environment is inherited from whatever launched the process, so honoring it let
+untrusted provenance raise a security boundary — the same supply-chain hazard
+`[security] enabled` is documented against.
 
 ### Two enforcement adapters
 
@@ -322,8 +354,8 @@ be transmitted outside the allowed egress set.
 
 **Exec-time capability gate:** `SandboxBackend::enforces_read_deny()` reports
 `true` only for backends that actually enforce `fs_read_deny` at the OS level
-(macOS sandbox-exec, Linux bwrap, Windows AppContainer, Docker with
-`live-docker` feature). The authoritative gate lives inside `bash.rs`
+(macOS sandbox-exec, Linux bwrap, Windows AppContainer when explicitly opted
+into, Docker with `live-docker` feature). The authoritative gate lives inside `bash.rs`
 `execute_with_ctx` / `execute_streaming_with_ctx` — checked on the same
 `default_for_platform()` instance that will run the command (TOCTOU-free). A
 bootstrap UX gate in `channel_tools.rs::keep_under` additionally drops `Bash`
@@ -332,13 +364,30 @@ so the model never sees a tool it cannot safely invoke.
 
 **Backend coverage:**
 
-| Backend | Mechanism | `enforces_read_deny()` |
-|---------|-----------|------------------------|
-| macOS sandbox-exec | `(deny file-read* (subpath …))` SBPL rules after allows (last-match-wins) | `true` |
-| Linux bwrap | `--ro-bind /dev/null <file>` / `--tmpfs <dir>` overlay after positive binds | `true` |
-| Windows AppContainer | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) |
-| Docker (`live-docker`) | `/dev/null:<path>:ro` bind / empty-dir bind after mounts | `true` |
-| `no_sandbox` / `FailClosed` | Not enforced | `false` (default) |
+| Backend | Mechanism | `enforces_read_deny()` | `confines_filesystem()` |
+|---------|-----------|------------------------|-------------------------|
+| macOS sandbox-exec | `(deny file-read* (subpath …))` SBPL rules after allows (last-match-wins) | `true` | `true` |
+| Linux bwrap | `--ro-bind /dev/null <file>` / `--tmpfs <dir>` overlay after positive binds | `true` | `true` |
+| Windows AppContainer (opt-in, `WAYLAND_SANDBOX=appcontainer`) | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) | `true` (real) |
+| Windows Job Object (**the Windows default**) | Kill-on-close Job Object owns the process tree; env scrubbed to the manifest. No AppContainer profile, no Low-integrity token, so no OS filesystem or network confinement. | `false` (default) | `false` (default) |
+| Docker (`live-docker`) | `/dev/null:<path>:ro` bind / empty-dir bind after mounts | `true` | `true` |
+| `no_sandbox` / `FailClosed` | Not enforced | `false` (default) | `false` (default) |
+
+`confines_filesystem()` is the answer to "can a shell command write outside the
+workspace". It is reported by `wayland-core sandbox status` and is deliberately
+NOT the same field as `bypasses_containment`, which is session authority (only a
+Dangerous launch sets it) and reads `false` on the Windows default while a write
+still escapes. `wcore-cli/tests/sandbox_activeness.rs` performs the escape and
+fails if the outcome and the claim disagree in either direction. Nothing gates
+execution on `confines_filesystem()`; the gates remain `enforces_read_deny()`.
+
+On Windows the default is therefore the RELAXED row, and the `false` there is
+load-bearing rather than a gap left open: it is what makes `channel_tools.rs`
+drop `Bash` from `Workspace` posture and what makes the `bash.rs` gate refuse.
+The relaxation had to be a backend SWAP for exactly that reason —
+`AppContainerBackend::enforces_read_deny()` is derived from its availability
+probe and takes no manifest, so emptying `fs_read_deny` under it would have
+left the claim (and both gates) standing.
 
 **Residuals (each backstopped by network-Deny):**
 

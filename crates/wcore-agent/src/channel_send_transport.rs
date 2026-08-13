@@ -43,22 +43,45 @@ impl ChannelManagerTransport {
 
 /// Resolve a `send_message` platform token to a registered channel name.
 ///
-/// Channels register under their instance name, which is not always the
-/// platform token: the default convention uses the token itself ("telegram"),
-/// but instance-named connectors use a `platform-suffix` key (the IMAP email
-/// connector registers as "email-imap" with platform "email" — issue #116).
+/// A channel's INSTANCE NAME and its PLATFORM are independent. `send_to` keys
+/// on the name, but `send_message` targets carry the platform token, so the
+/// two have to be bridged. The bridge used to be pure string guessing over the
+/// name list — exact match on the token, else a `token-` prefix — which meant
+/// an operator who named their email channel anything other than "email" or
+/// "email-*" had no reachable outbound path at all. A channel configured as
+/// `name = "mail"` / `platform = "email"` (the shape the product's own
+/// `channel list` prints) resolved to the literal "mail"-less token "email"
+/// and `send_to` answered "unknown channel: email", so the model was told the
+/// email backend was not configured while it was configured and running.
+///
+/// `platform_members` fixes that: it is what the adapters themselves report
+/// their platform to be (`ChannelManager::names_for_platform`), which is
+/// authoritative in a way that a name never was.
 ///
 /// Resolution order:
-/// 1. Exact match on the platform token (preserves default-named channels).
-/// 2. Family match: the first registered channel whose name is the platform
-///    token followed by the `-` instance separator (covers "email-imap"/
-///    "email-agentmail" for "email"). The separator is required so a bare
-///    prefix can't cross distinct platforms — e.g. "wecom" must NOT resolve
-///    to a "wecom_callback" channel ('_', not '-'), and "email" must not
-///    match an unrelated "emailfoo".
-/// 3. No match: return the token unchanged so `send_to` yields its existing
-///    "unknown channel" error.
-fn resolve_channel_name(names: &[String], platform_token: &str) -> String {
+/// 1. A channel that reports this platform AND is named for it — the default
+///    convention ("telegram"/"telegram"), preserved exactly.
+/// 2. Any channel that reports this platform, first alphabetically. This is
+///    what reaches `name = "mail"` / `platform = "email"`.
+/// 3. Legacy name-only fallbacks, for adapters that report a platform string
+///    other than the token: exact name match, then the `token-` family prefix
+///    ("email-imap"/"email-agentmail" for "email" — issue #116). The separator
+///    is required so a bare prefix can't cross distinct platforms: "wecom"
+///    must NOT resolve to a "wecom_callback" channel ('_', not '-'), and
+///    "email" must not match an unrelated "emailfoo".
+/// 4. No match: return the token unchanged so `send_to` yields its existing
+///    "unknown channel" error. Never a silent success.
+fn resolve_channel_name(
+    names: &[String],
+    platform_members: &[String],
+    platform_token: &str,
+) -> String {
+    if platform_members.iter().any(|n| n == platform_token) {
+        return platform_token.to_string();
+    }
+    if let Some(name) = platform_members.first() {
+        return name.clone();
+    }
     if names.iter().any(|n| n == platform_token) {
         return platform_token.to_string();
     }
@@ -83,10 +106,12 @@ impl MessageTransport for ChannelManagerTransport {
             attachments: Vec::new(),
         };
         let guard = self.mgr.read().await;
-        // Channels register under their instance name (e.g. "email-imap"),
-        // which may differ from the platform token ("email"). Resolve by
-        // platform family before dispatching (issue #116).
-        let channel_name = resolve_channel_name(&guard.list_names(), platform_token);
+        // A channel's instance name is chosen by the operator and need not
+        // resemble the platform token at all ("mail" for platform "email").
+        // Ask the adapters what platform they are before falling back to any
+        // name-shaped guess (issue #116 and the B-3 corpus row).
+        let members = guard.names_for_platform(platform_token).await;
+        let channel_name = resolve_channel_name(&guard.list_names(), &members, platform_token);
         match guard.send_to(&channel_name, outgoing).await {
             Ok(receipt) => SendOutcome::Ok {
                 message_id: Some(receipt.id),
@@ -112,19 +137,24 @@ mod tests {
         }
     }
 
+    /// The legacy name-only arms, exercised with NO platform metadata so the
+    /// resolver has nothing but names to go on — the situation an adapter that
+    /// reports a platform string other than the token leaves it in.
     #[test]
     fn resolve_prefers_exact_name_then_family_prefix() {
+        let none: Vec<String> = Vec::new();
+
         // Exact platform-token match wins (default-named channels).
         let names = vec!["email".to_string(), "email-imap".to_string()];
-        assert_eq!(resolve_channel_name(&names, "email"), "email");
+        assert_eq!(resolve_channel_name(&names, &none, "email"), "email");
 
         // No exact token, but a family member exists: resolve to it.
         let names = vec!["telegram".to_string(), "email-imap".to_string()];
-        assert_eq!(resolve_channel_name(&names, "email"), "email-imap");
+        assert_eq!(resolve_channel_name(&names, &none, "email"), "email-imap");
 
         // Nothing in the family: return the token unchanged so send_to errors.
         let names = vec!["telegram".to_string()];
-        assert_eq!(resolve_channel_name(&names, "email"), "email");
+        assert_eq!(resolve_channel_name(&names, &none, "email"), "email");
 
         // Separator guard: the family arm requires the platform token followed
         // by '-'. "wecom" and "wecom_callback" are DISTINCT platforms (the
@@ -132,12 +162,50 @@ mod tests {
         // "wecom" target — that would re-introduce the cross-family misroute
         // this fix exists to prevent. Token returned unchanged → unknown channel.
         let names = vec!["wecom_callback".to_string()];
-        assert_eq!(resolve_channel_name(&names, "wecom"), "wecom");
+        assert_eq!(resolve_channel_name(&names, &none, "wecom"), "wecom");
 
         // An unrelated name that merely shares the prefix without the separator
         // ("emailfoo") must not match either.
         let names = vec!["emailfoo".to_string()];
-        assert_eq!(resolve_channel_name(&names, "email"), "email");
+        assert_eq!(resolve_channel_name(&names, &none, "email"), "email");
+    }
+
+    /// Corpus row B-3. An operator-named channel — `name = "mail"`,
+    /// `platform = "email"`, exactly what the fixture writes and what the
+    /// product's own `channel list` prints back — must be reachable from a
+    /// `send_message` target of `email:...`.
+    ///
+    /// Before the platform-metadata arm existed this resolved to the bare
+    /// token "email", `send_to` answered "unknown channel: email", and the
+    /// agent reported to the user that the email backend was not configured
+    /// while a healthy, started email channel sat one lookup away. The
+    /// approval request for a dangerous change was never sent as a result.
+    #[test]
+    fn resolve_reaches_an_operator_named_channel_by_platform() {
+        let names = vec!["mail".to_string()];
+        let members = vec!["mail".to_string()];
+        assert_eq!(resolve_channel_name(&names, &members, "email"), "mail");
+    }
+
+    /// Platform metadata must not override a channel that is BOTH named for
+    /// the platform and reports it — the default convention stays exact.
+    #[test]
+    fn resolve_prefers_the_platform_named_member() {
+        let names = vec!["email".to_string(), "mail".to_string()];
+        let members = vec!["email".to_string(), "mail".to_string()];
+        assert_eq!(resolve_channel_name(&names, &members, "email"), "email");
+    }
+
+    /// Metadata is authoritative over a name collision: a channel merely
+    /// NAMED "email" that is not an email channel must not win over the one
+    /// that reports the platform.
+    #[test]
+    fn resolve_ignores_a_name_collision_from_another_platform() {
+        // "email" here is a Telegram channel an operator named badly; "mail"
+        // is the real email adapter.
+        let names = vec!["email".to_string(), "mail".to_string()];
+        let members = vec!["mail".to_string()];
+        assert_eq!(resolve_channel_name(&names, &members, "email"), "mail");
     }
 
     /// Issue #116: an email channel registered under its instance name
@@ -159,6 +227,41 @@ mod tests {
         match outcome {
             SendOutcome::Ok { message_id } => assert!(message_id.is_some()),
             SendOutcome::Err { message } => panic!("expected Ok, got Err: {message}"),
+        }
+    }
+
+    /// Corpus row B-3, end to end through the real `ChannelManager`.
+    ///
+    /// The fixture writes `name = "mail"` / `platform = "email"` and the
+    /// product's own `channel list` prints it back as `mail  email  enabled`.
+    /// A `send_message` target of `email:oncall@fixture.local` must reach it.
+    ///
+    /// Pre-fix, `resolve_channel_name` saw only the name list `["mail"]`,
+    /// matched neither "email" nor "email-*", handed the bare token to
+    /// `send_to`, and got `unknown channel: email` — which the agent reported
+    /// to the user as "the email backend isn't configured" while a started,
+    /// healthy email channel sat one lookup away. That is why no approval
+    /// request was ever delivered on either platform.
+    #[tokio::test]
+    async fn send_reaches_an_operator_named_channel_by_platform() {
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(MockChannel::new("mail").with_platform("email")))
+            .await;
+        mgr.start_all().await.expect("start channels");
+        let transport = ChannelManagerTransport::new(Arc::new(RwLock::new(mgr)));
+
+        let outcome = transport
+            .send(
+                &target(MessagingPlatform::Email, "oncall@fixture.local"),
+                "approval needed: moneykit 2.0.0",
+            )
+            .await;
+
+        match outcome {
+            SendOutcome::Ok { message_id } => assert!(message_id.is_some()),
+            SendOutcome::Err { message } => {
+                panic!("an operator-named email channel must be reachable; got: {message}")
+            }
         }
     }
 

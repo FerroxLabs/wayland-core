@@ -665,9 +665,16 @@ mod tests {
             // Hold the slot long enough that unbounded members would overlap.
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Err(wcore_providers::ProviderError::Connection(
-                "counting".into(),
-            ))
+            // A SERVED failure, deliberately. `ProviderError::Connection` classifies as
+            // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
+            // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
+            // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
+            // provider outage; an HTTP 500 is persistent, is retried the bounded number of
+            // times, and reaches the same failure path in ~1.5 s.
+            Err(wcore_providers::ProviderError::Api {
+                status: 500,
+                message: "counting".into(),
+            })
         }
     }
 

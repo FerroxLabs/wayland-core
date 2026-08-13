@@ -1185,10 +1185,29 @@ jobs:
           #   bubblewrap  20 failures. NOTE: the package alone does NOT fix these -- measured,
           #               see the security-opt block on the test step below. It is necessary
           #               and not sufficient.
+          #   curl (2026-08-12): 2 failures, both in
+          #               crates/wcore-agent/tests/bash_egress_provenance_test.rs --
+          #               `the_operator_switch_opens_the_sandboxed_shell` and
+          #               `control_the_observer_is_reachable_when_the_policy_allows_it`.
+          #               The whole file drives ONE `curl` at a loopback observer through
+          #               the real BashTool; with curl absent the child returns
+          #               "sh: 1: curl: not found" and the file's own vacuity guard at
+          #               line 314 refuses to pass:
+          #                 "INSTRUMENT BLIND: the observer recorded no connection even
+          #                  with the sandbox network policy set to Inherit, so every
+          #                  accept_count==0 assertion in this file is vacuous."
+          #               The product is fine -- the guard did exactly its job. Note the
+          #               blast radius is wider than the two red names: the file's OTHER
+          #               tests assert accept_count == 0, which a missing curl satisfies
+          #               for free, so they were passing vacuously too.
+          #               curl is not replaceable here by something already in the image:
+          #               one test measures curl's OWN behaviour under the sandbox
+          #               (exit 6 "Could not resolve host" against the host's result), so
+          #               swapping in python3 would change the instrument, not fix it.
           RUN apt-get update -qq \
             && apt-get install -y -qq --no-install-recommends \
                  libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold ca-certificates git \
-                 python3 procps bubblewrap \
+                 python3 procps bubblewrap curl \
             && rm -rf /var/lib/apt/lists/*
           RUN cargo install --locked cargo-nextest --version "^0.9"
           RUN cargo install --locked cargo-audit

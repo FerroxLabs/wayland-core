@@ -594,7 +594,10 @@ fn resolved_cron_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn lex_normalize(path: &Path) -> PathBuf {
+/// Lexical (no-syscall) path normalization. Shared with `grep_policy`, which
+/// must key a backend's emitted path and the walker's entry on the SAME string
+/// or the ignore/secret policy silently admits everything.
+pub(crate) fn lex_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {

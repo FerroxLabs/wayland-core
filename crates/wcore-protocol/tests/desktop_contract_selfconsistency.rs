@@ -210,7 +210,7 @@ fn published_schemas_accept_every_event_fixture_they_describe() {
         "detector cannot reach a FAIL state: an unsatisfiable schema accepted a fixture"
     );
     assert!(
-        fixtures.len() >= 52,
+        fixtures.len() >= 59,
         "a corpus sweep over {} fixtures is not a sweep — an empty or filtered set \
          passes this test for free (LANE-BRIEF §3.2)",
         fixtures.len()
@@ -463,9 +463,9 @@ fn protocol_event_source_parser_is_alive_in_both_directions() {
          parser did not report it — the byte-at-a-time scan is back"
     );
     assert!(
-        wire_types.len() >= 52,
+        wire_types.len() >= 59,
         "parsed only {} ProtocolEvent wire types; the enum has strictly more than the \
-         52 Desktop events, so the parser is truncating",
+         59 Desktop events, so the parser is truncating",
         wire_types.len()
     );
     assert_eq!(

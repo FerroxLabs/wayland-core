@@ -19,13 +19,12 @@
 //! | `4`  | refused by session authority (e.g. a destination outside the workspace root) |
 //! | `5`  | the operation is blocked by outstanding reconcile items |
 //!
-//! ## Divergence from `--list-sessions`
+//! ## Stream discipline, shared with `--list-sessions`
 //!
-//! The pre-existing root `--list-sessions` flag prints its table to STDERR
-//! (`main.rs:1510-1525`). This subcommand prints to STDOUT. The divergence is
-//! deliberate: a driver must be able to capture the result with `> log`, and
-//! changing the older flag would break anything already parsing its stderr.
-//! Recorded as backlog item 23B-M1.
+//! Every verb here writes its answer to STDOUT and its diagnostics to STDERR.
+//! The root `--list-sessions` flag used to invert that and print its table to
+//! stderr; backlog item 23B-M1 closed it, so the two surfaces now agree and
+//! `wayland-core --list-sessions | grep <id>` works.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -35,8 +34,9 @@ use clap::{Args, Subcommand};
 
 use wcore_agent::session::SessionManager;
 use wcore_agent::session_lifecycle::{
-    OperatorResolution, RetryOutcome, SessionLifecycleError, cancel, export, fork, inspect, list,
-    reconcile_list, reconcile_resolve, retain, retry, search, session_file_digest,
+    OperatorResolution, ReconcileItem, ResolutionAuthority, RetryOutcome, SessionLifecycleError,
+    cancel, export, fork, inspect, list, reconcile_list, reconcile_resolve, retain, retry, search,
+    session_file_digest,
 };
 
 use crate::tui::checkpoint::{CheckpointError, CheckpointId, CheckpointStore};
@@ -66,7 +66,7 @@ pub struct SessionArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SessionCmd {
-    /// List saved sessions (STDOUT, unlike the root `--list-sessions` flag).
+    /// List saved sessions to STDOUT, as the root `--list-sessions` flag does.
     List,
     /// Full-text search across saved sessions.
     Search {
@@ -129,9 +129,17 @@ pub enum SessionCmd {
         /// Resolve this tool execution instead of listing.
         #[arg(long)]
         resolve: Option<String>,
-        /// Disposition for `--resolve`.
-        #[arg(long, value_enum, default_value = "not-started")]
-        as_outcome: ResolveAs,
+        /// Disposition for `--resolve`: what actually happened to the
+        /// interrupted effect.
+        ///
+        /// Deliberately has NO default. It used to default to `not-started`,
+        /// which answered "did the effect land?" — the one thing the operator
+        /// is reporting they do not know — on their behalf, and recorded the
+        /// answer durably. Omit it and the product resolves the item itself
+        /// where the journal determines the outcome, and refuses with the
+        /// consequence of each choice where it does not.
+        #[arg(long, value_enum)]
+        as_outcome: Option<ResolveAs>,
         /// Operator identity recorded in the journal alongside the resolution.
         #[arg(long, default_value = "cli-operator")]
         operator: String,
@@ -169,7 +177,17 @@ impl From<ResolveAs> for OperatorResolution {
 
 /// Map a lifecycle error onto the documented exit code, reporting the message
 /// on stderr so stdout stays machine-parseable.
+///
+/// A refusal that names no remedy is the defect this surface was built to
+/// close and then reproduced: `cancel` exited 5 with ZERO bytes on stdout and
+/// a single stderr line counting items the user had no command to clear. Every
+/// refusal that HAS a remedy now prints it — on stdout, where the operator's
+/// `> log` redirect can see it, in the same shape the missing-API-key error
+/// already uses: the exact command, with the real identifier substituted.
 fn report(error: &SessionLifecycleError) -> ExitCode {
+    if let SessionLifecycleError::OutstandingReconcile { id, items } = error {
+        print_reconcile_remedy(id, items);
+    }
     eprintln!("wayland-core session: {error}");
     match error {
         SessionLifecycleError::NotFound { .. } => ExitCode::from(EXIT_NOT_FOUND),
@@ -179,6 +197,72 @@ fn report(error: &SessionLifecycleError) -> ExitCode {
         }
         _ => ExitCode::FAILURE,
     }
+}
+
+/// Print, on STDOUT, the exact command that clears each blocking item.
+fn print_reconcile_remedy(id: &str, items: &[ReconcileItem]) {
+    println!(
+        "F23_SESSION=cancel_blocked id={id} outstanding={}",
+        items.len()
+    );
+    for item in items {
+        println!(
+            "F23_SESSION=cancel_blocked_item id={id} kind={} ref={} tool={} resolvable={}",
+            item.kind.as_str(),
+            item.tool_execution_id,
+            item.tool,
+            item.operator_resolvable
+        );
+    }
+    println!();
+    println!(
+        "Cancel is blocked: {} interrupted effect(s) have no recorded outcome, and a turn \
+         cannot be declared over while the product would be guessing about what it did.",
+        items.len()
+    );
+    for item in items {
+        println!();
+        if !item.operator_resolvable {
+            println!(
+                "  {} {} ({}) is in state {} — no operator-writable receipt exists for that \
+                 state, so only a live engine can close it. Resume the session instead of \
+                 cancelling it.",
+                item.kind.as_str(),
+                item.tool,
+                item.tool_execution_id,
+                item.reason
+            );
+            continue;
+        }
+        println!(
+            "  `{}` was interrupted in state {} and only you can say what happened to it. \
+             Run ONE of:",
+            item.tool, item.reason
+        );
+        for (outcome, consequence) in [
+            (
+                "not-started",
+                "the work never began; nothing it would have changed was changed",
+            ),
+            (
+                "succeeded",
+                "the work completed; the turn records success with a null result, and no \
+                 output is invented",
+            ),
+            (
+                "failed",
+                "the work began and failed; the turn records the failure",
+            ),
+        ] {
+            println!(
+                "    wayland-core session reconcile {id} --resolve {} --as-outcome {outcome}",
+                item.tool_execution_id
+            );
+            println!("        {consequence}");
+        }
+    }
+    println!();
+    println!("Then re-run: wayland-core session cancel {id}");
 }
 
 /// Resolve the session directory without requiring a provider API key.
@@ -472,12 +556,16 @@ pub fn run(args: SessionArgs) -> anyhow::Result<ExitCode> {
                 &manager,
                 id,
                 tool_execution_id,
-                (*as_outcome).into(),
+                as_outcome.map(|outcome| outcome.into()),
                 operator,
             ) {
-                Ok(()) => {
+                Ok(authority) => {
+                    let by = match authority {
+                        ResolutionAuthority::Operator(_) => "operator".to_owned(),
+                        ResolutionAuthority::Journal(basis) => basis.as_str().to_owned(),
+                    };
                     println!(
-                        "F23_SESSION=reconcile_resolved id={id} tool_execution={tool_execution_id} operator={operator}"
+                        "F23_SESSION=reconcile_resolved id={id} tool_execution={tool_execution_id} operator={operator} determined_by={by}"
                     );
                     ExitCode::SUCCESS
                 }
@@ -486,11 +574,34 @@ pub fn run(args: SessionArgs) -> anyhow::Result<ExitCode> {
         },
 
         SessionCmd::Cancel { id } => match cancel(&manager, id) {
-            Ok(turns) => {
-                for turn_id in &turns {
+            Ok(outcome) => {
+                // Report every receipt written on the operator's behalf. An
+                // automatic disposition they cannot see is one they cannot
+                // audit or disagree with.
+                for resolved in &outcome.auto_resolved {
+                    println!(
+                        "F23_SESSION=cancel_auto_resolved id={id} kind={} ref={} tool={} determined_by={}",
+                        resolved.item.kind.as_str(),
+                        resolved.item.tool_execution_id,
+                        resolved.item.tool,
+                        resolved.determined_by.as_str()
+                    );
+                }
+                for turn_id in &outcome.cancelled_turns {
                     println!("F23_SESSION=cancel_turn id={id} turn={turn_id}");
                 }
-                println!("F23_SESSION=cancel id={id} cancelled={}", turns.len());
+                println!(
+                    "F23_SESSION=cancel id={id} cancelled={} auto_resolved={}",
+                    outcome.cancelled_turns.len(),
+                    outcome.auto_resolved.len()
+                );
+                if !outcome.cancelled_turns.is_empty() {
+                    println!();
+                    println!(
+                        "The session is resumable again. Continue it with:\n  \
+                         wayland-core --resume {id} \"your next message\""
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => report(&error),

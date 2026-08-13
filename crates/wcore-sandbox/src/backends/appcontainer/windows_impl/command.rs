@@ -126,13 +126,11 @@ pub(super) fn quote_arg(arg: &str) -> String {
 /// is preserved (the payload is still one argv entry the caller supplied, not a
 /// `format!`-interpolated shell string), and the sandbox token / Job Object /
 /// AppContainer ACL boundary is untouched.
-pub(super) fn quote_cmd_payload(payload: &str) -> String {
-    let mut out = String::with_capacity(payload.len() + 2);
-    out.push('"');
-    out.push_str(payload);
-    out.push('"');
-    out
-}
+///
+/// The rule is shared with the relaxed Job Object / no-sandbox spawn path,
+/// which reaches the same `cmd.exe` through `std::process::Command`, so both
+/// backends join a `/c` payload identically.
+pub(super) use crate::backends::windows_cmdline::quote_cmd_payload;
 
 /// True when a resolved `lpApplicationName` (NUL-terminated UTF-16, as
 /// returned by [`resolve_program`]) has `cmd.exe` as its exact FINAL PATH
@@ -152,11 +150,8 @@ pub(super) fn resolved_program_is_cmd(app_name_w: &[u16]) -> bool {
     // isolates the true final component of the `System32\cmd.exe` resolution or
     // any absolute path the caller passed; equality (not a suffix) rejects
     // `notcmd.exe`.
-    let decoded = String::from_utf16_lossy(&app_name_w[..end]).to_ascii_lowercase();
-    std::path::Path::new(&decoded)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "cmd.exe")
+    let decoded = String::from_utf16_lossy(&app_name_w[..end]);
+    crate::backends::windows_cmdline::program_is_cmd(&decoded)
 }
 
 /// Classification of a bare (non-absolute) `argv[0]`. Only `cmd` is

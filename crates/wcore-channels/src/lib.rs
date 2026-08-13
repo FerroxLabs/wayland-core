@@ -27,6 +27,7 @@ pub mod media;
 pub mod mock;
 pub mod outgoing;
 pub mod probe;
+pub mod untrusted;
 pub mod webhook;
 
 pub use actions::{ActionSupport, NativeActions};
@@ -37,10 +38,15 @@ pub use config::{
     parse_channel_config,
 };
 pub use dispatch::{
-    AccessDecision, AckMode, AutoReplyRateLimiter, ChannelToolPosture, DEFAULT_AUTO_REPLY_WINDOW,
-    DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome,
-    DmPolicy, GroupPolicy, InboundPolicy, TurnAdmission, build_session_key, classify,
-    decide_access, evaluate,
+    ABSENT_FIELD, ADMISSION_SHAPE_VERSION, AccessDecision, AckMode, AdmissionFieldChange,
+    AdmissionShape, AutoReplyRateLimiter, ChannelOpenAdmission, ChannelToolPosture,
+    DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CODE_TTL_MS, DEFAULT_CONVERSATION_CAP,
+    DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome, DmPolicy, GroupPolicy,
+    InboundPolicy, LegacyToken, OPTION_FIELD_PREFIX, OpenAdmission, OpenAdmissionFault,
+    OpenAdmissionRefusal, PAIRING_DENY_REASON, PairedSender, PairingBook, PairingState,
+    PairingStore, SHAPE_FIELDS, TurnAdmission, admission_shape_token, build_session_key, classify,
+    decide_access, decide_access_paired, evaluate, evaluate_paired, open_admission_faults,
+    open_admissions, refuse_open_admission, required_acknowledgement,
 };
 pub use error::ChannelError;
 pub use event::{

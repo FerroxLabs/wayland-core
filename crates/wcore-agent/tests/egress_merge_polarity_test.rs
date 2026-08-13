@@ -431,6 +431,70 @@ fn trusted_project_egress_allow_widens_the_boundary_by_design() {
     );
 }
 
+// ── allow_sandboxed_shell_network: operator-owned, EITHER trust state ────────
+
+/// SEC-13. `[security] allow_sandboxed_shell_network` is a WHOLE-HOST-NETWORK
+/// grant for the sandboxed shell, so it takes the same shape as
+/// `security.enabled`: the merge reads the trusted GLOBAL layer alone.
+///
+/// Unlike `egress_allow` — which is dropped while untrusted and concatenates
+/// once trust is granted — a project file must not mint this one in EITHER
+/// trust state. Granting a workspace fingerprint says "this repo's config is
+/// mine"; it does not say "this repo may take the shell off the leash",
+/// and repo content changes after a grant without the operator re-reading it.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn a_project_cannot_mint_the_sandboxed_shell_network_grant() {
+    for trust in [Trust::Untrusted, Trust::Granted] {
+        let loaded = load(
+            "[security]\nenabled = true\n",
+            "[security]\nallow_sandboxed_shell_network = true\n",
+            trust,
+        );
+        assert!(
+            !loaded.config.security.allow_sandboxed_shell_network,
+            "a project config must never mint the sandboxed-shell network grant \
+             (trust={trust:?})"
+        );
+    }
+}
+
+/// The control for the test above: the operator's own global value IS honoured.
+/// Without this, `!allow_sandboxed_shell_network` could be passing because the
+/// field is unreachable from config entirely.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn the_operator_global_sandboxed_shell_network_switch_is_honoured() {
+    let loaded = load(
+        "[security]\nenabled = true\nallow_sandboxed_shell_network = true\n",
+        "",
+        Trust::Untrusted,
+    );
+    assert!(
+        loaded.config.security.allow_sandboxed_shell_network,
+        "the operator's own global allow_sandboxed_shell_network must survive \
+         the merge, or the switch is unreachable and its negative test vacuous"
+    );
+}
+
+/// A project must not be able to REVOKE the operator's grant either — that is
+/// why the merge reads global alone rather than `global && project`. A project
+/// silent on `[security]` deserializes to `false`, which is absorbing for `&&`.
+#[test]
+#[serial(egress_merge_polarity_env)]
+fn a_project_cannot_revoke_the_sandboxed_shell_network_grant() {
+    let loaded = load(
+        "[security]\nenabled = true\nallow_sandboxed_shell_network = true\n",
+        "[security]\nenabled = true\n",
+        Trust::Granted,
+    );
+    assert!(
+        loaded.config.security.allow_sandboxed_shell_network,
+        "a project silent on allow_sandboxed_shell_network must leave the \
+         operator's grant alone"
+    );
+}
+
 // ── The resource ceiling: BL-UNTRUSTED-RESOURCE-LIMITS, now closed ───────────
 //
 // `restrict_untrusted_project_config` forwarded six `[default]` fields under the

@@ -43,7 +43,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
-use wcore_channel_email::{LettreSender, MailSender};
+use wcore_channel_email::{LettreSender, MailSecurity, MailSender};
 
 /// Body marker asserted in the delivered message, so a "delivered" claim is
 /// tied to *this* send rather than to any traffic reaching the relay.
@@ -240,6 +240,10 @@ async fn smtp_reaches_private_chain_relay_only_when_root_is_wired() {
         "user".to_string(),
         "pass".to_string(),
         Some(&ca_path),
+        // Explicit: this relay is a real STARTTLS host that happens to listen
+        // on loopback, so the Auto loopback-plaintext exemption must not apply
+        // to it. Naming the mode is exactly what an operator would do here.
+        MailSecurity::Starttls,
     )
     .expect("build sender with root");
 
@@ -268,6 +272,7 @@ async fn smtp_reaches_private_chain_relay_only_when_root_is_wired() {
         "user".to_string(),
         "pass".to_string(),
         None,
+        MailSecurity::Starttls,
     )
     .expect("build sender without root");
 

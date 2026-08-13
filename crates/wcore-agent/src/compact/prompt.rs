@@ -86,14 +86,20 @@ pub fn format_compact_summary(raw: &str) -> String {
 
 // ── Post-compact message content ────────────────────────────────────────────
 
+/// Opening sentence of every post-compact summary message. Named so the
+/// engine's B7 instruction-pin can recognise text the product wrote itself and
+/// refuse to pin it as if it were the user's request.
+pub const SUMMARY_LEAD_IN: &str =
+    "This session is being continued from a previous conversation that ran out of context.";
+
 /// Build the user message content for the post-compact summary.
 ///
 /// For autocompact (`is_auto = true`), appends an instruction telling the
 /// model to continue seamlessly without acknowledging the compaction.
 pub fn build_summary_content(formatted_summary: &str, is_auto: bool) -> String {
-    let mut content = String::from(
-        "This session is being continued from a previous conversation that ran out of context. \
-         The summary below covers the earlier portion of the conversation.\n\n",
+    let mut content = format!(
+        "{SUMMARY_LEAD_IN} \
+         The summary below covers the earlier portion of the conversation.\n\n"
     );
     content.push_str(formatted_summary);
 

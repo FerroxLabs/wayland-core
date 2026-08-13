@@ -21,13 +21,18 @@
 
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use wcore_sandbox::SandboxManifest;
 use wcore_sandbox::backends::SandboxBackend;
-use wcore_sandbox::{SandboxCommand, SandboxManifest};
+use wcore_sandbox::test_support::run_contained_probe;
 
-/// Resolve a real `cat` binary. Backends scrub `PATH`, so we need an
-/// absolute path.
-fn cat_path() -> Option<&'static str> {
-    ["/bin/cat", "/usr/bin/cat"]
+/// Resolve a real `sh`. Backends scrub `PATH`, so we need an absolute path.
+///
+/// This replaced a bare `cat_path()`: every case now runs its probe through a
+/// shell so `run_contained_probe` can wrap it in the liveness markers that
+/// prove the child executed INSIDE the sandbox. Without that proof an absent
+/// secret is indistinguishable from a sandbox that never spawned anything.
+fn sh_path() -> Option<&'static str> {
+    ["/bin/sh", "/usr/bin/sh"]
         .into_iter()
         .find(|p| std::path::Path::new(p).exists())
 }
@@ -66,8 +71,8 @@ async fn secret_read_deny_case_a_project_env_under_allowed_root() {
         eprintln!("skip: host sandbox backend not available");
         return;
     };
-    let Some(cat) = cat_path() else {
-        eprintln!("skip: no cat binary found");
+    let Some(sh) = sh_path() else {
+        eprintln!("skip: no sh binary found");
         return;
     };
 
@@ -83,33 +88,21 @@ async fn secret_read_deny_case_a_project_env_under_allowed_root() {
         ..Default::default()
     };
 
-    let out = backend
-        .execute(
-            &manifest,
-            SandboxCommand {
-                argv: vec![cat.into(), secret.to_string_lossy().into_owned()],
-                cwd: None,
-            },
-        )
-        .await
-        .expect("execute must not error");
-
-    // Non-vacuous deny: a `bwrap:` stderr prefix is bwrap's own setup-failure
-    // channel. Its absence proves the inner `cat` actually ran, so empty
-    // stdout is a real read-deny — not bwrap dying before the command. The
-    // marker never appears on macOS sandbox-exec, so this is cross-platform.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("bwrap: "),
-        "(a) bwrap must complete setup for a non-vacuous deny; bwrap error: {stderr}",
-    );
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("SECRET_TOKEN"),
-        "(a) secret bytes must not be readable via direct path; exit={} stdout={:?}",
-        out.exit_code,
-        stdout,
+    // The old non-vacuity guard here was `!stderr.contains("bwrap: ")`, and its
+    // own comment conceded "the marker never appears on macOS sandbox-exec" —
+    // i.e. on macOS there was NO control at all, and a sandbox-exec profile that
+    // failed to load would have produced empty stdout and a green. The liveness
+    // markers replace it with a control that works on every backend.
+    let probe = run_contained_probe(
+        backend.as_ref(),
+        &manifest,
+        sh,
+        &format!("cat '{}'", secret.display()),
+    )
+    .await;
+    probe.assert_absent(
+        "SECRET_TOKEN",
+        "(a) secret bytes must not be readable via direct path",
     );
 }
 
@@ -124,8 +117,8 @@ async fn secret_read_deny_case_b_symlink_to_env() {
         eprintln!("skip: host sandbox backend not available");
         return;
     };
-    let Some(cat) = cat_path() else {
-        eprintln!("skip: no cat binary found");
+    let Some(sh) = sh_path() else {
+        eprintln!("skip: no sh binary found");
         return;
     };
 
@@ -150,30 +143,16 @@ async fn secret_read_deny_case_b_symlink_to_env() {
         ..Default::default()
     };
 
-    let out = backend
-        .execute(
-            &manifest,
-            SandboxCommand {
-                argv: vec![cat.into(), link.to_string_lossy().into_owned()],
-                cwd: None,
-            },
-        )
-        .await
-        .expect("execute must not error");
-
-    // Non-vacuous deny (see case (a) for rationale).
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("bwrap: "),
-        "(b) bwrap must complete setup for a non-vacuous deny; bwrap error: {stderr}",
-    );
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("SECRET_TOKEN"),
-        "(b) symlink to secret must not expose secret bytes; exit={} stdout={:?}",
-        out.exit_code,
-        stdout,
+    let probe = run_contained_probe(
+        backend.as_ref(),
+        &manifest,
+        sh,
+        &format!("cat '{}'", link.display()),
+    )
+    .await;
+    probe.assert_absent(
+        "SECRET_TOKEN",
+        "(b) symlink to secret must not expose secret bytes",
     );
 }
 
@@ -204,8 +183,8 @@ async fn secret_read_deny_case_c_symlink_to_external_non_secret_is_readable() {
         eprintln!("skip: host sandbox backend not available");
         return;
     };
-    let Some(cat) = cat_path() else {
-        eprintln!("skip: no cat binary found");
+    let Some(sh) = sh_path() else {
+        eprintln!("skip: no sh binary found");
         return;
     };
 
@@ -236,34 +215,23 @@ async fn secret_read_deny_case_c_symlink_to_external_non_secret_is_readable() {
         ..Default::default()
     };
 
-    let out = backend
-        .execute(
-            &manifest,
-            SandboxCommand {
-                // Read through the symlink, not the target directly.
-                argv: vec![cat.into(), link.to_string_lossy().into_owned()],
-                cwd: None,
-            },
-        )
-        .await
-        .expect("execute must not error");
-
+    // Read through the symlink, not the target directly.
+    let probe = run_contained_probe(
+        backend.as_ref(),
+        &manifest,
+        sh,
+        &format!("cat '{}'", link.display()),
+    )
+    .await;
     // Behavioural proof: the symlink to a non-secret external file must be
-    // readable — exit 0 and expected bytes present — even though .env is
-    // denied in the same workspace root.
-    assert_eq!(
-        out.exit_code,
-        0,
-        "(c) symlink to external non-secret must be readable (no over-deny); \
-         exit={} stderr={:?}",
-        out.exit_code,
-        String::from_utf8_lossy(&out.stderr),
+    // readable — the probe body exits 0 and the expected bytes are present —
+    // even though .env is denied in the same workspace root.
+    probe.assert_probe_succeeded(
+        "(c) symlink to external non-secret must be readable (no over-deny)",
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("external non-secret data"),
-        "(c) symlink content must be present (no over-deny); stdout={:?}",
-        stdout,
+    probe.assert_present(
+        "external non-secret data",
+        "(c) symlink content must be present (no over-deny)",
     );
 }
 
@@ -277,8 +245,8 @@ async fn secret_read_deny_case_d_credential_dir_deny() {
         eprintln!("skip: host sandbox backend not available");
         return;
     };
-    let Some(cat) = cat_path() else {
-        eprintln!("skip: no cat binary found");
+    let Some(sh) = sh_path() else {
+        eprintln!("skip: no sh binary found");
         return;
     };
 
@@ -297,30 +265,16 @@ async fn secret_read_deny_case_d_credential_dir_deny() {
         ..Default::default()
     };
 
-    let out = backend
-        .execute(
-            &manifest,
-            SandboxCommand {
-                argv: vec![cat.into(), token_file.to_string_lossy().into_owned()],
-                cwd: None,
-            },
-        )
-        .await
-        .expect("execute must not error");
-
-    // Non-vacuous deny (see case (a) for rationale).
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("bwrap: "),
-        "(d) bwrap must complete setup for a non-vacuous deny; bwrap error: {stderr}",
-    );
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        !stdout.contains("CRED_TOKEN"),
-        "(d) credential dir deny must prevent reading token file; exit={} stdout={:?}",
-        out.exit_code,
-        stdout,
+    let probe = run_contained_probe(
+        backend.as_ref(),
+        &manifest,
+        sh,
+        &format!("cat '{}'", token_file.display()),
+    )
+    .await;
+    probe.assert_absent(
+        "CRED_TOKEN",
+        "(d) credential dir deny must prevent reading token file",
     );
 }
 
@@ -334,8 +288,8 @@ async fn secret_read_deny_case_e_ordinary_file_remains_readable() {
         eprintln!("skip: host sandbox backend not available");
         return;
     };
-    let Some(cat) = cat_path() else {
-        eprintln!("skip: no cat binary found");
+    let Some(sh) = sh_path() else {
+        eprintln!("skip: no sh binary found");
         return;
     };
 
@@ -357,28 +311,13 @@ async fn secret_read_deny_case_e_ordinary_file_remains_readable() {
         ..Default::default()
     };
 
-    let out = backend
-        .execute(
-            &manifest,
-            SandboxCommand {
-                argv: vec![cat.into(), main_rs.to_string_lossy().into_owned()],
-                cwd: None,
-            },
-        )
-        .await
-        .expect("execute must not error");
-
-    assert_eq!(
-        out.exit_code,
-        0,
-        "(e) ordinary src/main.rs must be readable; exit={} stderr={:?}",
-        out.exit_code,
-        String::from_utf8_lossy(&out.stderr),
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("fn main"),
-        "(e) ordinary file content must be readable; stdout={:?}",
-        stdout,
-    );
+    let probe = run_contained_probe(
+        backend.as_ref(),
+        &manifest,
+        sh,
+        &format!("cat '{}'", main_rs.display()),
+    )
+    .await;
+    probe.assert_probe_succeeded("(e) ordinary src/main.rs must be readable");
+    probe.assert_present("fn main", "(e) ordinary file content must be readable");
 }

@@ -66,8 +66,12 @@ impl WorktreeManager {
 
     pub(super) fn reserved_workspace_bytes(&self) -> Result<u64> {
         let mut total = 0_u64;
-        for entry in std::fs::read_dir(&self.swarm_root)? {
-            let entry = entry?;
+        let entries = std::fs::read_dir(&self.swarm_root)
+            .map_err(|error| io_at("read of the workspace root", &self.swarm_root, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                io_at("enumeration of the workspace root", &self.swarm_root, error)
+            })?;
             // Name equality, not full-path equality: every `read_dir` entry here
             // is by construction a DIRECT child of `swarm_root`, and the control
             // directory is by construction that root's child named by the
@@ -88,7 +92,12 @@ impl WorktreeManager {
                 )));
             }
             let reservation = entry.path().join(RESERVATION_FILE);
-            let root_authority = DirectoryAuthority::open(&entry.path())?;
+            let root_authority = DirectoryAuthority::open(&entry.path()).map_err(|error| {
+                SwarmError::WorktreeIo(format!(
+                    "open of the workspace reservation root {}: {error}",
+                    entry.path().display()
+                ))
+            })?;
             let bytes = if transaction_is_active(&root_authority, &entry.path())? {
                 let owner = entry.file_name().into_string().map_err(|_| {
                     SwarmError::DispatchAdmission(

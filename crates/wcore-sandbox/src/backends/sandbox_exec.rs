@@ -61,6 +61,43 @@ fn escape_sbpl_string(s: &str) -> String {
     out
 }
 
+/// Collect every proper ancestor DIRECTORY of the granted manifest paths.
+///
+/// Seatbelt grants are per-node: `(subpath "/Users/me/.cargo/bin")` makes that
+/// directory and its contents readable but leaves `/Users`, `/Users/me` and
+/// `/Users/me/.cargo` denied. Opening a file deep inside a granted subpath
+/// still works, but `realpath(3)` / `lstat(2)` resolve a path COMPONENT AT A
+/// TIME and fail on the first ungranted ancestor — which is why node aborts
+/// with `EPERM: operation not permitted, lstat '/Users'` and Homebrew's
+/// python3 with `realpath: /opt/homebrew/bin/: Operation not permitted` even
+/// though both interpreters live inside a granted subpath.
+///
+/// The root `/` is skipped: `build_profile` already grants it a `literal`
+/// read for the dyld bootstrap.
+fn ancestor_directories(
+    manifest: &SandboxManifest,
+    darwin_temp: Option<&std::path::Path>,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let granted = manifest
+        .fs_read_allow
+        .iter()
+        .chain(manifest.fs_write_allow.iter())
+        .chain(manifest.fs_metadata_read_allow.iter())
+        .map(|p| p.as_path())
+        .chain(darwin_temp);
+    for path in granted {
+        for ancestor in path.ancestors().skip(1) {
+            let text = ancestor.to_string_lossy();
+            if text.is_empty() || text == "/" {
+                continue;
+            }
+            out.insert(text.into_owned());
+        }
+    }
+    out
+}
+
 /// Reject a manifest path that cannot be safely represented in an SBPL
 /// profile. A NUL or a newline cannot appear in a profile string at all;
 /// rather than silently mangling such a path we fail the whole execution
@@ -74,6 +111,153 @@ fn reject_unsafe_path(path: &std::path::Path) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The per-user temporary directory Darwin's own tools use, read from
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` — the value `/var/folders/<a>/<b>/T`.
+///
+/// This is NOT `$TMPDIR`, and that distinction is the whole reason this
+/// function exists. `WorkspacePolicy` points `TMPDIR`/`TMP`/`TEMP` at the
+/// session's own granted scratch, which rescues every tool that reads the
+/// environment (clang, python3's `tempfile`, node's `os.tmpdir()`). Several
+/// Apple tools do not: `mktemp(1)` and the `xcrun` cache shim call `confstr`
+/// FIRST and only fall back to `$TMPDIR`, so under a deny-default profile they
+/// fail against a directory no environment variable can move. Measured on
+/// Darwin 25.3.0 with `TMPDIR` redirected: `mktemp` still returned
+/// `/var/folders/…/T/tmp.XXXXXXXXXX`, and inside the sandbox that became
+/// `mktemp: mkstemp failed on …: Operation not permitted`, while `git`,
+/// `python3` and `clang` each printed
+/// `couldn't create cache file '…/T/xcrun_db-XXXXXXXX'` on every invocation.
+///
+/// Canonicalized, because seatbelt matches the `/private`-rooted spelling: the
+/// `/var` the caller sees is a symlink and a `subpath` grant written through it
+/// does not match.
+///
+/// Returns `None` when `confstr` reports nothing or the directory does not
+/// resolve — the profile then simply omits the grant, which is the status quo
+/// ante rather than a widened one. Off macOS it is always `None`: this module
+/// compiles everywhere so the profile generator stays unit-testable, but
+/// `_CS_DARWIN_USER_TEMP_DIR` exists only in Darwin's libc.
+#[cfg(target_os = "macos")]
+fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: `confstr` writes at most `buf.len()` bytes (including the NUL)
+    // into the buffer we own and keep alive for the call, and returns the
+    // length it needed. It touches no other caller memory.
+    let len = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast::<libc::c_char>(),
+            buf.len(),
+        )
+    };
+    if len == 0 || len > buf.len() {
+        return None;
+    }
+    buf.truncate(len - 1); // drop the trailing NUL confstr counts
+    let raw = String::from_utf8(buf).ok()?;
+    std::fs::canonicalize(raw).ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn darwin_user_temp_dir() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// SBPL `regex` grant covering the entries Darwin's own temp-using tools create
+/// at the top of [`darwin_user_temp_dir`], and NOTHING else in that directory.
+///
+/// A plain `(subpath …)` grant over the whole per-user temp directory was the
+/// obvious fix and it is wrong. `crates/wcore-sandbox/tests/live_integrity_macos.rs`
+/// proves why: its "outside the retained root" directory — the location a write
+/// must never reach — is a `tempfile::tempdir()`, which on macOS lives inside
+/// that very directory. A subpath grant turned that suite's escape attempt into
+/// a success. The containment property is real and the subpath grant broke it.
+///
+/// So the grant is written as the naming the one tool that is actually BROKEN
+/// uses: `<T>/<prefix>.XXXXXXXXXX` and anything beneath it. `mktemp(1)`'s
+/// template is a prefix, a dot and exactly ten random alphanumerics, and
+/// `mktemp -d` needs its contents too.
+///
+/// The first component may not start with a dot, which is what keeps the
+/// `tempfile` crate's `.tmpXXXXXX` scratch directories — and therefore that
+/// acceptance suite's escape target — outside the grant.
+///
+/// **The prefix may not CONTAIN a dot either, and that is not cosmetic.**
+/// mktemp's `XXXXXXXXXX` is ten alphanumerics, and a reverse-DNS directory name
+/// whose last label happens to be ten alphanumerics is the same string shape.
+/// Measured against the real `confstr` directory on Darwin 25.3.0 — 10 517
+/// top-level entries — a prefix class that admitted `.` matched seven live
+/// Apple daemon directories, because `dataaccess`, `adprivacyd`, `biomesyncd`,
+/// `calaccessd`, `sessionkit`, `BiomeAgent` and `ap.adprivacyd` are each
+/// exactly ten characters after the final dot:
+///
+/// ```text
+/// com.apple.BiomeAgent  com.apple.adprivacyd  com.apple.ap.adprivacyd
+/// com.apple.biomesyncd  com.apple.calaccessd  com.apple.dataaccess
+/// com.apple.sessionkit
+/// ```
+///
+/// With `(/.*)?` on the end that was a RECURSIVE READ AND WRITE grant over
+/// seven directories belonging to other processes, and it was live: a sandboxed
+/// `echo pwn > <T>/com.apple.dataaccess/probe` exited 0 and the file was on
+/// disk afterwards, and `ls <T>/com.apple.dataaccess` enumerated it. Dropping
+/// `.` from the prefix class revokes exactly those seven and grants nothing new
+/// (measured: 21 covered entries before, 14 after, 0 added), while `mktemp` and
+/// `mktemp -t <prefix>` both still match — their prefixes carry no dot.
+///
+/// **`xcrun_db` is deliberately NOT covered, and that was measured, not
+/// assumed.** The xcrun shim's "couldn't create cache file" line appears twice
+/// on every sandboxed `git`, `python3` and `clang`, so an earlier revision of
+/// this grant included `<T>/xcrun_db-XXXXXXXX`. Run against the real product
+/// binary it removed nothing: xcrun writes the temp file and then RENAMES it
+/// onto `<T>/xcrun_db`, which the pattern does not cover, so the message simply
+/// changed from "couldn't create" to "couldn't replace" — and the now-creatable
+/// temp files were left behind, 50 of them after one evening of probes.
+/// Covering the destination too would fix the noise and is refused on purpose:
+/// `<T>/xcrun_db` maps tool names to resolved paths for every `xcrun` the user
+/// runs, including outside this sandbox, so a writable cache is a route to
+/// making another process execute an attacker-chosen binary. Two cosmetic
+/// stderr lines are not worth that, and the failure is cosmetic — `git
+/// --version`, `python3` and `clang` all still exit 0 through it.
+///
+/// Residual exposure: a sandboxed command can create junk at those names, and
+/// can read another process's `mktemp` file IF it guesses the name. It cannot
+/// enumerate: listing the directory needs `file-read-data` on the directory
+/// node, which is not granted (only `file-read-metadata`, for path resolution).
+///
+/// Returns `None` if the directory cannot be represented in an SBPL regex
+/// literal — a `"` would close the literal and a `\` would start an escape.
+/// Failing closed there costs `mktemp`; failing open would be an injection.
+///
+/// **The counted classes are written out, not `{10}`.** SBPL's regex engine
+/// does not implement the bounded-repetition interval, and it does not say so:
+/// a profile containing `{10}` loads without complaint and the rule then never
+/// matches anything. Measured on Darwin 25.3.0 against raw `sandbox-exec` —
+/// with `{10}` `mktemp` returned `Operation not permitted`; with the same
+/// pattern's interval expanded to ten `[A-Za-z0-9]` classes it succeeded, and
+/// the wide control `^<T>/` succeeded too, which is what separates "the engine
+/// rejected my syntax" from "regex grants do not work here". A construct that
+/// silently never matches is the worst failure mode available in a security
+/// policy, so it is named here rather than left as a magic expansion.
+fn darwin_temp_regex(dir: &std::path::Path) -> Option<String> {
+    let text = dir.to_string_lossy();
+    if text.contains('"') || text.contains('\\') {
+        return None;
+    }
+    let mut prefix = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        // Everything outside the portable-filename set is escaped, so a path
+        // component can never be read as a regex operator.
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-')) {
+            prefix.push('\\');
+        }
+        prefix.push(ch);
+    }
+    let ten = "[A-Za-z0-9]".repeat(10); // mktemp's XXXXXXXXXX
+    Some(format!(
+        "^{prefix}/[A-Za-z0-9_][A-Za-z0-9_-]*\\.{ten}(/.*)?$"
+    ))
 }
 
 impl SandboxExecBackend {
@@ -93,6 +277,22 @@ impl SandboxExecBackend {
     ///
     /// Public for testing.
     pub fn build_profile(manifest: &SandboxManifest) -> Result<String> {
+        Self::build_profile_with_darwin_temp(manifest, darwin_user_temp_dir().as_deref())
+    }
+
+    /// [`build_profile`](Self::build_profile) with the Darwin per-user temp
+    /// directory supplied instead of read from `confstr`.
+    ///
+    /// The seam exists so the grant can be asserted against a fixed, known path
+    /// instead of whatever `/var/folders/<random>/<random>/T` the running host
+    /// happens to own — a test that reads the same `confstr` the code under test
+    /// reads would pass no matter what the code emitted.
+    ///
+    /// Public for testing.
+    pub fn build_profile_with_darwin_temp(
+        manifest: &SandboxManifest,
+        darwin_temp: Option<&std::path::Path>,
+    ) -> Result<String> {
         let mut p = String::new();
         p.push_str("(version 1)\n");
         p.push_str("(deny default)\n");
@@ -126,6 +326,16 @@ impl SandboxExecBackend {
         p.push_str("(allow file-read* (subpath \"/usr\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/private/var/db/dyld\") (subpath \"/private/var/select\"))\n");
         p.push_str("(allow file-read* (literal \"/dev/null\") (literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/dtracehelper\"))\n");
         p.push_str("(allow file-write* (literal \"/dev/null\"))\n");
+        // LibreSSL — the TLS stack Apple links into `cargo`, `curl` and every
+        // other system-linked client — opens `/private/etc/ssl/openssl.cnf`
+        // unconditionally at init. Without this grant `cargo --version` prints
+        // `Auto configuration failed … fopen('/private/etc/ssl/openssl.cnf',
+        // 'rb')` and exits before doing any work. A single `literal`, not a
+        // `subpath`: the sibling `x509v3.cnf` and the rest of `/private/etc`
+        // stay denied. The file is the world-readable system OpenSSL
+        // configuration and carries no key material, so the read grants an
+        // attacker nothing beyond the host's default cipher/CA settings.
+        p.push_str("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))\n");
         // TAHOE FIX: bake hw.* sysctl-read for zsh + future tools.
         p.push_str("(allow sysctl-read (sysctl-name-prefix \"hw.\"))\n");
         p.push_str("(allow sysctl-read (sysctl-name-prefix \"kern.\"))\n");
@@ -172,6 +382,92 @@ impl SandboxExecBackend {
             p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
             p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
+        // The Darwin per-user temp directory — see [`darwin_user_temp_dir`] for
+        // why `$TMPDIR` cannot stand in for it, and [`darwin_temp_regex`] for
+        // why this is a `regex` and deliberately NOT a `subpath`. Without it
+        // `mktemp(1)` is simply broken on macOS under BOTH the contained and
+        // the trusted_local profile, and `git`, `python3` and `clang` each emit
+        // two `couldn't create cache file` lines per invocation.
+        //
+        // Read as well as write: `mkstemp` opens O_RDWR, so a write-only grant
+        // still returns EPERM. `fs_read_deny` outranks both — the deny block is
+        // emitted after this and SBPL is last-match-wins. The directory node
+        // itself gets metadata only, so `realpath` resolves through it while
+        // `readdir` (which needs `file-read-data`) stays denied and the grant
+        // cannot be used to enumerate what else is in there.
+        if let Some(dir) = darwin_temp {
+            reject_unsafe_path(dir)?;
+            if let Some(rx) = darwin_temp_regex(dir) {
+                p.push_str(&format!(
+                    "(allow file-read-metadata (literal \"{}\"))\n",
+                    escape_sbpl_string(&dir.to_string_lossy())
+                ));
+                p.push_str(&format!("(allow file-read* (regex #\"{rx}\"))\n"));
+                p.push_str(&format!("(allow file-write* (regex #\"{rx}\"))\n"));
+            }
+        }
+        // Metadata-only grants (`SandboxManifest::fs_metadata_read_allow`).
+        // `literal`, never `subpath`: the caller is naming ONE file it needs the
+        // child to be able to `stat`, and a subpath would hand over the whole
+        // directory's metadata and let `realpath` walk it. `file-read-metadata`
+        // does NOT permit reading contents and does NOT permit `readdir` — the
+        // same operation the ancestor block below relies on, live-verified in
+        // `live_integrity_macos.rs`.
+        //
+        // A denied path is SKIPPED here rather than emitted and overridden
+        // later, because "emitted and overridden later" does not work.
+        //
+        // SBPL is last-match-wins only WITHIN one operation. It resolves across
+        // operations by specificity, and `file-read-metadata` is more specific
+        // than the `file-read*` wildcard the deny block emits. Measured on
+        // Darwin 25.3.0, and it is why the live negative control failed on the
+        // first CI cycle rather than in review:
+        //
+        //   (allow file-read-metadata (literal F))
+        //   (deny  file-read*         (subpath  F))   <- later, and LOSES
+        //   $ stat -f %z F  ->  12          # the deny did not bite
+        //
+        // whereas the same deny after a WILDCARD allow does bite:
+        //
+        //   (allow file-read* (subpath <dir>))
+        //   (deny  file-read* (subpath F))
+        //   $ stat -f %z F  ->  Operation not permitted
+        //
+        // So the deny is enforced HERE, at profile construction, by never
+        // minting the grant: fail-closed by omission, and independent of any
+        // precedence subtlety in a future macOS revision. `starts_with` so a
+        // deny on an ancestor directory covers the file underneath it.
+        for path in &manifest.fs_metadata_read_allow {
+            reject_unsafe_path(path)?;
+            if manifest
+                .fs_read_deny
+                .iter()
+                .any(|denied| path.starts_with(denied))
+            {
+                continue;
+            }
+            p.push_str(&format!(
+                "(allow file-read-metadata (literal \"{}\"))\n",
+                escape_sbpl_string(&path.to_string_lossy())
+            ));
+        }
+        // Path-resolution ancestors. `file-read-metadata` is the narrowest
+        // seatbelt operation that satisfies `stat`/`lstat`/`realpath`: it does
+        // NOT permit reading file contents and does NOT permit listing a
+        // directory (`readdir` needs `file-read-data` on the directory node),
+        // both externally re-confirmed under a live `sandbox-exec` — `ls
+        // /Users`, `cat ~/.ssh/id_ed25519` and `cat /etc/passwd` all stay
+        // "Operation not permitted" while `stat /Users` succeeds. Every path
+        // emitted here is a prefix of a path the manifest ALREADY grants in
+        // full, so an attacker learns nothing it could not derive from its own
+        // grant list. Emitted before the deny block so a `fs_read_deny` entry
+        // still wins under SBPL last-match-wins.
+        for ancestor in ancestor_directories(manifest, darwin_temp) {
+            p.push_str(&format!(
+                "(allow file-read-metadata (literal \"{}\"))\n",
+                escape_sbpl_string(&ancestor)
+            ));
+        }
         // Secret-read-deny: emitted AFTER all allows so SBPL last-match-wins
         // semantics make the deny authoritative even under an allowed subtree.
         // Paths must be canonicalized by the caller (WorkspacePolicy) before
@@ -215,6 +511,13 @@ impl SandboxBackend for SandboxExecBackend {
     }
 
     fn enforces_read_deny(&self) -> bool {
+        true
+    }
+
+    /// The generated SBPL profile is deny-by-default for `file-write*`, with
+    /// allows emitted only for the manifest's granted subpaths, so a write
+    /// outside them is refused by the kernel.
+    fn confines_filesystem(&self) -> bool {
         true
     }
 
@@ -408,6 +711,251 @@ mod tests {
         assert!(
             deny_line.contains("\\\""),
             "expected escaped quote in: {deny_line}"
+        );
+    }
+
+    // ── macOS toolchain grant-set tests ───────────────────────────────────────
+    //
+    // Measured RED these encode (live `sandbox-exec` on darwin 25.3.0, profile
+    // reproduced from this generator, evidence in
+    // `RED-baseline.txt` / `negative-controls.txt`):
+    //   node    -> `Error: EPERM: operation not permitted, lstat '/Users'`
+    //   python3 -> `realpath: /opt/homebrew/bin/: Operation not permitted`
+    //   cargo   -> `fopen('/private/etc/ssl/openssl.cnf', 'rb')` Operation not permitted
+    // Both are grant-set defects in the generated profile, so both are
+    // falsifiable at generator level.
+
+    /// The manifest a genuinely-local macOS session produces: a workspace
+    /// under $HOME plus toolchain roots several levels below $HOME and /opt.
+    fn toolchain_manifest() -> SandboxManifest {
+        SandboxManifest {
+            fs_read_allow: vec!["/Users/alice/.cargo/bin".into(), "/opt/homebrew/bin".into()],
+            fs_write_allow: vec!["/Users/alice/proj".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn profile_grants_metadata_read_on_every_granted_path_ancestor() {
+        let p = SandboxExecBackend::build_profile(&toolchain_manifest()).expect("profile builds");
+        for ancestor in [
+            "/Users",
+            "/Users/alice",
+            "/Users/alice/.cargo",
+            "/opt",
+            "/opt/homebrew",
+        ] {
+            assert!(
+                p.contains(&format!(
+                    "(allow file-read-metadata (literal \"{ancestor}\"))"
+                )),
+                "missing ancestor metadata grant for {ancestor}; realpath()/lstat() \
+                 walks a path component at a time and EPERMs on the first \
+                 ungranted ancestor. Profile:\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_ancestor_grants_are_metadata_only_and_never_widen_to_home() {
+        let p = SandboxExecBackend::build_profile(&toolchain_manifest()).expect("profile builds");
+        // The ancestors must NOT become readable subtrees — that would hand a
+        // sandboxed command every file under $HOME.
+        for widened in [
+            "(allow file-read* (subpath \"/Users\"))",
+            "(allow file-read* (literal \"/Users\"))",
+            "(allow file-read* (subpath \"/Users/alice\"))",
+            "(allow file-read* (literal \"/Users/alice\"))",
+            "(allow file-write* (subpath \"/Users\"))",
+            "(allow file-write* (subpath \"/Users/alice\"))",
+            "(allow file-read* (subpath \"/opt\"))",
+        ] {
+            assert!(
+                !p.contains(widened),
+                "profile widened an ancestor into a full grant: {widened}\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_grants_system_openssl_config_as_a_literal() {
+        // LibreSSL (cargo/curl on macOS) opens this file at init.
+        let p =
+            SandboxExecBackend::build_profile(&SandboxManifest::default()).expect("profile builds");
+        assert!(
+            p.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"),
+            "missing the LibreSSL config grant; `cargo --version` fails with \
+             `Auto configuration failed … fopen('/private/etc/ssl/openssl.cnf')`.\n{p}"
+        );
+        // Narrow: the surrounding directory and its siblings stay denied.
+        for widened in [
+            "(allow file-read* (subpath \"/private/etc\"))",
+            "(allow file-read* (subpath \"/private/etc/ssl\"))",
+            "(allow file-read* (literal \"/private/etc/ssl/x509v3.cnf\"))",
+        ] {
+            assert!(
+                !p.contains(widened),
+                "openssl.cnf grant widened beyond the single file: {widened}\n{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_emits_ancestor_metadata_before_read_deny() {
+        // SBPL is last-match-wins: a secret-read deny must still override any
+        // grant, including the ancestor metadata block.
+        let m = SandboxManifest {
+            fs_read_allow: vec!["/Users/alice/proj".into()],
+            fs_read_deny: vec!["/Users/alice/proj/.env".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        let metadata_pos = p
+            .find("(allow file-read-metadata (literal \"/Users/alice\"))")
+            .expect("ancestor metadata grant must exist");
+        let deny_pos = p
+            .find("(deny file-read* (subpath \"/Users/alice/proj/.env\"))")
+            .expect("read-deny must exist");
+        assert!(
+            deny_pos > metadata_pos,
+            "read-deny must be emitted after the ancestor metadata grants \
+             (last-match-wins); metadata_pos={metadata_pos} deny_pos={deny_pos}"
+        );
+    }
+
+    #[test]
+    fn profile_ancestor_grants_are_escaped_and_deduplicated() {
+        // Two grants under one parent must not emit the parent twice, and a
+        // quote in a path must not break out of the SBPL string literal.
+        let m = SandboxManifest {
+            fs_read_allow: vec!["/Users/alice/a".into(), "/Users/alice/b".into()],
+            fs_write_allow: vec!["/Users/al\"ice/c".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert_eq!(
+            p.matches("(allow file-read-metadata (literal \"/Users/alice\"))")
+                .count(),
+            1,
+            "shared ancestor emitted more than once:\n{p}"
+        );
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/al\\\"ice\"))"),
+            "quote in an ancestor path must be escaped:\n{p}"
+        );
+    }
+
+    /// `fs_metadata_read_allow` must produce a METADATA grant and nothing else.
+    ///
+    /// The whole point of the channel is that the child learns the file exists
+    /// without reading a byte of it, so a `file-read*` grant on the same path —
+    /// in either the `literal` or the `subpath` spelling — is the failure this
+    /// pins. `/Users/alice/.gitconfig` is the real caller: libgit2 hard-errors
+    /// on the EPERM seatbelt returns for an ungranted path, and the file holds
+    /// the operator's identity and any `[url … insteadOf]` credential rewrite.
+    #[test]
+    fn metadata_read_allow_grants_metadata_and_never_content() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.gitconfig".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/alice/.gitconfig\"))"),
+            "metadata grant missing; libgit2 dies on the EPERM without it:\n{p}"
+        );
+        for widened in [
+            "(allow file-read* (subpath \"/Users/alice/.gitconfig\"))",
+            "(allow file-read* (literal \"/Users/alice/.gitconfig\"))",
+            "(allow file-read-data (literal \"/Users/alice/.gitconfig\"))",
+            "(allow file-read-metadata (subpath \"/Users/alice/.gitconfig\"))",
+        ] {
+            assert!(
+                !p.contains(widened),
+                "metadata grant widened into a content read: {widened}\n{p}"
+            );
+        }
+        // The ancestors it needs to be reachable are metadata-only too, and the
+        // home directory itself must not become readable.
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/alice\"))"),
+            "metadata grant needs its ancestors resolvable:\n{p}"
+        );
+        assert!(
+            !p.contains("(allow file-read* (subpath \"/Users/alice\"))"),
+            "metadata grant must not make the home directory readable:\n{p}"
+        );
+    }
+
+    /// A metadata grant must lose to `fs_read_deny` — and it can only do that
+    /// by never being emitted.
+    ///
+    /// Ordering is NOT enough, which is the whole reason this test exists in
+    /// this shape. Measured on Darwin 25.3.0: `(deny file-read* (subpath F))`
+    /// placed AFTER `(allow file-read-metadata (literal F))` does not stop
+    /// `stat F` — SBPL breaks ties across operations by specificity, and the
+    /// wildcard deny is less specific than the metadata allow. The first
+    /// version of this change relied on order and the live negative control on
+    /// a real macOS kernel caught it.
+    #[test]
+    fn a_denied_path_never_receives_a_metadata_grant() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.gitconfig".into()],
+            fs_read_deny: vec!["/Users/alice/.gitconfig".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            !p.contains("(allow file-read-metadata (literal \"/Users/alice/.gitconfig\"))"),
+            "a denied path was granted stat; ordering does not save this:\n{p}"
+        );
+        assert!(
+            p.contains("(deny file-read* (subpath \"/Users/alice/.gitconfig\"))"),
+            "the deny itself must still be emitted:\n{p}"
+        );
+    }
+
+    /// The deny wins through a parent directory too, not only on an exact
+    /// path match — otherwise denying a credential DIRECTORY would leave every
+    /// file under it stat-able by name.
+    #[test]
+    fn a_metadata_grant_under_a_denied_directory_is_also_withheld() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.config/git/config".into()],
+            fs_read_deny: vec!["/Users/alice/.config".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            !p.contains("(allow file-read-metadata (literal \"/Users/alice/.config/git/config\"))"),
+            "a deny on the parent directory must withhold the grant:\n{p}"
+        );
+        // A SIBLING of the denied tree is unaffected — the filter must be a
+        // prefix test, not "any deny disables every metadata grant".
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.gitconfig".into()],
+            fs_read_deny: vec!["/Users/alice/.config".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/Users/alice/.gitconfig\"))"),
+            "an unrelated deny must not withhold this grant:\n{p}"
+        );
+    }
+
+    /// The same malformed-path refusal the content channels get. A NUL or
+    /// newline cannot be represented in an SBPL string, and silently mangling
+    /// it would emit a profile that grants something the caller never named.
+    #[test]
+    fn metadata_read_allow_rejects_a_path_that_cannot_be_represented() {
+        let m = SandboxManifest {
+            fs_metadata_read_allow: vec!["/Users/alice/.git\nconfig".into()],
+            ..Default::default()
+        };
+        assert!(
+            SandboxExecBackend::build_profile(&m).is_err(),
+            "a newline-bearing metadata path must be refused, not mangled"
         );
     }
 
@@ -731,6 +1279,422 @@ mod tests {
         assert!(p.contains("(allow file-read* (subpath \"/tmp/work\"))"));
         assert!(p.contains("(allow file-read* (subpath \"/var/tmp/scratch\"))"));
         assert!(p.contains("(allow file-write* (subpath \"/var/tmp/scratch\"))"));
+    }
+
+    /// The Darwin per-user temp grant must be read AND write (mkstemp opens
+    /// O_RDWR), must be a `regex` and never a `subpath`, and its ancestors must
+    /// get the metadata grants `realpath(3)` needs — a grant on
+    /// `/private/var/folders/a/b/T` alone leaves `/private/var/folders` denied
+    /// and the resolve fails before the grant is ever consulted.
+    ///
+    /// A fixed path is injected rather than read from `confstr`, because a test
+    /// that called the same `confstr` the code calls would agree with the code
+    /// no matter which directory the code emitted.
+    #[test]
+    fn profile_grants_the_darwin_per_user_temp_dir() {
+        let t = std::path::Path::new("/private/var/folders/8h/probe/T");
+        let m = SandboxManifest::default();
+
+        let p = SandboxExecBackend::build_profile_with_darwin_temp(&m, Some(t))
+            .expect("profile builds");
+        let rx = darwin_temp_regex(t).expect("regex builds for an ordinary path");
+        assert!(
+            p.contains(&format!("(allow file-read* (regex #\"{rx}\"))")),
+            "mkstemp opens O_RDWR, so a write-only grant is not enough: {p}"
+        );
+        assert!(
+            p.contains(&format!("(allow file-write* (regex #\"{rx}\"))")),
+            "profile must let Darwin's confstr temp dir be written: {p}"
+        );
+        assert!(
+            p.contains("(allow file-read-metadata (literal \"/private/var/folders/8h/probe/T\"))"),
+            "the directory node needs metadata so realpath resolves through it: {p}"
+        );
+        for ancestor in [
+            "/private",
+            "/private/var",
+            "/private/var/folders",
+            "/private/var/folders/8h",
+            "/private/var/folders/8h/probe",
+        ] {
+            assert!(
+                p.contains(&format!(
+                    "(allow file-read-metadata (literal \"{ancestor}\"))"
+                )),
+                "path resolution needs a metadata grant on {ancestor}: {p}"
+            );
+        }
+
+        // THE CONTAINMENT LINE. A `subpath` grant here is what
+        // tests/live_integrity_macos.rs caught: its "must never be reachable"
+        // directory is a `tempfile::tempdir()`, which on macOS lives inside
+        // this very directory, and a subpath grant turned that suite's escape
+        // attempt into a success. Nothing may re-introduce that shape.
+        assert!(
+            !p.contains("(subpath \"/private/var/folders/8h/probe/T\")"),
+            "the temp grant must never widen to a subpath over the whole \
+             per-user temp directory: {p}"
+        );
+        assert!(
+            !rx.contains(".tmp"),
+            "the pattern must not reach tempfile-style dot-prefixed scratch \
+             directories, which is where an escape target lands: {rx}"
+        );
+
+        // And the grant must be absent when the host reports no such directory,
+        // so the `None` arm cannot silently widen anything.
+        let none =
+            SandboxExecBackend::build_profile_with_darwin_temp(&m, None).expect("profile builds");
+        assert!(
+            !none.contains("/private/var/folders"),
+            "no confstr temp dir means no grant: {none}"
+        );
+    }
+
+    /// A path that cannot be represented in an SBPL regex literal must fail
+    /// CLOSED — no grant — rather than emit a literal a `"` could break out of.
+    #[test]
+    fn darwin_temp_regex_refuses_a_quote_or_backslash() {
+        assert!(darwin_temp_regex(std::path::Path::new("/private/var/x\"y/T")).is_none());
+        assert!(darwin_temp_regex(std::path::Path::new("/private/var/x\\y/T")).is_none());
+        // A dot in a real component must be escaped, not left as "any char".
+        let rx = darwin_temp_regex(std::path::Path::new("/private/var/a.b/T"))
+            .expect("an ordinary dotted component is representable");
+        assert!(rx.contains("a\\.b"), "unescaped regex metacharacter: {rx}");
+
+        // SBPL's regex engine has no `{n}` interval and does not report one —
+        // the rule simply never matches, which on Darwin 25.3.0 left `mktemp`
+        // at "Operation not permitted" while the profile loaded cleanly.
+        assert!(
+            !rx.contains('{'),
+            "a bounded-repetition interval silently never matches under SBPL: {rx}"
+        );
+        assert_eq!(
+            rx.matches("[A-Za-z0-9]").count(),
+            10,
+            "mktemp's ten template positions must be written out: {rx}"
+        );
+
+        // xcrun's cache must stay outside the grant. Covering the temp file
+        // alone changed the error text and littered 50 orphans in one evening;
+        // covering its rename destination would make `<T>/xcrun_db` — the
+        // tool-path cache every `xcrun` on this account consults — writable
+        // from inside the sandbox.
+        assert!(
+            !rx.contains("xcrun"),
+            "the xcrun cache is deliberately not granted: {rx}"
+        );
+    }
+
+    /// The prefix half of the pattern may not admit a `.`.
+    ///
+    /// mktemp's `XXXXXXXXXX` is ten alphanumerics, and a reverse-DNS directory
+    /// name whose final label is ten alphanumerics has the same shape. Measured
+    /// against the real `confstr` directory on Darwin 25.3.0 — 10 517 top-level
+    /// entries — a prefix class containing `.` matched seven live Apple daemon
+    /// directories (`com.apple.dataaccess`, `com.apple.adprivacyd`,
+    /// `com.apple.biomesyncd`, `com.apple.calaccessd`, `com.apple.sessionkit`,
+    /// `com.apple.BiomeAgent`, `com.apple.ap.adprivacyd`), and with `(/.*)?`
+    /// appended that was recursive read AND write over each of them.
+    ///
+    /// This is the cheap shape pin that runs on every platform;
+    /// [`the_temp_grant_denies_a_reverse_dns_neighbour`] is the live proof that
+    /// SBPL's own engine agrees, which is the one that actually counts.
+    #[test]
+    fn darwin_temp_regex_prefix_class_admits_no_dot() {
+        let rx = darwin_temp_regex(std::path::Path::new("/private/var/folders/8h/probe/T"))
+            .expect("regex builds");
+        assert!(
+            rx.contains("/[A-Za-z0-9_][A-Za-z0-9_-]*\\."),
+            "the prefix class must exclude `.` or a reverse-DNS neighbour whose \
+             last label is ten alphanumerics falls inside the grant: {rx}"
+        );
+        assert!(
+            !rx.contains("[A-Za-z0-9_.-]"),
+            "this is the exact class that granted seven Apple daemon dirs: {rx}"
+        );
+    }
+
+    /// The live half: SBPL's own engine must refuse a neighbour of the shape
+    /// that used to slip through, while `mktemp`'s shape still works.
+    ///
+    /// Both directions are in ONE test on purpose. A grant that stopped
+    /// matching `mktemp` and a grant that reached a neighbour are both
+    /// failures, and SBPL reports neither — a rule that never matches loads in
+    /// complete silence (that is how the `{10}` interval bug survived). Only a
+    /// positive control next to the negative one separates "correctly narrow"
+    /// from "silently dead".
+    ///
+    /// The neighbour is synthesised rather than borrowed from Apple: it has the
+    /// same NAME SHAPE as `com.apple.dataaccess` (a dotted prefix plus a
+    /// ten-alphanumeric final label) but belongs to this test, so the assertion
+    /// never depends on which daemons happen to be running and the test never
+    /// writes into another process's scratch.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn the_temp_grant_denies_a_reverse_dns_neighbour() {
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+        let t = darwin_user_temp_dir().expect("confstr reports a per-user temp dir");
+        let work = tempfile::tempdir().expect("workspace");
+        let canon_work = std::fs::canonicalize(work.path()).expect("canonicalize workspace");
+        let m = SandboxManifest {
+            fs_write_allow: vec![canon_work],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        // `{:010}` of a u32 pid is always exactly ten digits, which is exactly
+        // mktemp's template width, and unique enough that two concurrent runs
+        // cannot collide.
+        let tag = format!("{:010}", std::process::id());
+        assert_eq!(
+            tag.len(),
+            10,
+            "fixture is dead: the final label must be ten characters or neither \
+             directory has the shape this test exists to discriminate"
+        );
+        let neighbour = t.join(format!("com.waylandtest.{tag}"));
+        let mktemp_shaped = t.join(format!("tmp.{tag}"));
+        std::fs::create_dir_all(&neighbour).expect("create the synthetic neighbour");
+        std::fs::create_dir_all(&mktemp_shaped).expect("create the mktemp-shaped dir");
+
+        // NEGATIVE first, graded from the filesystem rather than the exit code.
+        // An `is_error: false` with no side effect on disk is the failure this
+        // project has been burned by; here the inverse matters just as much —
+        // a file on disk is the only proof the denial did not hold.
+        let denied_target = neighbour.join("probe");
+        let _ = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/tee".into(),
+                        denied_target.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("backend runs even when the confined child fails");
+        let leaked = denied_target.exists();
+        let _ = std::fs::remove_file(&denied_target);
+        let _ = std::fs::remove_dir(&neighbour);
+
+        // POSITIVE: the same operation one directory over, at mktemp's naming,
+        // must still succeed — otherwise the grant is silently dead.
+        let allowed_target = mktemp_shaped.join("probe");
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/tee".into(),
+                        allowed_target.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("backend runs");
+        let landed = allowed_target.exists();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let _ = std::fs::remove_file(&allowed_target);
+        let _ = std::fs::remove_dir(&mktemp_shaped);
+
+        assert!(
+            !leaked,
+            "a sandboxed write reached {denied_target:?} — a reverse-DNS \
+             neighbour under the per-user temp directory is inside the grant again"
+        );
+        assert!(
+            landed,
+            "the grant no longer covers mktemp's own naming, so `mktemp` is \
+             broken under the sandbox; stderr={stderr:?}"
+        );
+    }
+
+    /// The new grant must not outrank a secret deny. SBPL is last-match-wins
+    /// and `fs_read_deny` is emitted after every allow, so a secret that
+    /// happens to live under the Darwin temp directory must still be denied.
+    #[test]
+    fn darwin_temp_grant_still_loses_to_a_read_deny() {
+        let t = std::path::Path::new("/private/var/folders/8h/probe/T");
+        let m = SandboxManifest {
+            fs_read_deny: vec!["/private/var/folders/8h/probe/T/secret".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile_with_darwin_temp(&m, Some(t))
+            .expect("profile builds");
+        let rx = darwin_temp_regex(t).expect("regex builds");
+        let allow = p
+            .find(&format!("(allow file-write* (regex #\"{rx}\"))"))
+            .expect("temp grant present");
+        let deny = p
+            .find("(deny file-read* (subpath \"/private/var/folders/8h/probe/T/secret\"))")
+            .expect("deny present");
+        assert!(
+            deny > allow,
+            "the deny must come after the temp grant or last-match-wins hands the secret over: {p}"
+        );
+    }
+
+    /// The string tests above prove the profile grants the directory it was
+    /// GIVEN. This proves the directory it is given is the one Darwin's own
+    /// tools actually use — the failure mode that motivated the fix was
+    /// granting `$TMPDIR` and discovering `mktemp` never reads it.
+    #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    fn darwin_user_temp_dir_is_where_mktemp_puts_files() {
+        let dir = darwin_user_temp_dir().expect("confstr reports a per-user temp dir");
+
+        // Deliberately point TMPDIR somewhere else: if `mktemp` honoured the
+        // environment there would be no defect to fix, and this assertion
+        // would fail rather than quietly agreeing.
+        let decoy = tempfile::tempdir().expect("decoy tempdir");
+        let out = std::process::Command::new("/usr/bin/mktemp")
+            .env("TMPDIR", decoy.path())
+            .output()
+            .expect("run mktemp");
+        let printed = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let canon = std::fs::canonicalize(&printed).expect("mktemp's file exists");
+        let _ = std::fs::remove_file(&canon);
+
+        assert!(
+            canon.starts_with(&dir),
+            "mktemp wrote {canon:?} but the profile would grant {dir:?}"
+        );
+    }
+
+    /// End to end, through the production `execute`: `mktemp` must produce a
+    /// file this test can see from OUTSIDE the sandbox.
+    ///
+    /// This is the row the live macOS matrix reported red on the merged tree —
+    /// `mktemp: mkstemp failed on /var/folders/…/T/tmp.XXXXXXXXXX: Operation
+    /// not permitted` — under BOTH the contained and the trusted_local profile.
+    /// `WorkspacePolicy` redirects `TMPDIR`/`TMP`/`TEMP` into the session's
+    /// granted scratch, which is why clang, python3 and node recovered, but
+    /// Darwin's `mktemp(1)` reads `confstr(_CS_DARWIN_USER_TEMP_DIR)` first and
+    /// never consults the environment, so it still targets a directory the
+    /// profile does not grant.
+    ///
+    /// The manifest carries only the workspace, exactly like the `contained`
+    /// profile, so a pass cannot come from some broader grant this test
+    /// invented. `TMPDIR` is set to the workspace on purpose: it must not be
+    /// what makes the test pass.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn sandboxed_mktemp_creates_a_file_the_host_can_see() {
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+        let work = tempfile::tempdir().expect("workspace");
+        let canon_work = std::fs::canonicalize(work.path()).expect("canonicalize workspace");
+        let m = SandboxManifest {
+            fs_write_allow: vec![canon_work.clone()],
+            env: vec![
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                // The redirect the workspace policy applies in production. It
+                // must not be what makes this pass.
+                ("TMPDIR".into(), canon_work.to_string_lossy().into_owned()),
+            ],
+            ..Default::default()
+        };
+
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec!["/usr/bin/mktemp".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("execute returns Ok");
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let printed = stdout.trim();
+        assert_eq!(
+            out.exit_code,
+            0,
+            "mktemp must succeed inside the sandbox; stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let path = std::path::Path::new(printed);
+        assert!(
+            path.is_absolute() && path.exists(),
+            "the host must see the file the sandboxed mktemp created, got {printed:?}"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The other half of the same change, and the one that matters more.
+    ///
+    /// `tests/live_integrity_macos.rs` builds its "a write here must never
+    /// reach the host" directory with `tempfile::tempdir()`, which on macOS
+    /// lands INSIDE the Darwin per-user temp directory. The first version of
+    /// this fix granted that directory as a `subpath` and turned that suite
+    /// from green to red — the escape succeeded. This test pins the property
+    /// locally so the next person to widen the grant sees it here first, in
+    /// the module they are editing, not in a separate acceptance binary.
+    ///
+    /// The mktemp test above is the positive control for this one: together
+    /// they say "the tool works AND the neighbourhood is still confined",
+    /// which neither says alone.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn the_darwin_temp_grant_does_not_open_the_whole_temp_directory() {
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+        let work = tempfile::tempdir().expect("workspace");
+        let canon_work = std::fs::canonicalize(work.path()).expect("canonicalize workspace");
+
+        // An ungranted directory that lives inside the Darwin temp tree, which
+        // is exactly what `tempfile::tempdir()` gives us on macOS.
+        let outside = tempfile::tempdir().expect("outside dir");
+        let canon_outside = std::fs::canonicalize(outside.path()).expect("canonicalize outside");
+        assert!(
+            canon_outside
+                .starts_with(darwin_user_temp_dir().expect("confstr reports a per-user temp dir")),
+            "fixture is dead: the escape target must sit inside the Darwin temp \
+             directory or this test cannot detect the widening it exists for"
+        );
+
+        let m = SandboxManifest {
+            fs_write_allow: vec![canon_work.clone()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+        let escapee = canon_outside.join("escapee");
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/usr/bin/tee".into(),
+                        escapee.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("backend runs even though the confined child fails");
+        assert_ne!(
+            out.exit_code,
+            0,
+            "a write into the Darwin temp tree outside the workspace must stay denied; \
+             stderr={:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !escapee.exists(),
+            "an escaping write must never reach the host filesystem"
+        );
     }
 
     #[test]

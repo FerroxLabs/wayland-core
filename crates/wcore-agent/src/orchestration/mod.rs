@@ -31,6 +31,10 @@ fn tool_dispatch_timeout(category: ToolCategory) -> Duration {
 /// The `not_started` policy label journalled for a `[default] read_only`
 /// refusal. Stable — the journal reducer and the acceptance tests key on it.
 pub(crate) const READ_ONLY_POLICY: &str = "read_only";
+/// The `not_started` policy label journalled when the unreachable-human
+/// freeze refuses a call (row B-3). Stable, for the same reason
+/// `READ_ONLY_POLICY` is: the journal reducer keys on it.
+pub(crate) const HUMAN_UNREACHABLE_POLICY: &str = "human_unreachable";
 
 /// The refusal a read-only session returns instead of running `tool`.
 ///
@@ -47,6 +51,24 @@ pub(crate) fn read_only_refusal(tool: &str) -> String {
          here — that is Read, Grep and Glob; every other tool, including Skill \
          (whose body can embed shell), is refused. Clear `read_only` in \
          config.toml to lift this."
+    )
+}
+
+/// Refusal text for the human-unreachable freeze (corpus row B-3).
+///
+/// Says the two things the model has to act on: nothing that changes the
+/// world will run, and the one call that lifts the freeze is a delivered
+/// message. It must not read as advice — the previous behaviour WAS advice
+/// (POLICY.md, read by the model), and it held in only half the runs.
+pub(crate) fn human_unreachable_refusal(tool: &str) -> String {
+    format!(
+        "Refused: the last attempt to reach a human failed and no message has \
+         been delivered since, so this session has no supervision. `{tool}` \
+         changes state, so it was not run and no PreToolUse hook fired for it. \
+         Read-only tools still work. Get a message delivered — fix the target \
+         or the channel and send again — and the session resumes; if you \
+         cannot, stop and report that you could not reach anyone rather than \
+         acting without them."
     )
 }
 
@@ -100,6 +122,8 @@ pub mod workflow;
 mod d1_refusal_terminal_tests;
 #[cfg(test)]
 mod f13_durability_tests;
+#[cfg(test)]
+mod human_unreachable_gate_tests;
 #[cfg(test)]
 mod read_only_gate_tests;
 
@@ -1458,6 +1482,60 @@ async fn execute_single_with_streaming(
         return (block, None, crate::hooks::HookOutcome::default(), false);
     }
 
+    // Corpus row B-3 — the unreachable-human freeze.
+    //
+    // Sits directly behind the read-only gate and borrows its shape on
+    // purpose: same default-deny predicate (`Tool::read_only_safe`), same
+    // position ahead of PreToolUse hooks, so a refused call still fires no
+    // operator shell.
+    //
+    // What it enforces: while the last word from the outbound human-contact
+    // route is a FAILURE, nothing that changes the world may run. There was
+    // no product-side notion of this at all — `confirm.rs` and the protocol
+    // approval manager gate tool calls against a permission policy, and
+    // nothing mapped "I could not reach anyone" onto a gate. Every refusal
+    // ever observed on this row was the model reading POLICY.md and choosing
+    // to stop, which is a model behaviour and measured at roughly a coin
+    // flip: with the approval mail undeliverable, one of two graded runs
+    // rewrote the dependency pin on disk with no approval on record.
+    //
+    // Two carve-outs, both load-bearing:
+    //  * read-only tools still run, so the agent can diagnose and report;
+    //  * the human-contact surface itself still runs, because it is the only
+    //    call that can clear the latch. Freezing it would deadlock the
+    //    session into the failure it is trying to escape.
+    if registry.human_unreachable()
+        && !registry
+            .get(name)
+            .is_some_and(|tool| tool.read_only_safe(input) || tool.reaches_a_human())
+    {
+        let durable = record_tool_not_started(
+            effect_scope,
+            id,
+            ordinal,
+            name,
+            input,
+            input,
+            registry
+                .get(name)
+                .map(|tool| tool.effect_contract(input))
+                .unwrap_or_default(),
+            ToolNotStartedReason::PolicyDenied {
+                policy: HUMAN_UNREACHABLE_POLICY.to_string(),
+            },
+            None,
+        );
+        let block = durable.map_or_else(
+            |error| journal_authority_failure(id, error),
+            |()| ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: human_unreachable_refusal(name),
+                is_error: true,
+            },
+        );
+        return (block, None, crate::hooks::HookOutcome::default(), false);
+    }
+
     // Run pre-tool-use hooks. A crash-proven retry reuses the pre-hook
     // authority from its original attempt: rerunning hooks could mutate the
     // input differently or repeat an external hook effect.
@@ -1741,7 +1819,18 @@ async fn execute_single_with_streaming(
             // every turn — pairs with the B-1 timeout so a flaky MCP
             // server is both bounded per-call AND backed off across
             // calls.
-            if registry.breaker_is_open(name) {
+            //
+            // Row B-3 exemption: NEVER back off the outbound route to a
+            // human. The breaker's job is to stop hammering a flaky backend;
+            // applied to the human-contact surface it instead deletes the
+            // session's only supervision and hands the model the same string
+            // it gets for a real delivery failure. Measured: three refused
+            // sends in one window opened the breaker, and the fourth attempt —
+            // the one the mail host recorded as DELIVERED in the green run —
+            // was refused locally and never reached the wire. A retry here is
+            // one cheap socket; the loop is still bounded by LoopGuard and the
+            // consecutive-failure cap.
+            if registry.breaker_is_open(name) && !tool.reaches_a_human() {
                 if let Err(error) = record_tool_attempt_not_started(
                     effect_scope,
                     id,
@@ -2403,7 +2492,12 @@ async fn execute_single_with_streaming(
             // `is_error: true` results above), so a tool that keeps
             // wedging eventually trips the breaker and is short-circuited
             // on the next turn.
-            registry.record_breaker_outcome(name, r.is_error);
+            registry.record_dispatch_outcome(name, &r);
+            // Row B-3: same dispatch outcome, against the human-contact
+            // latch. A failed send arms the freeze above; a delivered one
+            // lifts it. No-op for every tool that is not the outbound
+            // messaging surface.
+            registry.record_human_reach_outcome(name, r.is_error);
             // _budget_guard drops here, recording elapsed runtime.
             let modifier = if r.is_error {
                 None
@@ -3232,6 +3326,33 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                     return Err(ExecutionControl::Quit);
                 }
             }
+        } else {
+            // The call skipped the approval gate, so no `tool_request` went out
+            // - but the host still needs the call announced before any
+            // `tool_running`, or it has no `call_id` to match later frames
+            // against and fails the session closed mid-turn.
+            //
+            // Measured against published 0.12.26 by the desktop lane: two
+            // parallel `ToolSearch` calls 4 ms apart, the first gated and
+            // answered `Always`, which flipped `is_tool_name_auto_approved` for
+            // the second. The second dispatched with nothing on the wire and
+            // the engine exited mid-turn, blocking the Smart Trader setup path.
+            //
+            // This is `call_announced` and NOT a second `tool_request` on
+            // purpose: `tool_request` renders an approve/deny card, so reusing
+            // it would ask the operator to confirm a tool they already granted
+            // permanently. See `ProtocolEvent::CallAnnounced` for the full
+            // reasoning, including why the type name has no `tool_` prefix.
+            let _ = writer.emit(&ProtocolEvent::CallAnnounced {
+                msg_id: msg_id.to_string(),
+                call_id: id.clone(),
+                tool: ToolInfo {
+                    name: name.clone(),
+                    category,
+                    args: input.clone(),
+                    description,
+                },
+            });
         }
 
         // Emit tool_running
@@ -4925,6 +5046,135 @@ mod tests {
                 events.push(event.clone());
             }
             Ok(())
+        }
+    }
+
+    /// Desktop -> Core, 2026-08-12: an auto-approved call emitted `tool_running`
+    /// with NO `tool_request` ever on the wire. The desktop host requires a
+    /// request matching on both `call_id` and `msg_id` before any running
+    /// frame, so it failed closed and the engine exited mid-turn - blocking
+    /// the entire Smart Trader setup path.
+    ///
+    /// Root cause: `tool_request` was emitted only inside the `needs_approval`
+    /// branch, so force mode, an allow-listed tool, a command-scoped grant, a
+    /// recovered approval, or a tool just granted `ApprovalScope::Always` all
+    /// dispatched straight to `tool_running` with no request.
+    ///
+    /// WHY THE SIBLING TEST BELOW DID NOT CATCH IT: it approves BOTH calls
+    /// `Once`, so both take the gated branch and both emit a request. An
+    /// invariant named "every call must emit tool_request" only ever exercised
+    /// the branch where that was already true.
+    ///
+    /// Here the first call is approved `Always`, which flips
+    /// `is_tool_name_auto_approved` for the second call in the SAME batch -
+    /// reproducing the measured 4 ms double-`ToolSearch` exactly.
+    ///
+    /// RESOLVED by `ProtocolEvent::CallAnnounced`. The naive fix - emit a second
+    /// `tool_request` - was written, proven red-then-green, and REVERTED: the
+    /// desktop host renders `tool_request` as an approve/deny card, so it would
+    /// have asked the operator to confirm a tool they already granted
+    /// permanently. `scoped_auto_approval_is_bound_to_original_tool_input`
+    /// asserts that absence and is correct; it still passes untouched.
+    #[tokio::test]
+    async fn an_auto_approved_call_is_announced_before_it_runs() {
+        use wcore_protocol::events::ProtocolEvent;
+        use wcore_protocol::{ToolApprovalManager, commands::ApprovalScope};
+
+        let registry = make_registry_with_deferred();
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        let call_ids = ["call_always_a", "call_always_b"];
+        let calls: Vec<ContentBlock> = call_ids
+            .iter()
+            .map(|id| ContentBlock::ToolUse {
+                id: (*id).into(),
+                name: "MockNonDeferred".into(),
+                input: json!({"cmd": *id}),
+                extra: None,
+            })
+            .collect();
+
+        let mgr_clone = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                for id in call_ids {
+                    mgr_clone.approve(id, ApprovalScope::Always, None);
+                }
+            }
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            execute_tool_calls_with_approval(
+                &registry,
+                &calls,
+                &mgr,
+                &writer,
+                "msg-always",
+                &[],
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("approval round-trip timed out - approve-nudger exhausted")
+        .expect("should not return ExecutionControl");
+        assert_eq!(outcome.results.len(), 2, "both tools must produce results");
+
+        // CONTROL. If the `Always` grant never landed, both calls took the
+        // gated branch, the auto-approval path was never entered, and the
+        // assertions below would pass against the very build this test exists
+        // to catch. Fail loud rather than pass vacuously.
+        assert!(
+            mgr.is_tool_name_auto_approved("MockNonDeferred"),
+            "control failed: the Always grant never landed, so no call took the \
+             auto-approval path and this test proves nothing"
+        );
+
+        let events = emitter.0.lock().expect("emitter mutex").clone();
+
+        // SECOND CONTROL. At least one call must have taken the auto-approval
+        // path and been ANNOUNCED rather than requested. Without this, a build
+        // that gated both calls would satisfy the loop below while never
+        // exercising the defect at all.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProtocolEvent::CallAnnounced { .. })),
+            "control failed: no call was auto-approved, so the announce path was              never exercised and this test proves nothing"
+        );
+
+        for expected in call_ids {
+            // Every dispatched call owes the host an anchor frame carrying its
+            // call_id BEFORE tool_running - `tool_request` when the operator was
+            // asked, `call_announced` when they were not. Either satisfies the
+            // host sequence rule; neither being present kills the turn.
+            let anchor = events.iter().position(|e| {
+                matches!(e, ProtocolEvent::ToolRequest { call_id, msg_id, .. }
+                    | ProtocolEvent::CallAnnounced { call_id, msg_id, .. }
+                    if call_id == expected && msg_id == "msg-always")
+            });
+            let run = events.iter().position(|e| {
+                matches!(e, ProtocolEvent::ToolRunning { call_id, msg_id, .. }
+                    if call_id == expected && msg_id == "msg-always")
+            });
+            let run = run.unwrap_or_else(|| panic!("tool_running missing for {expected}"));
+            let anchor = anchor.unwrap_or_else(|| {
+                panic!(
+                    "no tool_request and no call_announced for {expected} - the host fails closed"
+                )
+            });
+            assert!(
+                anchor < run,
+                "the anchor frame for {expected} must precede tool_running (anchor={anchor}, run={run})"
+            );
         }
     }
 

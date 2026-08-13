@@ -341,39 +341,45 @@ pub fn govern_standalone_spawner(
 /// It previously used `ChannelConfigLoader::default_root()`, which joins
 /// `$HOME/.wayland/channels` unconditionally — see F24-C3-H1 at the call site
 /// for what that broke, in both directions.
-pub fn load_channel_policy_configs() -> Vec<wcore_channels::config::ChannelConfig> {
-    try_load_channel_policy_configs().unwrap_or_default()
-}
-
-/// The same load, with the error kept.
 ///
-/// F24-C3-H5. The two loaders over `<home>/channels` disagree about a
-/// malformed file, and the disagreement is dangerous once a reload can
-/// re-install policies at runtime:
+/// # Why this is fallible, and why there is only ONE of it
 ///
-/// - [`wcore_channels_registry::auto_register_from_dir`] SKIPS an unparseable
-///   file with a warning and returns `Ok`, so the other adapters still
-///   register;
-/// - [`wcore_channels::config::ChannelConfigLoader::load_all`] stops at the
-///   first failure and returns `Err`, which
-///   [`load_channel_policy_configs`]'s `unwrap_or_default` turns into an
-///   EMPTY policy set.
+/// There used to be two: this one, and a `load_channel_policy_configs` that was
+/// `try_load_channel_policy_configs().unwrap_or_default()`. The two loaders over
+/// `<home>/channels` disagree about a malformed file —
+/// [`wcore_channels_registry::auto_register_from_dir`] SKIPS it with a warning
+/// and registers the rest, while
+/// [`wcore_channels::config::ChannelConfigLoader::load_all`] stops at the first
+/// failure and returns `Err` — and the `unwrap_or_default` turned that `Err`
+/// into an EMPTY policy set.
 ///
-/// At startup that combination is merely visible (`policies=0` in the gateway's
-/// own log). At RELOAD it would be destructive: one newly-typo'd file would
-/// swap every running channel's policy out for the fail-closed default and
-/// convert a working gateway into universal denial — reintroducing the exact
-/// defect this lane is repairing, by a different route.
+/// Every cold-start entry point used the lossy one, so ONE unparseable `.toml`
+/// in the directory switched the whole P2 gate off: `refuse_open_admission([])`
+/// is `Ok`, and a `dm = "open"` channel sitting next to the junk file started
+/// with no refusal and no warning. The admission consequence was fail-CLOSED
+/// (an empty registry denies everyone), so it was never an admits-everyone
+/// hole — but a security gate that any stray file in the directory can silently
+/// satisfy is not a gate. The second consequence was worse for the operator: a
+/// single typo converted a working gateway into universal denial at the next
+/// restart, silently.
 ///
-/// So the reload path uses this function and **refuses to swap** on `Err`,
-/// keeping the policies it already has. The startup path keeps its historical
-/// lossy behaviour via [`load_channel_policy_configs`] so this change cannot
-/// alter how an existing deployment boots.
-pub fn try_load_channel_policy_configs()
+/// So a config that cannot be parsed is now an error the operator sees, on
+/// every path. Nothing calls `unwrap_or_default` on this any more, and there is
+/// no lossy sibling for a future call site to reach for.
+pub fn load_channel_policy_configs()
 -> Result<Vec<wcore_channels::config::ChannelConfig>, wcore_channels::ChannelError> {
     wcore_channels::config::ChannelConfigLoader::new(wcore_channels_registry::channels_dir())
         .load_all()
+        .map_err(|e| wcore_channels::ChannelError::Config(format!("{UNREADABLE_CHANNEL_DIR}: {e}")))
 }
+
+/// Framing for the error above. Lives here, once, so every surface that can hit
+/// it — headless, TUI, `--json-stream`, `gateway run`, `channel reload` — says
+/// the same thing. An operator who meets this on the desktop host and on the
+/// gateway must not have to work out that they are the same failure.
+pub const UNREADABLE_CHANNEL_DIR: &str = "inbound channel configuration could not be loaded, so the set of inbound access policies \
+     is unknown and the open-admission gate has nothing to check. Fix or remove the file named \
+     below; a channel directory that cannot be read is never treated as an empty one";
 
 /// Builder for creating a fully-initialized `AgentEngine`.
 ///
@@ -510,6 +516,70 @@ fn canonical_workspace(workspace: String) -> String {
         return workspace;
     };
     dunce::simplified(&canonical).to_string_lossy().into_owned()
+}
+
+/// The backend name that means "no real sandbox exists, so refuse everything".
+/// A session on it has no shell at all, which is the opposite of what the
+/// local-shell notice announces.
+const FAIL_CLOSED_BACKEND: &str = "fail_closed";
+
+/// The local-shell activation notice, or `None` when there is nothing true to
+/// say. Pure so every arm of the decision is directly testable against a real
+/// backend instead of being reachable only on one platform.
+///
+/// It fires exactly when this session KEPT a shell that the exec gate in
+/// `wcore_tools::bash` would otherwise have refused, i.e. all four hold:
+///
+/// * `local_operator_principal` — the relaxation applied at all;
+/// * `secret_read_deny_required` — the policy still wants OS read-deny, so the
+///   old code path would have refused;
+/// * the backend does not enforce read-deny — the refusal's trigger;
+/// * the backend is not the operator-requested containment BYPASS, which has
+///   its own, louder banner.
+///
+/// And one more, which is the difference between a notice and a lie: the
+/// backend must not be `fail_closed`. `FailClosedBackend` is installed when no
+/// real platform backend exists, reports `is_available() == true` so selection
+/// admits it, keeps the trait-default `enforces_read_deny() == false`, and is
+/// not a bypass — so it satisfies every other clause while refusing every
+/// command it is handed. Announcing "local shell enabled" there would be false.
+///
+/// On Linux (bwrap) and macOS (sandbox_exec) `enforces_read_deny()` is true at
+/// the shipping default, so this returns `None` and those platforms emit
+/// nothing new.
+fn local_shell_notice(
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    runtime: &wcore_sandbox::SandboxRegistry,
+) -> Option<String> {
+    if !(policy.local_operator_principal()
+        && policy.secret_read_deny_required()
+        && !runtime.enforces_read_deny()
+        && !runtime.bypasses_containment()
+        && runtime.backend_name() != FAIL_CLOSED_BACKEND)
+    {
+        return None;
+    }
+    // The write half is stated separately and only when true, so the sentence
+    // tracks the backend's own `confines_filesystem` claim instead of being a
+    // second, independently-rotting description of it.
+    let write_escape = if runtime.confines_filesystem() {
+        ""
+    } else {
+        " It cannot confine writes either: a Bash command can create or overwrite files \
+          ANYWHERE this user account can, not just inside the workspace — the workspace roots \
+          bound Core's own Read/Write/Edit tools, not the shell's children."
+    };
+    Some(format!(
+        "Local shell enabled WITHOUT OS secret containment: the active sandbox backend ({}) \
+         cannot enforce filesystem read-deny, so a Bash command in this session can read this \
+         workspace's secrets and your credential stores — the OS will not stop it.{} Still in \
+         force: kill-on-close process-tree ownership, per-command approval for Bash (unless you \
+         disabled approvals), the channel tool posture, and the Read/Write/Edit secret guard. \
+         This applies to your local keyboard session only; a channel or remote session on this \
+         backend still gets no shell.",
+        runtime.backend_name(),
+        write_escape,
+    ))
 }
 
 impl AgentBootstrap {
@@ -1523,6 +1593,7 @@ impl AgentBootstrap {
             crate::tool_backends::video_analyze::build_video_analyze_backend_with_accounting(
                 &self.config,
                 &media_accounting,
+                Some(std::path::Path::new(&self.workspace)),
             )
             .await
         {
@@ -1628,6 +1699,14 @@ impl AgentBootstrap {
         );
 
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
+        // Kept past the connect block so the engine can re-derive a
+        // refreshed tool's deferral exactly as boot-time registration did.
+        // Plugin-supplied servers are deliberately absent: they translate to
+        // `deferred: None`, which is what a lookup miss already resolves to.
+        let mut mcp_refresh_configs: std::collections::HashMap<
+            String,
+            wcore_config::config::McpServerConfig,
+        > = std::collections::HashMap::new();
         // wayland#551 — when the caller deferred config MCP, skip the
         // connect entirely; the caller connects in the background after
         // boot so a slow/hung server cannot gate the host's ready frame.
@@ -1673,6 +1752,7 @@ impl AgentBootstrap {
                         &resolved_servers,
                         &self.config.builtin_tools.defer_cold,
                     );
+                    mcp_refresh_configs = resolved_servers.clone();
                     mcp_managers.push(mgr.clone());
                     Some(mgr)
                 }
@@ -1724,6 +1804,16 @@ impl AgentBootstrap {
         if let Some(plugin_mcp_mgr) = plugin_mcp_manager {
             mcp_managers.push(plugin_mcp_mgr);
         }
+
+        // An MCP server may register or drop tools mid-session and say so
+        // with `notifications/tools/list_changed`. Boot-time discovery is
+        // one-shot, so without this the engine never re-lists and the tool
+        // stays uncallable for the rest of the session.
+        let mcp_catalog_refresh = Arc::new(wcore_mcp::tool_proxy::McpCatalogRefresh::new(
+            mcp_managers.clone(),
+            builtin_names.clone(),
+            mcp_refresh_configs,
+        ));
 
         let has_mcp = mcp_manager.is_some() || !mcp_managers.is_empty();
 
@@ -2341,6 +2431,32 @@ impl AgentBootstrap {
             && let Some(block) = crate::capability_advisory::render_capability_advisory(&registry)
         {
             system_prompt.push_str(&block);
+        }
+        // SECURITY (P3) — an engine attached to a remote messaging channel
+        // carries the standing untrusted-content rule in its SYSTEM prompt.
+        //
+        // This push is the WHOLE inbound boundary, and the transport enforces
+        // it. Provider request bodies are JSON: the system prompt is a
+        // separate field (Anthropic `system`, OpenAI `{"role":"system"}`) and
+        // a sender's bytes are a string value inside a USER message, so no
+        // byte a remote participant writes can terminate that string, add a
+        // sibling field, or otherwise reach this text. It replaces the
+        // in-band `<<<…>>>` marker protocol, which three rounds of Unicode
+        // bypasses showed cannot be made unforgeable, and the round-3
+        // in-turn prologue, which contradicted its own claim by being
+        // product-written text inside the turn it said held none — see the
+        // module docs on `wcore_channels::untrusted`.
+        //
+        // Delete this line and `untrusted_channel_wire_test` goes red on
+        // every leg: the directive is the only thing carrying the rule.
+        //
+        // Placed AFTER every other block so it is the last thing in the
+        // system prompt, adjacent to the conversation it governs, and applied
+        // for EVERY posture (including `Full`): the posture decides which
+        // tools a remote sender can reach, not whether their words are
+        // untrusted.
+        if self.channel_tool_posture.is_some() {
+            system_prompt.push_str(wcore_channels::untrusted::UNTRUSTED_CHANNEL_SESSION_DIRECTIVE);
         }
         self.config.system_prompt = Some(system_prompt);
 
@@ -2965,7 +3081,37 @@ impl AgentBootstrap {
                 || !self.config.workspace_trust.is_trusted();
             let workspace = std::path::PathBuf::from(&self.workspace);
             let policy = if strict_workspace {
+                // SEC-13 — the sandboxed shell's egress is decided by the
+                // OPERATOR's trusted `[security] allow_sandboxed_shell_network`,
+                // never by an inherited env var (SEC-11, see
+                // `default_bash_network_policy`) and never as a side effect of
+                // the per-host `egress_allow` permit. A channel-attached session
+                // is a remote sender and keeps the absolute #657 lockdown: the
+                // operator's switch widens the operator's own shell, not a
+                // remote sender's.
+                let network = if is_channel_remote {
+                    wcore_sandbox::NetworkPolicy::Deny
+                } else {
+                    wcore_tools::workspace_policy::operator_bash_network(
+                        self.config.security.allow_sandboxed_shell_network,
+                    )
+                };
+                // THE local-shell seam, decided by the ONE shared predicate
+                // `with_shell_principal` — the same call `sandbox exec` makes,
+                // so the session and the operator verb cannot drift apart
+                // again. `channel_tool_posture` is the engine's own
+                // construction: `Some` for exactly the channel/remote engines
+                // `ChannelTurnDispatcher` builds, `None` for the CLI / TUI /
+                // json-stream engines an operator drives from their own
+                // keyboard. It is NOT workspace trust — an untrusted workspace
+                // driven by the operator is still the operator. Repository
+                // content cannot reach either input.
                 wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
+                    .with_network(network)
+                    .with_shell_principal(
+                        is_channel_remote,
+                        self.config.execution_policy.is_managed(),
+                    )
             } else {
                 wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
                     .with_network(wcore_tools::workspace_policy::local_bash_network(false))
@@ -2982,6 +3128,35 @@ impl AgentBootstrap {
                 registry.set_tool_vfs(std::sync::Arc::new(jail));
             }
             registry.set_workspace_policy(policy);
+        }
+
+        // The local-shell activation notice. It fires exactly when this session
+        // KEPT a shell that the exec gate would otherwise have refused: a
+        // local-operator policy that still wants OS secret-read-deny, running on
+        // a backend that cannot provide it (today: the Windows relaxed
+        // `windows_job_object` default). On Linux (bwrap) and macOS
+        // (sandbox_exec) `enforces_read_deny()` is true at the shipping default,
+        // so this condition is unreachable there and the operator sees nothing
+        // new — that is what keeps those two platforms byte-for-byte unchanged.
+        //
+        // Graded off the policy the registry ACTUALLY holds, not off the branch
+        // above, so a policy installed by `apply_posture` can never be described
+        // by a notice that did not apply to it.
+        {
+            let installed = registry.workspace_policy();
+            let runtime = registry.sandbox_runtime();
+            if let Some(policy) = installed.as_deref()
+                && let Some(notice) = local_shell_notice(policy, runtime.as_ref())
+            {
+                self.output.emit_info(&notice);
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    backend = runtime.backend_name(),
+                    shell_principal = "local_operator",
+                    secret_read_deny_enforced = false,
+                    "{notice}"
+                );
+            }
         }
 
         let effective_workspace_trust = if is_channel_remote {
@@ -3096,6 +3271,7 @@ impl AgentBootstrap {
         // (the same instance the `SpawnTool` was built with) so the engine
         // and the spawner resolve plugin agents identically.
         engine.set_agent_registry(plugin_agent_registry);
+        engine.set_mcp_catalog_refresh(mcp_catalog_refresh);
         // v0.6.4 Task 1.3/1.7 — forward plugin-contributed hooks into the
         // engine's `HookEngine` (constructed inside `new_with_provider` /
         // `resume_with_provider`, so this must happen post-construction).
@@ -3510,7 +3686,13 @@ impl AgentBootstrap {
                 // is the same cross-profile leak F-019 closed for
                 // registration; `channels_dir`'s own doc comment already
                 // asserts the two loaders "never diverge", and they did.
-                let channel_configs = load_channel_policy_configs();
+                //
+                // P2 root cause 2: `?`, not `unwrap_or_default()`. An
+                // unparseable file in that directory used to empty the list,
+                // which silently switched the open-admission gate off for every
+                // sibling channel — and, on a working deployment, silently
+                // turned the next restart into universal denial.
+                let channel_configs = load_channel_policy_configs()?;
 
                 // Resolve each channel's access policy AND tool posture into
                 // one shared registry. `Workspace` jails to the channel's
@@ -3524,11 +3706,17 @@ impl AgentBootstrap {
                 // the posture while refreshing the policy is the failure mode
                 // that is WORSE than the original bug, because it is not
                 // fail-closed. One derivation, one object, one swap.
+                //
+                // P2: `from_configs` refuses a channel that admits an
+                // unbounded set of senders. The session does not start —
+                // `?` here rather than a warning, because a warning leaves
+                // the open configuration reachable, and the whole point is
+                // that it should not be.
                 let policies = std::sync::Arc::new(
                     crate::channel_policy::ChannelPolicyRegistry::from_configs(
                         channel_configs,
                         std::path::Path::new(&self.workspace),
-                    ),
+                    )?,
                 );
 
                 // Inbound-media enricher: resolve image/audio attachments to
@@ -3569,7 +3757,10 @@ impl AgentBootstrap {
                     policies,
                     60_000,
                     1024,
-                );
+                )
+                // Durable DM-pairing state, so `dm = "pairing"` is a working
+                // gate rather than a permanent deny.
+                .with_pairing_root(wcore_channels_registry::pairings_dir());
                 let handle = subscriber.spawn().await;
                 tracing::info!(
                     target: "wcore_agent::bootstrap",
@@ -5149,5 +5340,73 @@ mod tests {
         let inner = inner.expect("chatgpt inner build must not panic and must succeed");
         assert_eq!(inner.alias_key(), "openai-chatgpt");
         wrapped.expect("chatgpt wrapped build must not panic and must succeed");
+    }
+
+    /// The notice's whole truth table, driven against REAL backends rather than
+    /// whatever the host platform happens to ship. The `fail_closed` row is the
+    /// one that matters most: that backend satisfies every other clause and
+    /// then refuses every command, so announcing an enabled shell there would
+    /// be a lie about the thing the operator most needs to be right.
+    #[test]
+    fn local_shell_notice_only_fires_when_a_shell_was_actually_kept() {
+        use std::sync::Arc;
+        use wcore_sandbox::SandboxRegistry;
+        use wcore_sandbox::backends::bwrap::BubblewrapBackend;
+        use wcore_sandbox::backends::windows_job_object::WindowsJobObjectBackend;
+        use wcore_tools::workspace_policy::WorkspacePolicy;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let local = WorkspacePolicy::contained(root).with_local_operator_principal();
+        let channel = WorkspacePolicy::contained(root);
+        let trusted = WorkspacePolicy::trusted_local(root);
+
+        let relaxed = SandboxRegistry::new(Arc::new(WindowsJobObjectBackend::new()));
+        assert!(!relaxed.enforces_read_deny());
+        assert!(!relaxed.bypasses_containment());
+
+        // FIRES: the only combination where a refusal was avoided.
+        let notice = local_shell_notice(&local, &relaxed)
+            .expect("a kept-but-uncontained local shell must be announced");
+        assert!(notice.contains("windows_job_object"), "{notice}");
+        assert!(
+            notice.contains("cannot enforce filesystem read-deny"),
+            "{notice}"
+        );
+        // The write escape is the half the notice used to omit entirely.
+        assert!(!relaxed.confines_filesystem());
+        assert!(
+            notice.contains("cannot confine writes"),
+            "the notice must name the write escape, not only the read one: {notice}"
+        );
+        assert!(notice.contains("process-tree ownership"), "{notice}");
+        assert!(notice.contains("approval"), "{notice}");
+        assert!(notice.contains("channel tool posture"), "{notice}");
+        assert!(notice.contains("local keyboard session"), "{notice}");
+
+        // SILENT: no local-operator principal — the shell is still refused.
+        assert!(local_shell_notice(&channel, &relaxed).is_none());
+        // SILENT: the policy never required OS read-deny, so nothing changed.
+        assert!(local_shell_notice(&trusted, &relaxed).is_none());
+
+        // SILENT: a read-deny-enforcing backend. This is Linux and macOS at
+        // their shipping default, and it is why they emit nothing new.
+        let enforcing = SandboxRegistry::new(Arc::new(BubblewrapBackend::new()));
+        assert!(
+            enforcing.enforces_read_deny(),
+            "positive control: bwrap must claim read-deny enforcement, or the \
+             row below proves nothing"
+        );
+        assert!(local_shell_notice(&local, &enforcing).is_none());
+
+        // SILENT: fail-closed. Satisfies every other clause and runs nothing.
+        let failed = SandboxRegistry::new(Arc::new(wcore_sandbox::FailClosedBackend::new()));
+        assert_eq!(failed.backend_name(), super::FAIL_CLOSED_BACKEND);
+        assert!(!failed.enforces_read_deny());
+        assert!(!failed.bypasses_containment());
+        assert!(
+            local_shell_notice(&local, &failed).is_none(),
+            "fail_closed refuses every command; announcing an enabled shell there is a lie"
+        );
     }
 }

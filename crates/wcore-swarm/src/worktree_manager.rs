@@ -366,30 +366,57 @@ impl WorktreeManager {
 
     /// Prove usable storage and return the bounded workspace authority used by
     /// every transaction in one admitted dispatch.
-    pub async fn workspace_capacity(&self, active_workers: usize) -> Result<WorkspaceCapacity> {
+    ///
+    /// The two counts are deliberately separate because they answer different
+    /// questions and are NOT interchangeable:
+    ///
+    /// * `active_workers` divides the aggregate budget into the per-transaction
+    ///   ceiling. It is the fair-share denominator, so a fuller roster yields a
+    ///   smaller ceiling.
+    /// * `admitted_transactions` is how many NEW transaction roots this call
+    ///   admits. Only those are charged against free space here, because every
+    ///   workspace that already exists is already counted — by name, at its own
+    ///   receipt — in `reserved_workspace_bytes()`.
+    ///
+    /// Charging `active_workers` new ceilings double-counts the roster: the
+    /// `wcore-agent` spawner admits exactly one child while passing
+    /// `retained + 1`, so at a near-full evidence roster it demanded
+    /// 256 * 256 MiB + 512 MiB = 64.5 GiB of free space to create one small
+    /// checkout, and no host under that could ever admit a child. The flat
+    /// per-transaction ceiling itself is intentional and stays: a workspace is
+    /// allowed to GROW to it after admission, so reserving the measured initial
+    /// checkout size instead would under-reserve by construction.
+    pub async fn workspace_capacity(
+        &self,
+        active_workers: usize,
+        admitted_transactions: usize,
+    ) -> Result<WorkspaceCapacity> {
         self.validate_repo_authority()?;
         self.validate_swarm_root()?;
         let active_workers = u64::try_from(active_workers.max(1)).map_err(|_| {
             SwarmError::DispatchAdmission("active worker count exceeds u64".to_owned())
         })?;
+        let admitted_transactions = u64::try_from(admitted_transactions.max(1)).map_err(|_| {
+            SwarmError::DispatchAdmission("admitted transaction count exceeds u64".to_owned())
+        })?;
         let available_bytes = self.available_workspace_bytes().await?;
-        let max_transaction_bytes =
-            MAX_TRANSACTION_WORKSPACE_BYTES.min(MAX_AGGREGATE_WORKSPACE_BYTES / active_workers);
+        let max_transaction_bytes = per_transaction_ceiling(active_workers);
         let existing_reservation = self.reserved_workspace_bytes()?;
-        let active_reservation = max_transaction_bytes
-            .checked_mul(active_workers)
-            .and_then(|bytes| bytes.checked_add(existing_reservation))
-            .and_then(|bytes| bytes.checked_add(WORKSPACE_SAFETY_MARGIN_BYTES))
-            .ok_or_else(|| {
-                SwarmError::DispatchAdmission("dispatch workspace capacity overflowed".to_owned())
-            })?;
+        let (admitted_reservation, active_reservation) = admission_reservation(
+            max_transaction_bytes,
+            admitted_transactions,
+            existing_reservation,
+        )
+        .ok_or_else(|| {
+            SwarmError::DispatchAdmission("dispatch workspace capacity overflowed".to_owned())
+        })?;
         if active_reservation > available_bytes {
             return Err(SwarmError::DispatchAdmission(format!(
-                "dispatch requires {active_reservation} bytes for {active_workers} active workers, {existing_reservation} bytes already reserved, and its safety margin, but only {available_bytes} bytes are available"
+                "dispatch requires {active_reservation} bytes for {admitted_transactions} new transaction(s) sized for {active_workers} active workers, {existing_reservation} bytes already reserved, and its safety margin, but only {available_bytes} bytes are available"
             )));
         }
         if existing_reservation
-            .checked_add(max_transaction_bytes.saturating_mul(active_workers))
+            .checked_add(admitted_reservation)
             .is_none_or(|total| total > MAX_AGGREGATE_WORKSPACE_BYTES)
         {
             return Err(SwarmError::DispatchAdmission(
@@ -1510,6 +1537,109 @@ impl WorktreeManager {
             )));
         }
         Ok(workspace)
+    }
+}
+
+/// Per-transaction ceiling: the aggregate budget split fair-share across the
+/// whole active roster, never above the absolute per-transaction cap.
+fn per_transaction_ceiling(active_workers: u64) -> u64 {
+    MAX_TRANSACTION_WORKSPACE_BYTES.min(MAX_AGGREGATE_WORKSPACE_BYTES / active_workers)
+}
+
+/// `(bytes charged for the newly admitted transactions, total free bytes the
+/// host must prove)`.
+///
+/// Only the NEW transactions are charged a ceiling. Workspaces that already
+/// exist arrive in `existing_reservation`, which `reserved_workspace_bytes()`
+/// measured per root, so charging them a second ceiling here would count the
+/// same disk twice.
+fn admission_reservation(
+    max_transaction_bytes: u64,
+    admitted_transactions: u64,
+    existing_reservation: u64,
+) -> Option<(u64, u64)> {
+    let admitted = max_transaction_bytes.checked_mul(admitted_transactions)?;
+    let required = admitted
+        .checked_add(existing_reservation)?
+        .checked_add(WORKSPACE_SAFETY_MARGIN_BYTES)?;
+    Some((admitted, required))
+}
+
+/// Host-independent pins for the admission arithmetic.
+///
+/// These deliberately do NOT touch the filesystem. The behavioural proof —
+/// `spawner::production_durable_spawn_tests::concurrent_near_cap_admits_exactly_one_retained_workspace`
+/// — can only discriminate on a host with less free space than the buggy
+/// formula demanded, so on a large enough runner it would pass with the defect
+/// present. These pin the arithmetic on every host.
+#[cfg(test)]
+mod admission_arithmetic_tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    /// The exact figure the spawner demanded before the parameter split:
+    /// 256 workers * (64 GiB / 256) + 512 MiB.
+    const DOUBLE_CHARGED_NEAR_CAP_BYTES: u64 = 69_256_347_648;
+
+    #[test]
+    fn one_admission_at_a_full_roster_charges_one_ceiling_not_the_roster() {
+        let ceiling = per_transaction_ceiling(256);
+        assert_eq!(
+            ceiling,
+            256 * MIB,
+            "fair share of 64 GiB across 256 workers"
+        );
+
+        let (admitted, required) =
+            admission_reservation(ceiling, 1, 0).expect("no overflow at one admission");
+        assert_eq!(admitted, 256 * MIB);
+        assert_eq!(required, 256 * MIB + 512 * MIB);
+
+        // Regression pin. Charging the roster instead of the admission is what
+        // made one small checkout demand 64.5 GiB of free space.
+        assert_eq!(
+            admission_reservation(ceiling, 256, 0)
+                .expect("no overflow at roster charge")
+                .1,
+            DOUBLE_CHARGED_NEAR_CAP_BYTES
+        );
+        assert!(
+            required < DOUBLE_CHARGED_NEAR_CAP_BYTES,
+            "{required} must be far below the double-charged {DOUBLE_CHARGED_NEAR_CAP_BYTES}"
+        );
+    }
+
+    #[test]
+    fn a_fan_out_dispatch_still_charges_one_ceiling_per_new_worker() {
+        // Four workers are four NEW transactions, so four ceilings is correct
+        // and unchanged. This is a real, user-facing storage requirement: a
+        // four-worker dispatch cannot start on a host with less than 32.5 GiB
+        // free, whatever the repository's size, because each workspace is
+        // allowed to grow to the 8 GiB per-transaction cap after admission.
+        let ceiling = per_transaction_ceiling(4);
+        assert_eq!(ceiling, 8 * GIB, "the absolute cap binds below 16 workers");
+
+        let (admitted, required) =
+            admission_reservation(ceiling, 4, 0).expect("no overflow at four workers");
+        assert_eq!(admitted, 32 * GIB);
+        assert_eq!(required, 32 * GIB + 512 * MIB);
+    }
+
+    #[test]
+    fn already_reserved_bytes_are_charged_once_not_twice() {
+        let ceiling = per_transaction_ceiling(256);
+        let (admitted, required) = admission_reservation(ceiling, 1, 10 * GIB)
+            .expect("no overflow with existing reservations");
+        assert_eq!(admitted, 256 * MIB);
+        assert_eq!(required, 10 * GIB + 256 * MIB + 512 * MIB);
+    }
+
+    #[test]
+    fn an_overflowing_charge_refuses_rather_than_wrapping() {
+        assert!(admission_reservation(u64::MAX, 2, 0).is_none());
+        assert!(admission_reservation(u64::MAX, 1, 1).is_none());
     }
 }
 

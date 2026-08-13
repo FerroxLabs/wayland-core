@@ -741,6 +741,40 @@ pub enum ProtocolEvent {
         call_id: String,
         tool: ToolInfo,
     },
+    /// A tool call that is about to run WITHOUT being asked about - force
+    /// mode, an allow-listed tool, a command-scoped auto-approval, a recovered
+    /// approval, or a tool the host already granted `ApprovalScope::Always`.
+    ///
+    /// # Why this is not just a `tool_request`
+    ///
+    /// `tool_request` carries two meanings that are mutually exclusive here.
+    /// The Wayland desktop host uses it as the registration anchor - every
+    /// later `tool_*` frame is matched against the `call_id` it registered, and
+    /// an unregistered `call_id` fails the session closed mid-turn. It ALSO
+    /// renders that frame as an approve/deny card. Emitting `tool_request` for
+    /// an auto-approved call would therefore ask the operator to confirm a tool
+    /// they have already permanently allowed, which is a worse defect than the
+    /// one it fixes.
+    ///
+    /// # Why the name has no `tool_` prefix
+    ///
+    /// DELIBERATE, DO NOT "TIDY". The desktop validator routes on
+    /// `type.startsWith('tool_')` and fails closed on any `tool_`-prefixed type
+    /// whose `call_id` it has not already registered. A `tool_announced` would
+    /// reproduce exactly the mid-turn kill this event exists to prevent.
+    ///
+    /// # Compatibility
+    ///
+    /// Additive and safe for hosts that predate it: an unknown, non-`tool_`
+    /// type falls through the desktop decoder's default arm and is dropped with
+    /// a warning, the same path `workspace_policy` already takes. This matters
+    /// because the engine is updated INDEPENDENTLY of the desktop app by its
+    /// in-app updater, so a new engine routinely runs under an older host.
+    CallAnnounced {
+        msg_id: String,
+        call_id: String,
+        tool: ToolInfo,
+    },
     ToolRunning {
         msg_id: String,
         call_id: String,

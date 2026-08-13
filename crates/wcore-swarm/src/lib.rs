@@ -320,9 +320,16 @@ impl Swarm {
             .manager
             .pinned_dispatch_base(&brief.base_branch)
             .await?;
+        // This dispatch creates one transaction per worker, so the fair-share
+        // denominator and the number of newly charged transactions are the same
+        // number here. Anything already on disk is charged separately, by name,
+        // through `reserved_workspace_bytes()`.
         let capacity = self
             .manager
-            .workspace_capacity(count.min(MAX_CONCURRENT_WORKERS))
+            .workspace_capacity(
+                count.min(MAX_CONCURRENT_WORKERS),
+                count.min(MAX_CONCURRENT_WORKERS),
+            )
             .await?;
         self.manager
             .assert_dispatch_checkout_fits(&pinned_head, capacity)

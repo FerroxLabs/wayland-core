@@ -353,6 +353,23 @@ pub(crate) fn build_contents(
         Some(system_parts.join("\n\n"))
     };
 
+    // Gemini pairs `functionResponse` to `functionCall` by NAME, and the name
+    // must be the same wire-encoded function name the call went out with. The
+    // engine's `ToolResult` block carries only `tool_use_id`, so resolve the
+    // name from the `ToolUse` that requested it — one pass over history, built
+    // before the render loop so a result can reference a call in ANY earlier
+    // message. Falls back to the id (wire-encoded, so it can never exceed
+    // Gemini's name budget) for a result with no matching call in this window,
+    // e.g. a compaction-trimmed or host-synthesized round.
+    let mut call_names: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+    for msg in messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse { id, name, .. } = block {
+                call_names.insert(id.as_str(), encode_tool_name(name));
+            }
+        }
+    }
+
     let mut contents: Vec<Value> = Vec::new();
 
     for msg in messages {
@@ -402,28 +419,52 @@ pub(crate) fn build_contents(
                     is_error,
                 } => {
                     // Gemini's functionResponse uses the function NAME, not the
-                    // call ID — but we don't carry the name back through the
-                    // engine's ToolResult block. Use the id as a stable label;
-                    // the model only cares about pairing by position.
+                    // call ID. Resolve it from the `ToolUse` this result
+                    // answers (`call_names`, built above) so the name matches
+                    // the `functionCall` byte-for-byte. Emitting the raw id
+                    // here — as this builder used to — produced a
+                    // `functionResponse` Gemini cannot pair with any call, and
+                    // for the synthesized Gemini ids (`gemini_call_<tool>_
+                    // <nanos>_<tokens>`) it also blew past the 63-character
+                    // name budget for any non-trivial tool name.
+                    let response_name = call_names
+                        .get(tool_use_id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| encode_tool_name(tool_use_id));
                     let mut response_obj = json!({ "content": content });
                     if *is_error {
                         response_obj["isError"] = json!(true);
                     }
                     parts.push(json!({
                         "functionResponse": {
-                            "name": tool_use_id,
+                            "name": response_name,
                             "response": response_obj,
                         }
                     }));
                 }
-                ContentBlock::Thinking { thinking } => {
+                ContentBlock::Thinking { thinking, extra } => {
                     // Round-trip thinking text as a thought-flagged part so the
-                    // model has the prior reasoning context. The signature (if
-                    // any) was preserved on the corresponding ToolUse block.
-                    parts.push(json!({
+                    // model has the prior reasoning context.
+                    //
+                    // C-4b: Gemini is stateless about reasoning — a thought part
+                    // must be resent EXACTLY as it was received, signature
+                    // included. A `thoughtSignature` that arrived on the thought
+                    // part belongs back on the THOUGHT part; it is not
+                    // interchangeable with the signature on the `functionCall`
+                    // that followed it, and re-emitting the thought unsigned is
+                    // what makes the server reject the replayed turn.
+                    let mut part = json!({
                         "text": thinking,
                         "thought": true,
-                    }));
+                    });
+                    if let Some(sig) = extra
+                        .as_ref()
+                        .and_then(|e| e.get("thoughtSignature"))
+                        .and_then(Value::as_str)
+                    {
+                        part["thoughtSignature"] = json!(sig);
+                    }
+                    parts.push(part);
                 }
                 ContentBlock::Image { mime, data } => {
                     // Gemini native shape: `parts:[{inlineData:{mimeType,data}}]`.
@@ -763,6 +804,12 @@ pub(crate) struct GeminiStreamState {
     /// True if at least one functionCall part was emitted. Drives the
     /// StopReason mapping when finishReason is "STOP" but tool calls exist.
     saw_tool_call: bool,
+    /// C-4b — true once a `thoughtSignature` on a THOUGHT part has been
+    /// surfaced as `LlmEvent::ThinkingSignature`. The engine concatenates a
+    /// turn's reasoning into one `ContentBlock::Thinking` with one `extra`
+    /// slot, so only the first signature can be replayed; emitting later ones
+    /// would silently overwrite it with a signature covering different text.
+    saw_thought_signature: bool,
 }
 
 /// Parse the SSE stream from `streamGenerateContent?alt=sse`.
@@ -954,10 +1001,7 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
         .and_then(Value::as_array)
     {
         for part in parts {
-            // Thought parts (`thought: true`) carry reasoning text. The
-            // accompanying `thoughtSignature` is captured on the tool-call
-            // part (or, when there is no tool call, simply observed; the
-            // public API at present only exposes signatures on calls).
+            // Thought parts (`thought: true`) carry reasoning text.
             let is_thought = part
                 .get("thought")
                 .and_then(Value::as_bool)
@@ -971,6 +1015,23 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
                 } else {
                     events.push(LlmEvent::TextDelta(text.to_string()));
                 }
+            }
+
+            // C-4b: Gemini puts `thoughtSignature` on the part it belongs to,
+            // which is often the THOUGHT part rather than the `functionCall`.
+            // Only the call-part signature was ever captured, so a signature
+            // on a thought part was parsed and dropped — and the thought went
+            // back to a stateless server unsigned. Capture it here; the
+            // functionCall branch below keeps its own, distinct signature.
+            // First one wins: the engine folds a turn's reasoning into a
+            // single `ContentBlock::Thinking`, so it has exactly one slot.
+            if is_thought
+                && !state.saw_thought_signature
+                && let Some(sig) = part.get("thoughtSignature").and_then(Value::as_str)
+                && !sig.is_empty()
+            {
+                state.saw_thought_signature = true;
+                events.push(LlmEvent::ThinkingSignature(sig.to_string()));
             }
 
             if let Some(call) = part.get("functionCall") {
@@ -1229,6 +1290,65 @@ mod tests {
         assert_eq!(part["thoughtSignature"], "sig-abc");
     }
 
+    /// C-4b. The existing signature test above covers ONE part — a lone
+    /// `functionCall` — which is why the thought-part case shipped broken.
+    /// Here the assistant turn is MULTI-part and the SECOND part is the one
+    /// carrying the signature, matching what Gemini actually returns when it
+    /// reasons before calling a tool.
+    ///
+    /// Every part must go back exactly as it came: the unsigned thought stays
+    /// unsigned, the signed thought is re-signed IN PLACE at its own index,
+    /// and the call keeps its own distinct signature. Re-emitting the signed
+    /// thought as a bare `{"text":…,"thought":true}` — as the builder did —
+    /// silently strips reasoning material the server requires back.
+    #[test]
+    fn build_contents_round_trips_thought_signature_on_a_thought_part() {
+        let messages = vec![Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking {
+                    thinking: "First, read the file.".into(),
+                    extra: None,
+                },
+                ContentBlock::Thinking {
+                    thinking: "It is a config, so parse it.".into(),
+                    extra: Some(json!({"thoughtSignature": "sig-on-thought"})),
+                },
+                ContentBlock::ToolUse {
+                    id: gemini_id("Read"),
+                    name: "Read".into(),
+                    input: json!({}),
+                    extra: Some(json!({"thoughtSignature": "sig-on-call"})),
+                },
+            ],
+        )];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let parts = contents[0]["parts"].as_array().expect("parts array");
+        assert_eq!(parts.len(), 3, "every block must round-trip: {parts:?}");
+
+        assert_eq!(parts[0]["thought"], true);
+        assert!(
+            parts[0].get("thoughtSignature").is_none(),
+            "an unsigned thought must not acquire a signature: {}",
+            parts[0]
+        );
+
+        assert_eq!(parts[1]["thought"], true);
+        assert_eq!(
+            parts[1]["thoughtSignature"], "sig-on-thought",
+            "the signature Gemini put on the thought part must be resent on \
+             that same part, at that same index: {}",
+            parts[1]
+        );
+
+        assert_eq!(parts[2]["functionCall"]["name"], "Read");
+        assert_eq!(
+            parts[2]["thoughtSignature"], "sig-on-call",
+            "the call keeps its OWN signature — the two are not interchangeable"
+        );
+    }
+
     #[test]
     fn build_contents_tool_result_becomes_function_response_under_user_role() {
         let messages = vec![Message::new(
@@ -1244,6 +1364,197 @@ mod tests {
         let part = &contents[0]["parts"][0];
         assert_eq!(part["functionResponse"]["name"], "Read");
         assert_eq!(part["functionResponse"]["response"]["content"], "file body");
+    }
+
+    // ── C-4 triage: multi-call Gemini histories ────────────────────────────
+    //
+    // The two tests above cover exactly ONE tool call, with a hand-picked
+    // `tool_use_id` ("Read") that happens to spell a function name. Every
+    // defect below hides in the second call, or in an id that looks like the
+    // real ones the Gemini stream synthesizes
+    // (`make_tool_id` → `gemini_call_<tool>_<nanos>_<output_tokens>`).
+
+    /// Realistic Gemini call id — the exact shape `make_tool_id` produces.
+    fn gemini_id(tool: &str) -> String {
+        format!("gemini_call_{tool}_1785432109876543210_42")
+    }
+
+    fn call(id: &str, name: &str, sig: Option<&str>) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input: json!({}),
+            extra: sig.map(|s| json!({ "thoughtSignature": s })),
+        }
+    }
+
+    fn result_for(id: &str) -> ContentBlock {
+        ContentBlock::ToolResult {
+            tool_use_id: id.into(),
+            content: "ok".into(),
+            is_error: false,
+        }
+    }
+
+    /// Collect `(content_index, part_index, functionCall name)` for every
+    /// functionCall part, and the same for functionResponse parts. Written
+    /// independently of the builder so it measures the payload, not the code.
+    fn calls_and_responses(contents: &[Value]) -> (Vec<(usize, usize, String)>, Vec<String>) {
+        let mut calls = Vec::new();
+        let mut responses = Vec::new();
+        for (ci, content) in contents.iter().enumerate() {
+            for (pi, part) in content["parts"].as_array().unwrap().iter().enumerate() {
+                if let Some(fc) = part.get("functionCall") {
+                    calls.push((ci, pi, fc["name"].as_str().unwrap().to_string()));
+                }
+                if let Some(fr) = part.get("functionResponse") {
+                    responses.push(fr["name"].as_str().unwrap().to_string());
+                }
+            }
+        }
+        (calls, responses)
+    }
+
+    /// Gemini pairs `functionResponse` ⇄ `functionCall` BY NAME. The builder
+    /// used to emit the raw `tool_use_id` as the response name, so with a real
+    /// synthesized id no response could ever be matched to its call.
+    #[test]
+    fn build_contents_function_response_name_matches_its_function_call() {
+        let read_id = gemini_id("Read");
+        let search_id = gemini_id("ToolSearch");
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    call(&read_id, "Read", Some("sig-1")),
+                    call(&search_id, "ToolSearch", None),
+                ],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![result_for(&read_id), result_for(&search_id)],
+            ),
+        ];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let (calls, responses) = calls_and_responses(&contents);
+        let call_names: Vec<String> = calls.iter().map(|(_, _, n)| n.clone()).collect();
+
+        assert_eq!(call_names, vec!["Read", "ToolSearch"]);
+        assert_eq!(
+            responses, call_names,
+            "each functionResponse.name must equal the functionCall.name it answers; \
+             got responses={responses:?} for calls={call_names:?}"
+        );
+    }
+
+    /// An MCP tool name plus the synthesized-id wrapper blows past Gemini's
+    /// 64-character name budget, so the old id-as-name emitted a
+    /// `functionResponse` the API rejects outright — while the matching
+    /// `functionCall` went out correctly encoded.
+    #[test]
+    fn build_contents_function_response_name_stays_within_the_wire_budget() {
+        let tool = "mcp__io-github-taylorwilsdon-google-workspace-mcp__search_gmail_messages";
+        let id = gemini_id(tool);
+        assert!(
+            id.len() > 64,
+            "instrument check: the synthesized id must be over-budget to measure anything \
+             (len={})",
+            id.len()
+        );
+        let messages = vec![
+            Message::new(Role::Assistant, vec![call(&id, tool, Some("sig-1"))]),
+            Message::new(Role::Tool, vec![result_for(&id)]),
+        ];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let (calls, responses) = calls_and_responses(&contents);
+
+        assert_eq!(responses.len(), 1);
+        assert!(
+            responses[0].len() <= 64,
+            "functionResponse.name exceeds Gemini's 64-char budget: {} chars ({})",
+            responses[0].len(),
+            responses[0]
+        );
+        assert_eq!(
+            responses[0], calls[0].2,
+            "the over-budget name must be encoded the SAME way the call was"
+        );
+    }
+
+    /// C-4 gate. Google's rule: the signature must come back "in the exact
+    /// part where it was received", and in a parallel batch only the FIRST
+    /// functionCall part carries one. Prove the builder holds that across a
+    /// three-step history — the multi-call shape the single-call tests above
+    /// never exercised — and that it never interleaves a functionResponse
+    /// between two functionCalls of the same step (also a documented 400).
+    #[test]
+    fn build_contents_round_trips_every_signature_in_a_multi_call_history() {
+        let a = gemini_id("Read");
+        let b = gemini_id("Grep");
+        let c = gemini_id("ToolSearch");
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            // Step 1 — single call, signed.
+            Message::new(Role::Assistant, vec![call(&a, "Read", Some("sig-a"))]),
+            Message::new(Role::Tool, vec![result_for(&a)]),
+            // Step 2 — parallel batch: Gemini signs only the first part.
+            Message::new(
+                Role::Assistant,
+                vec![
+                    call(&b, "Grep", Some("sig-b")),
+                    call(&c, "ToolSearch", None),
+                ],
+            ),
+            Message::new(Role::Tool, vec![result_for(&b), result_for(&c)]),
+        ];
+
+        let (_, contents) = build_contents(&messages, &compat());
+        let (calls, _) = calls_and_responses(&contents);
+        assert_eq!(calls.len(), 3, "all three calls must survive the rebuild");
+
+        // Every signature present in history reaches the wire, on its own part.
+        let sig_at = |ci: usize, pi: usize| -> Option<String> {
+            contents[ci]["parts"][pi]
+                .get("thoughtSignature")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        assert_eq!(
+            sig_at(calls[0].0, calls[0].1).as_deref(),
+            Some("sig-a"),
+            "step 1's signature was dropped"
+        );
+        assert_eq!(
+            sig_at(calls[1].0, calls[1].1).as_deref(),
+            Some("sig-b"),
+            "step 2's FIRST functionCall lost its signature — the exact shape of the \
+             live 400 (\"missing a thought_signature ... position N\")"
+        );
+        assert_eq!(
+            sig_at(calls[2].0, calls[2].1),
+            None,
+            "the builder must not invent a signature Gemini never issued"
+        );
+
+        // Within a step, all functionCalls precede all functionResponses:
+        // Gemini 400s on FC1, FR1, FC2, FR2 interleaving.
+        for content in &contents {
+            let mut seen_response = false;
+            for part in content["parts"].as_array().unwrap() {
+                if part.get("functionResponse").is_some() {
+                    seen_response = true;
+                } else if part.get("functionCall").is_some() {
+                    assert!(
+                        !seen_response,
+                        "functionCall emitted after a functionResponse in the same content \
+                         block: {content}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1612,6 +1923,75 @@ mod tests {
                 assert_eq!(extra["thoughtSignature"], "sig-xyz");
             }
             other => panic!("expected ToolUse with extra, got {other:?}"),
+        }
+    }
+
+    /// C-4b (capture half). Gemini attaches `thoughtSignature` to the part it
+    /// belongs to — which is often a THOUGHT part, not the `functionCall`.
+    /// The parser only ever read the signature off a `functionCall` part, so a
+    /// signature that arrived on a thought part was parsed and thrown away,
+    /// and the replayed history went back unsigned. Nothing downstream can
+    /// re-sign it: if the parser drops it here, it is gone for the session.
+    #[test]
+    fn parse_sse_chunk_captures_thought_signature_on_a_thought_part() {
+        let mut state = GeminiStreamState::default();
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":"weighing it","thought":true,"thoughtSignature":"sig-thought"}]}}]}"#;
+        let events = parse_sse_chunk(data, &mut state);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::ThinkingDelta(t) if t == "weighing it")),
+            "the reasoning text must still surface: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LlmEvent::ThinkingSignature(s) if s == "sig-thought")),
+            "a signature on a thought part must be captured, not dropped: {events:?}"
+        );
+    }
+
+    /// A MULTI-part turn: the signed thought is the SECOND part, and a
+    /// `functionCall` with its OWN signature follows. The two signatures are
+    /// distinct values on distinct parts and must not be confused — the
+    /// call's rides on `ToolUse.extra`, the thought's on its own event.
+    /// A later signed thought must NOT displace the first: the engine folds a
+    /// turn's reasoning into one block with one signature slot.
+    #[test]
+    fn parse_sse_chunk_keeps_thought_and_call_signatures_apart() {
+        let mut state = GeminiStreamState::default();
+        let data = r#"{"candidates":[{"content":{"parts":[
+            {"text":"first","thought":true},
+            {"text":"second","thought":true,"thoughtSignature":"sig-thought"},
+            {"text":"third","thought":true,"thoughtSignature":"sig-later"},
+            {"functionCall":{"name":"Read","args":{}},"thoughtSignature":"sig-call"}
+        ]}}]}"#;
+        let events = parse_sse_chunk(data, &mut state);
+
+        let signatures: Vec<&String> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::ThinkingSignature(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            signatures,
+            vec!["sig-thought"],
+            "exactly the FIRST thought signature is carried, from the part \
+             that actually holds it: {events:?}"
+        );
+
+        match events
+            .iter()
+            .find(|e| matches!(e, LlmEvent::ToolUse { .. }))
+        {
+            Some(LlmEvent::ToolUse { extra, .. }) => assert_eq!(
+                extra.as_ref().expect("call signature")["thoughtSignature"],
+                "sig-call",
+                "the call keeps its OWN signature"
+            ),
+            other => panic!("expected a ToolUse event, got {other:?}"),
         }
     }
 

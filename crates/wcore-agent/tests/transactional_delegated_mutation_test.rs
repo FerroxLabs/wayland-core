@@ -318,7 +318,7 @@ async fn happy_path_open_accept_land_receipt_then_rollback() {
     fx.children
         .declare(child_record("child-1", "declare-1", "workspace-1"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard, seal, checkout_root) = stage_candidate(
         &manager,
         capacity,
@@ -438,7 +438,7 @@ async fn parent_drift_before_land_conflicts_without_overwrite() {
     fx.children
         .declare(child_record("child-1", "declare-1", "workspace-1"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard, seal, _root) =
         stage_candidate(&manager, capacity, "child-1", "added.txt", "candidate\n").await;
 
@@ -532,7 +532,7 @@ async fn gate_rejection_never_reaches_landing() {
     fx.children
         .declare(child_record("child-1", "declare-1", "workspace-1"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard, seal, checkout_root) =
         stage_candidate(&manager, capacity, "child-1", "added.txt", "candidate\n").await;
 
@@ -612,7 +612,7 @@ async fn landing_without_bound_accepted_candidate_fails_closed() {
     fx.children
         .declare(child_record("child-b", "declare-b", "workspace-b"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard_a, seal_a, _root_a) =
         stage_candidate(&manager, capacity, "child-a", "a.txt", "A\n").await;
 
@@ -697,7 +697,7 @@ async fn cancellation_after_accept_before_land_cleans_owned_only() {
     fx.children
         .declare(child_record("child-1", "declare-1", "workspace-1"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard, seal, checkout_root) =
         stage_candidate(&manager, capacity, "child-1", "added.txt", "candidate\n").await;
 
@@ -771,7 +771,7 @@ async fn restart_replays_landed_state_from_disk() {
     fx.children
         .declare(child_record("child-1", "declare-1", "workspace-1"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard, seal, _root) =
         stage_candidate(&manager, capacity, "child-1", "added.txt", "landed\n").await;
 
@@ -861,7 +861,7 @@ async fn multi_candidate_only_winner_lands_loser_is_cleaned() {
     fx.children
         .declare(child_record("loser", "declare-l", "workspace-l"))
         .unwrap();
-    let capacity = manager.workspace_capacity(2).await.expect("capacity");
+    let capacity = manager.workspace_capacity(2, 2).await.expect("capacity");
 
     // Two candidate checkouts are allocated (a keep-best climb produced both).
     let (winner_guard, winner_seal, winner_root) =
@@ -994,7 +994,7 @@ async fn land_selected_winner_drives_production_chain_to_landed() {
     fx.children
         .declare(child_record("child-1", "declare-1", "workspace-1"))
         .unwrap();
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let (guard, seal, checkout_root) = stage_candidate(
         &manager,
         capacity,

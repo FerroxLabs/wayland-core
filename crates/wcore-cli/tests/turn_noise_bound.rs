@@ -29,9 +29,10 @@
 //!
 //! # The three legs, and what each would let through on its own
 //!
-//! 1. **The notice is announced once.** Alone, this passes if the notice were
-//!    deleted outright — which would be a real regression, since a degraded
-//!    run must still tell the operator.
+//! 1. **The fact is announced once, in one wording.** The startup notice is
+//!    counted `== 1` and the engine's per-turn restatement `== 0`. Either
+//!    count alone is passed by a wrong fix — `== 0` by deleting both, `== 1`
+//!    by restoring the duplicate — so both are asserted.
 //! 2. **The per-turn RECORD survives, three times, in the diagnostics log.**
 //!    This is the leg that refuses "quieted by deletion". Quieting the terminal
 //!    is only legitimate because the forensic record moved to a durable,
@@ -82,6 +83,17 @@ const TURNS: usize = 3;
 /// repeat. `This turn IS being recorded` appears only in the engine's per-turn
 /// text — the startup notice speaks of the run, not of a turn.
 const DEGRADE_NOTICE: &str = "This turn IS being recorded";
+
+/// The startup notice `warn_replay_protection_unavailable_once` prints at
+/// config resolution, matched on a clause that appears ONLY there — the engine
+/// speaks of a turn, this speaks of the run, and only this one lists what is
+/// still on.
+///
+/// This is the notice the operator is meant to read. It is asserted here
+/// because leg 1 below now expects ZERO copies of the engine's wording, and a
+/// `== 0` on its own is equally satisfied by a run that told the operator
+/// nothing at all.
+const STARTUP_NOTICE: &str = "Durable sessions stay ON";
 
 /// The same fact as it reaches the size-bounded diagnostics log, once per turn.
 /// A separate string from [`DEGRADE_NOTICE`] on purpose: the record and the
@@ -195,14 +207,28 @@ async fn the_degrade_notice_is_announced_once_while_its_per_turn_record_survives
          suppression. stderr was:\n{stderr}"
     );
 
-    // LEG 1 — the human hears the immutable host fact once, not once per
-    // message they were trying to answer.
+    // LEG 1 — the human hears the immutable host fact ONCE PER RUN, in one
+    // wording. The engine's per-turn wording is not that wording: config
+    // resolution already printed the fuller startup notice to this same
+    // stderr, so a single copy of the engine's paragraph is still the same
+    // fact told twice — measured at 1,333 of a trivial run's 2,019 stderr
+    // bytes, 66% of it. The two counts are asserted together because either
+    // alone is passed by the wrong fix: `== 0` alone by deleting both, `== 1`
+    // alone by restoring the duplicate.
+    assert_eq!(
+        count(&stderr, STARTUP_NOTICE),
+        1,
+        "the operator must be told, once, that crash replay is off. The \
+         startup notice appeared {} times.\nstderr was:\n{stderr}",
+        count(&stderr, STARTUP_NOTICE)
+    );
     assert_eq!(
         count(&stderr, DEGRADE_NOTICE),
-        1,
-        "the degrade notice appeared {} times across {TURNS} turns. It reports \
-         a startup-resolved host fact that cannot change mid-process, and the \
-         operator was already told at config resolution.\nstderr was:\n{stderr}",
+        0,
+        "the engine's per-turn wording appeared {} times on a terminal that \
+         had already read the startup notice. It reports a startup-resolved \
+         host fact that cannot change mid-process; restating it in different \
+         words is not new information.\nstderr was:\n{stderr}",
         count(&stderr, DEGRADE_NOTICE)
     );
 

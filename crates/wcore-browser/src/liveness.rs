@@ -119,6 +119,13 @@ fn program_resolves(program: &str) -> bool {
 /// `camoufox_base_url` is the sidecar base URL (no trailing slash), normally
 /// `CamoufoxBackend::default_url()`. Only contacted when the local binary does
 /// not resolve, so an installed deployment pays nothing.
+///
+/// The `chromium` feature returns `Indeterminate` unconditionally below, which
+/// makes the Camoufox block — the only reader of `camoufox_base_url` — dead
+/// code in that configuration. The parameter stays in the signature because the
+/// default shipped build does use it; the allow is scoped to the one feature
+/// that cannot, and mirrors the existing `unreachable_code` allow on that block.
+#[cfg_attr(feature = "chromium", allow(unused_variables))]
 pub async fn probe(camoufox_base_url: &str) -> BrowserLiveness {
     // Cloud backend: compiled in AND credentialed means a machine with no local
     // browser at all can still browse. Whether `select_provider` ultimately

@@ -12,8 +12,10 @@
 //!     `SandboxedFs ∘ SecretDenyFs`. (Bash is NOT in this posture yet — see
 //!     the deferred OS-sandbox secret-read-deny work.)
 //!
-//! Network is ALWAYS seeded from `default_bash_network_policy()` so the
-//! `WAYLAND_BASH_ALLOW_NETWORK` opt-in survives; it is never hardcoded.
+//! Network is ALWAYS seeded from `default_bash_network_policy()` — a fail-safe
+//! Deny — and widened only by an explicit `with_network` at the trusted
+//! bootstrap seam (`local_bash_network` for a genuinely-local session,
+//! `operator_bash_network` for a sandboxed one). It is never hardcoded here.
 
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
@@ -81,10 +83,23 @@ const CREDENTIAL_STORES: &[&str] = &[
     ".config/doctl",
 ];
 
-/// Always-mounted system credential paths the backends grant unconditionally
-/// (bwrap `--ro-bind /etc`; macOS allows `/Library`,`/System`). Emitted
-/// regardless of `readable_roots()` because they ARE mounted. Kept short and
-/// high-value — broad system reads remain a DAC + network-Deny residual.
+/// System credential paths denied to the child regardless of
+/// `readable_roots()`, because a backend may mount them without the policy
+/// having asked for them. Kept short and high-value — broad system reads remain
+/// a DAC + network-Deny residual.
+///
+/// **macOS: still literally always-mounted.** The seatbelt profile allows
+/// `/Library` and `/System`, so `/Library/Keychains` is inside the sandbox and
+/// this deny is the only thing keeping it out.
+///
+/// **Linux: no longer always-mounted, and this entry is now defence in depth.**
+/// It used to be load-bearing against the blanket `--ro-bind /etc /etc` the
+/// bwrap backend emitted; `SYSTEM_RO_ETC` (SEC-05/07/10) replaced that with a
+/// curated list that contains neither `/etc/docker` nor `/etc/kubernetes`, so
+/// those paths are absent from the namespace entirely and the deny mount is
+/// classified `Absent` and dropped. Keeping the entries costs nothing and keeps
+/// the denial correct if `SYSTEM_RO_ETC` ever grows or a caller grants an
+/// ancestor through `fs_read_allow`.
 #[cfg(target_os = "macos")]
 const SYSTEM_CREDENTIAL_STORES: &[&str] = &["/Library/Keychains"];
 #[cfg(target_os = "linux")]
@@ -104,6 +119,21 @@ pub struct WorkspacePolicy {
     trust: WorkspaceTrust,
     writable_extra: Vec<PathBuf>,
     readable_extra: Vec<PathBuf>,
+    /// Readable only while the policy grants a network — see
+    /// [`discovery::network_scoped_reads`]. Held separately from
+    /// `readable_extra` because the network posture is set AFTER construction
+    /// (`with_network`), so the decision cannot be taken in the constructor.
+    network_scoped_readable: Vec<PathBuf>,
+    /// Paths the child may `stat` but never read — see
+    /// [`wcore_sandbox::SandboxManifest::fs_metadata_read_allow`] for the
+    /// backend contract and [`discovery::libgit2_global_config_probes`] for the
+    /// only thing that currently needs it.
+    ///
+    /// Held apart from `readable_extra` on purpose: these are NOT readable
+    /// roots. Folding them in would hand the child the file's contents, which
+    /// for `~/.gitconfig` means the operator's identity and any
+    /// `[url … insteadOf]` rewrite they have configured.
+    metadata_readable: Vec<PathBuf>,
     network: NetworkPolicy,
     cache_env: Vec<(String, String)>,
     /// Additional authority roots that must be unreadable to Bash even when a
@@ -124,6 +154,18 @@ pub struct WorkspacePolicy {
     /// project-secret denial (`with_project_secret_deny`, i.e. Full/remote). A
     /// genuinely-local `Trusted` session leaves it false and keeps its shell.
     secret_read_deny_required: bool,
+    /// The ONLY principal that can drive this session's shell is the local
+    /// operator at their own keyboard — there is no channel/remote scope on the
+    /// engine that owns this policy. See
+    /// [`shell_requires_os_read_deny`](Self::shell_requires_os_read_deny) for
+    /// what it buys and why it is not `secret_read_deny_required`'s inverse.
+    ///
+    /// FAIL-SAFE DEFAULT: `false` in every constructor. A policy only becomes a
+    /// local-operator policy by an explicit
+    /// [`with_shell_principal`](Self::with_shell_principal) at a seam that can
+    /// see the channel scope and the execution floor, so a new construction path
+    /// cannot acquire the relaxation by omission.
+    local_operator_principal: bool,
     developer_capabilities: Arc<RwLock<Vec<DeveloperCapability>>>,
     /// Read-only roots approved by the local desktop host for this process
     /// lifetime. This is interior-mutable so an already-running Bash tool sees
@@ -166,7 +208,9 @@ impl WorkspacePolicy {
     /// honors the network opt-in. Does NOT jail the in-process file tools.
     pub fn trusted_local(workspace: impl Into<PathBuf>) -> Self {
         let root = canon(workspace.into());
-        let mut writable_extra = scratch_dirs(WorkspaceTrust::Trusted);
+        let scratch = scratch_dirs(WorkspaceTrust::Trusted);
+        let cache_env = temp_env(&scratch);
+        let mut writable_extra = scratch;
         if let Some(home) = dirs::home_dir() {
             for sub in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache"] {
                 let path = home.join(sub);
@@ -184,14 +228,20 @@ impl WorkspacePolicy {
         readable_extra.extend(trusted_config_and_certificate_reads());
         readable_extra.sort();
         readable_extra.dedup();
+        let network_scoped_readable = network_scoped_reads();
 
         Self {
             root,
             trust: WorkspaceTrust::Trusted,
             writable_extra,
             readable_extra,
+            network_scoped_readable,
+            // Nothing to grant: `trusted_config_and_certificate_reads` already
+            // gives this profile the CONTENTS of `~/.gitconfig`, so the
+            // metadata channel would be redundant here.
+            metadata_readable: Vec::new(),
             // #657: the bare constructor is fail-safe — network is seeded from
-            // `default_bash_network_policy()` (Deny unless `WAYLAND_BASH_ALLOW_NETWORK`).
+            // `default_bash_network_policy()`, an unconditional Deny.
             // Network egress is granted only for a GENUINELY-LOCAL session, and
             // that grant is applied at bootstrap via `with_network(Inherit)` gated
             // on `channel_tool_posture.is_none()` (see `local_bash_network`). A
@@ -199,7 +249,7 @@ impl WorkspacePolicy {
             // sender and stays on this Deny default: it must not get a networked
             // shell by default (Overwatch ruling on #657, Sean-confirmed).
             network: crate::bash::default_bash_network_policy(),
-            cache_env: Vec::new(),
+            cache_env,
             authority_read_deny: Vec::new(),
             authority_write_deny: Vec::new(),
             deny_git_authority_env: false,
@@ -208,6 +258,7 @@ impl WorkspacePolicy {
             // Bash read-deny-enforcement gate does not apply. `with_project_secret_deny`
             // flips this to true for a Full/remote session (#667).
             secret_read_deny_required: false,
+            local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(developer_capabilities)),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
@@ -219,7 +270,7 @@ impl WorkspacePolicy {
     pub fn contained(root: impl Into<PathBuf>) -> Self {
         let root = canon(root.into());
         let cache_root = root.join(".wcache");
-        let cache_env = CACHE_ENV_DIRS
+        let mut cache_env: Vec<(String, String)> = CACHE_ENV_DIRS
             .iter()
             .map(|(var, sub)| {
                 (
@@ -228,19 +279,26 @@ impl WorkspacePolicy {
                 )
             })
             .collect();
-        let readable_extra = minimal_toolchain_read_dirs();
+        let readable_extra = contained_toolchain_read_dirs();
+        let network_scoped_readable = Vec::new();
         let writable_extra = scratch_dirs(WorkspaceTrust::Contained);
+        cache_env.extend(temp_env(&writable_extra));
+        cache_env.extend(git_config_env(&cache_root));
 
         Self {
             root,
             trust: WorkspaceTrust::Contained,
             writable_extra,
             readable_extra,
+            network_scoped_readable,
+            metadata_readable: libgit2_global_config_probes(),
             // #657: a Contained (untrusted / remote `Workspace`) posture runs
             // potentially attacker-influenced content, so egress stays DENIED to
-            // keep the exfil boundary tight. `WAYLAND_BASH_ALLOW_NETWORK=1`
-            // remains the explicit operator escape hatch (via
-            // `default_bash_network_policy`).
+            // keep the exfil boundary tight. The operator's config-file
+            // `[security] egress_allow` is the explicit escape hatch, applied at
+            // bootstrap via `with_network(operator_bash_network(..))` — SEC-11
+            // deleted the `WAYLAND_BASH_ALLOW_NETWORK` env lever that used to
+            // fill that role from untrusted provenance.
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             authority_read_deny: Vec::new(),
@@ -250,6 +308,7 @@ impl WorkspacePolicy {
             // Contained denies project secrets → Bash must be refused when the
             // backend can't enforce read-deny (else `cat .env` fails open).
             secret_read_deny_required: true,
+            local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
@@ -285,7 +344,8 @@ impl WorkspacePolicy {
             }
         }
 
-        let readable_extra = minimal_toolchain_read_dirs();
+        let readable_extra = contained_toolchain_read_dirs();
+        let network_scoped_readable = Vec::new();
         let writable_extra = vec![scratch.clone()];
         let mut cache_env = CACHE_ENV_DIRS
             .iter()
@@ -306,6 +366,13 @@ impl WorkspacePolicy {
                 scratch.join("tmp").to_string_lossy().into_owned(),
             )
         }));
+        // Same redirect `contained` applies, for the same reason: this profile
+        // does not grant `$HOME/.gitconfig` either, and git opens it
+        // unconditionally, so without this every `git` invocation inside a
+        // delegated forge dies at exit 128 under seatbelt. `deny_git_authority_env`
+        // strips an AMBIENT `GIT_CONFIG*` out of the passthrough; this is the
+        // policy's own value and is applied after that filter, on purpose.
+        cache_env.extend(git_config_env(&scratch.join("cache")));
 
         // The delegated child's TMPDIR/TMP/TEMP and tool caches resolve UNDER
         // the private scratch root; those subdirectories must exist and be
@@ -333,6 +400,8 @@ impl WorkspacePolicy {
             trust: WorkspaceTrust::Contained,
             writable_extra,
             readable_extra,
+            network_scoped_readable,
+            metadata_readable: libgit2_global_config_probes(),
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             authority_read_deny: protected.clone(),
@@ -340,6 +409,9 @@ impl WorkspacePolicy {
             deny_git_authority_env: true,
             delegated_scratch: Some(scratch),
             secret_read_deny_required: true,
+            // A delegated mutation is issued BY an orchestrator, not typed by the
+            // operator, so it is never a local-operator principal.
+            local_operator_principal: false,
             developer_capabilities: Arc::new(RwLock::new(Vec::new())),
             session_read_grants: Arc::new(RwLock::new(Vec::new())),
         })
@@ -370,10 +442,26 @@ impl WorkspacePolicy {
     pub fn readable_roots(&self) -> Vec<PathBuf> {
         let mut v = self.writable_roots();
         v.extend(self.readable_extra.iter().cloned());
+        // Network-scoped reads are withheld from a Deny-network child: they
+        // describe the network it does not have, and naming the host's DNS
+        // servers and search domains is the whole of what they leak.
+        // `AllowHosts` still needs to resolve names, so only `Deny` withholds.
+        if !matches!(self.network, NetworkPolicy::Deny) {
+            v.extend(self.network_scoped_readable.iter().cloned());
+        }
         v.extend(self.session_read_grants.read().iter().cloned());
         v.sort();
         v.dedup();
         v
+    }
+    /// Paths the child may `stat` but never read the contents of.
+    ///
+    /// Deliberately NOT merged into [`Self::readable_roots`] — see the field
+    /// doc. Also deliberately not filtered by `exists()`: under seatbelt an
+    /// absent path is EPERM too, so a host with no `~/.gitconfig` needs the
+    /// grant just as much as one that has it.
+    pub fn metadata_readable_roots(&self) -> Vec<PathBuf> {
+        self.metadata_readable.clone()
     }
     pub fn network(&self) -> NetworkPolicy {
         self.network.clone()
@@ -441,6 +529,102 @@ impl WorkspacePolicy {
         // must also be refused when the backend can't enforce read-deny.
         self.secret_read_deny_required = true;
         self
+    }
+
+    /// THE ONE ANSWER to "may this policy's shell be relaxed onto a backend
+    /// that cannot enforce OS secret-read-deny?" — i.e. is the only principal
+    /// who can drive it the local operator at their own keyboard?
+    ///
+    /// EVERY production path that builds a shell-bearing `WorkspacePolicy` must
+    /// call this rather than deciding for itself. There are two such paths —
+    /// `AgentBootstrap::build` (the session) and `wcore_cli::sandbox_cmd`
+    /// (`wayland-core sandbox exec`) — and they used to disagree, because only
+    /// the first one had the carve-out at all: `sandbox exec` refused every
+    /// shell on the Windows relaxed default while the session beside it worked.
+    /// Two independent answers to one question is how they drifted, so there is
+    /// now one answer. `sandbox_exec_principal_parity` fails if they diverge.
+    ///
+    /// The two facts stay the CALLER's to supply, because they come from
+    /// different places and only the caller can know them:
+    ///
+    /// * `channel_posture_present` — is a channel/remote sender able to reach
+    ///   this shell? `Some(ChannelToolScope)` on the engine for a session;
+    ///   structurally `false` for `sandbox exec`, which is reachable only from
+    ///   this host's argv (`TopCmd::Sandbox`) and has no channel, protocol or
+    ///   slash route.
+    /// * `managed_execution_floor` — is an administrator-imposed Managed policy
+    ///   installed? That floor is not this relaxation's to lift, on either path.
+    ///
+    /// Neither input can be selected by repository content.
+    ///
+    /// Effect when the answer is "the local operator":
+    /// [`shell_requires_os_read_deny`](Self::shell_requires_os_read_deny)
+    /// goes false, so `bash.rs` stops refusing the shell on a backend that
+    /// cannot enforce OS-level secret-read-deny. Nothing else moves —
+    /// `secret_read_deny_required` is untouched, so the OS deny LIST
+    /// ([`secret_deny_paths_dynamic`](Self::secret_deny_paths_dynamic)) is still
+    /// computed and still handed to the backend, and a backend that CAN enforce
+    /// it still does. The tool-layer `SecretDenyFs` on Read/Write/Edit is a
+    /// different guard entirely and is unaffected.
+    #[must_use]
+    pub fn with_shell_principal(
+        self,
+        channel_posture_present: bool,
+        managed_execution_floor: bool,
+    ) -> Self {
+        if channel_posture_present || managed_execution_floor {
+            self
+        } else {
+            self.with_local_operator_principal()
+        }
+    }
+
+    /// Unconditionally mark this policy's shell principal as the local operator.
+    ///
+    /// Production code must NOT call this — call
+    /// [`with_shell_principal`](Self::with_shell_principal), which is the one
+    /// place the decision is made. This exists so tests can construct a
+    /// local-operator policy directly without reconstructing a whole engine.
+    #[must_use]
+    pub fn with_local_operator_principal(mut self) -> Self {
+        self.local_operator_principal = true;
+        self
+    }
+
+    /// True when this policy's shell may only be driven by the local operator.
+    #[must_use]
+    pub fn local_operator_principal(&self) -> bool {
+        self.local_operator_principal
+    }
+
+    /// THE exec-time shell gate predicate: `Bash` must be REFUSED when this is
+    /// true and the active backend neither enforces read-deny nor is an
+    /// operator-requested containment bypass.
+    ///
+    /// It is `secret_read_deny_required` AND NOT `local_operator_principal`,
+    /// because the two flags answer different questions:
+    ///
+    /// * `secret_read_deny_required` — *does this policy's confidentiality story
+    ///   depend on the OS enforcing `fs_read_deny`?* True for `Contained` and for
+    ///   any `Trusted` policy that opted into project-secret denial.
+    /// * `local_operator_principal` — *who can drive the shell?* When the answer
+    ///   is "only the human who launched this process", the confidentiality the
+    ///   deny list protects is that human's own, from that human. The refusal
+    ///   buys nothing and costs the entire shell: it fires on every fresh clone
+    ///   (untrusted workspace ⇒ `contained`), and the product's own printed
+    ///   remedy — `--trust-workspace` — hands back a `trusted_local` policy with
+    ///   `secret_read_deny_required == false` and therefore the SAME uncontained
+    ///   shell, with no extra authority and no extra OS enforcement. A gate whose
+    ///   documented one-command bypass grants the identical capability is a
+    ///   usability cost, not a boundary.
+    ///
+    /// The refusal is UNCHANGED for every principal that is not the local
+    /// operator: channel/remote sessions of any posture, Managed execution
+    /// policy, and delegated orchestrator mutations all leave
+    /// `local_operator_principal` false and are still refused.
+    #[must_use]
+    pub fn shell_requires_os_read_deny(&self) -> bool {
+        self.secret_read_deny_required && !self.local_operator_principal
     }
 
     /// Deny explicit orchestrator authority roots to shell commands.
@@ -656,7 +840,11 @@ fn path_is_in_credential_store(path: &Path) -> bool {
 
 /// Free-function body of `is_secret_path` (uses no `self` fields). Extracted
 /// so `compute_secret_deny` can call it without a `WorkspacePolicy` instance.
-fn is_secret_path_static(path: &Path) -> bool {
+/// The one credential-file name predicate in the crate. `Read`/`SecretDenyFs`
+/// reach it via [`WorkspacePolicy::is_secret_path`]; `grep_policy` (SR-05) uses
+/// it directly, because Grep has no policy instance and must not grow a second,
+/// divergent copy of this list.
+pub(crate) fn is_secret_path_static(path: &Path) -> bool {
     let s = path.to_string_lossy().replace('\\', "/");
 
     if let Some(ext) = path.extension().and_then(|e| e.to_str())
@@ -921,6 +1109,80 @@ fn scratch_dirs(trust: WorkspaceTrust) -> Vec<PathBuf> {
     }
 }
 
+/// `TMPDIR`/`TMP`/`TEMP` pointed INTO the session's own writable scratch grant.
+///
+/// SEC-06 / SEC-10 made the bwrap backend remount every ungranted filesystem
+/// read-only, and the host `/tmp` is ungranted. Left pointing at the host temp
+/// directory, these vars turn every temp-using tool into a failure — and the
+/// dangerous ones do not fail loudly. Measured on hetzner-dsm under
+/// `trusted_local` and `contained` before this redirect existed:
+/// `mktemp` → "Read-only file system" (exit 1, honest), but
+/// `seq 1 200000 | sort -R | wc -l` → prints `0`, **exit 0**, `is_error=false`.
+/// A silently wrong answer reported as success is exactly the defect the
+/// read-only remount was added to remove, recreated at a different path.
+///
+/// [`WorkspacePolicy::delegated_mutation`] already does this with its private
+/// scratch root; this is the same mechanism for the two profiles a real user
+/// actually gets. It grants NO new authority — `scratch_dirs` already put this
+/// directory in `writable_extra`, so it is a writable root either way, and it
+/// is per-uid, per-trust and ownership-verified (see [`scratch_dir`]). Because
+/// every write grant is its own bind mount and `--remount-ro` does not touch
+/// submounts, it stays writable underneath a read-only `/tmp`.
+///
+/// Empty when the scratch grant could not be established: with no writable
+/// scratch to point at, redirecting would only relocate the failure.
+/// `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` pointed into the workspace's own
+/// cache root, for the same reason `CARGO_HOME` and `npm_config_cache` are.
+///
+/// Under the `contained` profile — **the profile a workspace gets by default,
+/// because [`EffectiveWorkspaceTrust`] starts untrusted** — `$HOME/.gitconfig`
+/// is deliberately not granted. git reads it unconditionally at startup, so on
+/// macOS seatbelt the result was that `git` did not work AT ALL: measured on
+/// Darwin 25.3.0, `git init` exited 128 with
+/// `fatal: unable to access '/Users/<me>/.gitconfig': Operation not permitted`,
+/// and so did every other subcommand.
+///
+/// The fix is to stop git reading the host file rather than to grant it. This
+/// REMOVES authority: the sandboxed child no longer sees the operator's global
+/// git configuration at all, which also means a `[url … insteadOf]` rewrite
+/// carrying an embedded credential can no longer be applied on behalf of
+/// untrusted workspace content. Both variables are absolute file paths (git
+/// requires that), inside `<root>/.wcache`, which is already a writable root —
+/// so `git config --global` inside the sandbox lands in a real file scoped to
+/// the workspace instead of being silently discarded.
+///
+/// This does NOT fix `cargo new`, and that is not an oversight: cargo's VCS
+/// init goes through libgit2, which computes the global config path from
+/// `$HOME` and ignores `GIT_CONFIG_GLOBAL` entirely — measured, it still fails
+/// with `failed to stat '/Users/<me>/.gitconfig'; class=Config (7)`. Closing
+/// that needs a metadata-only grant on the file, which needs a manifest channel
+/// that does not exist yet; see the lane report rather than a silent widening.
+fn git_config_env(cache_root: &Path) -> Vec<(String, String)> {
+    let git = cache_root.join("git");
+    [
+        ("GIT_CONFIG_GLOBAL", "config"),
+        ("GIT_CONFIG_SYSTEM", "system"),
+    ]
+    .into_iter()
+    .map(|(var, file)| {
+        (
+            var.to_owned(),
+            git.join(file).to_string_lossy().into_owned(),
+        )
+    })
+    .collect()
+}
+
+fn temp_env(scratch: &[PathBuf]) -> Vec<(String, String)> {
+    let Some(dir) = scratch.first() else {
+        return Vec::new();
+    };
+    ["TMPDIR", "TMP", "TEMP"]
+        .into_iter()
+        .map(|var| (var.to_owned(), dir.to_string_lossy().into_owned()))
+        .collect()
+}
+
 /// SAFETY: `getuid` is a POSIX call that cannot fail, takes no arguments and
 /// touches no caller-owned memory. It is `unsafe` only because it is `extern`.
 #[cfg(unix)]
@@ -971,11 +1233,10 @@ fn scratch_dir(trust: WorkspaceTrust) -> Option<PathBuf> {
 /// channel posture attached (local CLI / TUI / json-stream / ACP / desktop).
 ///
 /// A channel-attached session — INCLUDING `Full` posture — is a remote sender.
-/// It stays on the pre-#657 lockdown: `default_bash_network_policy()` (Deny
-/// unless the operator sets `WAYLAND_BASH_ALLOW_NETWORK`). A remote-triggered
-/// context does not get a networked shell by default; if a real
-/// remote-networked-shell use case appears, it becomes a deliberate per-channel
-/// opt-in, not the default.
+/// It stays on the pre-#657 lockdown: `default_bash_network_policy()`, which is
+/// an unconditional Deny. A remote-triggered context does not get a networked
+/// shell; if a real remote-networked-shell use case appears, it becomes a
+/// deliberate per-channel opt-in, not the default.
 pub fn local_bash_network(has_channel_posture: bool) -> NetworkPolicy {
     if has_channel_posture {
         crate::bash::default_bash_network_policy()
@@ -984,10 +1245,55 @@ pub fn local_bash_network(has_channel_posture: bool) -> NetworkPolicy {
     }
 }
 
+/// SEC-13 — the Bash network posture for a SANDBOXED (`contained`) session,
+/// decided by the operator's TRUSTED `[security] allow_sandboxed_shell_network`.
+///
+/// The W2/W3 conformance gate measured the polarity backwards on Linux: a bare
+/// `WAYLAND_BASH_ALLOW_NETWORK=1` in the environment re-opened the sandboxed
+/// shell (`accept_count=1` on a driver-owned listener) while the operator's own
+/// trusted config recorded `accept_count=0`. Untrusted provenance raised the
+/// boundary; trusted provenance had no lever at all.
+///
+/// The env lever is gone (see [`crate::bash::default_bash_network_policy`]) and
+/// this is its replacement, matching the posture `SecurityConfig::enabled`
+/// already documents: **config-file only, read from the trusted layer**. The
+/// `[security]` arm of `merge_config_files_with_trust` takes this field from the
+/// GLOBAL layer alone, so a project file — which travels with a cloned
+/// repository — cannot mint the grant.
+///
+/// It is deliberately **not** derived from `[security] egress_allow`. The first
+/// draft of this fix was, and that was a worse trade than the defect it closed:
+/// `egress_allow` is a per-host permit for the in-process HTTP gate, the strict
+/// branch is selected by `!workspace_trust.is_trusted()` — the DEFAULT for any
+/// repo the operator has not fingerprint-trusted — and no sandbox backend in
+/// this repo has a host/DNS gate for an arbitrary shell (bwrap, sandbox-exec,
+/// AppContainer and Docker all reject [`NetworkPolicy::AllowHosts`]), so the
+/// enforceable shell grant is all-or-nothing. Measured on the first draft:
+/// `egress_allow = ["docs.rs"]` opened a connection to `127.0.0.1:44755`, a host
+/// the operator never listed. Permitting one host for one subsystem must not
+/// hand an untrusted repository's shell arbitrary outbound TCP.
+///
+/// GRANULARITY, stated plainly: `true` yields [`NetworkPolicy::Inherit`] — the
+/// whole host network — and that is logged at `warn` every time it bites rather
+/// than happening quietly. There is no narrower enforceable option today.
+pub fn operator_bash_network(allow_sandboxed_shell_network: bool) -> NetworkPolicy {
+    if !allow_sandboxed_shell_network {
+        return NetworkPolicy::Deny;
+    }
+    tracing::warn!(
+        target: "wcore_tools::workspace_policy",
+        "[security] allow_sandboxed_shell_network = true, so the sandboxed shell is \
+         granted network access. No sandbox backend can filter an arbitrary shell's \
+         egress by host, so this grant is the WHOLE host network. Set it back to \
+         false to keep the shell offline."
+    );
+    NetworkPolicy::Inherit
+}
+
 mod discovery;
 use discovery::{
-    capability_roots, detect_developer_capabilities, minimal_toolchain_read_dirs,
-    trusted_config_and_certificate_reads,
+    capability_roots, contained_toolchain_read_dirs, detect_developer_capabilities,
+    libgit2_global_config_probes, network_scoped_reads, trusted_config_and_certificate_reads,
 };
 
 #[cfg(test)]
