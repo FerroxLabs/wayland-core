@@ -176,7 +176,7 @@ mod tests {
     /// and the test would still pass. Folding is why `Full` exists.
     #[test]
     fn full_still_folds_genuinely_repetitive_output() {
-        let identical = vec!["warning: unused variable `x`"; 10].join("\n");
+        let identical = ["warning: unused variable `x`"; 10].join("\n");
         let out = compact_output(&identical, CompactionLevel::Full);
         assert!(
             out.contains("identical lines"),
