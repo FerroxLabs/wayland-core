@@ -43,6 +43,12 @@ One command. The agent reads the file, runs `grep`/`glob` across the tree, reaso
 
 **Paste a key, get a provider.** Paste an API key (or run `/connect` in the TUI) and the engine fingerprints the provider from the key's shape, validates it live, and stores it in your OS keyring. From there, `/config` exposes Essentials and Advanced editors, `/doctor` shows provider, key, and MCP health, and `/effective` prints the resolved config with secrets redacted.
 
+**Your whole MCP toolset stays reachable.** `ToolSearch` is the hydration path
+for deferred tools, so its result is treated as structured data end to end and
+is never passed through a lossy text transform. A large MCP catalogue arrives
+intact and parseable, which is what makes the tool genuinely callable on the
+next turn rather than merely mentioned. Fixed in v0.13.0.
+
 ## What it is
 
 - **A standalone engine.** The engine is the product, not a feature bolted onto an editor and not a wrapper around one vendor's API.

@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.13.0](https://github.com/FerroxLabs/wayland-core/compare/v0.12.26...v0.13.0) (2026-08-13)
+
+**Release highlights.** 255 commits (3 `feat`, 140 `fix`, 64 `test`, 20 `docs`)
+across 287 files. No breaking changes. This is the release that closes the 0.12
+line: **58 days and 27 stable point releases** from v0.12.0 on 2026-06-16 to
+here. It could have shipped as 0.12.27 and deliberately did not, because the
+shape of the work is different. v0.12 built the surface; v0.13.0 is a cycle
+spent attacking it. Almost everything below was found by us, not reported.
+
+**MCP tool discovery works again.** At `compaction = "full"` a `ToolSearch`
+catalogue was run through the same line-folding heuristic as build logs.
+Pretty-printed JSON is full of legitimately similar lines, so a five-tool
+catalogue collapsed from 27 lines to 5 with **zero of five tool names
+surviving** — a model driving a 101-tool MCP server could not name one of its
+tools, and correctly refused to guess. The invisible half: the engine parses
+that same string to decide what to force-admit into `tools[]`, so hydration
+recorded nothing, the tool never became callable, and every repeat search
+returned a byte-identical body. Closed three ways — structured output never
+meets the fold, the similarity metric normalises by the longer line so a
+3-character `{` cannot anchor a group and swallow its own object, and results
+are no longer cut mid-object by a character-count truncation. A body that
+arrives corrupted now says so instead of silently hydrating nothing.
+
+**Auto-approved calls are announced.** Every call that skipped the approval
+gate — force mode, an allow-listed tool, a command-scoped grant, or a tool just
+granted `Always` — dispatched with nothing on the wire. The new
+`call_announced` frame carries the same payload as `tool_request` for exactly
+those calls, closing two unreported TUI defects: no tool card at all, and a
+touched path that never reached the right-rail tree or `/rewind`.
+
+**Unsaved work is not collateral.** The largest single family of fixes. The
+shell can no longer discard it, an `Edit` cannot drop it as a side effect, and
+a redirect that would truncate a file with unsaved changes is refused. The
+guard now covers `rm` and `git`, keys on one path spelling, anchors every copy
+it takes under a ref, and knows a merge in progress is not unsaved work.
+
+**Locks release when they should.** The session journal's data-file lock was
+leaking through `fork()`, blocking an agent behind its own child in 47.6% of
+reopens under load. Corrected there and swept across the cron schedule lease,
+the gateway pid lock, the eval candidate identity lock and snapshot publication.
+
+**Saying only what is true.** `sandbox status` no longer claims filesystem
+containment on Windows, where the Job Object does not provide it (measured, not
+assumed). A tool description no longer names the flag that bypasses it. Startup
+warnings are said once rather than every turn. Requests that never returned a
+response are disclosed instead of vanishing.
+
+**Also:** runs that need human contact they cannot reach freeze state and exit;
+single-use DM pairing codes with an operator verb; MCP `tools/list_changed`
+honoured mid-session; crash-interrupted sessions recoverable; `ready` guaranteed
+first on the json-stream; a rejected API key no longer retried; Windows connect
+failures classified by WSA code rather than error text.
+
+**Host contract.** `minor` 13 → 14, `major` holds at 1, additive only. 23
+commands / 60 events / 17 capabilities. Hosts pinning the descriptor must
+re-pin `fixture_digest` and `source_inputs_digest`; `schema_digest` is
+unchanged. Consuming `call_announced` is required, not optional — dropping it
+through a default arm leaves the `tool_running` behind it without a matching
+request.
+
+**Verified.** Linux 14,656/14,656 · macOS 14,547/14,547 · Windows self-hosted
+14,174/14,174, zero failures, plus six platform builds, the eval acceptance
+gate and the browser end-to-end suite. 21 required checks green. Full notes in
+[docs/releases/v0.13.0.md](docs/releases/v0.13.0.md).
+
+
 ## [0.12.26](https://github.com/FerroxLabs/wayland-core/compare/v0.12.25...v0.12.26) (2026-08-08)
 
 **Release highlights.** The largest release in the project's history: 2,918
