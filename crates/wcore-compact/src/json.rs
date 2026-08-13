@@ -34,7 +34,18 @@ fn format_value(value: &serde_json::Value, depth: usize) -> String {
             let close_indent = "  ".repeat(depth);
             let entries: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("{indent}\"{k}\": {}", format_value(v, depth + 1)))
+                .map(|(k, v)| {
+                    // The key must be JSON-ESCAPED, not interpolated raw
+                    // between two quote characters. A property named
+                    // `say "hi"`, or one containing a backslash, otherwise
+                    // produced output that no longer parsed -- silently
+                    // breaking every consumer that reads this back, including
+                    // ToolSearch hydration. MCP servers name their properties,
+                    // so this is attacker-adjacent input, not a curiosity.
+                    let key = serde_json::to_string(k)
+                        .unwrap_or_else(|_| format!("\"{}\"", k.escape_debug()));
+                    format!("{indent}{key}: {}", format_value(v, depth + 1))
+                })
                 .collect();
             format!("{{\n{}\n{close_indent}}}", entries.join(",\n"))
         }
@@ -166,6 +177,25 @@ mod tests {
         let input = "Exit code: 0\nSTDOUT:\n{\n    \"status\": \"ok\"\n}\nSTDERR:\n";
         let result = compact_json(input);
         assert!(result.contains("\"status\""));
+    }
+
+    /// A property name carrying a quote or a backslash used to be
+    /// interpolated raw between two quote characters, producing output that
+    /// no longer parsed. MCP servers choose their own property names, so this
+    /// is reachable from a remote catalogue, and an unparseable result breaks
+    /// ToolSearch hydration silently.
+    #[test]
+    fn compact_escapes_object_keys() {
+        let input = serde_json::to_string_pretty(&serde_json::json!({
+            "properties": {
+                "say \"hi\"": {"type": "string", "description": "long enough to avoid inlining here"},
+                "back\\slash": {"type": "string", "description": "also long enough to avoid inlining"}
+            }
+        }))
+        .expect("serialize");
+        let out = compact_json(&input);
+        serde_json::from_str::<serde_json::Value>(&out)
+            .expect("compacted output must stay parseable when keys contain quotes");
     }
 
     #[test]
