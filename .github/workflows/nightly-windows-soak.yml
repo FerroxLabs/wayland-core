@@ -179,6 +179,65 @@ jobs:
           # H-mutants.log, and nothing in the run said so.
           if-no-files-found: error
 
+      # Close the failure issue when the soak goes GREEN.
+      #
+      # This step exists because the failure body above has always promised
+      # "the next nightly cron tick will close this issue" and nothing in the
+      # workflow could do it. core#256 accumulated 19 bot failure comments,
+      # went silent when the soak recovered, and would have stayed open
+      # forever. A tracker that can only ever gain rows is not a tracker.
+      #
+      # Deliberately narrow: it closes ONLY an issue this workflow opened,
+      # identified by BOTH its labels and its title prefix, and it always
+      # leaves a comment naming the green run so the close is auditable.
+      # It never touches a human-filed issue.
+      - name: Close the failure issue on a green soak
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today  = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner:  context.repo.owner,
+              repo:   context.repo.repo,
+              state:  'open',
+              labels: ['windows-soak', 'test-debt'],
+            });
+            const existing = issues.find(i => i.title.startsWith('[nightly-windows-soak] FAIL'));
+            if (!existing) {
+              core.info('no open soak failure issue - nothing to close');
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: existing.number,
+              body: [
+                `## Windows soak GREEN - ${today}`,
+                ``,
+                `**Run**: ${runUrl}`,
+                ``,
+                `Closing automatically. One green tick is what this issue was`,
+                `opened against, so one green tick retires it. If the soak is`,
+                `flaky rather than fixed, the next red tick reopens a new issue`,
+                `and that recurrence is the signal worth reading.`,
+                ``,
+                `_Auto-closed by .github/workflows/nightly-windows-soak.yml_`,
+              ].join('\n'),
+            });
+
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: existing.number,
+              state: 'closed',
+              state_reason: 'completed',
+            });
+            core.info(`closed #${existing.number} on a green soak`);
+
       # Open (or update) a GitHub issue when the soak fails. Mirrors
       # mutants-nightly.yml so a failure shows up in the tracker the next
       # morning rather than being buried in a red workflow badge.
@@ -206,7 +265,8 @@ jobs:
               `   H-mutants.log for the first failing step.`,
               `2. Reproduce locally with pwsh scripts/wayland-e2e-windows-soak.ps1`,
               `   on a Windows machine if the failure isn't environment-specific.`,
-              `3. PR the fix; the next nightly cron tick will close this issue.`,
+              `3. PR the fix. The next GREEN nightly tick closes this issue`,
+              `   automatically (see the success-path step in the same workflow).`,
               ``,
               `_Auto-opened by .github/workflows/nightly-windows-soak.yml_`,
             ].join('\n');
