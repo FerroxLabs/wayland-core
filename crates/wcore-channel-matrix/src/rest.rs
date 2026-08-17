@@ -165,6 +165,59 @@ pub async fn send_text_message(
     Ok(result.event_id)
 }
 
+/// The token pair `POST /_matrix/client/v3/refresh` returns.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RefreshedTokens {
+    pub access_token: String,
+    /// Matrix refresh tokens ROTATE. When this is present the token we
+    /// presented is SPENT, and persisting the replacement is not optional:
+    /// a later process that replays the spent one can have the whole grant
+    /// revoked (RFC 6819 §5.2.2.3).
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    /// Lifetime of the new access token. Absent means the homeserver did not
+    /// state one, so no proactive renewal is scheduled — the reactive 401 path
+    /// still covers it.
+    #[serde(default)]
+    pub expires_in_ms: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct RefreshRequest<'a> {
+    refresh_token: &'a str,
+}
+
+/// Exchange a refresh token for a fresh access token.
+///
+/// **Deliberately unauthenticated.** The refresh token IS the credential here
+/// and rides in the body; attaching the (expired) access token as a bearer
+/// would hand the homeserver a reason to 401 a call that must succeed, and
+/// would make the dead credential a precondition for replacing itself.
+pub(crate) async fn refresh_access_token(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    refresh_token: &str,
+) -> Result<RefreshedTokens, MatrixError> {
+    let url = format!("{api_base}/_matrix/client/v3/refresh");
+    let resp = http
+        .post(&url)
+        .json(&RefreshRequest { refresh_token })
+        .timeout(crate::token::REFRESH_POST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| MatrixError::Network(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(MatrixError::Http { status, body });
+    }
+
+    resp.json()
+        .await
+        .map_err(|e| MatrixError::Parse(e.to_string()))
+}
+
 #[derive(Serialize)]
 struct TypingBody {
     typing: bool,
