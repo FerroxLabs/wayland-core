@@ -1087,7 +1087,15 @@ impl TurnEngine for EngineTurnEngine {
             // `AlwaysPrefix` is a command-prefix grant with no egress meaning;
             // it narrows to `once` rather than widening to a whole-host
             // `always`. Narrowing is logged, never silent.
-            let egress_scope = match &scope {
+            //
+            // A DENIED outcome carries no scope at all. A persistence scope on
+            // a refusal has no meaning to grant, and `{"egress_scope":"always"}`
+            // sitting on `approved: false` reads as a standing allowance to any
+            // consumer that forgets to check `approved` first. The TUI sibling
+            // (`engine_bridge::resolve_egress`) already gates on `approved`;
+            // this matches it rather than shipping two dialects of the same
+            // field.
+            let egress_scope = decision.approved.then(|| match &scope {
                 wcore_protocol::commands::ApprovalScope::Always => "always",
                 wcore_protocol::commands::ApprovalScope::Once => "once",
                 wcore_protocol::commands::ApprovalScope::AlwaysPrefix { prefix } => {
@@ -1098,10 +1106,11 @@ impl TurnEngine for EngineTurnEngine {
                     );
                     "once"
                 }
-            };
+            });
             let outcome = wcore_agent::approval::ApprovalOutcome {
                 approved: decision.approved,
-                modifications: Some(serde_json::json!({ "egress_scope": egress_scope })),
+                modifications: egress_scope
+                    .map(|scope| serde_json::json!({ "egress_scope": scope })),
             };
             if session.approval_bridge.resolve(token, outcome).await {
                 return Ok(());
@@ -1896,7 +1905,7 @@ mod tests {
     /// whole-host `always` would be the silent-widening half of the same bug.
     #[tokio::test]
     async fn bridge_resolve_carries_the_operator_scope() {
-        async fn egress_scope_for(scope: ApprovalScopeWire) -> Option<String> {
+        async fn egress_scope_for(approved: bool, scope: ApprovalScopeWire) -> Option<String> {
             let turn = EngineTurnEngine::new(placeholder_config(), ".".to_string());
             let session = live_session();
             turn.sessions
@@ -1920,7 +1929,7 @@ mod tests {
                 "s-583",
                 "corr-583",
                 ApprovalDecision {
-                    approved: true,
+                    approved,
                     scope,
                     answer: None,
                     resume_token: Some(secret),
@@ -1930,11 +1939,12 @@ mod tests {
             .expect("bridge gate resolves via secret resume_token");
 
             let outcome = rx.try_recv().expect("the bridge waiter is resolved");
-            // CONTROL: the resolve really approved, so a `None` below means the
-            // scope was dropped and not that the whole path failed.
-            assert!(
-                outcome.approved,
-                "control failed: the gate was not approved"
+            // CONTROL: the resolve really carried the operator's verdict, so a
+            // `None` below means the scope was dropped (or deliberately
+            // withheld) and not that the whole path failed.
+            assert_eq!(
+                outcome.approved, approved,
+                "control failed: the gate did not carry the operator's verdict"
             );
             outcome
                 .modifications
@@ -1945,23 +1955,48 @@ mod tests {
         }
 
         assert_eq!(
-            egress_scope_for(ApprovalScopeWire::Always).await.as_deref(),
+            egress_scope_for(true, ApprovalScopeWire::Always)
+                .await
+                .as_deref(),
             Some("always"),
             "an Always grant must reach the bridge as always, not collapse to once"
         );
         assert_eq!(
-            egress_scope_for(ApprovalScopeWire::Once).await.as_deref(),
+            egress_scope_for(true, ApprovalScopeWire::Once)
+                .await
+                .as_deref(),
             Some("once"),
             "a Once grant must reach the bridge as once"
         );
         assert_eq!(
-            egress_scope_for(ApprovalScopeWire::AlwaysPrefix {
-                prefix: "git ".to_string()
-            })
+            egress_scope_for(
+                true,
+                ApprovalScopeWire::AlwaysPrefix {
+                    prefix: "git ".to_string()
+                }
+            )
             .await
             .as_deref(),
             Some("once"),
             "a prefix grant has no egress meaning; it must narrow, never widen"
+        );
+
+        // A REFUSAL grants nothing, so it carries no scope. `always` riding an
+        // `approved: false` outcome is a standing allowance to any consumer
+        // that reads the scope before the verdict.
+        assert_eq!(
+            egress_scope_for(false, ApprovalScopeWire::Always)
+                .await
+                .as_deref(),
+            None,
+            "a denied approval must not carry a persistence scope"
+        );
+        assert_eq!(
+            egress_scope_for(false, ApprovalScopeWire::Once)
+                .await
+                .as_deref(),
+            None,
+            "a denied approval must not carry a persistence scope"
         );
     }
 
