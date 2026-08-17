@@ -21,36 +21,38 @@ jobs:
       - name: Environment facts
         run: |
           echo "TMPDIR=$TMPDIR"
-          python3 -c "import os,sys; print('realpath TMPDIR:', os.path.realpath(os.environ['TMPDIR']))"
           sysctl -n hw.ncpu
-          df -h "$TMPDIR" || true
-          mount | grep -i apfs | head -5
       - name: Hammer the race
+        shell: bash
+        env:
+          RUST_BACKTRACE: "1"
         run: |
-          set -u
+          set +e
           BIN=$(find target/debug/deps -name 'workspace_authority-*' -type f -perm +111 | head -1)
           echo "BIN=$BIN"
           mkdir -p repro-logs
           fails=0
-          for round in $(seq 1 24); do
-            pids=""
+          for round in $(seq 1 30); do
             for i in $(seq 1 12); do
-              ( "$BIN" --exact independent_cli_processes_cannot_overbook_shared_capacity --nocapture \
-                  > "repro-logs/r${round}_${i}.log" 2>&1 ; echo "$?" > "repro-logs/r${round}_${i}.rc" ) &
-              pids="$pids $!"
+              (
+                "$BIN" --exact independent_cli_processes_cannot_overbook_shared_capacity --nocapture \
+                  > "repro-logs/r${round}_${i}.log" 2>&1
+                echo "$?" > "repro-logs/r${round}_${i}.rc"
+              ) &
             done
-            wait $pids || true
+            wait
             for i in $(seq 1 12); do
-              rc=$(cat "repro-logs/r${round}_${i}.rc")
-              if [ "$rc" != "0" ]; then
+              rc=$(cat "repro-logs/r${round}_${i}.rc" 2>/dev/null)
+              if [ "x$rc" != "x0" ]; then
                 fails=$((fails+1))
-                echo "===== FAILURE round=$round copy=$i rc=$rc ====="
+                echo "===== FAILURE round=$round copy=$i rc=${rc:-missing} ====="
                 cat "repro-logs/r${round}_${i}.log"
+                echo "===== END FAILURE ====="
               else
                 rm -f "repro-logs/r${round}_${i}.log"
               fi
             done
             rm -f repro-logs/*.rc
+            if [ "$fails" -ge 4 ]; then echo "enough evidence collected"; break; fi
           done
-          echo "TOTAL RUNS=288 FAILURES=$fails"
-          if [ "$fails" -gt 0 ]; then exit 1; fi
+          echo "TOTAL FAILURES=$fails"
