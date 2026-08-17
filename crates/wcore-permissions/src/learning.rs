@@ -245,6 +245,17 @@ impl LearnedPolicy {
     /// then gives up with [`LearningError::LockTimeout`], which the TUI already
     /// renders as "this grant applies to this session only". Losing one grant
     /// with an explanation beats wedging the session without one.
+    ///
+    /// The `Drop`-unlock claim above is read from the vendored source
+    /// (`fd-lock-4.0.4/src/sys/unix/write_guard.rs`), NOT pinned by a test,
+    /// and a test in this crate cannot pin it: `lock` is a local, so the
+    /// `File` is closed when this function returns and the flock would be
+    /// released by that close even if the guard were leaked. Inside one
+    /// process the two mechanisms are indistinguishable through the public
+    /// API. Telling them apart needs `/proc/locks` plus a fork-without-exec
+    /// child outliving its parent — the shape
+    /// `wcore-agent/tests/snapshot_lock_probe.rs` already builds. Do not add
+    /// a `mem::forget`-the-guard test here; it passes either way.
     pub fn update_at(path: &Path, mutate: impl FnOnce(&mut Self)) -> Result<(), LearningError> {
         let mut lock = open_policy_lock(path)?;
         // `fd_lock`'s guard borrows the `RwLock` mutably, so the retry loop
