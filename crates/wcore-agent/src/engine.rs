@@ -14741,7 +14741,11 @@ impl AgentEngine {
                 Some(self.crucible_result(outcome.final_text))
             }
             Err(e) => {
-                let msg = format!("crucible: {e}");
+                // #584: an `anyhow` chain from the council can quote arbitrary
+                // upstream text, including an in-flight `apr-` token. The scrub
+                // removes only exact live tokens, so the underlying error
+                // (errno, checksum, provider name) survives intact.
+                let msg = crate::output_redaction::redact_active_tokens(&format!("crucible: {e}"));
                 let _ = writer.emit(&ProtocolEvent::ToolResult {
                     msg_id: self.current_msg_id.clone(),
                     call_id,

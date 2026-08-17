@@ -1,10 +1,74 @@
 //! Central redaction for tool output before it reaches hooks, hosts, models,
 //! traces, provider requests, or persisted transcripts.
 
+use std::sync::{Arc, Weak};
+
+use parking_lot::{Mutex, RwLock};
 use wcore_safety::PIIScrubber;
 
+/// #584 — process-wide set of live active-approval-token sources.
+///
+/// The active-token scrub used to be reachable ONLY through
+/// [`crate::output::protocol_sink::ActiveTokenRedactor`], which exactly three
+/// `ProtocolSink` methods held a handle to. Every other producer of tool text —
+/// most importantly the authoritative `ToolResult` card, emitted in
+/// `orchestration` through a RAW `Arc<dyn ProtocolEmitter>` that structurally
+/// cannot reach a sink — emitted unscrubbed. The streaming chunk was redacted
+/// and the final card that supersedes it was not.
+///
+/// Wiring one more redactor handle down the dispatch path would have reproduced
+/// the same failure mode one call site later, so the scrub is instead published
+/// process-wide: every [`ActiveTokenRedactor`] that ever publishes tokens
+/// registers its shared set here, and [`redact_active_tokens`] strips the union
+/// of every live set. Sources are held WEAKLY, so a dropped bridge's set is
+/// pruned automatically and two concurrent bridges (tests, sub-agents) union
+/// rather than clobber each other.
+static ACTIVE_TOKEN_SOURCES: Mutex<Vec<Weak<RwLock<Vec<String>>>>> = Mutex::new(Vec::new());
+
+/// Publish `inner` as a live active-token source. Idempotent: a set already
+/// registered is not registered twice. Dead entries are pruned on every call,
+/// which is also what keeps the pointer-identity check below sound (a pruned
+/// slot can never alias a freshly allocated set).
+pub(crate) fn register_active_token_source(inner: &Arc<RwLock<Vec<String>>>) {
+    let mut sources = ACTIVE_TOKEN_SOURCES.lock();
+    sources.retain(|weak| weak.strong_count() > 0);
+    let target = Arc::as_ptr(inner);
+    if !sources.iter().any(|weak| weak.as_ptr() == target) {
+        sources.push(Arc::downgrade(inner));
+    }
+}
+
+/// Strip every in-flight approval `apr-<uuid>` from `text`, replacing each with
+/// `[REDACTED]`. A no-op — and a single uncontended lock — when no approval is
+/// in flight, which is the steady state.
+///
+/// Only exact tokens minted by this process seconds earlier are removed, so
+/// this cannot eat a checksum, an errno, or a product name out of an error
+/// message: the underlying error survives intact.
+pub(crate) fn redact_active_tokens(text: &str) -> String {
+    let sets: Vec<Arc<RwLock<Vec<String>>>> = {
+        let mut sources = ACTIVE_TOKEN_SOURCES.lock();
+        sources.retain(|weak| weak.strong_count() > 0);
+        sources.iter().filter_map(Weak::upgrade).collect()
+    };
+    let mut out = text.to_string();
+    for set in sets {
+        for token in set.read().iter() {
+            if !token.is_empty() {
+                out = out.replace(token, "[REDACTED]");
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn redact_tool_output(content: &str) -> String {
-    PIIScrubber.scrub(content).into_owned()
+    // #584 ordering: the active-token scrub runs on the SAME pass as the PII
+    // scrub and therefore ahead of truncation/compaction at every call site,
+    // so a token straddling a truncation boundary is removed while it is still
+    // one contiguous string. `redact` is an exact `str::replace`; a token cut
+    // in half survives an emit-time-only pass.
+    redact_active_tokens(&PIIScrubber.scrub(content))
 }
 
 const MAX_PENDING_BYTES: usize = 1024 * 1024;

@@ -86,6 +86,12 @@ impl ActiveTokenRedactor {
     pub fn set(&self, tokens: Vec<String>) {
         let inner = self.inner.lock().clone();
         *inner.write() = tokens;
+        // #584: publish this set process-wide so producers that never see a
+        // `ProtocolSink` — the authoritative `ToolResult` card, `ToolCancelled`,
+        // the Crucible error card — scrub it too. Registering on `set` (rather
+        // than on construction) means only sets a bridge actually publishes to
+        // are ever consulted.
+        crate::output_redaction::register_active_token_source(&inner);
     }
 
     /// Snapshot the current active tokens (read-side).
@@ -1119,11 +1125,13 @@ impl OutputSink for ProtocolSink {
         tool_name: &str,
         panic_message: &str,
     ) {
+        // #584: a panic payload is tool-derived text like any other. This is
+        // the one struct that OWNS `token_redactor` and was not using it here.
         let _ = self.writer.emit(&ProtocolEvent::ToolPanicked {
             msg_id: msg_id.to_string(),
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            panic_message: panic_message.to_string(),
+            panic_message: self.token_redactor.redact(panic_message),
         });
     }
 
@@ -1727,5 +1735,38 @@ mod tests {
         let writer = Arc::new(ProtocolWriter::new());
         let sink = ProtocolSink::new(writer);
         sink.emit_compaction("m1", "window_pressure", 4096, Some(41));
+    }
+
+    /// #584 — `emit_tool_panicked` is a method on the ONE struct that owns
+    /// `token_redactor`, and it was the only tool-text emitter on that struct
+    /// not using it. A panic payload quotes whatever the tool was holding,
+    /// which on the snooping path is the live approval token.
+    #[test]
+    fn tool_panicked_scrubs_an_active_approval_token() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+        let token = "apr-11111111-2222-3333-4444-555555555555".to_string();
+        sink.token_redactor().set(vec![token.clone()]);
+
+        sink.emit_tool_panicked("m1", "c1", "Bash", &format!("panicked at {token} !"));
+
+        let panic_message = emitter
+            .events
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::ToolPanicked { panic_message, .. } => Some(panic_message.clone()),
+                _ => None,
+            })
+            .expect("emit_tool_panicked must write a frame");
+        // CONTROL: the payload really rode the frame.
+        assert!(
+            panic_message.contains("panicked at"),
+            "control failed: the frame lost the panic text: {panic_message}"
+        );
+        assert!(
+            !panic_message.contains(&token),
+            "tool_panicked leaked the live approval token: {panic_message}"
+        );
     }
 }
