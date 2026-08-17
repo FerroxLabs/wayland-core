@@ -38,7 +38,7 @@ pub enum SwarmError {
 
     /// Generic IO error (filesystem operations on `.swarm-worktrees`).
     #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
     /// Failure inside the Auto-Mode audit trail (sqlite open / record /
     /// query). T3-2. Carries the human-readable diagnostic; callers route
@@ -48,3 +48,16 @@ pub enum SwarmError {
 }
 
 pub type Result<T> = std::result::Result<T, SwarmError>;
+
+// DIAG (temporary): name every bare `?`-converted io::Error site by backtrace.
+impl From<std::io::Error> for SwarmError {
+    #[cold]
+    fn from(error: std::io::Error) -> Self {
+        eprintln!(
+            "DIAG-SWARM-IO kind={:?} error={error}\n{}",
+            error.kind(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        SwarmError::Io(error)
+    }
+}

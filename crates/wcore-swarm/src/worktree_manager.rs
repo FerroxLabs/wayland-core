@@ -1047,7 +1047,13 @@ impl WorktreeManager {
                 String::from_utf8_lossy(&clone.stderr).trim()
             )));
         }
-        make_guard_dir_private(&checkout)?;
+        make_guard_dir_private(&checkout).map_err(|error| {
+            io_at(
+                "DIAG private-mode set on the clone checkout",
+                &checkout,
+                error,
+            )
+        })?;
 
         Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
         let actual = Box::pin(
@@ -1071,8 +1077,18 @@ impl WorktreeManager {
         } else {
             checkout.join(common)
         };
-        let common = normalized_root(&common)?;
-        let checkout_root = normalized_root(&checkout)?;
+        let common = normalized_root(&common).map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG canonicalize common {}: {error}",
+                common.display()
+            ))
+        })?;
+        let checkout_root = normalized_root(&checkout).map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG canonicalize checkout_root {}: {error}",
+                checkout.display()
+            ))
+        })?;
         if !common.starts_with(&checkout_root) {
             return Err(SwarmError::WorktreeIo(format!(
                 "isolated checkout Git authority escaped its root: {}",
@@ -1118,9 +1134,24 @@ impl WorktreeManager {
             self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{tree}"]),
         )
         .await?;
-        let checkout = normalized_root(&checkout)?;
-        let scratch = normalized_root(&scratch)?;
-        let transaction_root = normalized_root(&transaction_root)?;
+        let checkout = normalized_root(&checkout).map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG canonicalize final checkout {}: {error}",
+                checkout.display()
+            ))
+        })?;
+        let scratch = normalized_root(&scratch).map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG canonicalize final scratch {}: {error}",
+                scratch.display()
+            ))
+        })?;
+        let transaction_root = normalized_root(&transaction_root).map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG canonicalize final transaction_root {}: {error}",
+                transaction_root.display()
+            ))
+        })?;
         if !checkout.starts_with(&transaction_root)
             || !scratch.starts_with(&transaction_root)
             || checkout.starts_with(&scratch)
