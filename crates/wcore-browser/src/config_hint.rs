@@ -48,15 +48,47 @@ pub const ALLOWLIST_REFUSED_URL: &str = "https://not-on-the-list.test/";
 /// A URL only [`ENABLE_BY_DEFAULT_ACTION_TOML`] admits.
 pub const DEFAULT_ACTION_ADMITTED_URL: &str = "https://anything-at-all.test/";
 
+/// The workspace-local config filename. The loader accepts this file form (and
+/// a `.wayland-core/config.toml` dir form) inside the working directory — it
+/// does NOT read a plain `config.toml` sitting beside the operator's work.
+/// Named here because the hint must not advertise a filename the loader
+/// ignores; see [`disabled_by_default_hint_for`].
+pub const PROJECT_CONFIG_FILENAME: &str = ".wayland-core.toml";
+
 /// The full remediation message shown when the browser tool denies solely
 /// because it is in its fail-closed default posture.
+///
+/// Names the config file THIS process reads, resolved from the same
+/// [`wcore_config::config::global_config_path`] the loader uses, so the two
+/// cannot drift.
 pub fn disabled_by_default_hint() -> String {
+    disabled_by_default_hint_for(&wcore_config::config::global_config_path())
+}
+
+/// [`disabled_by_default_hint`] with the config path injected, so a guard can
+/// drive the exact text an operator sees without depending on the host's
+/// `WAYLAND_HOME`.
+///
+/// gh#900: naming the right SECTION was only half of `27-C2(a)`. The message
+/// still said "your config.toml" with no path, and the reporter's sessions ran
+/// with the working directory set to a throwaway `wcore-temp-*` workspace. An
+/// operator following the hint verbatim creates `<cwd>/config.toml`, which is
+/// not a config source in ANY layer: the workspace layer is
+/// [`PROJECT_CONFIG_FILENAME`], and `config.toml` is only read under the app
+/// config dir. Four workspaces and four edits later the tool was still denying,
+/// with no diagnostic, because every edited file was invisible to the loader.
+pub fn disabled_by_default_hint_for(config_path: &std::path::Path) -> String {
     format!(
         "Browser tool is disabled by default. \
-         Add allowed domains to your config.toml to enable it:\n\n\
+         Add allowed domains to the config file this session reads — \
+         {} — to enable it:\n\n\
          {ENABLE_BY_ALLOWLIST_TOML}\n\
          Alternatively, permit all origins — not recommended, exposes SSRF risk:\n\n\
-         {ENABLE_BY_DEFAULT_ACTION_TOML}"
+         {ENABLE_BY_DEFAULT_ACTION_TOML}\n\
+         A workspace-local override must be named `{PROJECT_CONFIG_FILENAME}` in the \
+         working directory. Browser policy is read once when the session starts, so \
+         restart the session after editing.",
+        config_path.display(),
     )
 }
 
@@ -78,6 +110,69 @@ mod tests {
         assert!(
             hint.contains(ENABLE_BY_DEFAULT_ACTION_TOML),
             "hint dropped the default_action snippet:\n{hint}"
+        );
+    }
+
+    /// gh#900 — the hint must name a config file the loader actually reads.
+    ///
+    /// This is an ALLOWLIST: exactly two filenames are legal in the message —
+    /// the resolved config path (which ends in `config.toml`, but only under
+    /// the app config dir) and [`PROJECT_CONFIG_FILENAME`]. Any OTHER mention
+    /// of `config.toml` is an unanchored filename the operator will create in
+    /// their working directory, where nothing reads it. Returns `false` when
+    /// such a mention survives.
+    fn names_only_config_files_the_loader_reads(hint: &str, config_path: &std::path::Path) -> bool {
+        !hint
+            .replace(&config_path.display().to_string(), "")
+            .contains("config.toml")
+    }
+
+    #[test]
+    fn hint_names_the_config_file_this_process_actually_reads() {
+        let path = std::path::Path::new("/somewhere/absolute/wayland-core/config.toml");
+        let hint = disabled_by_default_hint_for(path);
+        assert!(
+            hint.contains(&path.display().to_string()),
+            "hint does not name the config file it is telling the operator to edit:\n{hint}"
+        );
+        assert!(
+            names_only_config_files_the_loader_reads(&hint, path),
+            "hint tells the operator to edit an unanchored `config.toml`; they will \
+             create it in the working directory, which is not a config source:\n{hint}"
+        );
+        assert!(
+            hint.contains(PROJECT_CONFIG_FILENAME),
+            "hint never names the workspace-local filename, so an operator working in a \
+             temp workspace has no correct local option:\n{hint}"
+        );
+    }
+
+    /// Positive control for the predicate above: the pre-gh#900 text — which
+    /// shipped and cost the reporter four workspaces of edits — must FAIL it.
+    /// Without this the assertion could pass by being unfalsifiable.
+    #[test]
+    fn the_unanchored_pre_fix_wording_fails_the_same_check() {
+        let path = std::path::Path::new("/somewhere/absolute/wayland-core/config.toml");
+        const PRE_FIX: &str = "Browser tool is disabled by default. Add allowed domains to your config.toml \
+             to enable it:";
+        assert!(
+            !names_only_config_files_the_loader_reads(PRE_FIX, path),
+            "the check cannot detect the very wording it exists to ban; it is vacuous"
+        );
+    }
+
+    /// The production entry point must resolve its path from the loader's own
+    /// resolver. Recomputing it here from the SAME function is the point: a
+    /// hardcoded or hand-built path in `disabled_by_default_hint` reddens this.
+    #[test]
+    fn the_production_hint_names_the_loaders_own_resolved_path() {
+        let expected = wcore_config::config::global_config_path();
+        let hint = disabled_by_default_hint();
+        assert!(
+            hint.contains(&expected.display().to_string()),
+            "the hint names a path the config loader does not resolve.\n\
+             loader resolves: {}\nhint says:\n{hint}",
+            expected.display()
         );
     }
 
