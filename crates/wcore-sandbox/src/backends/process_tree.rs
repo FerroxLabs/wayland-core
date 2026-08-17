@@ -303,9 +303,11 @@ impl MacProcessGroupAuthority {
     ) -> std::io::Result<Option<Self>> {
         use std::os::fd::FromRawFd;
 
+        // RED ARM MUTATION (temporary): restore the pre-fix fail-closed entry
+        // probe. Behaviour only - the signature is unchanged, so a failure here
+        // is the SYMPTOM and not a compile break.
         let root = match MacProcessIdentity::open(process_group) {
             Ok(identity) => Some(identity),
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => None,
             Err(error) => return Err(error),
         };
         if root.is_some() {
