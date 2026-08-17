@@ -1820,28 +1820,53 @@ impl TuiEngine {
     /// the grant is live for this session either way — but it must not
     /// pretend to have saved: the user is told the grant is session-only.
     fn persist_always_allow_grant(&self, tool_name: &str) {
-        let Some(path) = self.learned_policy_path.as_deref() else {
+        // Every arm that does not write must reach the SAME notice. An
+        // unresolvable home directory and an unresolvable workspace are not
+        // write failures, but they end in exactly the state the doc comment
+        // above forbids being silent about: the user pressed a key under a
+        // prompt that named a durable scope and got a session-only grant.
+        let failure = match (
+            self.learned_policy_path.as_deref(),
+            self.learned_policy_workspace.as_deref(),
+        ) {
+            (Some(path), Some(workspace)) => persist_always_allow(path, tool_name, workspace)
+                .err()
+                .map(|error| error.to_string()),
+            (None, _) => Some("no permissions file could be resolved".to_string()),
+            (Some(_), None) => Some("the current workspace could not be resolved".to_string()),
+        };
+        let Some(reason) = failure else {
             return;
         };
-        let Some(workspace) = self.learned_policy_workspace.as_deref() else {
-            return;
-        };
-        if let Err(error) = persist_always_allow(path, tool_name, workspace) {
-            tracing::warn!(
-                target: "wcore_cli::tui",
-                tool = %tool_name,
-                path = %path.display(),
-                %error,
-                "could not persist the always-allow grant"
-            );
-            let _ = self.tx.send(ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!(
-                    "Could not save the \"always allow {tool_name}\" decision ({error}). \
-                     It applies to this session only."
-                ),
-            });
-        }
+        tracing::warn!(
+            target: "wcore_cli::tui",
+            tool = %tool_name,
+            path = ?self.learned_policy_path,
+            workspace = ?self.learned_policy_workspace,
+            %reason,
+            "could not persist the always-allow grant"
+        );
+        let _ = self.tx.send(ProtocolEvent::Info {
+            msg_id: String::new(),
+            message: format!(
+                "Could not save the \"always allow {tool_name}\" decision ({reason}). \
+                 It applies to this session only."
+            ),
+        });
+    }
+
+    /// Pin the workspace a durable grant is stamped with to the session's
+    /// resolved workspace root.
+    ///
+    /// #693 — [`TuiEngine::new`] defaults to the process CWD, which is the
+    /// right identity only when the session was not pointed elsewhere. The
+    /// CLI resolves `--project-dir` (falling back to the CWD) into the one key
+    /// the workspace trust store also uses, and hands it over here, so a
+    /// session aimed at project A cannot restore or write a grant that a
+    /// session aimed at project B shares.
+    pub fn with_learned_policy_workspace(mut self, workspace: String) -> Self {
+        self.learned_policy_workspace = Some(workspace);
+        self
     }
 
     /// Point the durable learned policy at a test-owned file. Production
@@ -4981,6 +5006,50 @@ mod tests {
         assert!(tui.approval.is_tool_name_auto_approved("Write"));
 
         let notice = rx.try_recv().expect("a failed save must be reported");
+        match notice {
+            ProtocolEvent::Info { message, .. } => assert!(
+                message.contains("session only"),
+                "the user must learn the grant is not durable, got: {message}"
+            ),
+            other => panic!("expected an Info notice, got {other:?}"),
+        }
+    }
+
+    /// #693 — an unresolvable workspace is not a write failure, but it ends
+    /// in the same place: the user pressed `[a]` under a prompt reading
+    /// "always in this workspace" and got a session-only grant. The doc on
+    /// `persist_always_allow_grant` says that must never be silent, and the
+    /// arm added with the workspace scoping returned without a word.
+    #[tokio::test]
+    async fn an_unresolvable_workspace_still_tells_the_user_the_grant_is_session_only() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = wcore_agent::engine::AgentEngine::new(
+            wcore_config::config::Config::default(),
+            wcore_tools::registry::ToolRegistry::new(),
+            Arc::new(ChannelSink::new(tokio::sync::mpsc::unbounded_channel().0)),
+        );
+        let mut tui = TuiEngine::new(engine, Arc::new(ToolApprovalManager::new()), tx);
+        // A perfectly good path — only the workspace is missing, which is what
+        // `LearnedPolicy::current_workspace()` returns when the directory was
+        // deleted out from under the process.
+        tui.set_learned_policy_path(tmp.path().join("permissions.toml"));
+        tui.learned_policy_workspace = None;
+
+        let _rx = tui
+            .approval
+            .request_approval("call-nows", &ToolCategory::Edit, "Write");
+        tui.approve("call-nows", ApprovalScope::Always, None);
+
+        // The turn is unaffected: the grant still applies this session.
+        assert!(tui.approval.is_tool_name_auto_approved("Write"));
+
+        let notice = rx
+            .try_recv()
+            .expect("a grant that did not reach disk must be reported");
         match notice {
             ProtocolEvent::Info { message, .. } => assert!(
                 message.contains("session only"),
