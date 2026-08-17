@@ -72,7 +72,7 @@ impl PermissionComponent for EnterPlanModeComponent {
     fn keys(&self, ctx: &PermissionContext) -> Line<'static> {
         let _ = ctx;
         Line::from(Span::styled(
-            "[enter/y] approve   [a] always   [n] deny   [esc] cancel",
+            "[enter/y] approve   [a] always in this workspace   [n] deny   [esc] cancel",
             Style::default(),
         ))
     }
@@ -175,6 +175,24 @@ mod tests {
         assert!(keys.contains("always"));
         assert!(keys.contains("deny"));
         assert!(keys.contains("cancel"));
+    }
+
+    /// #693 — `EnterPlanMode` has its own dispatch arm, so the retext of the
+    /// generic surfaces missed it: its `[a]` is a plain `ApprovalScope::
+    /// Always`, which is exactly the durable, workspace-scoped grant
+    /// `TuiEngine::approve` writes. A footer reading a bare "[a] always" over
+    /// that authority is the loudest counter-example to the prompt this
+    /// change exists to make true.
+    #[test]
+    fn keys_name_the_workspace_scope_of_the_always_grant() {
+        let t = Theme::hearth();
+        let c = card("");
+        let keys = line_text(&EnterPlanModeComponent.keys(&ctx(&c, &t)));
+        assert!(
+            keys.contains("[a] always in this workspace"),
+            "`[a]` here writes a workspace-scoped durable grant and the prompt \
+             must say so: {keys}"
+        );
     }
 
     #[test]
