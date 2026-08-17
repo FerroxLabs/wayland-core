@@ -21,6 +21,16 @@ use wcore_memory::error::MemoryError;
 use crate::error::EvolveError;
 use crate::evolve::EvolveOutcome;
 
+/// Value stored in the `score` column for a row nothing has measured.
+///
+/// It is a placeholder, not a measurement — `score_measured = 0` is the
+/// statement of record and every reader here keys off that flag. 0.0 is the
+/// chosen value because of what an *older* binary does with it: a pre-v7
+/// `seed_pairs_for` scales it to zero simulated successes and skips the row,
+/// and `ORDER BY score DESC` puts it below every real measurement. So a
+/// rolled-back build reaches the same answer this one does.
+const UNMEASURED_PLACEHOLDER: f64 = 0.0;
+
 /// One row in the `evolved_prompts` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvolvedPrompt {
@@ -36,9 +46,14 @@ pub struct EvolvedPrompt {
     /// `None` means **no scorer has ever measured this row** (#694). It is not
     /// a zero and it is not a default — it is the absence of a measurement,
     /// and readers must treat it as such rather than substituting a number.
-    /// Persisted as SQL NULL, which sorts below every real score under
-    /// `ORDER BY score DESC`, so an unmeasured row cannot outrank a measured
-    /// one.
+    ///
+    /// Persisted as the schema-v7 pair (`score`, `score_measured`): the flag
+    /// carries the meaning and `score` stores 0.0 as a placeholder. It is NOT
+    /// stored as SQL NULL, deliberately — `score` stays `REAL NOT NULL` so an
+    /// already-released pre-v7 binary, which maps this column into a bare
+    /// `f64`, can still read a store this build wrote. Reads order by
+    /// `score_measured DESC, score DESC`, so an unmeasured row cannot outrank
+    /// a measured one whatever the placeholder is.
     pub score: Option<f64>,
     /// Stable scorer identifier — currently `"bench"`, `"default"` or
     /// `"auto_drafter"`.
@@ -78,14 +93,17 @@ impl PromptStore {
         let conn = tc.conn.lock();
         conn.execute(
             "INSERT INTO evolved_prompts \
-             (id, skill_name, parent_id, prompt_body, score, scorer, generation, created_at, metadata) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, skill_name, parent_id, prompt_body, score, score_measured, scorer, generation, created_at, metadata) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 v.id,
                 v.skill_name,
                 v.parent_id,
                 v.prompt_body,
-                v.score,
+                // Unmeasured rows store the placeholder, never NULL — see
+                // `EvolvedPrompt::score`. `score_measured` is what means it.
+                v.score.unwrap_or(UNMEASURED_PLACEHOLDER),
+                i64::from(v.score.is_some()),
                 v.scorer,
                 v.generation,
                 v.created_at,
@@ -140,10 +158,10 @@ impl PromptStore {
         let conn = tc.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, skill_name, parent_id, prompt_body, score, scorer, generation, created_at, metadata \
+                "SELECT id, skill_name, parent_id, prompt_body, score, score_measured, scorer, generation, created_at, metadata \
                  FROM evolved_prompts \
                  WHERE skill_name = ?1 AND scorer = ?2 \
-                 ORDER BY score DESC, created_at DESC \
+                 ORDER BY score_measured DESC, score DESC, created_at DESC \
                  LIMIT ?3",
             )
             .map_err(|e| EvolveError::PromptStore(MemoryError::Db(e).to_string()))?;
@@ -206,10 +224,10 @@ impl PromptStore {
         let conn = tc.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, skill_name, parent_id, prompt_body, score, scorer, generation, created_at, metadata \
+                "SELECT id, skill_name, parent_id, prompt_body, score, score_measured, scorer, generation, created_at, metadata \
                  FROM evolved_prompts \
                  WHERE skill_name = ?1 \
-                 ORDER BY generation DESC, score DESC",
+                 ORDER BY generation DESC, score_measured DESC, score DESC",
             )
             .map_err(|e| EvolveError::PromptStore(MemoryError::Db(e).to_string()))?;
         let rows = stmt
@@ -224,16 +242,23 @@ impl PromptStore {
 }
 
 fn row_to_evolved_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvolvedPrompt> {
+    // `score` is NOT NULL at every schema version; `score_measured` is what
+    // distinguishes a measurement from the placeholder that stands in for one.
+    let measured: i64 = row.get(5)?;
     Ok(EvolvedPrompt {
         id: row.get(0)?,
         skill_name: row.get(1)?,
         parent_id: row.get(2)?,
         prompt_body: row.get(3)?,
-        score: row.get(4)?,
-        scorer: row.get(5)?,
-        generation: row.get::<_, i64>(6)? as u32,
-        created_at: row.get(7)?,
-        metadata: row.get(8)?,
+        score: if measured != 0 {
+            Some(row.get(4)?)
+        } else {
+            None
+        },
+        scorer: row.get(6)?,
+        generation: row.get::<_, i64>(7)? as u32,
+        created_at: row.get(8)?,
+        metadata: row.get(9)?,
     })
 }
 
@@ -498,5 +523,19 @@ mod tests {
         let got = s.all_for_skill("s").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].score, None);
+
+        // ...and on disk it is the placeholder plus a cleared flag, never SQL
+        // NULL. `score` must stay mappable into a bare `f64`, because that is
+        // what an already-released pre-v7 binary does with it (#694 rollback).
+        let tc = s.db.global.clone();
+        let conn = tc.conn.lock();
+        let raw: (f64, i64) = conn
+            .query_row(
+                "SELECT score, score_measured FROM evolved_prompts WHERE id = 'u'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("an unmeasured row must still read as a non-null f64");
+        assert_eq!(raw, (0.0, 0));
     }
 }
