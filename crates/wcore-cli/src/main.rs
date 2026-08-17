@@ -28,6 +28,7 @@ use wcore_cli::runtime_diagnostics::RuntimeDiagnosticsState;
 use wayland_ollama::OllamaProvider;
 
 use wcore_agent::bootstrap::{AgentBootstrap, PluginProviderRouter};
+use wcore_agent::late_mcp::LateMcpBinder;
 use wcore_agent::mcp_lifecycle::{
     McpConfigIdentity, McpConnectionReservation, McpLifecycleCatalog, McpLifecycleState,
     McpReservationOutcome,
@@ -38,9 +39,7 @@ use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session;
 use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome};
 use wcore_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
-use wcore_agent::late_mcp::LateMcpBinder;
 use wcore_mcp::manager::{McpManager, McpServerHealth};
-use wcore_skills::refs::SkillRef;
 use wcore_mcp::tool_proxy::register_single_server_tools;
 use wcore_protocol::commands::{
     MCP_LIFECYCLE_VERSION, ProtocolCommand, RemoveMcpServerCommand, ResumeTurnAction,
@@ -57,6 +56,7 @@ use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_providers::LlmProvider;
+use wcore_skills::refs::SkillRef;
 use wcore_types::execution_policy::{ApprovalPolicy, DEFAULT_DANGEROUS_SESSION_TTL_SECS};
 
 // v0.8.0 N.1+N.2+N.3 — slash-runtime dispatch helpers.

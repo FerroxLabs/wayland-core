@@ -212,9 +212,10 @@ pub fn format_skills_section(
     visible_skills: &[SkillRef],
     context_window_tokens: Option<usize>,
 ) -> String {
-    let listing = wcore_config::hooks::neutralize_trust_delimiters(
-        &format_skills_within_budget(visible_skills, context_window_tokens),
-    );
+    let listing = wcore_config::hooks::neutralize_trust_delimiters(&format_skills_within_budget(
+        visible_skills,
+        context_window_tokens,
+    ));
     if listing.is_empty() {
         String::new()
     } else {

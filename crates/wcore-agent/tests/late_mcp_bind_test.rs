@@ -90,7 +90,8 @@ fn tool(name: &str) -> McpToolDef {
     }
 }
 
-const SKILL_BODY: &str = "---\nname: remote-helper\ndescription: RESOURCE_SERVED_SKILL\n---\n\nbody\n";
+const SKILL_BODY: &str =
+    "---\nname: remote-helper\ndescription: RESOURCE_SERVED_SKILL\n---\n\nbody\n";
 
 fn local_ref(name: &str) -> SkillRef {
     SkillRef {
@@ -107,7 +108,9 @@ fn local_ref(name: &str) -> SkillRef {
         user_invocable: true,
         disable_model_invocation: false,
         has_artifacts: false,
-        inline_content: Some(format!("---\nname: {name}\ndescription: local\n---\nbody\n")),
+        inline_content: Some(format!(
+            "---\nname: {name}\ndescription: local\n---\nbody\n"
+        )),
     }
 }
 
@@ -278,10 +281,7 @@ async fn late_config_mcp_binds_the_plugin_hook_dispatcher() {
         report.hook_bindings
     );
     assert!(
-        engine
-            .hook_engine()
-            .expect("HookEngine")
-            .has_dispatcher(),
+        engine.hook_engine().expect("HookEngine").has_dispatcher(),
         "hook dispatcher was never installed on the engine after the late connect"
     );
 }
@@ -319,16 +319,10 @@ async fn late_config_mcp_unbinds_a_newly_ambiguous_hook() {
         Arc::new(wcore_agent::hooks::McpManagerCaller::new(vec![Arc::clone(
             &plugin_mgr,
         )])),
-        std::collections::HashMap::from([(
-            "demo-plugin".to_string(),
-            "plugin-srv".to_string(),
-        )]),
+        std::collections::HashMap::from([("demo-plugin".to_string(), "plugin-srv".to_string())]),
     )));
     assert!(
-        engine
-            .hook_engine()
-            .expect("HookEngine")
-            .has_dispatcher(),
+        engine.hook_engine().expect("HookEngine").has_dispatcher(),
         "precondition: boot bound the plugin to its own MCP server"
     );
 
@@ -348,10 +342,7 @@ async fn late_config_mcp_unbinds_a_newly_ambiguous_hook() {
         report.hook_bindings
     );
     assert!(
-        !engine
-            .hook_engine()
-            .expect("HookEngine")
-            .has_dispatcher(),
+        !engine.hook_engine().expect("HookEngine").has_dispatcher(),
         "the newly ambiguous binding must be REMOVED, not left on the boot-time answer"
     );
 }
