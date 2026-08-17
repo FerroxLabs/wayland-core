@@ -62,6 +62,18 @@ pub fn apply_migrations(
     conn.pragma_update(None, "foreign_keys", "ON")?;
 
     let installed = current_schema_version(conn)?;
+    // Fail closed on a store from the future. Every arm below is
+    // `installed < N`, so a newer store silently applies nothing and the
+    // binary carries on against a schema it does not understand. Since v7
+    // that is destructive rather than merely wrong: v7 rebuilds
+    // `evolved_prompts` with a nullable `score`, which a pre-v7 reader
+    // cannot map. Downgrade is a supported route, so this is reachable.
+    if installed > CURRENT_VERSION {
+        return Err(MemoryError::SchemaTooNew {
+            found: installed,
+            supported: CURRENT_VERSION,
+        });
+    }
     if installed < 1 {
         apply_v1(conn)?;
     }
@@ -430,6 +442,77 @@ mod tests {
             n.iter().any(|x| x == "idx_evolved_prompts_skill_gen"),
             "{n:?}"
         );
+    }
+
+    /// #694 follow-up — a store written by a build newer than this one must be
+    /// refused, not silently accepted.
+    ///
+    /// The runner is a ladder of `installed < N` arms, so a newer store makes
+    /// every arm false: no migration runs, no error is raised, and the binary
+    /// carries on against a schema it does not understand. That is a live
+    /// downgrade path because rollback is a supported operation, and from v7
+    /// it is destructive: v7 rebuilds `evolved_prompts` with a nullable
+    /// `score`, which a pre-v7 reader (`score: f64`) cannot map at all.
+    #[test]
+    fn refuses_a_store_written_by_a_newer_schema_version() {
+        let mut conn = open_conn_with_vec();
+        apply_migrations(&mut conn, None).unwrap();
+
+        // Stamp a version this build has never heard of. Nothing else about
+        // the file changes — that is exactly the downgrade case: a newer
+        // binary migrated the store, then the operator rolled back.
+        let future = CURRENT_VERSION + 1;
+        conn.execute("INSERT INTO schema_version (version) VALUES (?1)", [future])
+            .unwrap();
+        assert_eq!(current_schema_version(&conn).unwrap(), future);
+
+        let err = apply_migrations(&mut conn, None)
+            .expect_err("a store newer than this build must be refused, not opened");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("v{future}")),
+            "must name the version found: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("v{CURRENT_VERSION}")),
+            "must name the version supported: {msg}"
+        );
+        assert!(
+            msg.contains("newer"),
+            "must say the store is newer than this build: {msg}"
+        );
+        assert!(
+            msg.contains("upgrade") && msg.contains("backup"),
+            "must tell the operator what to do about it: {msg}"
+        );
+    }
+
+    /// Control for the guard above: it must refuse *only* newer stores.
+    ///
+    /// Without this, a guard that refused everything would pass the newer-store
+    /// test while bricking every normal open and upgrade.
+    #[test]
+    fn equal_and_older_schema_versions_still_open() {
+        // Equal — a store already at CURRENT_VERSION re-opens as a no-op.
+        let mut current = open_conn_with_vec();
+        apply_migrations(&mut current, None).unwrap();
+        assert_eq!(current_schema_version(&current).unwrap(), CURRENT_VERSION);
+        apply_migrations(&mut current, None)
+            .expect("a store at exactly CURRENT_VERSION must still open");
+        assert_eq!(current_schema_version(&current).unwrap(), CURRENT_VERSION);
+
+        // Lower — a v6-era store must still be upgraded. The guard sits in
+        // front of the upgrade path and must not block it.
+        let mut old = open_conn_with_vec();
+        old.execute_batch(V1_SQL).unwrap();
+        old.execute_batch(V2_SQL).unwrap();
+        old.execute_batch(V3_SQL).unwrap();
+        old.execute_batch(V4_SQL).unwrap();
+        old.execute_batch(V5_SQL).unwrap();
+        old.execute_batch(V6_SQL).unwrap();
+        assert_eq!(current_schema_version(&old).unwrap(), 6);
+        apply_migrations(&mut old, None).expect("a pre-v7 store must still upgrade");
+        assert_eq!(current_schema_version(&old).unwrap(), CURRENT_VERSION);
     }
 
     #[test]
