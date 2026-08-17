@@ -260,6 +260,13 @@ impl HookEngine {
         self.dispatcher = None;
     }
 
+    /// wayland#562 — whether a host dispatcher is currently installed.
+    /// Inspection only: lets a test assert that a late MCP connect actually
+    /// bound (or unbound) plugin hooks without driving a whole turn.
+    pub fn has_dispatcher(&self) -> bool {
+        self.dispatcher.is_some()
+    }
+
     /// Invoke the host dispatcher for every plugin hook registered at `phase`
     /// and fold each contribution into `outcome.injected_messages` as a
     /// provenance-labeled, untrusted **User-role** block — mirroring the
