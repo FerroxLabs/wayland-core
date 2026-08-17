@@ -412,11 +412,18 @@ fn resolve_target(arg: &str, key: &str, doc: &Table) -> Result<AuthTarget> {
 ///
 /// The WHERE column is the point of the change: a user has to be able to see
 /// which of their keys are still sitting in cleartext.
-fn list_cmd(config_path: &std::path::Path) -> Result<()> {
-    let doc = load_doc(config_path)?;
-
+/// Build the `list` rows: `(slug, masked key, where it lives)`, one per
+/// configured provider OR account that actually holds a key.
+///
+/// Split out of [`list_cmd`] so it can be asserted on directly — the printed
+/// table is unreachable from a test, and "list did not error" is satisfied by a
+/// list that silently shows nothing.
+fn list_rows(
+    doc: &Table,
+    store: Option<&dyn wcore_config::credentials::CredentialsStore>,
+) -> Vec<(String, String, &'static str)> {
     // Every slug that could hold a key, from either side.
-    let mut slugs: Vec<String> = providers_table(&doc)
+    let mut slugs: Vec<String> = providers_table(doc)
         .map(|providers| providers.keys().cloned().collect())
         .unwrap_or_default();
     for provider in Provider::ALL {
@@ -425,6 +432,30 @@ fn list_cmd(config_path: &std::path::Path) -> Result<()> {
         }
     }
     slugs.sort();
+
+    let mut rows: Vec<(String, String, &'static str)> = Vec::new();
+    for slug in &slugs {
+        // #14: `credentials_store_account_key` covers BOTH — it delegates a
+        // built-in slug to that provider's shared slot and gives every other
+        // `[providers.<id>]` account its own. Keying this off `Provider::
+        // from_slug` alone made every account's stored key invisible here, and
+        // an invisible key is one the operator re-enters or leaves behind.
+        let stored = store
+            .zip(wcore_config::config::credentials_store_account_key(slug))
+            .and_then(|(store, slot)| store.get(&slot).ok().flatten());
+        if let Some(key) = stored {
+            rows.push((slug.clone(), mask_key(&key), "credentials store"));
+            continue;
+        }
+        if let Some(key) = legacy_config_key(doc, slug) {
+            rows.push((slug.clone(), mask_key(&key), "config.toml (CLEARTEXT)"));
+        }
+    }
+    rows
+}
+
+fn list_cmd(config_path: &std::path::Path) -> Result<()> {
+    let doc = load_doc(config_path)?;
 
     // A store that will not open is reported, not silently treated as empty —
     // "no providers configured" when the store is merely unreachable is the
@@ -437,25 +468,7 @@ fn list_cmd(config_path: &std::path::Path) -> Result<()> {
         }
     };
 
-    let mut rows: Vec<(String, String, &'static str)> = Vec::new();
-    for slug in &slugs {
-        // #14: `credentials_store_account_key` covers BOTH — it delegates a
-        // built-in slug to that provider's shared slot and gives every other
-        // `[providers.<id>]` account its own. Keying this off `Provider::
-        // from_slug` alone made every account's stored key invisible here, and
-        // an invisible key is one the operator re-enters or leaves behind.
-        let stored = store
-            .as_ref()
-            .zip(wcore_config::config::credentials_store_account_key(slug))
-            .and_then(|(store, slot)| store.get(&slot).ok().flatten());
-        if let Some(key) = stored {
-            rows.push((slug.clone(), mask_key(&key), "credentials store"));
-            continue;
-        }
-        if let Some(key) = legacy_config_key(&doc, slug) {
-            rows.push((slug.clone(), mask_key(&key), "config.toml (CLEARTEXT)"));
-        }
-    }
+    let rows = list_rows(&doc, store.as_deref());
 
     if rows.is_empty() {
         println!("No providers configured. Add one with `wayland-core auth add <provider> <key>`.");
@@ -1114,7 +1127,17 @@ mod tests {
         .unwrap();
         assert!(stored_account_key(&path, "acct-a").is_some());
 
-        // `list` must not error on an account (it reads the account slot now).
+        // `list` must SHOW the account's stored key, not merely not error: a
+        // key the operator cannot see is one they re-enter or leave behind.
+        let doc = load_doc(&path).unwrap();
+        let store = credentials_store(&path, &doc).unwrap();
+        let rows = list_rows(&doc, Some(store.as_ref()));
+        let row = rows
+            .iter()
+            .find(|(slug, _, _)| slug == "acct-a")
+            .unwrap_or_else(|| panic!("`auth list` does not show account 'acct-a': {rows:?}"));
+        assert_eq!(row.2, "credentials store");
+        assert_ne!(row.1, "or-fixture-aaa", "list printed the key unmasked");
         run_with_path(AuthCmd::List, &path).unwrap();
 
         run_with_path(
