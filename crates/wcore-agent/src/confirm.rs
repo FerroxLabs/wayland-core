@@ -144,9 +144,22 @@ impl ToolConfirmer {
         // semantics for interactive callers.
         let _ = io::stderr().flush();
 
+        self.decide_from_answer(tool_name, &mut io::stdin().lock())
+    }
+
+    /// Read one answer from `reader` and map it to a decision.
+    ///
+    /// Split out of `check_for` so the mapping is testable without a real
+    /// TTY. EOF is the security-critical case: `read_line` reports it as
+    /// `Ok(0)`, not `Err`, and leaves `input` empty. Falling through to the
+    /// empty-line "yes" default would turn a closed stdin — Ctrl-D at the
+    /// prompt, or a pipe that ended — into consent that was never given, so
+    /// EOF fails closed exactly like an I/O error.
+    fn decide_from_answer<R: BufRead>(&mut self, tool_name: &str, reader: &mut R) -> ConfirmResult {
         let mut input = String::new();
-        if io::stdin().lock().read_line(&mut input).is_err() {
-            return ConfirmResult::Denied;
+        match reader.read_line(&mut input) {
+            Ok(0) | Err(_) => return ConfirmResult::Denied,
+            Ok(_) => {}
         }
 
         match input.trim().to_lowercase().as_str() {
@@ -306,6 +319,43 @@ mod tests {
             assert!(confirmer.requires_confirmation_for("AskUserQuestion", ToolCategory::Info));
             assert!(confirmer.approval_is_input_bound("AskUserQuestion"));
         }
+    }
+
+    // Ctrl-D at the approval prompt must NOT approve the tool. `read_line`
+    // reports EOF as `Ok(0)`, never `Err`, so the old `is_err()` guard fell
+    // straight through to the `"" => Approved` arm: closing stdin granted
+    // consent the user never gave.
+    #[test]
+    fn eof_at_prompt_is_denied_not_approved() {
+        let mut confirmer = ToolConfirmer::new(false, vec![]);
+        let mut eof = io::Cursor::new(Vec::new());
+        assert_eq!(
+            confirmer.decide_from_answer("Bash", &mut eof),
+            ConfirmResult::Denied,
+            "EOF (Ctrl-D / closed stdin) must fail closed, not be read as the \
+             empty-line default"
+        );
+    }
+
+    // The boundary the fix turns on: an empty LINE is a real answer and keeps
+    // its historical "yes" meaning, while EOF is the absence of any answer.
+    // Both leave `input` empty after trimming, so only the `Ok(0)` vs `Ok(n)`
+    // distinction separates them.
+    #[test]
+    fn empty_line_still_approves_but_eof_does_not() {
+        let mut confirmer = ToolConfirmer::new(false, vec![]);
+        let mut newline = io::Cursor::new(b"\n".to_vec());
+        assert_eq!(
+            confirmer.decide_from_answer("Bash", &mut newline),
+            ConfirmResult::Approved,
+            "pressing Enter is an affirmative answer and must stay Approved"
+        );
+        let mut eof = io::Cursor::new(Vec::new());
+        assert_eq!(
+            confirmer.decide_from_answer("Bash", &mut eof),
+            ConfirmResult::Denied,
+            "EOF is the absence of an answer and must not share Enter's default"
+        );
     }
 
     #[test]
