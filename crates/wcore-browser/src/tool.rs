@@ -491,27 +491,7 @@ impl Tool for BrowserTool {
             // must NOT be replaced with the friendly hint — operators need the specific reason.
             // Those paths produce reasons like "cloud metadata endpoint blocked: ..." which do
             // NOT start with "default_action=Deny".
-            let msg = if let BrowserOpError::PolicyDenied { ref reason, .. } = e {
-                if reason.starts_with("default_action=Deny")
-                    && self.policy.allowed_origins.is_empty()
-                    && self.policy.default_action == crate::policy::PolicyAction::Deny
-                {
-                    // 27-C2(a): the section header here MUST be the one the
-                    // config loader reads (`[browser.policy]`). It named
-                    // `[browser]`, which `#[serde(default)]` silently drops,
-                    // so following this hint verbatim left the tool disabled
-                    // with no diagnostic. The text now comes from
-                    // `config_hint`, whose snippets are round-tripped through
-                    // the real loader by
-                    // `wcore-agent/tests/browser_config_hint_roundtrip.rs`.
-                    crate::config_hint::disabled_by_default_hint()
-                } else {
-                    format!("policy: {e}")
-                }
-            } else {
-                format!("policy: {e}")
-            };
-            return err(msg);
+            return err(denial_message(&e, &self.policy));
         }
 
         let sub = input.get("sub_agent").and_then(|s| s.as_str());
@@ -537,6 +517,45 @@ impl Tool for BrowserTool {
     }
 }
 
+/// Choose the operator-facing text for a policy refusal.
+///
+/// Extracted from `dispatch` so the ROUTING is testable, not just the message
+/// bodies. Two branches are remediation text for a specific recoverable
+/// posture; picking the wrong one is how a user ends up following advice that
+/// cannot apply to their denial, which is how gh#826 happened.
+fn denial_message(e: &BrowserOpError, policy: &BrowserPolicy) -> String {
+    let BrowserOpError::PolicyDenied { reason, .. } = e else {
+        return format!("policy: {e}");
+    };
+    // gh#826/gh#911: a loopback denial is the one hard block with a real
+    // recovery path, so it gets the grant instructions rather than a bare
+    // reason. Matched on the loopback reason prefixes `BrowserPolicy` emits —
+    // NOT on the URL — so a private-IP or metadata denial can never be
+    // answered with loopback advice.
+    if reason.starts_with("loopback hostname blocked:")
+        || reason.starts_with("loopback IP blocked:")
+    {
+        return crate::config_hint::loopback_blocked_hint(reason);
+    }
+    // F-023: when the policy denies solely because no origins are allow-listed
+    // (the fail-closed default posture), surface the config hint. SSRF-class
+    // denials must keep their specific reason.
+    //
+    // 27-C2(a): the section header in that hint MUST be the one the config
+    // loader reads (`[browser.policy]`). It named `[browser]`, which
+    // `#[serde(default)]` silently drops, so following it verbatim left the
+    // tool disabled with no diagnostic. The text comes from `config_hint`,
+    // whose snippets are round-tripped through the real loader by
+    // `wcore-agent/tests/browser_config_hint_roundtrip.rs`.
+    if reason.starts_with("default_action=Deny")
+        && policy.allowed_origins.is_empty()
+        && policy.default_action == crate::policy::PolicyAction::Deny
+    {
+        return crate::config_hint::disabled_by_default_hint();
+    }
+    format!("policy: {e}")
+}
+
 impl Drop for BrowserTool {
     fn drop(&mut self) {
         // Inform supervisor about every session we opened so the lifecycle
@@ -555,6 +574,88 @@ mod tests {
     use crate::policy::PolicyAction;
     use crate::provider::{BrowserProvider, BrowserSession, OpResult, SessionCtx};
     use async_trait::async_trait;
+
+    /// gh#826 routing guard. The remediation bodies are proven elsewhere; what
+    /// is proven here is that each denial CLASS reaches the right body. A
+    /// loopback denial answered with allow-list advice, or a metadata denial
+    /// answered with loopback advice, is the defect that made a user hunt for
+    /// a setting that does not exist.
+    #[test]
+    fn denial_message_routes_each_class_to_the_right_remedy() {
+        fn denied(reason: &str, policy: &BrowserPolicy) -> String {
+            denial_message(
+                &BrowserOpError::PolicyDenied {
+                    url: "http://irrelevant.test/".into(),
+                    reason: reason.into(),
+                },
+                policy,
+            )
+        }
+        let fail_closed = BrowserPolicy::new(PolicyAction::Deny, vec![], vec![]);
+
+        // Loopback -> the loopback grant instructions.
+        for reason in [
+            "loopback hostname blocked: localhost",
+            "loopback IP blocked: 127.0.0.1",
+        ] {
+            let msg = denied(reason, &fail_closed);
+            assert!(
+                msg.contains("[browser.policy.loopback]"),
+                "a loopback denial did not get the loopback grant instructions: {msg}"
+            );
+            assert!(
+                msg.contains(reason),
+                "the specific refusal was dropped: {msg}"
+            );
+        }
+
+        // Fail-closed default -> the allow-list instructions, and NOT the
+        // loopback ones (loopback is not what is wrong here).
+        let msg = denied(
+            "default_action=Deny and no rules matched origin example.com",
+            &fail_closed,
+        );
+        assert!(
+            msg.contains("disabled by default"),
+            "the fail-closed default denial lost its config hint: {msg}"
+        );
+        assert!(
+            !msg.contains("[browser.policy.loopback]"),
+            "an allow-list problem was answered with loopback advice: {msg}"
+        );
+
+        // SSRF class -> the specific reason, and NO remediation at all. There
+        // is deliberately no way to enable these, so any advice would be false.
+        for reason in [
+            "cloud metadata endpoint blocked: 169.254.169.254 (169.254.169.254)",
+            "RFC 1918 private IP blocked: 10.0.0.1",
+            "link-local IP blocked: 169.254.1.1",
+        ] {
+            let msg = denied(reason, &fail_closed);
+            assert!(msg.contains(reason), "specific reason dropped: {msg}");
+            assert!(
+                !msg.contains("[browser.policy.loopback]") && !msg.contains("disabled by default"),
+                "an unfixable SSRF denial was given remediation advice, which would send \
+                 the reader after a setting that cannot help: {msg}"
+            );
+        }
+    }
+
+    /// The non-`PolicyDenied` arm must keep the plain formatting it had.
+    #[test]
+    fn denial_message_passes_through_non_denial_errors() {
+        let policy = BrowserPolicy::default();
+        let msg = denial_message(
+            &BrowserOpError::PolicySuspended {
+                url: "https://ask.test/".into(),
+            },
+            &policy,
+        );
+        assert_eq!(
+            msg,
+            "policy: policy suspended: ask required for https://ask.test/"
+        );
+    }
 
     struct OkBackend;
 

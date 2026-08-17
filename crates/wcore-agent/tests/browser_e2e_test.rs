@@ -90,6 +90,7 @@ fn build_tool_pointed_at(server_uri: &str, allowed_host: &str) -> Arc<BrowserToo
             default_action: "allow".into(),
             allowed_origins: vec![allowed_host.to_string()],
             denied_origins: vec![],
+            loopback: Default::default(),
         },
         allow_cloud: false,
     };
@@ -131,6 +132,7 @@ async fn host_registrar_captures_wayland_browser_spec() {
                 default_action: "allow".into(),
                 allowed_origins: vec!["example.com".into()],
                 denied_origins: vec![],
+                loopback: Default::default(),
             },
             allow_cloud: false,
         })
