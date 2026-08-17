@@ -7978,6 +7978,115 @@ mod tests {
         drop(hold);
     }
 
+    /// Serves one `skill://` resource: `resources/list` then `resources/read`,
+    /// the exact pair `wcore_skills::mcp::load_mcp_skills` issues per server.
+    struct SkillResourceTransport {
+        responses: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    #[async_trait]
+    impl McpTransport for SkillResourceTransport {
+        async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            let mut guard = self.responses.lock().unwrap();
+            let value = if guard.is_empty() {
+                json!(null)
+            } else {
+                guard.remove(0)
+            };
+            Ok(JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: Some(1),
+                result: Some(value),
+                error: None,
+            })
+        }
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    /// wayland#562 regression: registering the deferred server's TOOLS is only
+    /// part of integration. The same path must hand the connected manager to
+    /// the late binder, or a json-stream session keeps running without the
+    /// skills that server publishes — the exact gap wayland#551's deferral
+    /// opened, and one a TUI on the same config never has.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: drop the `late_binder` block from
+    /// `integrate_deferred_mcp` and the skill is missing from both the live
+    /// catalog and the prompt listing the model reads.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_late_binds_mcp_served_skills() {
+        let body = "---\nname: helper\ndescription: Formats a release note\n---\n\nBody.\n";
+        let cwd = tempfile::tempdir().unwrap();
+        let bundled = wcore_skills::bundled::init_bundled_skills();
+        let refs =
+            wcore_agent::bootstrap::load_session_skill_refs(cwd.path(), &[], None, &bundled, None)
+                .await;
+        let section = wcore_agent::context::skills_reminder_section(&refs, None);
+        let config = wcore_config::config::Config {
+            system_prompt: Some(format!("BASE PROMPT\n\n{section}")),
+            ..Default::default()
+        };
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        let catalog = Arc::new(wcore_skills::refs::SkillCatalog::from_refs(refs));
+        engine.set_skill_catalog(Arc::clone(&catalog));
+        engine.set_skill_listing_section(section);
+        assert!(
+            catalog.find("notes-mcp:helper").is_none(),
+            "fixture is vacuous: the MCP skill must be absent before integration"
+        );
+
+        let manager = Arc::new(McpManager::new_for_test(vec![(
+            "notes-mcp",
+            true,
+            Box::new(SkillResourceTransport {
+                responses: std::sync::Mutex::new(vec![
+                    json!({"resources": [{"uri": "skill://helper"}]}),
+                    json!({"contents": [{"uri": "skill://helper", "mimeType": "text/plain", "text": body}]}),
+                ]),
+            }) as Box<dyn McpTransport>,
+        )]));
+        let binder = Arc::new(wcore_agent::late_mcp::LateMcpBinder::new(
+            cwd.path().to_path_buf(),
+            vec![],
+            Arc::new(wcore_skills::bundled::init_bundled_skills()),
+            None,
+            HashMap::new(),
+            vec![],
+            true,
+        ));
+
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        let mut reservations = HashMap::new();
+        assert!(
+            integrate_deferred_mcp(
+                &mut engine,
+                manager,
+                &HashMap::new(),
+                &mut reservations,
+                &writer,
+                &mut dynamic_managers,
+                Some(&binder),
+            )
+            .await
+        );
+
+        assert!(
+            catalog.find("notes-mcp:helper").is_some(),
+            "the deferred server's skill never reached the live catalog"
+        );
+        assert!(
+            engine.system_prompt().contains("notes-mcp:helper"),
+            "the deferred server's skill is invisible to the model: it is missing \
+             from the system prompt's available-skills listing"
+        );
+    }
+
     /// F17 review regression: the Message boundary must report that it is not
     /// ready while a registry reader is retained. The session loop uses this
     /// result to park and retry the exact command instead of running a turn
