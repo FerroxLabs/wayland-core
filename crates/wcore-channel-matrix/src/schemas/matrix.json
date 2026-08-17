@@ -14,6 +14,10 @@
       "type": "string",
       "description": "Credentials-store key for the Matrix access token."
     },
+    "credential_handle_refresh_token": {
+      "type": "string",
+      "description": "Credentials-store key for the Matrix refresh token, if the login requested one. Set it when the homeserver issues expiring access tokens (OIDC / Matrix Authentication Service) so the channel renews in place instead of going unauthenticated at expiry."
+    },
     "user_id": {
       "type": "string",
       "description": "Full Matrix user ID of the bot (e.g. @bot:matrix.org).",

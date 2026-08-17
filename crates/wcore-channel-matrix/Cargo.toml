@@ -22,4 +22,5 @@ wcore-config = { workspace = true }
 
 [dev-dependencies]
 mockito = "1"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
