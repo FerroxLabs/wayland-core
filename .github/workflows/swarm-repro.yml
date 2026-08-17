@@ -1,0 +1,56 @@
+name: Swarm macOS repro (temporary)
+
+on:
+  push:
+    branches:
+      - 'lane/swarmfix-repro'
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustc -V && cargo -V
+      - name: Build the workspace_authority test binary
+        run: cargo test -p wcore-swarm --test workspace_authority --no-run
+      - name: Environment facts
+        run: |
+          echo "TMPDIR=$TMPDIR"
+          python3 -c "import os,sys; print('realpath TMPDIR:', os.path.realpath(os.environ['TMPDIR']))"
+          sysctl -n hw.ncpu
+          df -h "$TMPDIR" || true
+          mount | grep -i apfs | head -5
+      - name: Hammer the race
+        run: |
+          set -u
+          BIN=$(find target/debug/deps -name 'workspace_authority-*' -type f -perm +111 | head -1)
+          echo "BIN=$BIN"
+          mkdir -p repro-logs
+          fails=0
+          for round in $(seq 1 24); do
+            pids=""
+            for i in $(seq 1 12); do
+              ( "$BIN" --exact independent_cli_processes_cannot_overbook_shared_capacity --nocapture \
+                  > "repro-logs/r${round}_${i}.log" 2>&1 ; echo "$?" > "repro-logs/r${round}_${i}.rc" ) &
+              pids="$pids $!"
+            done
+            wait $pids || true
+            for i in $(seq 1 12); do
+              rc=$(cat "repro-logs/r${round}_${i}.rc")
+              if [ "$rc" != "0" ]; then
+                fails=$((fails+1))
+                echo "===== FAILURE round=$round copy=$i rc=$rc ====="
+                cat "repro-logs/r${round}_${i}.log"
+              else
+                rm -f "repro-logs/r${round}_${i}.log"
+              fi
+            done
+            rm -f repro-logs/*.rc
+          done
+          echo "TOTAL RUNS=288 FAILURES=$fails"
+          if [ "$fails" -gt 0 ]; then exit 1; fi
