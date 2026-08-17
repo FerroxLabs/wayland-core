@@ -145,9 +145,10 @@ impl PromptStore {
         Ok(Some(id))
     }
 
-    /// Read the top-N winners for `skill_name` filtered by `scorer`,
-    /// ordered by score DESC. Bounded by the index
-    /// `idx_evolved_prompts_skill_scorer_score`.
+    /// Read the top-N winners for `skill_name` filtered by `scorer`, ordered
+    /// by (score_measured DESC, score DESC) so an unmeasured row can never
+    /// outrank a measured one. Bounded by the index
+    /// `idx_evolved_prompts_skill_scorer_measured`.
     pub fn best_for_skill(
         &self,
         skill_name: &str,
@@ -218,7 +219,7 @@ impl PromptStore {
     }
 
     /// Read every winner for `skill_name` across all scorers, ordered by
-    /// (generation DESC, score DESC).
+    /// (generation DESC, score_measured DESC, score DESC).
     pub fn all_for_skill(&self, skill_name: &str) -> Result<Vec<EvolvedPrompt>, EvolveError> {
         let tc = self.db.global.clone();
         let conn = tc.conn.lock();
@@ -491,8 +492,10 @@ mod tests {
         assert_eq!(pairs, vec![("drafted".to_string(), 3)]);
     }
 
-    /// An unmeasured row must never sort above a measured one: `best_for_skill`
-    /// is `ORDER BY score DESC`, and SQL NULL sorts below every value there.
+    /// An unmeasured row must never sort above a measured one. Since v7 that
+    /// is carried by the `score_measured DESC` leg of `best_for_skill`'s
+    /// ORDER BY, NOT by the value sitting in `score` — the guarantee must hold
+    /// whatever placeholder an unmeasured row stores.
     #[test]
     fn unmeasured_rows_sort_below_measured_ones() {
         let s = fresh_store();
@@ -511,8 +514,9 @@ mod tests {
         assert_eq!(got[1].score, None);
     }
 
-    /// The NULL score survives a write/read round trip as `None` rather than
-    /// being silently coerced to a number by the row mapper.
+    /// A missing measurement survives a write/read round trip as `None` rather
+    /// than being silently coerced to a number by the row mapper — even though
+    /// it is stored as a non-NULL placeholder plus a cleared `score_measured`.
     #[test]
     fn unmeasured_score_round_trips_as_none() {
         let s = fresh_store();
