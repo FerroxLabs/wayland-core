@@ -21,16 +21,36 @@
 //! **The homeserver is local.** Never a real one: a burned grant is not a
 //! recoverable test failure.
 //!
-//! **On the red half.** This test is only worth anything if it can fail. It is
-//! deliberately NOT paired with a "skip the lock" switch in the shipping
-//! binary — a bypass of the control is a worse defect than the one it proves.
-//! The red control is a SOURCE MUTANT applied out of tree: make
-//! `TokenSource::renew` proceed without `ExclusiveFileLock::acquire` and this
-//! test observes two POSTs.
+//! **On the red half.** This test is only worth anything if it can fail, and
+//! the wall-clock barrier alone is NOT enough to make it fail. Measured: with
+//! `ExclusiveFileLock` removed from `TokenSource::renew`, a barrier-only
+//! version still observed ONE POST, because the winner completed its POST and
+//! its store write inside the few milliseconds of launch skew and the loser's
+//! double-check then adopted the result. The test passed for a reason that had
+//! nothing to do with the lock — indistinguishable from the "got lucky on
+//! timing" it claims to rule out.
+//!
+//! So the race window is held OPEN by [`RendezvousStore`]: the first read of
+//! the refresh-token handle — which production code performs inside the
+//! critical section, immediately before the POST — parks until a sibling
+//! process reaches the same point, or [`RENDEZVOUS_HOLD`] elapses.
+//!
+//! * Lock present: the loser is parked in `ExclusiveFileLock::acquire` and
+//!   never reaches the read, so the winner's rendezvous times out, POSTs, and
+//!   persists; the loser then adopts. ONE POST.
+//! * Lock absent: both reach the read together and are both released, so both
+//!   POST with neither having persisted yet. TWO POSTs, and the count is what
+//!   `expect(1)` names.
+//!
+//! The instrument only DELAYS a store read. It adds no bypass of the control to
+//! the shipping binary — a "skip the lock" switch would be a worse defect than
+//! the one this proves — so the red arm remains a source mutant applied out of
+//! tree.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use wcore_channel_matrix::{MatrixChannel, MatrixConfig};
 use wcore_channels::Channel;
@@ -72,6 +92,95 @@ fn store_at(root: &std::path::Path) -> Arc<dyn CredentialsStore> {
     ))
 }
 
+/// How long the first refresh-token read parks waiting for a sibling process.
+///
+/// Bounded on both sides, and neither bound is arbitrary:
+///
+/// * Above the launch skew of two cold test binaries, so the LOCK-ABSENT arm
+///   reliably gets both processes into the critical section at once. Milliseconds
+///   of skew is what made the barrier-only version of this test unable to fail.
+/// * Well below the refresh lock's wait ceiling and its stale-after window, so
+///   in the LOCK-PRESENT arm the parked winner is never mistaken for a crashed
+///   holder and stolen from. A steal there would produce the two POSTs this
+///   test reads as a defect, i.e. a false red.
+const RENDEZVOUS_HOLD: Duration = Duration::from_millis(1_500);
+
+/// Number of processes the rendezvous waits for.
+const PEERS: usize = 2;
+
+/// A [`CredentialsStore`] that holds the cross-process race window open.
+///
+/// Delegates everything, except that the FIRST read of the refresh-token handle
+/// parks until `PEERS` processes have reached that same read or
+/// [`RENDEZVOUS_HOLD`] elapses. That read sits inside `TokenSource::renew`'s
+/// critical section, immediately before the refresh POST, so parking there is
+/// what turns "did both processes try to POST?" from a timing coin-flip into a
+/// determinate question.
+///
+/// It does NOT weaken the thing under test: no lock is skipped, no code path is
+/// branched on a test flag, and a store read is the only thing delayed.
+struct RendezvousStore {
+    inner: Arc<dyn CredentialsStore>,
+    dir: PathBuf,
+    tag: String,
+    /// Fires once. A refresh that legitimately reads the handle again must not
+    /// park a second time and burn another hold.
+    armed: AtomicBool,
+}
+
+impl RendezvousStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: store_at(root),
+            dir: root.join("rendezvous"),
+            tag: std::process::id().to_string(),
+            armed: AtomicBool::new(true),
+        }
+    }
+
+    fn wait_for_peer(&self) {
+        // Announce arrival, then wait for the sibling's announcement. A
+        // directory of one file per process is the whole protocol: it needs no
+        // cleanup, and a crashed peer just means the hold expires.
+        let _ = std::fs::create_dir_all(&self.dir);
+        let _ = std::fs::write(self.dir.join(&self.tag), b"here");
+        let deadline = Instant::now() + RENDEZVOUS_HOLD;
+        loop {
+            let arrived = std::fs::read_dir(&self.dir)
+                .map(std::iter::Iterator::count)
+                .unwrap_or(0);
+            if arrived >= PEERS || Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl CredentialsStore for RendezvousStore {
+    fn get(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, wcore_config::credentials::CredentialsError> {
+        if key == REFRESH_HANDLE && self.armed.swap(false, Ordering::SeqCst) {
+            self.wait_for_peer();
+        }
+        self.inner.get(key)
+    }
+
+    fn put(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), wcore_config::credentials::CredentialsError> {
+        self.inner.put(key, value)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), wcore_config::credentials::CredentialsError> {
+        self.inner.delete(key)
+    }
+}
+
 /// The child half. Runs in a SEPARATE OS PROCESS; the parent below spawns two.
 ///
 /// Named as a test so the harness will run it, but inert unless the parent set
@@ -91,7 +200,12 @@ async fn xproc_child_entrypoint() {
         .parse()
         .expect("start barrier is millis");
 
-    let mut channel = MatrixChannel::with_base("xproc", cfg(&base), store_at(&root), base);
+    let mut channel = MatrixChannel::with_base(
+        "xproc",
+        cfg(&base),
+        Arc::new(RendezvousStore::new(&root)),
+        base,
+    );
     channel.start().await.expect("start reads the seeded token");
 
     // Barrier. Both children have read the SAME expired access token by now,
