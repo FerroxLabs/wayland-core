@@ -1072,12 +1072,36 @@ impl TurnEngine for EngineTurnEngine {
         // secret and resolves by `call_id`. When the host presents a non-empty
         // token, try the bridge first; fall through to the manager path if it
         // is not a live bridge token (stale, or actually a manager gate). The
-        // ACP resolve carries no `modifications` payload (its `answer` threads
-        // to the manager path), so bridge consent is a plain approve/deny.
+        // ACP resolve carries no host-supplied `modifications` payload (its
+        // `answer` threads to the manager path); the one thing it does put
+        // there is the operator's persistence scope — see #583 below.
         if let Some(token) = decision.resume_token.as_deref().filter(|t| !t.is_empty()) {
+            // #583: the bridge expresses persistence scope through
+            // `ApprovalOutcome::modifications` (`BridgeConsentDoorbell` reads
+            // `egress_scope`), which is the ONLY channel it has — the resolve
+            // signature cannot report a downgrade. Passing `None` here dropped
+            // the operator's choice on the floor and collapsed every bridge
+            // grant to `Once`, so an `Always` egress consent re-prompted on the
+            // very next request.
+            //
+            // `AlwaysPrefix` is a command-prefix grant with no egress meaning;
+            // it narrows to `once` rather than widening to a whole-host
+            // `always`. Narrowing is logged, never silent.
+            let egress_scope = match &scope {
+                wcore_protocol::commands::ApprovalScope::Always => "always",
+                wcore_protocol::commands::ApprovalScope::Once => "once",
+                wcore_protocol::commands::ApprovalScope::AlwaysPrefix { prefix } => {
+                    tracing::warn!(
+                        target: "wcore_cli::acp",
+                        %prefix,
+                        "prefix-scoped approval has no bridge equivalent; narrowing to once"
+                    );
+                    "once"
+                }
+            };
             let outcome = wcore_agent::approval::ApprovalOutcome {
                 approved: decision.approved,
-                modifications: None,
+                modifications: Some(serde_json::json!({ "egress_scope": egress_scope })),
             };
             if session.approval_bridge.resolve(token, outcome).await {
                 return Ok(());
@@ -1851,6 +1875,93 @@ mod tests {
         assert!(
             matches!(err, AcpError::Session(_)),
             "stale token falls through to the manager path and 404s, got {err:?}"
+        );
+    }
+
+    /// #583 — the scope the endpoint computes must survive the BRIDGE branch.
+    ///
+    /// `resolve_approval` mapped the wire scope onto a `ProtocolScope` and then
+    /// took an early return through `ApprovalBridge::resolve` that read only
+    /// `approved`, so the operator's choice was dropped on the floor and every
+    /// bridge-backed grant collapsed to `Once`: an `Always` egress consent
+    /// re-prompted on the very next request.
+    ///
+    /// `ApprovalOutcome::modifications` is the bridge's only scope channel —
+    /// `BridgeConsentDoorbell` reads `egress_scope` off it and its own tests pin
+    /// `"always"` → `ConsentDecision::Always`. This asserts the other half of
+    /// that contract: what the ACP endpoint actually puts on the wire.
+    ///
+    /// `AlwaysPrefix` is a command-prefix grant with no egress meaning, so it
+    /// narrows to `once`. Narrowing is the safe direction; widening it to a
+    /// whole-host `always` would be the silent-widening half of the same bug.
+    #[tokio::test]
+    async fn bridge_resolve_carries_the_operator_scope() {
+        async fn egress_scope_for(scope: ApprovalScopeWire) -> Option<String> {
+            let turn = EngineTurnEngine::new(placeholder_config(), ".".to_string());
+            let session = live_session();
+            turn.sessions
+                .lock()
+                .await
+                .insert("s-583".to_string(), session.clone());
+
+            let (secret, mut rx) = session
+                .approval_bridge
+                .request_with_id(
+                    "corr-583".to_string(),
+                    wcore_agent::approval::ApprovalRequest {
+                        call_id: "corr-583".to_string(),
+                        reason: "allow network access to example.com".to_string(),
+                        context: String::new(),
+                    },
+                )
+                .await;
+
+            turn.resolve_approval(
+                "s-583",
+                "corr-583",
+                ApprovalDecision {
+                    approved: true,
+                    scope,
+                    answer: None,
+                    resume_token: Some(secret),
+                },
+            )
+            .await
+            .expect("bridge gate resolves via secret resume_token");
+
+            let outcome = rx.try_recv().expect("the bridge waiter is resolved");
+            // CONTROL: the resolve really approved, so a `None` below means the
+            // scope was dropped and not that the whole path failed.
+            assert!(
+                outcome.approved,
+                "control failed: the gate was not approved"
+            );
+            outcome
+                .modifications
+                .as_ref()
+                .and_then(|v| v.get("egress_scope"))
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        }
+
+        assert_eq!(
+            egress_scope_for(ApprovalScopeWire::Always).await.as_deref(),
+            Some("always"),
+            "an Always grant must reach the bridge as always, not collapse to once"
+        );
+        assert_eq!(
+            egress_scope_for(ApprovalScopeWire::Once).await.as_deref(),
+            Some("once"),
+            "a Once grant must reach the bridge as once"
+        );
+        assert_eq!(
+            egress_scope_for(ApprovalScopeWire::AlwaysPrefix {
+                prefix: "git ".to_string()
+            })
+            .await
+            .as_deref(),
+            Some("once"),
+            "a prefix grant has no egress meaning; it must narrow, never widen"
         );
     }
 
