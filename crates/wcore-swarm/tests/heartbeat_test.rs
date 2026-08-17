@@ -54,7 +54,24 @@ for n in 1 2 3; do
   ts=$(($(date +%s%N) / 1000000))
   printf '{"last_alive_at":%d,"step":"step-%d"}' "$ts" "$n" > .swarm-status.tmp
   mv .swarm-status.tmp .swarm-status.json
-  sleep 0.15
+  # Rendezvous (wayland#935). Block until the orchestrator has actually READ
+  # this heartbeat before emitting the next one. The previous version slept a
+  # fixed 150ms and let the observer sample at 40ms, so under full-suite load
+  # the worker could emit every heartbeat inside one poll gap and the observed
+  # count came up short while the worker had behaved perfectly.
+  #
+  # The ack lives in the worktree (the worker's cwd) because that is the only
+  # tree the delegated backend mounts into the child -- an ack in an outside
+  # tempdir is invisible to a bubblewrap worker. Dot-prefixed to match the
+  # existing `.swarm-status.json` convention, which is already written here.
+  deadline=$(( $(date +%s) + 30 ))
+  while [ ! -f ".swarm-hb-ack-$n" ]; do
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+      echo "worker gave up waiting for ack-$n" >&2
+      exit 91
+    fi
+    sleep 0.01
+  done
 done
 "#;
 
@@ -63,7 +80,9 @@ done
         base_branch: "main".into(),
         worker_branch_prefix: "swarm/hb".into(),
         worker_command: vec!["bash".into(), "-c".into(), script.into()],
-        timeout: Duration::from_secs(15),
+        // Raised from 15s: the worker now waits for the observer, so its
+        // wall-clock includes the orchestrator's read latency under load.
+        timeout: Duration::from_secs(60),
         env: vec![],
     };
 
@@ -78,15 +97,37 @@ done
     let handles = loop {
         tokio::select! {
             res = &mut dispatch_fut => break res.unwrap(),
-            _ = tokio::time::sleep(Duration::from_millis(40)) => {
-                // We don't have a worker_id until dispatch returns, so
-                // probe the swarm root directly for any worktree-with-
-                // status-file. This mirrors what worker_status does
-                // under the hood, just without the handle.
-                if let Some(status) = probe_any_worker_status(tmp.path())
-                    && observed.last().map(|p| p.last_alive_at) != Some(status.last_alive_at)
-                {
-                    observed.push(status);
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                // We have no worker_id until dispatch returns, so locate the
+                // single worker worktree and read its heartbeat through the
+                // PRODUCT reader (`heartbeat::read_status`) rather than a
+                // second, test-local JSON decode. A private copy of the read
+                // path would keep this test green through a regression in the
+                // real one.
+                let Some((worktree, status)) = probe_any_worker_status(tmp.path()) else {
+                    continue;
+                };
+                if observed.last().map(|p| p.last_alive_at) == Some(status.last_alive_at) {
+                    continue;
+                }
+                // Acknowledge the heartbeat we just read, which is what
+                // unblocks the worker to emit the next one. The worker cannot
+                // run ahead of this loop, so no heartbeat can be missed and
+                // the `>= 3` assertion below is deterministic rather than
+                // sampled (wayland#935).
+                let step = status.step.clone().unwrap_or_default();
+                observed.push(status);
+                if let Some(n) = step.strip_prefix("step-") {
+                    // The worker runs in <transaction_root>/checkout, NOT in the
+                    // transaction root itself. The root only carries the MIRROR
+                    // that `dispatch::mirror_heartbeat` republishes there for the
+                    // orchestrator to read, so an ack written to the root is
+                    // invisible to the worker -- which is exactly what the first
+                    // attempt at this rendezvous proved (worker blocked the full
+                    // 30s waiting for ack-1, observed count stuck at 1).
+                    let ack = worktree.join("checkout").join(format!(".swarm-hb-ack-{n}"));
+                    std::fs::write(&ack, b"1")
+                        .unwrap_or_else(|e| panic!("write ack {}: {e}", ack.display()));
                 }
             }
         }
@@ -125,16 +166,24 @@ done
     swarm.cleanup().await.unwrap();
 }
 
+/// Locate the single worker worktree and read its heartbeat.
+///
+/// wayland#935: this used to `std::fs::read` + `serde_json::from_slice` itself,
+/// so every intermediate observation in the e2e test went through a SECOND
+/// implementation of the read path and the product's own
+/// [`wcore_swarm::heartbeat::read_status`] was exercised exactly once, at the
+/// end. A regression in the real reader would have left this test green.
+///
+/// A malformed heartbeat is surfaced as `Err` by `read_status`, and a partial
+/// write is not possible here (the worker renames into place), so an error is
+/// treated as "nothing readable yet" and simply retried by the caller.
 #[cfg(unix)]
-fn probe_any_worker_status(repo_root: &Path) -> Option<WorkerStatusFile> {
+fn probe_any_worker_status(repo_root: &Path) -> Option<(std::path::PathBuf, WorkerStatusFile)> {
     let swarm_root = repo_root.join(".swarm-worktrees");
-    let entries = std::fs::read_dir(&swarm_root).ok()?;
-    for ent in entries.flatten() {
-        let p = ent.path().join(wcore_swarm::heartbeat::STATUS_FILE);
-        if let Ok(bytes) = std::fs::read(&p)
-            && let Ok(payload) = serde_json::from_slice::<WorkerStatusFile>(&bytes)
-        {
-            return Some(payload);
+    for ent in std::fs::read_dir(&swarm_root).ok()?.flatten() {
+        let worktree = ent.path();
+        if let Ok(Some(payload)) = wcore_swarm::heartbeat::read_status(&worktree) {
+            return Some((worktree, payload));
         }
     }
     None
