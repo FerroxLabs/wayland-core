@@ -3,7 +3,7 @@ name: Swarm macOS repro (temporary)
 on:
   push:
     branches:
-      - 'lane/swarmfix-repro'
+      - 'lane/swarmfix-repro*'
 
 permissions:
   contents: read
