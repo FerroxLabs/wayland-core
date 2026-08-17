@@ -1777,6 +1777,10 @@ impl AgentBootstrap {
                 .expect("session egress policy is installed before scoped bootstrap")
                 .clone(),
         );
+        // fix/904 — plugin-declared servers get the same credentials store as
+        // config-declared ones so a `${cred:KEY}` in their stdio `env` resolves
+        // (or fails closed) rather than reaching the child process literally.
+        let plugin_credentials = self.config.open_credentials_store().ok();
         let plugin_mcp_manager =
             crate::plugins::mcp_delivery::connect_plugin_mcp_servers_with_policy(
                 &applied.plugin_mcp_servers,
@@ -1784,6 +1788,7 @@ impl AgentBootstrap {
                 &builtin_names,
                 plugin_egress_policy,
                 &self.config.builtin_tools.defer_cold,
+                plugin_credentials.as_deref(),
             )
             .await;
         let plugin_mcp_declarations = applied

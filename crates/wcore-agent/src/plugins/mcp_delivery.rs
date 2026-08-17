@@ -97,6 +97,10 @@ pub fn translate_mcp_server_spec(spec: &McpServerSpec) -> McpServerConfig {
 /// `builtin_names` is the snapshot of built-in tool names taken *before*
 /// the first MCP pass (bootstrap.rs:392). It is forwarded to
 /// `register_mcp_tools` for collision detection, identical to the first pass.
+///
+/// `credentials` is the session credentials store used to resolve `${cred:KEY}`
+/// references in a plugin server headers/`env`. `None` means no store: every
+/// reference-bearing server is dropped before transport spawn.
 pub async fn connect_plugin_mcp_servers(
     specs: &[McpServerSpec],
     tool_registry: &mut wcore_tools::registry::ToolRegistry,
@@ -109,6 +113,7 @@ pub async fn connect_plugin_mcp_servers(
         builtin_names,
         wcore_egress::default_policy(),
         defer_cold,
+        None,
     )
     .await
 }
@@ -122,16 +127,32 @@ pub async fn connect_plugin_mcp_servers_with_policy(
     builtin_names: &[String],
     egress_policy: wcore_egress::SharedPolicy,
     defer_cold: &wcore_config::tools::DeferColdConfig,
+    credentials: Option<&dyn wcore_config::credentials::CredentialsStore>,
 ) -> Option<Arc<wcore_mcp::manager::McpManager>> {
     if specs.is_empty() {
         return None;
     }
 
     // Build the HashMap<name, McpServerConfig> that connect_all expects.
-    let configs: HashMap<String, McpServerConfig> = specs
+    let translated: HashMap<String, McpServerConfig> = specs
         .iter()
         .map(|s| (s.name.clone(), translate_mcp_server_spec(s)))
         .collect();
+
+    // fix/904 — a plugin-declared stdio server carries its credential in `env`,
+    // exactly like a config-declared one, and this pass spawns the same child
+    // processes. Run the shared `${cred:KEY}` rail here too, so an unresolvable
+    // reference fails closed (the server is dropped) instead of reaching the
+    // child as a literal placeholder. No store available gives the same
+    // fail-closed answer: reference-bearing servers are dropped, literal ones
+    // connect unchanged.
+    let configs = match credentials {
+        Some(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(&translated, store),
+        None => wcore_config::mcp_cred_refs::without_credential_references(&translated),
+    };
+    if configs.is_empty() {
+        return None;
+    }
 
     // Plugin MCP servers are third-party code from installed marketplace
     // plugins; a broken one must not dominate boot. Give them a tighter
