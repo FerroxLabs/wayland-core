@@ -1,0 +1,63 @@
+name: Swarm macOS repro (temporary)
+
+on:
+  push:
+    branches:
+      - 'lane/swarmfix-*'
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustc -V && cargo -V
+      - name: Build
+        run: |
+          cargo test -p wcore-swarm --test workspace_authority --no-run
+          cargo test -p wcore-sandbox --lib --no-run
+      - name: The two containment regression tests (arm under test)
+        shell: bash
+        run: |
+          set +e
+          cargo test -p wcore-sandbox --lib -- --exact --nocapture \
+            backends::process_tree::macos_tests::attaching_to_an_already_exited_root_is_not_a_containment_failure
+          echo "UNIT_1_EXIT=$?"
+          cargo test -p wcore-sandbox --lib -- --exact --nocapture \
+            backends::process_tree::macos_tests::a_corpse_root_with_a_live_descendant_still_yields_containment
+          echo "UNIT_2_EXIT=$?"
+      - name: Hammer the swarm race
+        shell: bash
+        run: |
+          set +e
+          BIN=$(find target/debug/deps -name 'workspace_authority-*' -type f -perm +111 | head -1)
+          echo "BIN=$BIN"
+          mkdir -p repro-logs
+          fails=0
+          for round in $(seq 1 30); do
+            for i in $(seq 1 12); do
+              (
+                "$BIN" --exact independent_cli_processes_cannot_overbook_shared_capacity --nocapture \
+                  > "repro-logs/r${round}_${i}.log" 2>&1
+                echo "$?" > "repro-logs/r${round}_${i}.rc"
+              ) &
+            done
+            wait
+            for i in $(seq 1 12); do
+              rc=$(cat "repro-logs/r${round}_${i}.rc" 2>/dev/null)
+              if [ "x$rc" != "x0" ]; then
+                fails=$((fails+1))
+                echo "===== FAILURE round=$round copy=$i rc=${rc:-missing} ====="
+                grep -E "panicked at|assertion|left:|right:" "repro-logs/r${round}_${i}.log"
+                echo "===== END FAILURE ====="
+              else
+                rm -f "repro-logs/r${round}_${i}.log"
+              fi
+            done
+            rm -f repro-logs/*.rc
+          done
+          echo "HAMMER_ROUNDS=30 HAMMER_RUNS=360 HAMMER_FAILURES=$fails"
