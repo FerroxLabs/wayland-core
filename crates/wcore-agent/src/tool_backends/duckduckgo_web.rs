@@ -120,10 +120,10 @@ fn interpret_response(status: u16, html: &str, limit: usize) -> WebOutcome {
         return WebOutcome::Err {
             message: format!(
                 "duckduckgo blocked this search with its anti-bot challenge page (HTTP {status}) \
-                 — a rate limit on this IP, not an HTML-format change. Retry in a few minutes, \
-                 set WAYLAND_WEB_BACKEND=parallel, or configure a keyed provider \
-                 (BRAVE_SEARCH_API_KEY / TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / \
-                 FIRECRAWL_API_KEY)."
+                 — a rate limit on this IP, not an HTML-format change. The block clears on \
+                 DuckDuckGo's schedule, not ours; for a search path that does not depend on this \
+                 IP's reputation, configure a keyed provider (BRAVE_SEARCH_API_KEY / \
+                 TAVILY_API_KEY / EXA_API_KEY / SEARXNG_URL / FIRECRAWL_API_KEY)."
             ),
         };
     }
@@ -481,6 +481,30 @@ mod tests {
                 .unwrap()
                 .contains("Will rain disrupt"),
             "snippets must stay paired with their titles"
+        );
+    }
+
+    /// The remediation must not advise a setting that changes nothing for
+    /// the user most likely to see this message. `build_web_search_backend`
+    /// constructs `chain(ParallelWebBackend::free())` for BOTH the keyless
+    /// default and `WAYLAND_WEB_BACKEND=parallel`, so telling a default-config
+    /// user to "set WAYLAND_WEB_BACKEND=parallel" re-selects the identical
+    /// chain that just fell through to DuckDuckGo. Nor may it promise a
+    /// recovery time nobody has measured.
+    #[test]
+    fn the_block_message_advises_no_no_op_remedy() {
+        let msg = err_message(interpret_response(202, CHALLENGE_PAGE, 5));
+        assert!(
+            !msg.contains("WAYLAND_WEB_BACKEND=parallel"),
+            "advising =parallel is a no-op in the default keyless config: {msg}"
+        );
+        assert!(
+            !msg.contains("few minutes"),
+            "the recovery time is DuckDuckGo's and has never been measured: {msg}"
+        );
+        assert!(
+            msg.contains("BRAVE_SEARCH_API_KEY"),
+            "a remedy that does work must still be offered: {msg}"
         );
     }
 
