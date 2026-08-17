@@ -113,60 +113,99 @@ impl WebBackend for DuckDuckGoWebBackend {
 ///
 /// Split out of [`DuckDuckGoWebBackend::search`] so the decision — *which*
 /// of the failure modes actually happened — is testable without a network
-/// round-trip. Order matters: the anti-automation challenge is checked
-/// first because it arrives with a 2xx status and an empty result list, so
-/// every later branch would describe it wrongly.
+/// round-trip.
+///
+/// Order matters, and it is deliberately **results first**. DuckDuckGo
+/// echoes the query straight back into the page (`<input name="q"
+/// value="…">`), so a body marker can also show up on a perfectly good
+/// results page whenever the user happened to search for that text.
+/// Parsing before sniffing means a page that served results is always
+/// reported as results; the challenge markers only get a say once there is
+/// nothing to report.
 fn interpret_search_response(status: reqwest::StatusCode, html: &str, limit: usize) -> WebOutcome {
-    if let Some(message) = describe_challenge(status, html) {
-        return WebOutcome::Err { message };
+    // An explicit 429 is authoritative on its own — no body needed.
+    if status.as_u16() == 429 {
+        return WebOutcome::Err {
+            message: rate_limit_message(status),
+        };
     }
-    if !status.is_success() {
+    if status.is_success() {
+        let results = parse_duckduckgo_html(html, limit);
+        if !results.is_empty() {
+            return WebOutcome::Ok {
+                payload: serde_json::json!({ "web": results }),
+            };
+        }
+        if is_challenge_page(html) {
+            return WebOutcome::Err {
+                message: rate_limit_message(status),
+            };
+        }
+        // Genuinely nothing to parse and no challenge: name the status so
+        // the reader can tell a plain 200 apart from a silent 202 instead
+        // of taking the format guess on faith.
         return WebOutcome::Err {
             message: format!(
-                "duckduckgo returned HTTP {} (body sniff: {})",
-                status.as_u16(),
-                html.chars().take(200).collect::<String>()
+                "duckduckgo returned HTTP {} with no parseable results (their HTML format may \
+                 have changed; try setting BRAVE_SEARCH_API_KEY for a structured API)",
+                status.as_u16()
             ),
         };
     }
-    let results = parse_duckduckgo_html(html, limit);
-    if results.is_empty() {
+    if is_challenge_page(html) {
         return WebOutcome::Err {
-            message: "duckduckgo returned no parseable results (their HTML format may have \
-                      changed; try setting BRAVE_SEARCH_API_KEY for a structured API)"
-                .to_string(),
+            message: rate_limit_message(status),
         };
     }
-    WebOutcome::Ok {
-        payload: serde_json::json!({ "web": results }),
+    WebOutcome::Err {
+        message: format!(
+            "duckduckgo returned HTTP {} (body sniff: {})",
+            status.as_u16(),
+            html.chars().take(200).collect::<String>()
+        ),
     }
 }
 
-/// Markup fragments that appear only in DuckDuckGo's anti-automation
-/// interstitial ("Unfortunately, bots use DuckDuckGo too." plus an
-/// image puzzle) — the CSS block name and the challenge script.
-const CHALLENGE_MARKERS: [&str; 2] = ["anomaly-modal", "anomaly.js"];
+/// Attribute-anchored markers for DuckDuckGo's anti-automation
+/// interstitial ("Unfortunately, bots use DuckDuckGo too." plus a
+/// select-the-ducks puzzle): the CSS block name on the modal, and the
+/// challenge endpoint both of its forms submit to.
+///
+/// The anchoring is load-bearing. A bare `anomaly-modal` / `anomaly.js`
+/// substring search also matches the query DuckDuckGo echoes into
+/// `value="…"` and `<title>`, so searching for `anomaly.js` would make the
+/// backend flag its own results page as a challenge. The echo is
+/// HTML-escaped and so can never contain the `"` these patterns require.
+const CHALLENGE_MARKER_PATTERNS: [&str; 2] = [
+    r#"class="[^"]*anomaly-modal"#,
+    r#"action="[^"]*anomaly\.js"#,
+];
 
-/// Detect a rate-limit / bot challenge and describe it truthfully.
+/// True when the body is DuckDuckGo's bot-challenge interstitial rather
+/// than a search-results page.
+fn is_challenge_page(html: &str) -> bool {
+    CHALLENGE_MARKER_PATTERNS
+        .iter()
+        .any(|p| regex::Regex::new(p).is_ok_and(|re| re.is_match(html)))
+}
+
+/// Describe a rate-limit / bot challenge truthfully.
 ///
 /// DuckDuckGo serves the challenge with **HTTP 202** — a success status —
-/// and no `result__a` markup at all. Before this check existed the empty
-/// parse was reported as "their HTML format may have changed", which sent
-/// users hunting a parser bug that does not exist while the real cause was
-/// that the free HTML endpoint had throttled their IP (#930).
-fn describe_challenge(status: reqwest::StatusCode, html: &str) -> Option<String> {
-    let challenged = CHALLENGE_MARKERS.iter().any(|m| html.contains(m));
-    if !challenged && status.as_u16() != 429 {
-        return None;
-    }
-    Some(format!(
+/// and no `result__a` markup at all. `StatusCode::is_success` accepts 202,
+/// so the empty parse used to fall through to "their HTML format may have
+/// changed", which sent users hunting a parser bug that does not exist
+/// while the real cause was the free HTML endpoint throttling their IP
+/// (#930).
+fn rate_limit_message(status: reqwest::StatusCode) -> String {
+    format!(
         "duckduckgo refused this query as automated traffic (HTTP {}) and returned a bot \
          challenge page instead of search results — nothing was searched, and this is NOT a \
          parsing failure. The free HTML endpoint rate-limits by IP after a couple of rapid \
          queries. Wait a minute and retry, or set BRAVE_SEARCH_API_KEY / TAVILY_API_KEY (or \
          WAYLAND_WEB_BACKEND) to use a structured search API that does not throttle scrapers.",
         status.as_u16()
-    ))
+    )
 }
 
 /// Parse DuckDuckGo's HTML-lite result list into `[{title,url,snippet}]`.
@@ -295,31 +334,55 @@ mod tests {
     use super::*;
     use reqwest::StatusCode;
 
-    /// Excerpt of a real capture from `https://html.duckduckgo.com/html/`
-    /// (POST `q=rust+programming+language`, 2026-08-17, from a datacentre
-    /// IP): HTTP 202, 14 340 bytes, zero `result__a` occurrences.
+    /// Trimmed excerpt of a real capture of `https://html.duckduckgo.com/html/`
+    /// (POST `q=rust+programming+language`, 2026-08-17, from a datacentre IP):
+    /// HTTP 202, 14 346 bytes, zero `result__a`, 56 `anomaly-modal`
+    /// occurrences. Both markers are kept in their real attribute positions —
+    /// `class=` on the modal divs and `action=` on the challenge form.
     const CHALLENGE_FIXTURE: &str = r#"<!DOCTYPE html>
-<html lang="en"><head><title>DuckDuckGo</title>
-<script src="../anomaly.js?sv=html&cc=sre"></script></head>
+<html lang="en"><head><title>DuckDuckGo</title></head>
 <body>
-  <div class="anomaly-modal__mask">
-    <div class="anomaly-modal__modal  is-ie" data-testid="anomaly-modal">
-      <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
-      <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+  <form id="challenge-form" action="//duckduckgo.com/anomaly.js?sv=html&cc=sre&st=1786976247" method="POST">
+    <div class="anomaly-modal__mask">
+      <div class="anomaly-modal__modal  is-ie" data-testid="anomaly-modal">
+        <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+        <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+        <div class="anomaly-modal__instructions">Select all squares containing a duck:</div>
+      </div>
     </div>
-  </div>
+  </form>
 </body></html>"#;
 
-    /// A results page in the shape the parser expects.
+    /// Results page in the shape really served in 2026: organic hits carry a
+    /// direct `href`, not the older `//duckduckgo.com/l/?uddg=` wrapper.
     const RESULTS_FIXTURE: &str = r#"<html><body>
-<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&amp;rut=x">Rust <b>Programming</b> Language</a>
-<a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F">A language empowering everyone.</a></div>
+<div class="result"><a rel="nofollow" class="result__a" href="https://rust-lang.org/">Rust <b>Programming</b> Language</a>
+<a class="result__snippet" href="https://rust-lang.org/">A language empowering everyone.</a></div>
+</body></html>"#;
+
+    /// A **successful** results page for the query `anomaly.js source map`,
+    /// in the real shape: DuckDuckGo echoes the query into `<title>` and into
+    /// two `value="…"` inputs, so the literal text `anomaly.js` appears three
+    /// times on a page that served ten real results.
+    const RESULTS_ECHOING_MARKER_FIXTURE: &str = r#"<html><head>
+  <title>anomaly.js source map at DuckDuckGo</title></head><body>
+  <input name="q" class="search__input" type="text" value="anomaly.js source map" />
+  <input type="hidden" name="q" value="anomaly.js source map" />
+<div class="result"><a rel="nofollow" class="result__a" href="https://github.com/denandz/sourcemapper">GitHub - denandz/sourcemapper</a>
+<a class="result__snippet" href="https://github.com/denandz/sourcemapper">Extract JavaScript source trees.</a></div>
 </body></html>"#;
 
     fn err_message(outcome: WebOutcome) -> String {
         match outcome {
             WebOutcome::Err { message } => message,
             WebOutcome::Ok { payload } => panic!("expected Err, got Ok({payload})"),
+        }
+    }
+
+    fn web_array(outcome: WebOutcome) -> Vec<serde_json::Value> {
+        match outcome {
+            WebOutcome::Ok { payload } => payload["web"].as_array().expect("web array").clone(),
+            WebOutcome::Err { message } => panic!("expected Ok, got Err({message})"),
         }
     }
 
@@ -345,6 +408,40 @@ mod tests {
         );
     }
 
+    /// The mirror-image lie: DuckDuckGo echoes the query into the page, so a
+    /// bare marker substring search flags a *successful* search for
+    /// "anomaly.js" as a bot challenge and throws its results away.
+    #[test]
+    fn results_survive_a_query_that_echoes_a_challenge_marker() {
+        let web = web_array(interpret_search_response(
+            StatusCode::OK,
+            RESULTS_ECHOING_MARKER_FIXTURE,
+            5,
+        ));
+        assert_eq!(
+            web.len(),
+            1,
+            "a served results page must be reported as results even when the query text \
+             collides with a challenge marker"
+        );
+        assert_eq!(web[0]["url"], "https://github.com/denandz/sourcemapper");
+    }
+
+    /// Same collision at the detector level: the markers must be anchored to
+    /// the attributes DuckDuckGo puts them in, not matched anywhere in the
+    /// body.
+    #[test]
+    fn challenge_detection_is_attribute_anchored() {
+        assert!(
+            is_challenge_page(CHALLENGE_FIXTURE),
+            "real challenge page must be detected"
+        );
+        assert!(
+            !is_challenge_page(RESULTS_ECHOING_MARKER_FIXTURE),
+            "an echoed query must not be mistaken for challenge markup"
+        );
+    }
+
     /// An explicit 429 is the same class of failure and must read the same,
     /// even though it carries no challenge markup.
     #[test]
@@ -359,7 +456,7 @@ mod tests {
 
     /// Polarity control: the detector must NOT claim rate limiting for an
     /// ordinary page that simply had nothing to parse. Without this, a
-    /// detector that fired on everything would still pass the test above.
+    /// detector that fired on everything would still pass the tests above.
     #[test]
     fn ordinary_empty_page_still_reports_a_parse_failure() {
         let html = "<html><body><div class=\"no-results\">No results.</div></body></html>";
@@ -367,6 +464,10 @@ mod tests {
         assert!(
             msg.contains("no parseable results"),
             "an unchallenged empty page must keep the parser diagnosis: {msg}"
+        );
+        assert!(
+            msg.contains("200"),
+            "the fallback diagnosis must still name the status it saw: {msg}"
         );
     }
 
@@ -386,15 +487,24 @@ mod tests {
     /// zero above means "no results were served", not "the query failed".
     #[test]
     fn results_page_parses_into_web_payload() {
-        match interpret_search_response(StatusCode::OK, RESULTS_FIXTURE, 5) {
-            WebOutcome::Ok { payload } => {
-                let web = payload["web"].as_array().expect("web array");
-                assert_eq!(web.len(), 1);
-                assert_eq!(web[0]["title"], "Rust Programming Language");
-                assert_eq!(web[0]["url"], "https://www.rust-lang.org/");
-                assert_eq!(web[0]["snippet"], "A language empowering everyone.");
-            }
-            WebOutcome::Err { message } => panic!("expected Ok, got Err({message})"),
-        }
+        let web = web_array(interpret_search_response(
+            StatusCode::OK,
+            RESULTS_FIXTURE,
+            5,
+        ));
+        assert_eq!(web.len(), 1);
+        assert_eq!(web[0]["title"], "Rust Programming Language");
+        assert_eq!(web[0]["url"], "https://rust-lang.org/");
+        assert_eq!(web[0]["snippet"], "A language empowering everyone.");
+    }
+
+    /// The older `uddg=` wrapper is still decoded, so restoring direct-href
+    /// results above did not drop wrapper support.
+    #[test]
+    fn uddg_wrapper_urls_are_still_decoded() {
+        assert_eq!(
+            decode_ddg_url("//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&rut=x"),
+            "https://www.rust-lang.org/"
+        );
     }
 }
