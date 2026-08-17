@@ -492,7 +492,17 @@ impl Tool for BrowserTool {
             // Those paths produce reasons like "cloud metadata endpoint blocked: ..." which do
             // NOT start with "default_action=Deny".
             let msg = if let BrowserOpError::PolicyDenied { ref reason, .. } = e {
-                if reason.starts_with("default_action=Deny")
+                // gh#826/gh#911: a loopback denial is the one hard block with a
+                // real recovery path, so it gets the grant instructions rather
+                // than a bare reason. Matched on the loopback reason prefixes
+                // `BrowserPolicy` emits (`loopback hostname blocked:` /
+                // `loopback IP blocked:`) — NOT on the URL, so a private-IP or
+                // metadata denial can never be answered with loopback advice.
+                if reason.starts_with("loopback hostname blocked:")
+                    || reason.starts_with("loopback IP blocked:")
+                {
+                    crate::config_hint::loopback_blocked_hint(reason)
+                } else if reason.starts_with("default_action=Deny")
                     && self.policy.allowed_origins.is_empty()
                     && self.policy.default_action == crate::policy::PolicyAction::Deny
                 {
