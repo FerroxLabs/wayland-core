@@ -3427,6 +3427,11 @@ pub struct AgentEngine {
     /// engines constructed outside bootstrap (`SkillHandler::Stub`
     /// continues to back those paths).
     skill_catalog: Option<Arc<wcore_skills::refs::SkillCatalog>>,
+    /// wayland#562 — the exact skills `<system-reminder>` block currently
+    /// embedded in `system_prompt`, so a late catalog rebind can swap it for a
+    /// freshly rendered one without re-deriving the rest of the prompt.
+    /// `None` when the session booted with no listable skills.
+    skill_listing_section: Option<String>,
     /// v0.8.0 Task K — optional learned router that picks an
     /// orchestration `Template` per turn. When `Some`, it is consulted
     /// before the deterministic `IntentClassifier` cold-start fallback;
@@ -3935,6 +3940,7 @@ impl AgentEngine {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -4209,6 +4215,7 @@ impl AgentEngine {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -5099,6 +5106,15 @@ impl AgentEngine {
     /// `HookEngine`. Until set, plugin lifecycle hooks fire log-only. Called by
     /// `AgentBootstrap` after `register_plugin_hooks`. No-op when `self.hooks`
     /// is `None` (synthetic test-mode engines).
+    /// wayland#562 — identity of the installed plugin-hook dispatcher, or
+    /// `None` when plugin hooks are log-only. Read by the late-MCP bind tests
+    /// (and available to diagnostics) to tell the two states apart.
+    pub fn hook_dispatcher_identity(&self) -> Option<&'static str> {
+        self.hooks
+            .as_ref()
+            .and_then(|hooks| hooks.dispatcher_identity())
+    }
+
     pub fn set_hook_dispatcher(
         &mut self,
         dispatcher: std::sync::Arc<dyn crate::hooks::HookDispatcher>,
@@ -5339,6 +5355,49 @@ impl AgentEngine {
     /// used outside `AgentBootstrap::build` keep the default).
     pub fn skill_catalog(&self) -> Option<&Arc<wcore_skills::refs::SkillCatalog>> {
         self.skill_catalog.as_ref()
+    }
+
+    /// wayland#562 — record the skills `<system-reminder>` block bootstrap
+    /// embedded in the system prompt. Enables [`Self::swap_skill_listing_section`]
+    /// to replace exactly that block later.
+    pub fn set_skill_listing_section(&mut self, section: String) {
+        self.skill_listing_section = if section.is_empty() {
+            None
+        } else {
+            Some(section)
+        };
+    }
+
+    /// wayland#562 — swap the embedded skills listing for `section`.
+    ///
+    /// A session whose config MCP connect was deferred out of boot learns its
+    /// MCP-provided skills only after the background handshake settles. Adding
+    /// them to the catalog is not enough: the model discovers skills from the
+    /// prompt listing, so the listing has to change too.
+    ///
+    /// Applied to the live prompt AND to `rebind_system_prefix` (the retained
+    /// base a later host rebind re-prepends to), or the swap would be undone
+    /// by the next `set_system_prompt`. When boot listed no skills the new
+    /// block is appended.
+    pub fn swap_skill_listing_section(&mut self, section: String) {
+        fn apply(text: &str, old: Option<&str>, new: &str) -> String {
+            match old {
+                Some(old) if text.contains(old) => text.replace(old, new),
+                _ if new.is_empty() => text.to_string(),
+                _ if text.is_empty() => new.to_string(),
+                _ => format!("{text}\n\n{new}"),
+            }
+        }
+        let old = self.skill_listing_section.clone();
+        self.system_prompt = apply(&self.system_prompt, old.as_deref(), &section);
+        if let Some(prefix) = self.rebind_system_prefix.as_ref() {
+            self.rebind_system_prefix = Some(apply(prefix, old.as_deref(), &section));
+        }
+        self.skill_listing_section = if section.is_empty() {
+            None
+        } else {
+            Some(section)
+        };
     }
 
     /// v0.8.0 Task M — install a `UserModelBackend` for per-turn
@@ -10398,7 +10457,7 @@ impl AgentEngine {
             && let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
-            let candidates: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
+            let candidates: Vec<String> = catalog.visible_names();
             if !candidates.is_empty() {
                 // `choose` lives on the `DecisionRouter` trait, in the
                 // sibling `wcore-dispatch` crate. Importing it inline
@@ -18015,6 +18074,7 @@ mod set_config_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -19887,6 +19947,7 @@ mod phase6_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -20209,6 +20270,7 @@ mod compact_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -21850,6 +21912,7 @@ mod plan_mode_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -22305,6 +22368,7 @@ mod hook_integration_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -23471,6 +23535,7 @@ mod approval_bridge_engine_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             user_model_backend: None,
             user_correction_store: None,
             user_model_user_id: resolve_user_model_user_id(),
@@ -24529,6 +24594,7 @@ mod user_model_writeback_tests {
             plugin_user_models: Vec::new(),
             style_detector: Mutex::new(crate::style_detector::StyleDetector::new()),
             skill_catalog: None,
+            skill_listing_section: None,
             template_router: None,
             user_model_backend: None,
             user_correction_store: None,

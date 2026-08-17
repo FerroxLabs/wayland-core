@@ -245,6 +245,16 @@ impl HookEngine {
 
     /// Wire the host's hook dispatcher (built at bootstrap with access to the
     /// MCP managers). Until this is set, plugin hooks fire log-only.
+    /// wayland#562 — recovery identity of the installed dispatcher, or `None`
+    /// while plugin hooks are log-only. This is the observable difference
+    /// between "plugin hooks can contribute" and "they cannot", and it is what
+    /// the durable tool-hook authority digest keys on.
+    pub fn dispatcher_identity(&self) -> Option<&'static str> {
+        self.dispatcher
+            .as_ref()
+            .map(|dispatcher| dispatcher.recovery_identity())
+    }
+
     pub fn set_dispatcher(&mut self, dispatcher: Arc<dyn HookDispatcher>) {
         self.dispatcher = Some(dispatcher);
     }

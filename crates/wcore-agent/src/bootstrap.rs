@@ -57,6 +57,10 @@ pub struct BootstrapResult {
     /// Hosts emit these additive events only after their `Ready` boundary.
     pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
     pub mcp_managers: Vec<Arc<McpManager>>,
+    /// wayland#562 — replays the boot-time skill-catalog and plugin-hook
+    /// bindings against a config MCP server that connected after `build()`
+    /// returned. Only the `defer_config_mcp` caller has anything to replay.
+    pub late_mcp_binder: Arc<crate::late_mcp::LateMcpBinder>,
     /// Redacted declarations retained even when a plugin MCP connection fails.
     /// Command arguments, environment, and URLs never cross this boundary.
     pub plugin_mcp_declarations: Vec<PluginMcpDeclaration>,
@@ -474,6 +478,89 @@ pub struct AgentBootstrap {
 /// Keeping this constructor at the production call boundary makes reuse of a
 /// prior session's mutable catalog impossible: every call starts from a fresh
 /// embedded catalog and consumes only that invocation's plugin specs.
+/// Load the session's skill listing exactly as `build()` does.
+///
+/// wayland#562 — extracted so a config MCP server that connected *after* boot
+/// (see [`crate::late_mcp::LateMcpBinder`]) can re-derive the catalog from the
+/// same inputs with the manager supplied, instead of merging MCP skills into a
+/// live catalog and inventing a precedence rule of its own. Everything that
+/// decides ordering lives here: `load_catalog_with_bundled` (bundled > MCP >
+/// user > project), the marketplace-plugin skills appended after it, and the
+/// memory-backed prioritizer reorder.
+///
+/// `memory_api` is `Some` only when `[memory] enabled` is on — passing `None`
+/// skips the prioritizer, which is what a memory-disabled session does.
+pub async fn load_session_skill_refs(
+    cwd: &std::path::Path,
+    extra_skill_dirs: &[std::path::PathBuf],
+    mcp_manager: Option<&wcore_mcp::manager::McpManager>,
+    bundled_catalog: &wcore_skills::bundled::BundledSkillCatalog,
+    memory_api: Option<&Arc<dyn wcore_memory::MemoryApi>>,
+) -> Vec<wcore_skills::refs::SkillRef> {
+    // X1 (Task 5): load the catalog lazily. Bodies are NOT pinned in
+    // memory — SkillCatalog::resolve() reads them on demand on first
+    // activation, with a 32-entry LRU thereafter.
+    let mut skill_refs = wcore_skills::loader::load_catalog_with_bundled(
+        cwd,
+        extra_skill_dirs,
+        false,
+        mcp_manager,
+        bundled_catalog,
+    )
+    .await;
+
+    // Lane D3 (G2/G4): load skills copied into installed marketplace plugins
+    // (`<plugins-root>/<plugin>@<marketplace>/skills/`), namespaced
+    // `<marketplace>/<plugin>:<skill>`. A declarative plugin runs no code, so
+    // its skills are otherwise never registered. Only dirs with a plugin.toml
+    // are treated as plugins (mirrors the on-disk loader); the bare skills/
+    // layout matches what the install committer writes.
+    for root in crate::plugins::loader::resolved_plugins_roots() {
+        let read = match std::fs::read_dir(&root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for entry in read.flatten() {
+            let plugin_dir = entry.path();
+            if !plugin_dir.join("plugin.toml").is_file() {
+                continue;
+            }
+            let skills_dir = plugin_dir.join("skills");
+            if !skills_dir.is_dir() {
+                continue;
+            }
+            let dirname = entry.file_name().to_string_lossy().into_owned();
+            let ns = match dirname.split_once('@') {
+                Some((plugin, mkt)) => format!("{mkt}/{plugin}"),
+                None => dirname.clone(),
+            };
+            let plugin_skills =
+                wcore_skills::loader::load_plugin_skill_catalog(&skills_dir, &ns).await;
+            skill_refs.extend(plugin_skills);
+        }
+    }
+
+    // M3.6.2 — reorder skill_refs by procedural-partition success when
+    // memory is enabled. Falls back to load order on any memory error
+    // (the prioritizer itself swallows errors and returns input). The
+    // reorder also flows through the system_prompt below so the prompt
+    // introduces skills in their prioritized order.
+    if let Some(memory_api) = memory_api {
+        use std::collections::HashMap;
+        let names: Vec<String> = skill_refs.iter().map(|r| r.name.clone()).collect();
+        let prioritizer = wcore_skills::prioritizer::SkillPrioritizer::new(Arc::clone(memory_api));
+        let ordered = prioritizer.priority_order(&names, 64).await;
+        let rank: HashMap<&str, usize> = ordered
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.as_str(), i))
+            .collect();
+        skill_refs.sort_by_key(|r| rank.get(r.name.as_str()).copied().unwrap_or(usize::MAX));
+    }
+
+    skill_refs
+}
+
 fn build_session_bundled_catalog(
     plugin_skills: Vec<wcore_plugin_api::BundledSkillSpec>,
 ) -> wcore_skills::bundled::BundledSkillCatalog {
@@ -2087,54 +2174,20 @@ impl AgentBootstrap {
         // Build one catalog for this bootstrap. Embedded definitions are
         // inserted first, then plugin definitions are appended in discovery
         // order, preserving the existing bundled/plugin precedence.
-        let bundled_catalog = build_session_bundled_catalog(applied.plugin_skills);
+        let bundled_catalog = Arc::new(build_session_bundled_catalog(applied.plugin_skills));
         tracing::debug!(
             target: "wcore_agent::bootstrap",
             "bundled skill catalog initialised for session"
         );
 
-        // X1 (Task 5): load the catalog lazily. Bodies are NOT pinned in
-        // memory — SkillCatalog::resolve() reads them on demand on first
-        // activation, with a 32-entry LRU thereafter.
-        let mut skill_refs = wcore_skills::loader::load_catalog_with_bundled(
+        let skill_refs = load_session_skill_refs(
             cwd_path,
             &self.extra_skill_dirs,
-            false,
             mcp_manager.as_deref(),
             &bundled_catalog,
+            self.config.memory.enabled.then_some(&memory_api),
         )
         .await;
-
-        // Lane D3 (G2/G4): load skills copied into installed marketplace plugins
-        // (`<plugins-root>/<plugin>@<marketplace>/skills/`), namespaced
-        // `<marketplace>/<plugin>:<skill>`. A declarative plugin runs no code, so
-        // its skills are otherwise never registered. Only dirs with a plugin.toml
-        // are treated as plugins (mirrors the on-disk loader); the bare skills/
-        // layout matches what the install committer writes.
-        for root in crate::plugins::loader::resolved_plugins_roots() {
-            let read = match std::fs::read_dir(&root) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            for entry in read.flatten() {
-                let plugin_dir = entry.path();
-                if !plugin_dir.join("plugin.toml").is_file() {
-                    continue;
-                }
-                let skills_dir = plugin_dir.join("skills");
-                if !skills_dir.is_dir() {
-                    continue;
-                }
-                let dirname = entry.file_name().to_string_lossy().into_owned();
-                let ns = match dirname.split_once('@') {
-                    Some((plugin, mkt)) => format!("{mkt}/{plugin}"),
-                    None => dirname.clone(),
-                };
-                let plugin_skills =
-                    wcore_skills::loader::load_plugin_skill_catalog(&skills_dir, &ns).await;
-                skill_refs.extend(plugin_skills);
-            }
-        }
 
         // F-067 (MED): warn when a user- or project-level skill would shadow a
         // bundled skill. Bundled skills win dedup inside `load_catalog` (spliced
@@ -2187,24 +2240,30 @@ impl AgentBootstrap {
             }
         }
 
-        // M3.6.2 — reorder skill_refs by procedural-partition success when
-        // memory is enabled. Falls back to load order on any memory error
-        // (the prioritizer itself swallows errors and returns input). The
-        // reorder also flows through the system_prompt below so the prompt
-        // introduces skills in their prioritized order.
-        if self.config.memory.enabled {
-            use std::collections::HashMap;
-            let names: Vec<String> = skill_refs.iter().map(|r| r.name.clone()).collect();
-            let prioritizer =
-                wcore_skills::prioritizer::SkillPrioritizer::new(Arc::clone(&memory_api));
-            let ordered = prioritizer.priority_order(&names, 64).await;
-            let rank: HashMap<&str, usize> = ordered
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.as_str(), i))
-                .collect();
-            skill_refs.sort_by_key(|r| rank.get(r.name.as_str()).copied().unwrap_or(usize::MAX));
-        }
+        // wayland#562 — capture everything a deferred config MCP connect needs
+        // to replay the two boot-time bindings it missed: the skill catalog
+        // (`skill://` resources) and the plugin hook dispatcher. The binder is
+        // inert until a caller invokes it, so a session that connected inline
+        // simply never uses it.
+        let late_mcp_binder = {
+            let mut hooks_by_plugin: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for h in &applied.plugin_hooks {
+                hooks_by_plugin
+                    .entry(h.plugin.clone())
+                    .or_default()
+                    .push(h.name.clone());
+            }
+            Arc::new(crate::late_mcp::LateMcpBinder::new(
+                cwd_path.to_path_buf(),
+                self.extra_skill_dirs.clone(),
+                Arc::clone(&bundled_catalog),
+                self.config.memory.enabled.then(|| Arc::clone(&memory_api)),
+                hooks_by_plugin,
+                mcp_managers.clone(),
+                self.config.hooks.dispatch_enabled,
+            ))
+        };
 
         let mut prompt_cache = crate::context::SystemPromptCache::new();
         let system_prompt = crate::context::build_system_prompt(
@@ -2464,6 +2523,10 @@ impl AgentBootstrap {
         // current project's parent directory holds sibling projects; a
         // `resolve()` miss widens to their `.wayland-core/skills/` dirs.
         // Degrades to single-project behaviour when cwd has no parent.
+        // wayland#562 — the exact skills block `build_system_prompt` embedded
+        // above. Kept so a late MCP rebind replaces those precise bytes rather
+        // than pattern-matching the prompt.
+        let skill_listing_section = crate::context::skills_reminder_section(&skill_refs, None);
         let mut catalog = wcore_skills::refs::SkillCatalog::from_refs(skill_refs);
         if let Some(siblings_root) = cwd_path.parent() {
             catalog = catalog.with_cross_project_root(siblings_root);
@@ -2497,7 +2560,7 @@ impl AgentBootstrap {
         // construction below.
         let skill_router_to_install: wcore_skills::SkillRouter = {
             let mut sk_router = wcore_skills::SkillRouter::new();
-            let candidate_names: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
+            let candidate_names: Vec<String> = catalog.visible_names();
             // Layer 1 — GEPA winners. Requires a real Db handle; the
             // `NullMemory` fallback skips this branch entirely.
             if let Some(db_arc) = mem_db_for_router.clone() {
@@ -3296,6 +3359,7 @@ impl AgentBootstrap {
         // `/skill` slash-command handler's Runtime variant observes the
         // same `Arc<SkillCatalog>` the `SkillTool` was constructed with.
         engine.set_skill_catalog(Arc::clone(&catalog));
+        engine.set_skill_listing_section(skill_listing_section);
         // v0.8.1 U1 — install the per-turn `SkillRouter` built above.
         // From this point `engine.run()` calls `choose()` against the
         // catalog every turn and `observe()` credits the pick on exit.
@@ -4125,6 +4189,7 @@ impl AgentBootstrap {
             workspace_policy_receipt,
             capability_activations,
             mcp_managers,
+            late_mcp_binder,
             plugin_mcp_declarations,
             has_mcp,
             host_send_bridge,

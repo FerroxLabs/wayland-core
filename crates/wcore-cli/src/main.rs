@@ -2843,8 +2843,8 @@ async fn run_tui_mode(
         .map(|cat| {
             cat.visible()
                 .map(|r| tui::SkillInfo {
-                    name: r.name.clone(),
-                    description: r.description.clone(),
+                    name: r.name,
+                    description: r.description,
                     user_invocable: r.user_invocable,
                 })
                 .collect()
@@ -3564,13 +3564,14 @@ async fn remove_runtime_mcp_server(
 /// the registry is momentarily borrowed so the caller can retry between
 /// turns); on failure, surface the error with bootstrap's inline-connect
 /// wording. Shared by the loop-top non-blocking poll and the select arm.
-fn note_deferred_mcp_connect(
+async fn note_deferred_mcp_connect(
     result: DeferredMcpConnectResult,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    late_binder: Option<&Arc<wcore_agent::late_mcp::LateMcpBinder>>,
 ) -> Option<PendingDeferredMcp> {
     let DeferredMcpConnectResult {
         outcome,
@@ -3596,7 +3597,10 @@ fn note_deferred_mcp_connect(
                 &mut reservations,
                 writer,
                 dynamic_managers,
-            ) {
+                late_binder,
+            )
+            .await
+            {
                 None
             } else {
                 Some(PendingDeferredMcp {
@@ -3620,45 +3624,66 @@ fn note_deferred_mcp_connect(
 /// Returns `false` when the registry Arc is currently borrowed (a turn is
 /// mid-flight) — the caller parks the manager and retries at the next
 /// between-turns boundary.
-fn integrate_deferred_mcp(
+async fn integrate_deferred_mcp(
     engine: &mut wcore_agent::engine::AgentEngine,
     mgr: Arc<McpManager>,
     resolved_servers: &HashMap<String, McpServerConfig>,
     reservations: &mut HashMap<String, McpConnectionReservation>,
     writer: &ProtocolWriter,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    late_binder: Option<&Arc<wcore_agent::late_mcp::LateMcpBinder>>,
 ) -> bool {
     let builtin_names = engine.tool_names();
     let defer_cold = engine.defer_cold_config();
-    let Some(reg) = engine.registry_mut() else {
-        return false;
-    };
-    wcore_mcp::tool_proxy::register_mcp_tools(
-        reg,
-        &mgr,
-        &builtin_names,
-        resolved_servers,
-        &defer_cold,
-    );
-    reg.refresh_tool_search_catalog(&defer_cold);
-    for (name, reservation) in reservations.drain() {
-        match mgr.health().get(&name).and_then(mcp_server_failure_reason) {
-            Some(reason) => {
-                reservation.complete_failed(reason);
-            }
-            None if mgr.health().contains_key(&name) => {
-                reservation.complete_ready();
-            }
-            None => {
-                reservation.complete_failed("connect outcome missing from MCP health report");
+    {
+        let Some(reg) = engine.registry_mut() else {
+            return false;
+        };
+        wcore_mcp::tool_proxy::register_mcp_tools(
+            reg,
+            &mgr,
+            &builtin_names,
+            resolved_servers,
+            &defer_cold,
+        );
+        reg.refresh_tool_search_catalog(&defer_cold);
+        for (name, reservation) in reservations.drain() {
+            match mgr.health().get(&name).and_then(mcp_server_failure_reason) {
+                Some(reason) => {
+                    reservation.complete_failed(reason);
+                }
+                None if mgr.health().contains_key(&name) => {
+                    reservation.complete_ready();
+                }
+                None => {
+                    reservation.complete_failed("connect outcome missing from MCP health report");
+                }
             }
         }
+        for event in mcp_ready_events_for(&mgr, reg) {
+            let _ = writer.emit(&event);
+        }
+        for event in mcp_failed_events_for(&mgr) {
+            let _ = writer.emit(&event);
+        }
     }
-    for event in mcp_ready_events_for(&mgr, reg) {
-        let _ = writer.emit(&event);
-    }
-    for event in mcp_failed_events_for(&mgr) {
-        let _ = writer.emit(&event);
+    // wayland#562 — tools are only one of the three boot-time consumers of a
+    // config MCP manager. Re-derive the skill catalog (`skill://` resources)
+    // and re-resolve the plugin hook binding now that the server is up, so a
+    // deferred json-stream session ends up with what a non-deferred boot had.
+    // Runs before the first provider turn: the CLI settles the deferred
+    // connect at the `Message` boundary, so the rebuilt prompt is the one the
+    // first request carries.
+    if let Some(binder) = late_binder {
+        let outcome = binder.bind(engine, Arc::clone(&mgr)).await;
+        if !outcome.is_empty() {
+            tracing::info!(
+                target: "wcore_cli::json_stream",
+                skills = outcome.skills_added.len(),
+                hook_plugins = outcome.hook_plugins_bound.len(),
+                "wayland#562: deferred MCP late-bound skills/hooks"
+            );
+        }
     }
     dynamic_managers.push(mgr);
     true
@@ -3699,6 +3724,7 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
 /// before their first `Message`; those commands must not let the message race
 /// ahead of the already-running MCP handshake.
+#[allow(clippy::too_many_arguments)]
 async fn settle_deferred_mcp_before_message(
     deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
     pending_deferred_mcp: &mut Option<PendingDeferredMcp>,
@@ -3707,6 +3733,7 @@ async fn settle_deferred_mcp_before_message(
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
+    late_binder: Option<&Arc<wcore_agent::late_mcp::LateMcpBinder>>,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
         && let Ok(result) = rx.await
@@ -3718,7 +3745,9 @@ async fn settle_deferred_mcp_before_message(
             writer,
             output,
             dynamic_managers,
-        );
+            late_binder,
+        )
+        .await;
     }
 
     if let Some(mut pending) = pending_deferred_mcp.take()
@@ -3729,7 +3758,9 @@ async fn settle_deferred_mcp_before_message(
             &mut pending.reservations,
             writer,
             dynamic_managers,
+            late_binder,
         )
+        .await
     {
         *pending_deferred_mcp = Some(pending);
     }
@@ -4763,6 +4794,10 @@ async fn run_json_stream_mode(
     };
     let session_control = result.cancel_root.clone();
     runtime_diagnostics.record_plugin_declarations(&result.plugin_mcp_declarations);
+    // wayland#562 — replays the skill-catalog and plugin-hook bindings that a
+    // deferred config MCP connect skipped at boot. Only meaningful on the
+    // deferred path, so it is threaded through exactly the deferred arms.
+    let late_mcp_binder = Arc::clone(&result.late_mcp_binder);
     let mut engine = result.engine;
     let session_egress_policy = engine.egress_policy();
     let workspace_policy = engine
@@ -4967,7 +5002,9 @@ async fn run_json_stream_mode(
                         &writer,
                         &output,
                         &mut dynamic_managers,
-                    );
+                        Some(&late_mcp_binder),
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -5253,7 +5290,9 @@ async fn run_json_stream_mode(
                         &writer,
                         &output,
                         &mut dynamic_managers,
-                    );
+                        Some(&late_mcp_binder),
+                    )
+                    .await;
                 }
                 first_cmd = Some(other);
                 break;
@@ -5282,7 +5321,9 @@ async fn run_json_stream_mode(
                 &writer,
                 &output,
                 &mut dynamic_managers,
-            );
+                Some(&late_mcp_binder),
+            )
+            .await;
         }
         if let Some(mut pending) = pending_deferred_mcp.take()
             && !integrate_deferred_mcp(
@@ -5292,7 +5333,9 @@ async fn run_json_stream_mode(
                 &mut pending.reservations,
                 &writer,
                 &mut dynamic_managers,
+                Some(&late_mcp_binder),
             )
+            .await
         {
             pending_deferred_mcp = Some(pending);
         }
@@ -5324,7 +5367,9 @@ async fn run_json_stream_mode(
                                 &writer,
                                 &output,
                                 &mut dynamic_managers,
-                            );
+                                Some(&late_mcp_binder),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -5345,6 +5390,7 @@ async fn run_json_stream_mode(
                 &output,
                 &mut dynamic_managers,
                 Some(&mut runtime_diagnostics),
+                Some(&late_mcp_binder),
             )
             .await;
             if !ready {
@@ -7593,7 +7639,9 @@ mod tests {
                 &mut reservations,
                 &writer,
                 &mut dynamic_managers,
-            ),
+                None,
+            )
+            .await,
             "integration must succeed on an idle engine"
         );
         assert!(
@@ -7682,14 +7730,18 @@ mod tests {
         let mut dynamic_managers = Vec::new();
         let mut reservations = lifecycle_reservations(&resolved);
 
-        assert!(integrate_deferred_mcp(
-            &mut engine,
-            manager.clone(),
-            &resolved,
-            &mut reservations,
-            &writer,
-            &mut dynamic_managers,
-        ));
+        assert!(
+            integrate_deferred_mcp(
+                &mut engine,
+                manager.clone(),
+                &resolved,
+                &mut reservations,
+                &writer,
+                &mut dynamic_managers,
+                None,
+            )
+            .await
+        );
 
         let registry = engine.tools();
         let names = registry.tool_names();
@@ -7810,6 +7862,7 @@ mod tests {
                         &output,
                         &mut dynamic_managers,
                         None,
+                        None,
                     ),
                 )
                 .await
@@ -7911,8 +7964,10 @@ mod tests {
                 &HashMap::new(),
                 &mut reservations,
                 &writer,
-                &mut dynamic_managers
-            ),
+                &mut dynamic_managers,
+                None,
+            )
+            .await,
             "integration must decline while the registry is borrowed"
         );
         assert!(dynamic_managers.is_empty());
@@ -7959,6 +8014,7 @@ mod tests {
                 &output,
                 &mut dynamic_managers,
                 None,
+                None,
             )
             .await,
             "a retained registry reader must block the provider boundary"
@@ -7978,6 +8034,7 @@ mod tests {
                 &writer,
                 &output,
                 &mut dynamic_managers,
+                None,
                 None,
             )
             .await,

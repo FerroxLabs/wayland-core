@@ -198,6 +198,42 @@ fn format_plugin_rules(rules: &[RuleSpec], cwd: &str) -> String {
 /// plugin rules) are cached in `cache.sections` and reused across calls. The
 /// `joined` field caches the final concatenated result; it is returned on
 /// subsequent calls unless plan_mode_active has changed.
+/// Render the `<system-reminder>` block listing the model-invocable skills,
+/// or an empty string when there is nothing to list.
+///
+/// Extracted from [`build_system_prompt`] (which is its only boot-time caller)
+/// so wayland#562's late MCP rebind can render the *replacement* block with
+/// exactly the bytes boot would have produced instead of approximating them.
+/// Pure: the same refs and the same budget always yield the same string.
+pub fn skills_reminder_section(
+    skills: &[SkillRef],
+    context_window_tokens: Option<usize>,
+) -> String {
+    let visible_skills: Vec<SkillRef> = skills
+        .iter()
+        .filter(|s| !s.disable_model_invocation)
+        .cloned()
+        .collect();
+    if visible_skills.is_empty() {
+        return String::new();
+    }
+    // Skill name/description come from plugins/MCP resources (untrusted).
+    // Defang any forged host trust tags (e.g. a skill named
+    // `</system-reminder>...`) before embedding in the system prompt,
+    // matching the hook/memory sinks (hooks/mod.rs, engine.rs).
+    let listing = wcore_config::hooks::neutralize_trust_delimiters(&format_skills_within_budget(
+        &visible_skills,
+        context_window_tokens,
+    ));
+    if listing.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n{listing}\n</system-reminder>"
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_system_prompt(
     cache: &mut SystemPromptCache,
@@ -334,32 +370,12 @@ pub fn build_system_prompt(
     }
 
     // Section: skills (cached, event-invalidated)
-    let visible_skills: Vec<SkillRef> = skills
-        .iter()
-        .filter(|s| !s.disable_model_invocation)
-        .cloned()
-        .collect();
-
-    if !visible_skills.is_empty() {
-        let skills_section = cache.sections.entry("skills").or_insert_with(|| {
-            // Skill name/description come from plugins/MCP resources (untrusted).
-            // Defang any forged host trust tags (e.g. a skill named
-            // `</system-reminder>...`) before embedding in the system prompt,
-            // matching the hook/memory sinks (hooks/mod.rs, engine.rs).
-            let listing = wcore_config::hooks::neutralize_trust_delimiters(
-                &format_skills_within_budget(&visible_skills, context_window_tokens),
-            );
-            if listing.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n{listing}\n</system-reminder>"
-                )
-            }
-        });
-        if !skills_section.is_empty() {
-            parts.push(skills_section.clone());
-        }
+    let skills_section = cache
+        .sections
+        .entry("skills")
+        .or_insert_with(|| skills_reminder_section(skills, context_window_tokens));
+    if !skills_section.is_empty() {
+        parts.push(skills_section.clone());
     }
 
     // Section: plugin rules (session permanent — content + cwd-gating are
