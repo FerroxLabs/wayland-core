@@ -165,6 +165,14 @@ mod tests {
     /// resolver. Recomputing it here from the SAME function is the point: a
     /// hardcoded or hand-built path in `disabled_by_default_hint` reddens this.
     #[test]
+    // Reads `WAYLAND_HOME` twice (once directly, once through the hint) and
+    // requires both to agree. `supervisor::tests::pid_dir_roots_under_wayland_home`
+    // repoints that variable for the length of its body, so without this the two
+    // reads can straddle the change and the assertion fails on a scheduling
+    // interleave. Measured: with both windows artificially widened the test
+    // reports "loader resolves: /root/.config/wayland-core/config.toml" against a
+    // tempdir path in the hint.
+    #[serial_test::serial]
     fn the_production_hint_names_the_loaders_own_resolved_path() {
         let expected = wcore_config::config::global_config_path();
         let hint = disabled_by_default_hint();
