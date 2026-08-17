@@ -130,8 +130,52 @@ async fn await_supervisor(client: &AcpClient) {
 /// Direct child PIDs of `parent` (Unix only). Used to assert a profile child
 /// spawned under the supervisor and was reaped on delete. The router spawns the
 /// child with `process_group(0)` (setsid), which changes its process group but
-/// NOT its parent, so `pgrep -P` still sees it.
-#[cfg(unix)]
+/// NOT its parent, so a parent-PID query still sees it.
+///
+/// # Why this does not shell out to `pgrep` on Linux
+///
+/// It used to. The `CI (linux-containerized)` job's image ships without
+/// procps, so `Command::new("pgrep")` failed there with
+/// `Os { code: 2, kind: NotFound }` and this test could not run at all in one
+/// of the required jobs — every attempt of `retries = 2` exhausted, on a test
+/// whose subject was working fine.
+///
+/// Linux already exposes the parent of every process in `/proc/<pid>/status`,
+/// so the query needs no external binary. There is deliberately NO fallback to
+/// `pgrep` here: a silent fallback would let the procps dependency creep back
+/// in unnoticed, which is how it got here.
+#[cfg(target_os = "linux")]
+fn child_pids(parent: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let entries = std::fs::read_dir("/proc").expect("read /proc");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue; // /proc also holds non-numeric entries
+        };
+        // A process can exit between the readdir and this read; that is not an
+        // error, it just means it is not a child any more.
+        let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        // `PPid:` is on its own line, so this cannot be confused by a `comm`
+        // containing spaces or parentheses the way parsing `stat` can.
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("PPid:")
+                && rest.trim().parse::<u32>() == Ok(parent)
+            {
+                out.push(pid);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// macOS and other Unixes have no `/proc`. `pgrep` is part of the base system
+/// there, so it is a safe dependency in a way it is not inside a minimal Linux
+/// container image.
+#[cfg(all(unix, not(target_os = "linux")))]
 fn child_pids(parent: u32) -> Vec<u32> {
     let out = Command::new("pgrep")
         .args(["-P", &parent.to_string()])
