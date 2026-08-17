@@ -5108,6 +5108,15 @@ impl AgentEngine {
         }
     }
 
+    /// wayland#562 — remove the host `HookDispatcher` (plugin hooks return to
+    /// log-only). Used by `crate::late_mcp` when a late config-MCP connect
+    /// makes every `plugin -> server` binding ambiguous under the F5/F6 gate.
+    pub fn clear_hook_dispatcher(&mut self) {
+        if let Some(engine) = self.hooks.as_mut() {
+            engine.clear_dispatcher();
+        }
+    }
+
     /// v0.6.4 Task 1.2 — install a plugin-contributed `AgentRegistry`.
     ///
     /// Called by `AgentBootstrap` after `apply_initialize_outcome` returns,
@@ -10398,7 +10407,7 @@ impl AgentEngine {
             && let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
-            let candidates: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
+            let candidates: Vec<String> = catalog.visible().into_iter().map(|r| r.name).collect();
             if !candidates.is_empty() {
                 // `choose` lives on the `DecisionRouter` trait, in the
                 // sibling `wcore-dispatch` crate. Importing it inline

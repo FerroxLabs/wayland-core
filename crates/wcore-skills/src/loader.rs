@@ -315,6 +315,24 @@ fn metadata_to_ref(m: SkillMetadata) -> crate::refs::SkillRef {
     crate::refs::metadata_to_ref(&m)
 }
 
+/// wayland#562 — load `skill://` resources from ONE MCP manager as listing
+/// refs, for merging into an already-built catalog.
+///
+/// Used by the deferred config-MCP path (json-stream `defer_config_mcp`),
+/// where the manager does not exist yet when `load_catalog` runs, so the
+/// boot-time `mcp_manager: Some(..)` argument is `None` and these skills are
+/// never seen. Runs the same dedup + `apply_governance` choke point the boot
+/// catalog goes through, so a REVOKED skill cannot enter the session through
+/// the late door that it is blocked from entering at boot.
+pub async fn load_mcp_skill_refs(manager: &McpManager) -> Vec<crate::refs::SkillRef> {
+    let loaded = load_mcp_skills(manager).await;
+    if loaded.is_empty() {
+        return Vec::new();
+    }
+    let governed = apply_governance(deduplicate(loaded)).await;
+    governed.into_iter().map(metadata_to_ref).collect()
+}
+
 /// Lane D3 (G2/G4): load skills contributed by an installed marketplace plugin.
 ///
 /// Scans `<plugin_skills_dir>/<name>/SKILL.md` (the bare `skills/` tree inside a

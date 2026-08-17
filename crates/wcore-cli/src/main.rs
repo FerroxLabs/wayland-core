@@ -38,7 +38,9 @@ use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session;
 use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome};
 use wcore_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
+use wcore_agent::late_mcp::LateMcpBinder;
 use wcore_mcp::manager::{McpManager, McpServerHealth};
+use wcore_skills::refs::SkillRef;
 use wcore_mcp::tool_proxy::register_single_server_tools;
 use wcore_protocol::commands::{
     MCP_LIFECYCLE_VERSION, ProtocolCommand, RemoveMcpServerCommand, ResumeTurnAction,
@@ -2842,9 +2844,10 @@ async fn run_tui_mode(
         .skill_catalog()
         .map(|cat| {
             cat.visible()
+                .into_iter()
                 .map(|r| tui::SkillInfo {
-                    name: r.name.clone(),
-                    description: r.description.clone(),
+                    name: r.name,
+                    description: r.description,
                     user_invocable: r.user_invocable,
                 })
                 .collect()
@@ -3564,13 +3567,14 @@ async fn remove_runtime_mcp_server(
 /// the registry is momentarily borrowed so the caller can retry between
 /// turns); on failure, surface the error with bootstrap's inline-connect
 /// wording. Shared by the loop-top non-blocking poll and the select arm.
-fn note_deferred_mcp_connect(
+async fn note_deferred_mcp_connect(
     result: DeferredMcpConnectResult,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    late_mcp: &mut LateMcpBinder,
 ) -> Option<PendingDeferredMcp> {
     let DeferredMcpConnectResult {
         outcome,
@@ -3589,6 +3593,12 @@ fn note_deferred_mcp_connect(
                 }
             }
             let mgr = Arc::new(mgr);
+            // wayland#562 — the `skill://` read is the only ASYNC part of
+            // late-binding, so it happens here, before the sync integrate
+            // step whose "registry borrowed, retry between turns" contract
+            // must stay sync. The refs ride along on `PendingDeferredMcp` so a
+            // retry never re-reads the server.
+            let mut skill_refs = LateMcpBinder::skill_refs_for(&mgr).await;
             if integrate_deferred_mcp(
                 engine,
                 mgr.clone(),
@@ -3596,6 +3606,8 @@ fn note_deferred_mcp_connect(
                 &mut reservations,
                 writer,
                 dynamic_managers,
+                late_mcp,
+                &mut skill_refs,
             ) {
                 None
             } else {
@@ -3603,6 +3615,7 @@ fn note_deferred_mcp_connect(
                     manager: mgr,
                     resolved,
                     reservations,
+                    skill_refs,
                 })
             }
         }
@@ -3620,6 +3633,7 @@ fn note_deferred_mcp_connect(
 /// Returns `false` when the registry Arc is currently borrowed (a turn is
 /// mid-flight) — the caller parks the manager and retries at the next
 /// between-turns boundary.
+#[allow(clippy::too_many_arguments)]
 fn integrate_deferred_mcp(
     engine: &mut wcore_agent::engine::AgentEngine,
     mgr: Arc<McpManager>,
@@ -3627,6 +3641,8 @@ fn integrate_deferred_mcp(
     reservations: &mut HashMap<String, McpConnectionReservation>,
     writer: &ProtocolWriter,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    late_mcp: &mut LateMcpBinder,
+    skill_refs: &mut Vec<SkillRef>,
 ) -> bool {
     let builtin_names = engine.tool_names();
     let defer_cold = engine.defer_cold_config();
@@ -3660,6 +3676,21 @@ fn integrate_deferred_mcp(
     for event in mcp_failed_events_for(&mgr) {
         let _ = writer.emit(&event);
     }
+    // wayland#562 — tools are only one of the three boot-time consumers of a
+    // config MCP manager. Bind the other two now: merge the server's
+    // `skill://` skills into the live shared catalog (+ prompt listing) and
+    // re-resolve the plugin hook dispatcher over the widened manager set.
+    // Taken (not cloned) because everything above this point has committed —
+    // the only early return is the borrowed-registry check at the top.
+    let report = late_mcp.bind(engine, mgr.clone(), std::mem::take(skill_refs));
+    if !report.skills_added.is_empty() {
+        tracing::info!(
+            target: "wcore_cli::mcp",
+            skills = ?report.skills_added,
+            prompt_updated = report.prompt_updated,
+            "deferred config MCP: late-bound skills into the live session"
+        );
+    }
     dynamic_managers.push(mgr);
     true
 }
@@ -3674,6 +3705,10 @@ struct PendingDeferredMcp {
     manager: Arc<McpManager>,
     resolved: HashMap<String, McpServerConfig>,
     reservations: HashMap<String, McpConnectionReservation>,
+    /// wayland#562 — `skill://` refs already read off `manager`. Held across
+    /// the retry so a borrowed registry never costs a second server round
+    /// trip (and never loses the skills).
+    skill_refs: Vec<SkillRef>,
 }
 
 type DeferredMcpReceiver = tokio::sync::oneshot::Receiver<DeferredMcpConnectResult>;
@@ -3699,6 +3734,7 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
 /// before their first `Message`; those commands must not let the message race
 /// ahead of the already-running MCP handshake.
+#[allow(clippy::too_many_arguments)]
 async fn settle_deferred_mcp_before_message(
     deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
     pending_deferred_mcp: &mut Option<PendingDeferredMcp>,
@@ -3707,6 +3743,7 @@ async fn settle_deferred_mcp_before_message(
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
+    late_mcp: &mut LateMcpBinder,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
         && let Ok(result) = rx.await
@@ -3718,7 +3755,9 @@ async fn settle_deferred_mcp_before_message(
             writer,
             output,
             dynamic_managers,
-        );
+            late_mcp,
+        )
+        .await;
     }
 
     if let Some(mut pending) = pending_deferred_mcp.take()
@@ -3729,6 +3768,8 @@ async fn settle_deferred_mcp_before_message(
             &mut pending.reservations,
             writer,
             dynamic_managers,
+            late_mcp,
+            &mut pending.skill_refs,
         )
     {
         *pending_deferred_mcp = Some(pending);
@@ -4763,6 +4804,11 @@ async fn run_json_stream_mode(
     };
     let session_control = result.cancel_root.clone();
     runtime_diagnostics.record_plugin_declarations(&result.plugin_mcp_declarations);
+    // wayland#562 — the late-bind seam for config MCP servers deferred out of
+    // `build()`. Moved out of `result` (which stays alive for its other
+    // fields) so the command loop can hand each settled background manager to
+    // it.
+    let mut late_mcp = result.late_mcp;
     let mut engine = result.engine;
     let session_egress_policy = engine.egress_policy();
     let workspace_policy = engine
@@ -4967,7 +5013,9 @@ async fn run_json_stream_mode(
                         &writer,
                         &output,
                         &mut dynamic_managers,
-                    );
+                        &mut late_mcp,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -5253,7 +5301,9 @@ async fn run_json_stream_mode(
                         &writer,
                         &output,
                         &mut dynamic_managers,
-                    );
+                        &mut late_mcp,
+                    )
+                    .await;
                 }
                 first_cmd = Some(other);
                 break;
@@ -5282,7 +5332,9 @@ async fn run_json_stream_mode(
                 &writer,
                 &output,
                 &mut dynamic_managers,
-            );
+                &mut late_mcp,
+            )
+            .await;
         }
         if let Some(mut pending) = pending_deferred_mcp.take()
             && !integrate_deferred_mcp(
@@ -5292,6 +5344,8 @@ async fn run_json_stream_mode(
                 &mut pending.reservations,
                 &writer,
                 &mut dynamic_managers,
+                &mut late_mcp,
+                &mut pending.skill_refs,
             )
         {
             pending_deferred_mcp = Some(pending);
@@ -5324,7 +5378,9 @@ async fn run_json_stream_mode(
                                 &writer,
                                 &output,
                                 &mut dynamic_managers,
-                            );
+                                &mut late_mcp,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -5345,6 +5401,7 @@ async fn run_json_stream_mode(
                 &output,
                 &mut dynamic_managers,
                 Some(&mut runtime_diagnostics),
+                &mut late_mcp,
             )
             .await;
             if !ready {
@@ -6151,10 +6208,23 @@ async fn run_json_stream_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// wayland#562 — an inert `LateMcpBinder` for tests that only exercise the
+    /// tool-registration half of deferred-MCP integration: empty catalog, no
+    /// plugin hooks, no boot managers. `bind` still runs against it, so these
+    /// tests also prove late-binding cannot panic or disturb tool registration
+    /// when there is nothing to bind.
+    fn inert_late_binder() -> LateMcpBinder {
+        LateMcpBinder::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_refs(Vec::new())),
+            &[],
+            Vec::new(),
+            true,
+        )
+    }
     use async_trait::async_trait;
     use serde_json::{Value, json};
     use std::time::Duration;
-    use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
 
     /// UAT-W1 — the product's own error advised the wrong flag.
@@ -7593,6 +7663,8 @@ mod tests {
                 &mut reservations,
                 &writer,
                 &mut dynamic_managers,
+                &mut inert_late_binder(),
+                &mut Vec::new(),
             ),
             "integration must succeed on an idle engine"
         );
@@ -7689,6 +7761,8 @@ mod tests {
             &mut reservations,
             &writer,
             &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
         ));
 
         let registry = engine.tools();
@@ -7795,6 +7869,7 @@ mod tests {
         ];
         let mut readiness_trace = Vec::new();
         let mut init_history_applied = false;
+        let mut late_mcp = inert_late_binder();
 
         for command in commands {
             let readiness = session_command_readiness(&command);
@@ -7810,6 +7885,7 @@ mod tests {
                         &output,
                         &mut dynamic_managers,
                         None,
+                        &mut late_mcp,
                     ),
                 )
                 .await
@@ -7911,7 +7987,9 @@ mod tests {
                 &HashMap::new(),
                 &mut reservations,
                 &writer,
-                &mut dynamic_managers
+                &mut dynamic_managers,
+                &mut inert_late_binder(),
+                &mut Vec::new(),
             ),
             "integration must decline while the registry is borrowed"
         );
@@ -7945,10 +8023,12 @@ mod tests {
             manager,
             resolved: HashMap::new(),
             reservations: HashMap::new(),
+            skill_refs: Vec::new(),
         });
         let writer = ProtocolWriter::new();
         let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
         let mut dynamic_managers = Vec::new();
+        let mut late_mcp = inert_late_binder();
 
         assert!(
             !settle_deferred_mcp_before_message(
@@ -7959,6 +8039,7 @@ mod tests {
                 &output,
                 &mut dynamic_managers,
                 None,
+                &mut late_mcp,
             )
             .await,
             "a retained registry reader must block the provider boundary"
@@ -7979,6 +8060,7 @@ mod tests {
                 &output,
                 &mut dynamic_managers,
                 None,
+                &mut late_mcp,
             )
             .await,
             "the parked manager must integrate after the reader is released"
