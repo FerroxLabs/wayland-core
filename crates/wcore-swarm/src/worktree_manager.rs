@@ -910,15 +910,32 @@ impl WorktreeManager {
                     )));
                 }
                 ensure_absent_destination(&transaction_root)?;
-                std::fs::create_dir(&transaction_root)?;
+                std::fs::create_dir(&transaction_root).map_err(|error| {
+                    io_at(
+                        "DIAG creation of the transaction root",
+                        &transaction_root,
+                        error,
+                    )
+                })?;
                 let registration = (|| {
-                    make_guard_dir_private(&transaction_root)?;
+                    make_guard_dir_private(&transaction_root).map_err(|error| {
+                        io_at(
+                            "DIAG private-mode set on the transaction root",
+                            &transaction_root,
+                            error,
+                        )
+                    })?;
                     // One representation for everything derived below: the root
                     // authority, the checkout/scratch joins, the lease file and
                     // TransactionCleanup.root. The checkout authority is opened on
                     // a path from this same derivation, which is what makes
                     // RetainedWorkspaceAuthority::new's parent-equality proof hold.
-                    let transaction_root = normalized_root(&transaction_root)?;
+                    let transaction_root = normalized_root(&transaction_root).map_err(|error| {
+                        SwarmError::WorktreeIo(format!(
+                            "DIAG canonicalization of the transaction root {}: {error}",
+                            transaction_root.display()
+                        ))
+                    })?;
                     let root_authority = DirectoryAuthority::open(&transaction_root)?;
                     let reservation_authority = Arc::new(
                         root_authority
@@ -931,8 +948,16 @@ impl WorktreeManager {
                     );
                     let checkout = transaction_root.join("checkout");
                     let scratch = transaction_root.join("scratch");
-                    std::fs::create_dir(&scratch)?;
-                    make_guard_dir_private(&scratch)?;
+                    std::fs::create_dir(&scratch).map_err(|error| {
+                        io_at("DIAG creation of the transaction scratch", &scratch, error)
+                    })?;
+                    make_guard_dir_private(&scratch).map_err(|error| {
+                        io_at(
+                            "DIAG private-mode set on the transaction scratch",
+                            &scratch,
+                            error,
+                        )
+                    })?;
                     // The lease is taken on the LEASE_FILE that the transaction
                     // derivation opens-or-creates, never on the transaction-root
                     // DIRECTORY object: Windows byte-range locking is undefined

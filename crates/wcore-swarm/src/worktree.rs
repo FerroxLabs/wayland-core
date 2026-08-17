@@ -390,8 +390,14 @@ impl std::fmt::Debug for TransactionWorkspace {
 /// unrelated to locking.
 fn swarm_lock_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
     authority
-        .open_or_create_child_directory(CONTROL_DIR)?
+        .open_or_create_child_directory(CONTROL_DIR)
+        .map_err(|error| SwarmError::WorktreeIo(format!("DIAG open of {CONTROL_DIR}: {error}")))?
         .open_or_create_child_lock_file(SWARM_LOCK_FILE)
+        .map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG open of {CONTROL_DIR}/{SWARM_LOCK_FILE}: {error}"
+            ))
+        })
 }
 
 /// The ONE derivation of a transaction's lease target.
@@ -402,7 +408,13 @@ fn swarm_lock_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLo
 /// accounted against the transaction root's own counter, so a root whose lease
 /// is held still refuses `remove_open_dir_all`.
 fn transaction_lease_handle(authority: &DirectoryAuthority) -> Result<DirectoryHandleLoan> {
-    authority.open_or_create_child_lock_file(LEASE_FILE)
+    authority
+        .open_or_create_child_lock_file(LEASE_FILE)
+        .map_err(|error| {
+            SwarmError::WorktreeIo(format!(
+                "DIAG open of the transaction {LEASE_FILE}: {error}"
+            ))
+        })
 }
 
 fn with_directory_lock<T>(
@@ -422,7 +434,11 @@ fn with_directory_lock<T>(
         match lock.write() {
             Ok(guard) => break guard,
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                return Err(SwarmError::WorktreeIo(format!(
+                    "DIAG exclusive lock on the swarm control lock: {error}"
+                )));
+            }
         }
     };
     authority.validate_path(path)?;
@@ -521,7 +537,12 @@ fn transaction_is_active(authority: &DirectoryAuthority, path: &Path) -> Result<
     let file = match authority.open_child_lock_file(LEASE_FILE) {
         Ok(file) => file,
         Err(SwarmError::Io(error)) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(SwarmError::WorktreeIo(format!(
+                "DIAG lease probe on {}: {error}",
+                path.display()
+            )));
+        }
     };
     let mut lock = fd_lock::RwLock::new(file);
     match lock.try_write() {
