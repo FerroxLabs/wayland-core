@@ -433,16 +433,42 @@ fn list_rows(
     }
     slugs.sort();
 
+    // #14: `credentials_store_account_key` covers BOTH — it delegates a
+    // built-in slug to that provider's shared slot and gives every other
+    // `[providers.<id>]` account its own. Keying this off `Provider::from_slug`
+    // alone made every account's stored key invisible here, and an invisible
+    // key is one the operator re-enters or leaves behind.
+    let slots: Vec<Option<String>> = slugs
+        .iter()
+        .map(|slug| wcore_config::config::credentials_store_account_key(slug))
+        .collect();
+
+    // ONE `get_many`, not one `get` per slug. The vault re-derives its Argon2id
+    // key on every `load_secrets`, so a `get` per provider put one full KDF run
+    // on every row: measured at **29.0s** for a single `auth list` against an
+    // encrypted-file vault, on an idle machine.
+    //
+    // `CredentialsStore::get_many` exists for precisely this reason — its own
+    // doc comment says the default per-key form "would put one KDF run per
+    // provider on the model picker's path" — and it takes one snapshot per tier.
+    // The model picker already used it; `auth list` simply never called it.
+    let queried: Vec<&str> = slots.iter().filter_map(|slot| slot.as_deref()).collect();
+    let fetched: Vec<Option<String>> = match store {
+        // An error is treated as "absent", matching the previous
+        // `.ok().flatten()` behaviour — `list_cmd` has already reported an
+        // unopenable store to the operator by this point.
+        Some(store) => store
+            .get_many(&queried)
+            .unwrap_or_else(|_| vec![None; queried.len()]),
+        None => vec![None; queried.len()],
+    };
+
+    // Re-align results onto slugs. Only slugs that produced a slot were
+    // queried, so a slug without one must NOT consume a result.
+    let mut fetched = fetched.into_iter();
     let mut rows: Vec<(String, String, &'static str)> = Vec::new();
-    for slug in &slugs {
-        // #14: `credentials_store_account_key` covers BOTH — it delegates a
-        // built-in slug to that provider's shared slot and gives every other
-        // `[providers.<id>]` account its own. Keying this off `Provider::
-        // from_slug` alone made every account's stored key invisible here, and
-        // an invisible key is one the operator re-enters or leaves behind.
-        let stored = store
-            .zip(wcore_config::config::credentials_store_account_key(slug))
-            .and_then(|(store, slot)| store.get(&slot).ok().flatten());
+    for (slug, slot) in slugs.iter().zip(&slots) {
+        let stored = slot.as_ref().and_then(|_| fetched.next().flatten());
         if let Some(key) = stored {
             rows.push((slug.clone(), mask_key(&key), "credentials store"));
             continue;
