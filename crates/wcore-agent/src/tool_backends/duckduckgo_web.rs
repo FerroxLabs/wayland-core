@@ -498,6 +498,21 @@ mod tests {
         assert_eq!(web[0]["snippet"], "A language empowering everyone.");
     }
 
+    /// Ordering invariant: if a body ever carried both real results and
+    /// challenge markup, the results must win. Synthetic — DuckDuckGo has not
+    /// been observed serving both at once — but it is what pins the
+    /// parse-before-sniff order that keeps an echoed query harmless.
+    #[test]
+    fn results_win_over_challenge_markup_on_the_same_page() {
+        let mixed = format!("{RESULTS_FIXTURE}{CHALLENGE_FIXTURE}");
+        let web = web_array(interpret_search_response(StatusCode::OK, &mixed, 5));
+        assert_eq!(
+            web.len(),
+            1,
+            "served results must outrank challenge markup on the same page"
+        );
+    }
+
     /// The older `uddg=` wrapper is still decoded, so restoring direct-href
     /// results above did not drop wrapper support.
     #[test]
