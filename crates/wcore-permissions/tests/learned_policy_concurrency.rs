@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use wcore_permissions::learning::{LearnedDecision, LearnedPolicy};
+use wcore_permissions::learning::{LearnedDecision, LearnedPolicy, LearningError};
 
 const WORKSPACE: &str = "/workspace/race";
 /// Rounds per writer. Enough that the writers stay overlapped for the whole
@@ -185,4 +185,79 @@ fn child_writer_helper() {
         .expect("writer index must be a number");
     await_rendezvous(&PathBuf::from(go));
     write_grants(&PathBuf::from(path), writer);
+}
+
+/// How long the wedged holder sits inside the critical section. It stands in
+/// for a peer session SIGSTOPped (Ctrl-Z), paused in a debugger, or blocked on
+/// a network home directory — measured at 17.9 s in the audit probe — and for
+/// a lock orphaned by a forked child of a killed parent, which never releases
+/// at all.
+const WEDGE_HOLD: Duration = Duration::from_secs(6);
+/// The caller must give up WELL inside the hold. `update_at`'s own budget is
+/// 2 s; this leaves room for a loaded CI box without ever passing by accident
+/// against a blocking `flock`, which could only return at `WEDGE_HOLD`.
+const WEDGE_BUDGET: Duration = Duration::from_secs(4);
+
+/// #693 — `update_at` is called INLINE on the TUI's synchronous event thread
+/// (`TuiEngine::approve` ← the surface router), so a blocking `flock` there is
+/// a frozen UI for as long as some unrelated process holds the lock, with no
+/// message and no escape.
+///
+/// The holder here is a real `update_at` on another thread: `flock` belongs to
+/// the open file description and each call opens the lock file itself, so two
+/// threads of one process contend exactly as two processes do — the same
+/// property `concurrent_threads_do_not_lose_grants` rests on.
+///
+/// This is NOT a licence to drop the lock. The race it closes is real and
+/// reproduced (removing the guard loses 83 of 96 grants). The requirement is
+/// that the wait is BOUNDED and the failure is HONEST: `LockTimeout` reaches
+/// the same "this grant applies to this session only" notice a write failure
+/// already does.
+#[test]
+fn a_wedged_lock_holder_does_not_hang_the_caller() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("permissions.toml");
+    LearnedPolicy::new().save_to(&path).expect("prime the file");
+
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let holder_path = path.clone();
+    let holder = std::thread::spawn(move || {
+        LearnedPolicy::update_at(&holder_path, |policy| {
+            entered_tx.send(()).expect("signal entry");
+            std::thread::sleep(WEDGE_HOLD);
+            policy.record_in("Holder", None, LearnedDecision::AllowAlways, WORKSPACE);
+        })
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the holder never entered the critical section");
+
+    let started = Instant::now();
+    let result = LearnedPolicy::update_at(&path, |policy| {
+        policy.record_in("Wedged", None, LearnedDecision::AllowAlways, WORKSPACE);
+    });
+    let waited = started.elapsed();
+
+    assert!(
+        waited < WEDGE_BUDGET,
+        "a keypress on the TUI event thread waited {waited:?} behind a wedged \
+         lock holder — the UI is frozen for exactly that long, with no message"
+    );
+    assert!(
+        matches!(result, Err(LearningError::LockTimeout { .. })),
+        "giving up must be a LockTimeout the caller can report, got {result:?}"
+    );
+
+    // The holder is unharmed: bounding the WAITER does not weaken the lock.
+    holder
+        .join()
+        .expect("holder thread panicked")
+        .expect("the holder's own write must still succeed");
+    let stored = LearnedPolicy::load_from(&path).expect("parse");
+    assert_eq!(
+        stored.len(),
+        1,
+        "the holder's grant must be the one on disk — the timed-out caller \
+         must not have published a policy derived from a stale read"
+    );
 }

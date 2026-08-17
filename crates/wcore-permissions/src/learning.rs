@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +101,8 @@ pub enum LearningError {
         #[source]
         source: std::io::Error,
     },
+    #[error("gave up after {waited:?} waiting for the lock on {path}")]
+    LockTimeout { path: PathBuf, waited: Duration },
     #[error("failed to parse permissions TOML: {0}")]
     Deserialize(#[from] toml::de::Error),
     #[error("failed to serialise permissions TOML: {0}")]
@@ -133,12 +136,25 @@ impl LearnedPolicy {
     /// instead of several that never match each other on restore. The write
     /// and restore sides both call this, so they cannot disagree.
     pub fn current_workspace() -> Option<String> {
-        let cwd = std::env::current_dir().ok()?;
+        Some(Self::workspace_key(&std::env::current_dir().ok()?))
+    }
+
+    /// The workspace key for an explicitly chosen directory.
+    ///
+    /// #693 — the process CWD is only the right identity when the session was
+    /// not pointed somewhere else. `--project-dir` moves the workspace the
+    /// session operates against (its config, its skills, its MCP servers, and
+    /// its entry in the workspace trust store) WITHOUT moving the CWD, so a
+    /// grant keyed off the CWD alone is shared by two sessions aimed at two
+    /// different projects. The CLI resolves `--project-dir` or the CWD once
+    /// and passes the answer here, so the learned policy and the trust store
+    /// agree on what "this workspace" means.
+    pub fn workspace_key(dir: &Path) -> String {
         // A canonicalize failure (a permission-denied ancestor) is not fatal:
         // the raw path is still a stable key for this machine, it just will
         // not unify with an alias of the same directory.
-        let canonical = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-        Some(canonical.to_string_lossy().into_owned())
+        let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        canonical.to_string_lossy().into_owned()
     }
 
     /// Load from a specific path. Missing file = empty policy (not an error).
@@ -196,33 +212,63 @@ impl LearnedPolicy {
     /// guarantees no torn file, not that the file being written was derived
     /// from the current one.
     ///
-    /// ## The lock, and why it cannot leak through `fork`
+    /// ## What releases the lock, and why the wait is bounded
     ///
-    /// `fd_lock` takes a `flock(2)`-style lock, which belongs to the open
-    /// file description and is therefore SHARED with a forked child rather
-    /// than re-acquired by it. That is exactly how the session-journal lock
-    /// in this project came to be held by a process nobody was looking at.
-    /// Two properties keep it from happening here:
+    /// `fd_lock` takes a `flock(2)`-style lock, which belongs to the open file
+    /// description and is therefore DUPLICATED into a forked child rather than
+    /// re-acquired by it. That is exactly how the session-journal lock in this
+    /// project came to be held by a process nobody was looking at.
     ///
-    /// 1. The critical section is a file read, an in-memory edit, and a
-    ///    write. It spawns nothing, so there is no `fork` for the descriptor
-    ///    to cross.
-    /// 2. Rust opens every file `O_CLOEXEC`, so even an unrelated concurrent
-    ///    spawn elsewhere in the process cannot carry this descriptor into
-    ///    the child image.
+    /// What prevents it here is neither of the two properties this comment
+    /// used to name. "The critical section spawns nothing" is irrelevant: the
+    /// hazard is a `fork` on ANOTHER thread, which duplicates every descriptor
+    /// this one has open — that is the shape
+    /// `wcore-agent/tests/snapshot_lock_probe.rs` models, naming the Bash
+    /// tool, `git status`, the spawner and the forge. And `O_CLOEXEC` (which
+    /// Rust does set on this file) is consulted only by `exec`, so it does
+    /// nothing for a `fork` WITHOUT one. The actual protection is that
+    /// `fd_lock`'s write guard issues an explicit `FlockOperation::Unlock` in
+    /// its `Drop`: the unlock is SYMMETRIC with the lock, so it lands the
+    /// moment the guard dies — on an early return or a panic inside `mutate`
+    /// too — instead of waiting for the last duplicate of the descriptor to be
+    /// closed.
     ///
-    /// Release is by drop, not by an explicit call, so an early return or a
-    /// panic inside `mutate` still releases it.
+    /// One shape survives that, and it is why the wait below is bounded: if
+    /// this process is killed outright while a forked child still holds a
+    /// duplicate of the descriptor, no `Drop` runs, the kernel keeps the flock
+    /// until that child exits, and `/proc/locks` attributes it to the dead
+    /// parent. A blocking `flock` behind such a holder waits forever, and a
+    /// blocking `flock` behind a merely SUSPENDED peer (Ctrl-Z inside its
+    /// critical section) was measured at 17.9 s. The only caller runs INLINE
+    /// on the TUI's synchronous event thread, so an unbounded wait there is a
+    /// frozen UI with no message. `try_write` is polled to [`LOCK_WAIT`] and
+    /// then gives up with [`LearningError::LockTimeout`], which the TUI already
+    /// renders as "this grant applies to this session only". Losing one grant
+    /// with an explanation beats wedging the session without one.
     pub fn update_at(path: &Path, mutate: impl FnOnce(&mut Self)) -> Result<(), LearningError> {
         let mut lock = open_policy_lock(path)?;
         // `fd_lock`'s guard borrows the `RwLock` mutably, so the retry loop
         // cannot return the guard across a function boundary under NLL — the
         // same closure shape `wcore-config`'s credential marker lock and
         // `wcore-budget`'s daily ledger already use.
+        let deadline = Instant::now() + LOCK_WAIT;
         let _guard = loop {
-            match lock.write() {
+            match lock.try_write() {
                 Ok(guard) => break guard,
                 Err(source) if source.kind() == std::io::ErrorKind::Interrupted => continue,
+                // `fd_lock` normalises contention to `WouldBlock` on BOTH
+                // platforms: `EWOULDBLOCK` from `flock(LOCK_NB)` on unix and
+                // `ERROR_LOCK_VIOLATION` from `LOCKFILE_FAIL_IMMEDIATELY` on
+                // Windows. Anything else is a real open/lock failure.
+                Err(source) if source.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(LearningError::LockTimeout {
+                            path: policy_lock_path(path),
+                            waited: LOCK_WAIT,
+                        });
+                    }
+                    std::thread::sleep(LOCK_POLL);
+                }
                 Err(source) => {
                     return Err(LearningError::Lock {
                         path: policy_lock_path(path),
@@ -385,6 +431,18 @@ impl LearnedPolicy {
         self.rules.is_empty()
     }
 }
+
+/// How long [`LearnedPolicy::update_at`] waits for the policy lock before
+/// giving up. This is a UI freeze budget, not an I/O budget: the caller runs
+/// inline on the TUI's synchronous event thread. An honest concurrent grant
+/// holds the lock for a small file read, an in-memory edit and an atomic
+/// write — sub-millisecond — so a legitimate contender always wins this
+/// comfortably, while a wedged or orphaned holder cannot hang the session.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Poll interval while waiting. `flock` has no timed variant, so a bounded
+/// wait has to be a `try_write` poll.
+const LOCK_POLL: Duration = Duration::from_millis(10);
 
 /// The sidecar advisory-lock file for the policy at `path`.
 ///
