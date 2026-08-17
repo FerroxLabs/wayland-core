@@ -87,7 +87,7 @@ impl PermissionComponent for FileWriteComponent {
 
     fn keys(&self, ctx: &PermissionContext) -> Line<'static> {
         let always = if ctx.always_allow_available {
-            "   [a] always for this tool"
+            "   [a] always in this workspace"
         } else {
             ""
         };

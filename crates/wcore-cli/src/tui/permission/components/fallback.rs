@@ -70,7 +70,7 @@ impl PermissionComponent for FallbackComponent {
         };
         Line::from(Span::styled(
             format!(
-                "[enter/y] approve   [a] always for this tool   [n] deny   [esc] cancel   {expand}"
+                "[enter/y] approve   [a] always in this workspace   [n] deny   [esc] cancel   {expand}"
             ),
             Style::default(),
         ))

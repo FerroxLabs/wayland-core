@@ -18,6 +18,13 @@ default = ["sqlite-revocation"]
 sqlite-revocation = ["dep:rusqlite"]
 
 [dependencies]
+# #693 — `atomic_write` (tempfile + fsync + rename) and the workspace's
+# `fd-lock` pin. The learned-policy file is a cross-process read-modify-write,
+# so it needs both; re-implementing either here would duplicate a helper
+# across crates. wcore-config depends only on wcore-{types,compact,budget},
+# so this cannot close a cycle.
+wcore-config.workspace = true
+fd-lock.workspace      = true
 serde.workspace      = true
 serde_json.workspace = true
 thiserror.workspace  = true

@@ -10144,6 +10144,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "fd-lock",
  "hex",
  "rusqlite",
  "serde",
@@ -10152,6 +10153,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml",
+ "wcore-config",
 ]
 
 [[package]]

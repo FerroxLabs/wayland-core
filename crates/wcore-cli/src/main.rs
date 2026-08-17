@@ -2721,15 +2721,27 @@ async fn run_tui_mode(
     // status bar renders the live mode so later de-escalation is visible.
     approval_manager.set_mode(approval_policy_to_session(approval_policy));
     // #693 — replay the "always allow <tool>" grants the user made in earlier
-    // sessions. The manager's always-allow set is in-memory, so without this
-    // the durable grant `TuiEngine::approve` writes would never be read back
-    // and the user would be re-prompted for a tool they already answered.
-    match wcore_permissions::LearnedPolicy::default_path() {
-        Ok(path) => tui::restore_always_allows(&approval_manager, &path),
-        Err(error) => tracing::warn!(
+    // sessions IN THIS WORKSPACE. The manager's always-allow set is in-memory,
+    // so without this the durable grant `TuiEngine::approve` writes would never
+    // be read back and the user would be re-prompted for a tool they already
+    // answered. The policy file is user-global, so the workspace filter is what
+    // keeps a grant made in another checkout from applying here; the key comes
+    // from the same helper `TuiEngine` stamps a grant with, so the write and
+    // the read cannot disagree.
+    match (
+        wcore_permissions::LearnedPolicy::default_path(),
+        wcore_permissions::LearnedPolicy::current_workspace(),
+    ) {
+        (Ok(path), Some(workspace)) => {
+            tui::restore_always_allows(&approval_manager, &path, &workspace)
+        }
+        (Err(error), _) => tracing::warn!(
             %error,
             "cannot resolve the permissions path; always-allow grants not restored"
         ),
+        (Ok(_), None) => {
+            tracing::warn!("cannot resolve the current workspace; always-allow grants not restored")
+        }
     }
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so

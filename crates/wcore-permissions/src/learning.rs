@@ -54,6 +54,22 @@ struct StoredRule {
     /// `git `.
     arg_pattern: Option<String>,
     decision: LearnedDecision,
+    /// The workspace this rule was granted in, as a canonical absolute path.
+    /// `None` means "every workspace".
+    ///
+    /// #693 — this file is USER-global (`~/.wayland/permissions.toml`), so
+    /// without this field a grant made by pressing `[a]` at an approval
+    /// prompt in one checkout would authorise that tool in every other
+    /// checkout the user ever opens. [`LearnedPolicy::record_in`] stamps the
+    /// workspace and [`LearnedPolicy::snapshot_in`] filters on it, so an
+    /// interactive grant carries exactly the authority its prompt names.
+    ///
+    /// `None` is reachable only from a file written before this field
+    /// existed or hand-edited by the operator. Both are deliberate
+    /// statements of "everywhere", so they are honoured rather than dropped
+    /// — nothing in this codebase writes an unscoped rule.
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -74,6 +90,12 @@ pub enum LearningError {
     },
     #[error("failed to write {path}: {source}")]
     Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to lock {path}: {source}")]
+    Lock {
         path: PathBuf,
         #[source]
         source: std::io::Error,
@@ -100,6 +122,23 @@ impl LearnedPolicy {
         dirs::home_dir()
             .map(|h| h.join(".wayland").join("permissions.toml"))
             .ok_or(LearningError::NoHomeDir)
+    }
+
+    /// The workspace key for the process's current directory: its canonical
+    /// absolute path, as a string. `None` when the directory cannot be read
+    /// (it was deleted out from under the process).
+    ///
+    /// #693 — canonical so that two paths reaching the same directory (a
+    /// symlinked checkout, a `..` hop, a trailing `.`) produce ONE key
+    /// instead of several that never match each other on restore. The write
+    /// and restore sides both call this, so they cannot disagree.
+    pub fn current_workspace() -> Option<String> {
+        let cwd = std::env::current_dir().ok()?;
+        // A canonicalize failure (a permission-denied ancestor) is not fatal:
+        // the raw path is still a stable key for this machine, it just will
+        // not unify with an alias of the same directory.
+        let canonical = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+        Some(canonical.to_string_lossy().into_owned())
     }
 
     /// Load from a specific path. Missing file = empty policy (not an error).
@@ -132,10 +171,69 @@ impl LearnedPolicy {
             rules: self.rules.clone(),
         };
         let toml = toml::to_string_pretty(&stored)?;
-        std::fs::write(path, toml).map_err(|e| LearningError::Write {
+        // #693 — `std::fs::write` truncates in place, so a crash (or a full
+        // disk) mid-write publishes a half-file under the live name and the
+        // next launch reads a policy that parses to something the operator
+        // never wrote. `atomic_write` is the workspace's existing
+        // tempfile+fsync+rename helper; the rename target is this file, never
+        // the sidecar lock, so a concurrent lock holder cannot make the
+        // rename fail with a sharing violation on Windows.
+        wcore_config::atomic_write(path, toml.as_bytes()).map_err(|e| LearningError::Write {
             path: path.to_path_buf(),
             source: e,
         })
+    }
+
+    /// Run `mutate` against the policy stored at `path` while holding that
+    /// file's exclusive cross-process advisory lock, then publish the result
+    /// atomically.
+    ///
+    /// #693 — a bare load / mutate / save is a read-modify-write with no
+    /// mutual exclusion: two sessions that grant a tool at the same time both
+    /// read the same "before" file and the later `save_to` overwrites the
+    /// earlier one's rule, so one user decision is silently lost. The lock
+    /// must span the READ as well as the write — publishing atomically only
+    /// guarantees no torn file, not that the file being written was derived
+    /// from the current one.
+    ///
+    /// ## The lock, and why it cannot leak through `fork`
+    ///
+    /// `fd_lock` takes a `flock(2)`-style lock, which belongs to the open
+    /// file description and is therefore SHARED with a forked child rather
+    /// than re-acquired by it. That is exactly how the session-journal lock
+    /// in this project came to be held by a process nobody was looking at.
+    /// Two properties keep it from happening here:
+    ///
+    /// 1. The critical section is a file read, an in-memory edit, and a
+    ///    write. It spawns nothing, so there is no `fork` for the descriptor
+    ///    to cross.
+    /// 2. Rust opens every file `O_CLOEXEC`, so even an unrelated concurrent
+    ///    spawn elsewhere in the process cannot carry this descriptor into
+    ///    the child image.
+    ///
+    /// Release is by drop, not by an explicit call, so an early return or a
+    /// panic inside `mutate` still releases it.
+    pub fn update_at(path: &Path, mutate: impl FnOnce(&mut Self)) -> Result<(), LearningError> {
+        let mut lock = open_policy_lock(path)?;
+        // `fd_lock`'s guard borrows the `RwLock` mutably, so the retry loop
+        // cannot return the guard across a function boundary under NLL — the
+        // same closure shape `wcore-config`'s credential marker lock and
+        // `wcore-budget`'s daily ledger already use.
+        let _guard = loop {
+            match lock.write() {
+                Ok(guard) => break guard,
+                Err(source) if source.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(source) => {
+                    return Err(LearningError::Lock {
+                        path: policy_lock_path(path),
+                        source,
+                    });
+                }
+            }
+        };
+        let mut policy = Self::load_from(path)?;
+        mutate(&mut policy);
+        policy.save_to(path)
     }
 
     /// Evaluate whether `tool` invoked with `argv` is currently allowed.
@@ -192,13 +290,41 @@ impl LearnedPolicy {
         arg_pattern: Option<String>,
         decision: LearnedDecision,
     ) {
+        self.record_rule(tool, arg_pattern, decision, None);
+    }
+
+    /// [`record`](Self::record), scoped to the `workspace` the decision was
+    /// made in.
+    ///
+    /// #693 — this is the shape an interactive grant takes. Rules are keyed
+    /// by (tool, arg_pattern, workspace), so granting a tool in one checkout
+    /// neither replaces nor widens the same tool's rule in another.
+    pub fn record_in(
+        &mut self,
+        tool: impl Into<String>,
+        arg_pattern: Option<String>,
+        decision: LearnedDecision,
+        workspace: &str,
+    ) {
+        self.record_rule(tool, arg_pattern, decision, Some(workspace.to_string()));
+    }
+
+    fn record_rule(
+        &mut self,
+        tool: impl Into<String>,
+        arg_pattern: Option<String>,
+        decision: LearnedDecision,
+        workspace: Option<String>,
+    ) {
         let tool = tool.into();
-        self.rules
-            .retain(|r| !(r.tool == tool && r.arg_pattern == arg_pattern));
+        self.rules.retain(|r| {
+            !(r.tool == tool && r.arg_pattern == arg_pattern && r.workspace == workspace)
+        });
         self.rules.push(StoredRule {
             tool,
             arg_pattern,
             decision,
+            workspace,
         });
     }
 
@@ -228,6 +354,28 @@ impl LearnedPolicy {
         map
     }
 
+    /// [`snapshot`](Self::snapshot), narrowed to the rules that apply in
+    /// `workspace`: those granted in it, plus the unscoped rules that apply
+    /// everywhere.
+    ///
+    /// #693 — the restore path reads through here so a grant made in one
+    /// checkout cannot be replayed as authority in another.
+    pub fn snapshot_in(
+        &self,
+        workspace: &str,
+    ) -> HashMap<String, Vec<(Option<String>, LearnedDecision)>> {
+        let mut map: HashMap<String, Vec<(Option<String>, LearnedDecision)>> = HashMap::new();
+        for r in &self.rules {
+            if r.workspace.as_deref().is_some_and(|ws| ws != workspace) {
+                continue;
+            }
+            map.entry(r.tool.clone())
+                .or_default()
+                .push((r.arg_pattern.clone(), r.decision.clone()));
+        }
+        map
+    }
+
     /// Total rule count (mostly useful for tests).
     pub fn len(&self) -> usize {
         self.rules.len()
@@ -236,6 +384,41 @@ impl LearnedPolicy {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+}
+
+/// The sidecar advisory-lock file for the policy at `path`.
+///
+/// A SEPARATE file on purpose: [`LearnedPolicy::save_to`] publishes by
+/// renaming over `path`, and on Windows a rename over a file another process
+/// holds open fails with a sharing violation. Locking a sibling leaves the
+/// rename target closed by every participant.
+fn policy_lock_path(path: &Path) -> PathBuf {
+    path.with_extension("lock")
+}
+
+fn open_policy_lock(path: &Path) -> Result<fd_lock::RwLock<std::fs::File>, LearningError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| LearningError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    let lock_path = policy_lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        // Never truncate: the lock file's CONTENT is irrelevant, but
+        // truncating it is a write that a concurrent holder would see.
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| LearningError::Lock {
+            path: lock_path,
+            source,
+        })?;
+    Ok(fd_lock::RwLock::new(file))
 }
 
 fn pattern_matches(pattern: &str, argv: &str) -> bool {

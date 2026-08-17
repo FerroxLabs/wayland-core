@@ -911,19 +911,29 @@ fn render_model_info_list(
 }
 
 /// #693 — write an "always allow this tool" grant to the durable learned
-/// policy at `path`.
+/// policy at `path`, scoped to `workspace`.
 ///
-/// Read-modify-write, so a grant made concurrently by another session (both
-/// resolve the same `~/.wayland/permissions.toml`) is preserved rather than
-/// clobbered by a whole-file overwrite.
-fn persist_always_allow(path: &std::path::Path, tool_name: &str) -> Result<(), LearningError> {
-    let mut policy = LearnedPolicy::load_from(path)?;
-    policy.record(tool_name, None, LearnedDecision::AllowAlways);
-    policy.save_to(path)
+/// The grant is stamped with the workspace it was made in. The policy file is
+/// user-global (`~/.wayland/permissions.toml`), so an unscoped rule would let
+/// one keypress at one prompt in one checkout authorise that tool in every
+/// other checkout the user ever opens — authority the prompt does not ask for
+/// and the user did not grant.
+///
+/// `update_at` holds the file's exclusive cross-process lock across the read
+/// AND the write and publishes atomically, so a grant made at the same moment
+/// by another session is neither lost nor half-written.
+fn persist_always_allow(
+    path: &std::path::Path,
+    tool_name: &str,
+    workspace: &str,
+) -> Result<(), LearningError> {
+    LearnedPolicy::update_at(path, |policy| {
+        policy.record_in(tool_name, None, LearnedDecision::AllowAlways, workspace)
+    })
 }
 
 /// #693 — restore the bare `ApprovalScope::Always` grants made in earlier
-/// sessions from the durable learned policy at `path`.
+/// sessions IN `workspace` from the durable learned policy at `path`.
 ///
 /// Only `AllowAlways` rules with NO argument pattern are replayed: those are
 /// exactly the shape [`persist_always_allow`] writes for a whole-tool grant.
@@ -933,11 +943,21 @@ fn persist_always_allow(path: &std::path::Path, tool_name: &str) -> Result<(), L
 /// the manager keys those by tool CATEGORY, which only the live tool registry
 /// can supply at dispatch time.
 ///
+/// `snapshot_in` drops rules stamped with a DIFFERENT workspace, so a grant
+/// the user made in another checkout is not authority here. A rule with no
+/// workspace at all still applies: nothing in this codebase writes one, so it
+/// can only have been hand-written by the operator, which is an explicit
+/// "everywhere".
+///
 /// A missing file is an empty policy (nothing to restore); a file that exists
 /// but does not parse is a WARN and no restore, mirroring the engine's own
 /// `load_learned_policy` — an operator with a malformed file must not silently
 /// get a different permission posture than the one they wrote.
-pub fn restore_always_allows(approval: &ToolApprovalManager, path: &std::path::Path) {
+pub fn restore_always_allows(
+    approval: &ToolApprovalManager,
+    path: &std::path::Path,
+    workspace: &str,
+) {
     let policy = match LearnedPolicy::load_from(path) {
         Ok(policy) => policy,
         Err(error) => {
@@ -950,7 +970,7 @@ pub fn restore_always_allows(approval: &ToolApprovalManager, path: &std::path::P
             return;
         }
     };
-    for (tool, rules) in policy.snapshot() {
+    for (tool, rules) in policy.snapshot_in(workspace) {
         let whole_tool_allow = rules.iter().any(|(pattern, decision)| {
             pattern.is_none() && matches!(decision, LearnedDecision::AllowAlways)
         });
@@ -985,6 +1005,12 @@ pub struct TuiEngine {
     /// cannot be resolved (no home dir), which is warned about at
     /// construction; the grant then applies for this session only.
     learned_policy_path: Option<PathBuf>,
+    /// #693 — the workspace a durable grant is scoped to. `None` when the
+    /// current directory cannot be resolved, in which case NOTHING is
+    /// written: an unscoped rule would apply in every workspace, which is
+    /// strictly more authority than the prompt asked for, so the failure mode
+    /// is a session-only grant rather than a silently global one.
+    learned_policy_workspace: Option<String>,
     /// The channel both the `ChannelEmitter` and `ChannelSink` forward
     /// on. Kept so a `StreamEnd` synthesized after `run` returns reaches
     /// the bridge (the engine emits `StreamStart` itself but never
@@ -1385,11 +1411,22 @@ impl TuiEngine {
                 None
             }
         };
+        // #693 — the same helper the restore side calls, so the workspace a
+        // grant is written under and the one it is read back under cannot
+        // disagree.
+        let learned_policy_workspace = LearnedPolicy::current_workspace();
+        if learned_policy_workspace.is_none() {
+            tracing::warn!(
+                target: "wcore_cli::tui",
+                "cannot resolve the current workspace; always-allow grants will not persist"
+            );
+        }
         Self {
             engine: Arc::new(tokio::sync::Mutex::new(engine)),
             approval,
             approval_bridge,
             learned_policy_path,
+            learned_policy_workspace,
             tx,
             active_turn: None,
             active_recovery: None,
@@ -1786,7 +1823,10 @@ impl TuiEngine {
         let Some(path) = self.learned_policy_path.as_deref() else {
             return;
         };
-        if let Err(error) = persist_always_allow(path, tool_name) {
+        let Some(workspace) = self.learned_policy_workspace.as_deref() else {
+            return;
+        };
+        if let Err(error) = persist_always_allow(path, tool_name, workspace) {
             tracing::warn!(
                 target: "wcore_cli::tui",
                 tool = %tool_name,
@@ -1810,6 +1850,14 @@ impl TuiEngine {
     #[cfg(test)]
     fn set_learned_policy_path(&mut self, path: PathBuf) {
         self.learned_policy_path = Some(path);
+    }
+
+    /// Pin the workspace a durable grant is stamped with. Production resolves
+    /// the process's current directory in [`TuiEngine::new`]; a test needs a
+    /// stable, distinguishable value to prove the scoping.
+    #[cfg(test)]
+    fn set_learned_policy_workspace(&mut self, workspace: &str) {
+        self.learned_policy_workspace = Some(workspace.to_string());
     }
 
     /// Deny a pending tool call (`SurfaceAction::Deny`).
@@ -4782,6 +4830,13 @@ mod tests {
     // `~/.wayland/permissions.toml` at bootstrap but nothing ever wrote it.
     // So "always allow Write" worked all session and was gone on restart.
 
+    /// The workspace a test grant is made in. A fixed string rather than the
+    /// real cwd so the scoping assertions do not depend on where the test
+    /// binary happens to run.
+    const WS_A: &str = "/workspace/alpha";
+    /// A DIFFERENT workspace — the one a grant made in [`WS_A`] must not reach.
+    const WS_B: &str = "/workspace/beta";
+
     /// Build a `TuiEngine` over a hermetic engine. Construction touches no
     /// network — `AgentEngine::new` only assembles the config/registry/sink.
     fn test_tui_engine() -> TuiEngine {
@@ -4805,6 +4860,7 @@ mod tests {
         // ── session 1: the user presses `a` on a Write card ──
         let mut tui = test_tui_engine();
         tui.set_learned_policy_path(path.clone());
+        tui.set_learned_policy_workspace(WS_A);
         let _rx = tui
             .approval
             .request_approval("call-693", &ToolCategory::Edit, "Write");
@@ -4827,7 +4883,7 @@ mod tests {
 
         // ── session 2: a brand-new process ──
         let restarted = ToolApprovalManager::new();
-        restore_always_allows(&restarted, &path);
+        restore_always_allows(&restarted, &path, WS_A);
         assert!(
             restarted.is_tool_name_auto_approved("Write"),
             "a restarted session must not re-prompt for a tool the user already \
@@ -4855,6 +4911,7 @@ mod tests {
 
         let mut tui = test_tui_engine();
         tui.set_learned_policy_path(path.clone());
+        tui.set_learned_policy_workspace(WS_A);
         let _rx = tui
             .approval
             .request_approval("call-once", &ToolCategory::Edit, "Write");
@@ -4879,6 +4936,7 @@ mod tests {
 
         let mut tui = test_tui_engine();
         tui.set_learned_policy_path(path.clone());
+        tui.set_learned_policy_workspace(WS_A);
         let _rx = tui
             .approval
             .request_approval("call-msg", &ToolCategory::Exec, "send_message");
@@ -4912,6 +4970,7 @@ mod tests {
         );
         let mut tui = TuiEngine::new(engine, Arc::new(ToolApprovalManager::new()), tx);
         tui.set_learned_policy_path(path);
+        tui.set_learned_policy_workspace(WS_A);
 
         let _rx = tui
             .approval
@@ -4940,17 +4999,18 @@ mod tests {
         let path = tmp.path().join("permissions.toml");
 
         let mut policy = LearnedPolicy::new();
-        policy.record("Bash", None, LearnedDecision::DenyAlways);
-        policy.record(
+        policy.record_in("Bash", None, LearnedDecision::DenyAlways, WS_A);
+        policy.record_in(
             "WebFetch",
             Some("https://example.com/*".to_string()),
             LearnedDecision::AllowAlways,
+            WS_A,
         );
-        policy.record("Write", None, LearnedDecision::AllowAlways);
+        policy.record_in("Write", None, LearnedDecision::AllowAlways, WS_A);
         policy.save_to(&path).expect("save");
 
         let manager = ToolApprovalManager::new();
-        restore_always_allows(&manager, &path);
+        restore_always_allows(&manager, &path, WS_A);
 
         assert!(
             manager.is_tool_name_auto_approved("Write"),
@@ -4972,8 +5032,98 @@ mod tests {
     fn restore_from_a_missing_file_is_a_no_op() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manager = ToolApprovalManager::new();
-        restore_always_allows(&manager, &tmp.path().join("does-not-exist.toml"));
+        restore_always_allows(&manager, &tmp.path().join("does-not-exist.toml"), WS_A);
         assert!(!manager.is_tool_name_auto_approved("Write"));
+    }
+
+    /// #693, the authority-expansion arm: the policy file is USER-global, so a
+    /// grant made by pressing `[a]` once in one checkout must not authorise
+    /// that tool in every other checkout the user opens. The prompt says
+    /// "always in this workspace"; this is that promise, tested.
+    #[tokio::test]
+    async fn a_grant_made_in_one_workspace_does_not_apply_in_another() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("permissions.toml");
+
+        // The user grants "always" for Write while working in WS_A.
+        let mut tui = test_tui_engine();
+        tui.set_learned_policy_path(path.clone());
+        tui.set_learned_policy_workspace(WS_A);
+        let _rx = tui
+            .approval
+            .request_approval("call-ws", &ToolCategory::Edit, "Write");
+        tui.approve("call-ws", ApprovalScope::Always, None);
+
+        // Positive control: the grant IS durable, in the workspace it was made
+        // in. Without this arm the assertion below would also pass for an
+        // implementation that simply wrote nothing.
+        let same = ToolApprovalManager::new();
+        restore_always_allows(&same, &path, WS_A);
+        assert!(
+            same.is_tool_name_auto_approved("Write"),
+            "the grant must restore in the workspace it was granted in"
+        );
+
+        // The defect: a different checkout inherits authority nobody granted.
+        let other = ToolApprovalManager::new();
+        restore_always_allows(&other, &path, WS_B);
+        assert!(
+            !other.is_tool_name_auto_approved("Write"),
+            "an always-allow grant made in {WS_A} must not authorise Write in \
+             {WS_B} — the user pressed one key at one prompt in one repo"
+        );
+    }
+
+    /// The write side carries the scope, not just the read side: a reader that
+    /// filtered correctly over an UNSCOPED file would pass the test above only
+    /// because nothing else is in the file. Assert the stamp is really on disk.
+    #[tokio::test]
+    async fn the_persisted_grant_is_stamped_with_its_workspace() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("permissions.toml");
+
+        let mut tui = test_tui_engine();
+        tui.set_learned_policy_path(path.clone());
+        tui.set_learned_policy_workspace(WS_A);
+        let _rx = tui
+            .approval
+            .request_approval("call-stamp", &ToolCategory::Edit, "Write");
+        tui.approve("call-stamp", ApprovalScope::Always, None);
+
+        let raw = std::fs::read_to_string(&path).expect("the policy file must exist");
+        assert!(
+            raw.contains(WS_A),
+            "the durable rule must name the workspace it was granted in, got:\n{raw}"
+        );
+    }
+
+    /// A rule with NO workspace still applies everywhere. Nothing in this
+    /// codebase writes one, so it can only be a hand-edit or a file that
+    /// predates the field — both are an explicit "everywhere", and silently
+    /// dropping the operator's own config would be its own dishonesty.
+    #[test]
+    fn an_unscoped_rule_still_applies_in_every_workspace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("permissions.toml");
+
+        let mut policy = LearnedPolicy::new();
+        policy.record("Read", None, LearnedDecision::AllowAlways);
+        policy.save_to(&path).expect("save");
+
+        for workspace in [WS_A, WS_B] {
+            let manager = ToolApprovalManager::new();
+            restore_always_allows(&manager, &path, workspace);
+            assert!(
+                manager.is_tool_name_auto_approved("Read"),
+                "a hand-written unscoped rule must apply in {workspace}"
+            );
+        }
     }
 
     #[test]
