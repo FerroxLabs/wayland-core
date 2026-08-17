@@ -18,10 +18,10 @@ use std::sync::Arc;
 use wcore_browser::adapter::{
     BrowserToolSpec as CoreBrowserToolSpec, from_spec as core_from_spec, make_policy,
 };
-use wcore_browser::policy::PolicyAction;
+use wcore_browser::policy::{LoopbackCapability, PolicyAction};
 use wcore_browser::selection::ProviderHint as CoreProviderHint;
 use wcore_browser::tool::BrowserTool;
-use wcore_plugin_api::browser_spec::{BrowserProviderHint, BrowserToolSpec};
+use wcore_plugin_api::browser_spec::{BrowserLoopbackSpec, BrowserProviderHint, BrowserToolSpec};
 use wcore_plugin_api::registry::browser::BrowserToolRegistrar;
 
 /// Captures every `BrowserToolSpec` registered by a `wayland-browser` plugin.
@@ -77,7 +77,8 @@ pub fn spec_to_core(s: &BrowserToolSpec) -> CoreBrowserToolSpec {
         },
         s.policy.allowed_origins.clone(),
         s.policy.denied_origins.clone(),
-    );
+    )
+    .with_loopback(loopback_spec_to_core(&s.policy.loopback));
     CoreBrowserToolSpec {
         tool_namespace: s.tool_namespace.clone(),
         preferred_provider: match s.preferred_provider {
@@ -88,6 +89,21 @@ pub fn spec_to_core(s: &BrowserToolSpec) -> CoreBrowserToolSpec {
         },
         policy,
         allow_cloud: s.allow_cloud,
+    }
+}
+
+/// Translate the plugin-api loopback mirror into the core grant (gh#911).
+///
+/// A straight field copy on purpose: this function must not decide anything.
+/// `wcore_browser::policy::LoopbackCapability::authorize` owns every
+/// validation gate, so there is exactly one place that can say yes and the
+/// mirror cannot widen authority by drifting.
+fn loopback_spec_to_core(s: &BrowserLoopbackSpec) -> LoopbackCapability {
+    LoopbackCapability {
+        enabled: s.enabled,
+        schema_version: s.schema_version,
+        session_scope: s.session_scope.clone(),
+        ports: s.ports.clone(),
     }
 }
 
@@ -108,6 +124,12 @@ pub fn apply_config_policy(
         spec.policy.default_action = policy.default_action.clone();
         spec.policy.allowed_origins = policy.allowed_origins.clone();
         spec.policy.denied_origins = policy.denied_origins.clone();
+        spec.policy.loopback = BrowserLoopbackSpec {
+            enabled: policy.loopback.enabled,
+            schema_version: policy.loopback.schema_version,
+            session_scope: policy.loopback.session_scope.clone(),
+            ports: policy.loopback.ports.clone(),
+        };
     }
 }
 
@@ -125,6 +147,7 @@ mod tests {
                 default_action: "allow".into(),
                 allowed_origins: vec!["*.example.com".into()],
                 denied_origins: vec!["*.evil.example".into()],
+                loopback: BrowserLoopbackSpec::default(),
             },
             allow_cloud: false,
         }
@@ -178,5 +201,33 @@ mod tests {
         assert_eq!(core.preferred_provider, CoreProviderHint::Camoufox);
         assert_eq!(core.policy.allowed_origins.len(), 1);
         assert_eq!(core.policy.denied_origins.len(), 1);
+    }
+
+    /// gh#911 — the grant has to survive `config -> mirror -> core`. This is
+    /// the seam that made the reporter of gh#900 believe browser policy had
+    /// its own config resolver: a field that stops here is invisible.
+    #[test]
+    fn apply_config_policy_carries_the_loopback_grant_to_core() {
+        let mut specs = vec![fixture_spec("Browser")];
+        let cfg = wcore_config::browser::BrowserPolicyConfig {
+            default_action: "deny".into(),
+            allowed_origins: vec![],
+            denied_origins: vec![],
+            loopback: wcore_config::browser::BrowserLoopbackConfig {
+                enabled: true,
+                schema_version: 1,
+                session_scope: "chat-42".into(),
+                ports: vec![3000],
+            },
+        };
+        apply_config_policy(&cfg, &mut specs);
+        let core = spec_to_core(&specs[0]);
+        assert!(core.policy.loopback.enabled);
+        assert_eq!(core.policy.loopback.session_scope, "chat-42");
+        assert_eq!(core.policy.loopback.ports, vec![3000]);
+        // And it is load-bearing, not just carried: the granted port passes
+        // and an ungranted one on the same host does not.
+        assert!(core.policy.check_url("http://localhost:3000/").is_ok());
+        assert!(core.policy.check_url("http://localhost:9377/").is_err());
     }
 }
