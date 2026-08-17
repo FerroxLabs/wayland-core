@@ -628,39 +628,80 @@ mod tests {
             .seed_pairs_for(std::slice::from_ref(&drafted.name), "auto_drafter", 1)
             .unwrap();
         let measured_successes = measured_seed.first().map(|p| p.1).unwrap_or(0);
-        let drafted_successes = drafted_seed.first().map(|p| p.1).unwrap_or(0);
 
+        // Exact, not comparative. "fewer successes than the measured arm" is
+        // satisfied by a smaller fabricated number, which is the same defect
+        // with the volume turned down. The contract is that an unmeasured row
+        // contributes NO prior.
         assert!(
-            drafted_successes < measured_successes,
-            "unmeasured auto-draft seeded with {drafted_successes} simulated successes \
-             vs {measured_successes} for a MEASURED skill: an arm nothing ever measured \
-             must not carry a stronger router prior than a measured one"
+            drafted_seed.is_empty(),
+            "an unmeasured auto-draft must contribute no router prior at all, \
+             got {drafted_seed:?}"
+        );
+        assert!(
+            measured_successes > 0,
+            "control: the measured skill must still seed ({measured_successes}), \
+             or the assertion above passes for the wrong reason"
         );
 
-        // ...and the same defect expressed in live routing.
+        // ...and the same property expressed in live routing.
+        //
+        // Why not a majority vote: with Beta priors the measured arm (3
+        // successes) takes the majority for ANY drafted seed of 2 or less, so
+        // a majority assertion only reddens on a near-total reintroduction of
+        // the defect and a partial regression -- a fabricated 0.3, say -- sails
+        // through it. Assert the exact property instead: routing with whatever
+        // the store yields for the draft must be INDISTINGUISHABLE from
+        // routing with no draft prior at all. Any nonzero prior moves the
+        // distribution, however small.
         let candidates = vec![measured_name.clone(), drafted.name.clone()];
-        let mut drafted_picks = 0usize;
-        let mut measured_picks = 0usize;
-        for seed in 0..600u64 {
-            let mut router = wcore_skills::SkillRouter::with_seed(seed);
-            router.restore_seeds(measured_seed.clone());
-            router.restore_seeds(drafted_seed.clone());
-            let pick = router
-                .choose(wcore_skills::SkillRouterInput {
-                    task: "some task",
-                    candidates: &candidates,
-                })
-                .unwrap();
-            if pick == drafted.name {
-                drafted_picks += 1;
-            } else {
-                measured_picks += 1;
+        let picks = |draft_seed: &[(String, u64)]| -> (usize, usize) {
+            let mut drafted_picks = 0usize;
+            let mut measured_picks = 0usize;
+            for seed in 0..600u64 {
+                let mut router = wcore_skills::SkillRouter::with_seed(seed);
+                router.restore_seeds(measured_seed.clone());
+                router.restore_seeds(draft_seed.to_vec());
+                let pick = router
+                    .choose(wcore_skills::SkillRouterInput {
+                        task: "some task",
+                        candidates: &candidates,
+                    })
+                    .unwrap();
+                if pick == drafted.name {
+                    drafted_picks += 1;
+                } else {
+                    measured_picks += 1;
+                }
             }
-        }
+            (drafted_picks, measured_picks)
+        };
+
+        let observed = picks(&drafted_seed);
+        let no_prior_at_all = picks(&[]);
+        assert_eq!(
+            observed, no_prior_at_all,
+            "live routing must treat the unmeasured draft exactly as an arm \
+             carrying no prior: got {observed:?} vs {no_prior_at_all:?} \
+             (drafted, measured) picks over 600 seeds"
+        );
         assert!(
-            measured_picks > drafted_picks,
-            "live routing preferred the UNMEASURED auto-draft {drafted_picks}/600 times \
-             vs {measured_picks}/600 for the measured skill"
+            observed.1 > observed.0,
+            "live routing preferred the UNMEASURED auto-draft {}/600 times vs \
+             {}/600 for the measured skill",
+            observed.0,
+            observed.1
+        );
+
+        // Positive control for the equality above: the SMALLEST partial
+        // regression representable -- one simulated success -- must make the
+        // two differ. Otherwise the equality could hold because the comparison
+        // is blind rather than because the prior is absent.
+        let partial_regression = picks(&[(drafted.name.clone(), 1)]);
+        assert_ne!(
+            partial_regression, no_prior_at_all,
+            "a 1-success prior is invisible to this comparison, so the \
+             assertion above proves nothing"
         );
     }
 }
