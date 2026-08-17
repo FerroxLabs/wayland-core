@@ -81,17 +81,32 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// threaded through. This is a documented defense-in-depth gap, not an
 /// escape: the env is already secret-scrubbed and the network now defaults
 /// closed.
+///
+/// Shorthand for [`build_sandbox_pieces_for_session`] with no session env
+/// passthrough and `backend_enforces_read_deny = true`.
+///
+/// The `true` is inert rather than assumed: both production callers pass
+/// `policy: None`, and with no policy there is no `fs_read_deny` to produce
+/// whatever the flag says. It is also the conservative value — `true` COMPUTES
+/// the list, which is #922 R1's stale-positive (availability-only) direction.
+/// Keeping this two-argument shape is deliberate: the `#234` / `#667` unit
+/// suite drives it with a policy, and that suite must keep grading the
+/// enforcing path byte-for-byte as it did before #922.
 fn build_sandbox_pieces(
     command: &str,
     policy: Option<&crate::workspace_policy::WorkspacePolicy>,
 ) -> (SandboxManifest, SandboxCommand) {
-    build_sandbox_pieces_for_session(command, policy, None)
+    build_sandbox_pieces_for_session(command, policy, None, true)
 }
 
+/// `backend_enforces_read_deny` is `SandboxBackend::enforces_read_deny()` read
+/// off the SAME backend handle that will run `execute()` for this manifest —
+/// so there is no window between reading the capability and applying it.
 fn build_sandbox_pieces_for_session(
     command: &str,
     policy: Option<&crate::workspace_policy::WorkspacePolicy>,
     env_passthrough: Option<&std::collections::HashSet<String>>,
+    backend_enforces_read_deny: bool,
 ) -> (SandboxManifest, SandboxCommand) {
     // Shell prefix honors the Windows WAYLAND_BASH_SHELL=powershell|pwsh override
     // (BashTool only); defaults to sh -c / cmd /C.
@@ -133,7 +148,10 @@ fn build_sandbox_pieces_for_session(
         // is denied on the next command — closing the Bash TOCTOU that the file
         // tools' dynamic `is_project_secret` guard already avoids. Local-keyboard
         // (Trusted, no project-secret denial) is returned unchanged, no walk.
-        manifest.fs_read_deny = p.secret_deny_paths_dynamic();
+        // #922 R1: on a backend that does not enforce this field the walk
+        // below produces a value the backend discards. See
+        // `WorkspacePolicy::secret_deny_paths_for_backend`.
+        manifest.fs_read_deny = p.secret_deny_paths_for_backend(backend_enforces_read_deny);
         // Stat-only, never content — see
         // `SandboxManifest::fs_metadata_read_allow`. Assigned after
         // `fs_read_deny` for readability only: SBPL last-match-wins is what
@@ -620,6 +638,8 @@ impl Tool for BashTool {
             command,
             ctx.workspace.as_deref(),
             Some(ctx.sandbox.env_passthrough()),
+            // Same `backend` handle that runs `execute()` below.
+            backend.enforces_read_deny(),
         );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
@@ -717,6 +737,8 @@ impl Tool for BashTool {
             command,
             ctx.workspace.as_deref(),
             Some(ctx.sandbox.env_passthrough()),
+            // Same `backend` handle that runs `execute()` below.
+            backend.enforces_read_deny(),
         );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
