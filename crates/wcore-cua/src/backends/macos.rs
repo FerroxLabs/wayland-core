@@ -99,6 +99,21 @@ impl ComputerUseBackend for MacOsBackend {
     }
 
     async fn dispatch(&self, _session: &CuaSession, op: CuaOp) -> CuaResult<CuaOpResult> {
+        // macOS TCC gate. Without the grant, `CGEvent::post` silently
+        // drops the event and `CGDisplayCreateImageForRect` hands back
+        // null — failures indistinguishable from a healthy run once
+        // they have been flattened into a `Backend` string. Convert the
+        // missing grant into the typed `PermissionDenied`, which names
+        // the exact Settings pane, BEFORE touching the platform API.
+        //
+        // `probe` is the NON-prompting check: dispatch must never raise
+        // a system dialog at a user who only asked the agent to click.
+        // The prompting variant lives behind `permissions::prime` and
+        // is reachable only from `wayland-core --request-permissions`.
+        if let Some(capability) = crate::permissions::required_capability(&op) {
+            crate::permissions::permission_gate(capability, crate::permissions::probe(capability))?;
+        }
+
         match op {
             CuaOp::LeftClick { x, y, button, mods } => {
                 cg_mouse_click(x, y, button.into(), mods, /*double=*/ false)
@@ -607,6 +622,15 @@ fn cg_screenshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permissions::{self, DeniedOutcome, TccCapability, TccStatus};
+
+    fn screenshot_op() -> CuaOp {
+        CuaOp::Screenshot {
+            region: crate::backend::Region::Full,
+            format: crate::backend::ScreenshotFormat::Png,
+            redact: false,
+        }
+    }
 
     #[tokio::test]
     async fn name_and_platform() {
@@ -641,9 +665,21 @@ mod tests {
             )
             .await;
 
+        // Focus invariance holds either way, but the dispatch outcome
+        // is still graded against the permission state observed up
+        // front — otherwise a click refused for want of Accessibility
+        // would be indistinguishable from a click that landed.
         #[cfg(target_os = "macos")]
-        {
-            r.expect("CGEvent click should not return error on macOS");
+        match permissions::probe(TccCapability::Accessibility) {
+            TccStatus::Granted => {
+                r.expect("Accessibility is granted, so the CGEvent click must dispatch");
+            }
+            TccStatus::Denied => assert_eq!(
+                permissions::classify_denied_outcome(TccCapability::Accessibility, &r),
+                DeniedOutcome::TypedPermissionError,
+                "a denied Accessibility grant must name its Settings pane, not fail generically"
+            ),
+            TccStatus::NotApplicable => unreachable!("TCC always applies on a macOS build"),
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -657,60 +693,78 @@ mod tests {
         assert_eq!(before, after, "click MUST NOT change frontmost-app cache");
     }
 
-    /// On macOS: a CGDisplay screenshot returns a real PNG of the main
-    /// display. Off-macOS: the typed `UnsupportedPlatform` path.
+    /// Authorised arm. Only meaningful on a host that actually holds
+    /// the Screen Recording grant. Everywhere else it SKIPS with a
+    /// reason instead of passing on an unauthorised result.
+    ///
+    /// This replaces `screenshot_returns_real_png_on_macos_or_typed_
+    /// error_elsewhere`, which accepted ANY `Backend` error whose
+    /// message mentioned `CGDisplay` and therefore could not fail on a
+    /// missing-permission defect on any host.
     #[tokio::test]
-    async fn screenshot_returns_real_png_on_macos_or_typed_error_elsewhere() {
+    async fn screenshot_returns_a_real_png_when_screen_recording_is_granted() {
+        if !permissions::skip_unless(
+            TccCapability::ScreenRecording,
+            TccStatus::Granted,
+            "screenshot_returns_a_real_png_when_screen_recording_is_granted",
+        ) {
+            return;
+        }
+
+        let b = MacOsBackend::new();
+        match b
+            .dispatch(&CuaSession::for_test("s"), screenshot_op())
+            .await
+        {
+            Ok(CuaOpResult::Screenshot {
+                data_b64,
+                width,
+                height,
+                ..
+            }) => {
+                assert!(width > 0 && height > 0, "real display dims must be > 0");
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&data_b64)
+                    .expect("screenshot payload must be valid base64");
+                image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+                    .expect("screenshot payload must decode as PNG");
+            }
+            other => panic!("Screen Recording is granted, so capture must succeed: {other:?}"),
+        }
+    }
+
+    /// Unauthorised arm — the ONLY tolerance for a missing grant, and
+    /// it is narrow. A denied capability must produce exactly
+    /// `CuaError::PermissionDenied { ScreenRecording }`. A generic
+    /// `Backend` error, a different capability, or a bogus success all
+    /// fail here.
+    #[tokio::test]
+    async fn screenshot_reports_the_screen_recording_pane_when_the_grant_is_absent() {
+        if !permissions::skip_unless(
+            TccCapability::ScreenRecording,
+            TccStatus::Denied,
+            "screenshot_reports_the_screen_recording_pane_when_the_grant_is_absent",
+        ) {
+            return;
+        }
+
         let b = MacOsBackend::new();
         let r = b
-            .dispatch(
-                &CuaSession::for_test("s"),
-                CuaOp::Screenshot {
-                    region: crate::backend::Region::Full,
-                    format: crate::backend::ScreenshotFormat::Png,
-                    redact: false,
-                },
-            )
+            .dispatch(&CuaSession::for_test("s"), screenshot_op())
             .await;
-
-        #[cfg(target_os = "macos")]
-        {
-            match r {
-                Ok(CuaOpResult::Screenshot {
-                    data_b64,
-                    width,
-                    height,
-                    ..
-                }) => {
-                    assert!(width > 0 && height > 0, "real display dims must be > 0");
-                    use base64::Engine;
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(&data_b64)
-                        .unwrap();
-                    image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).unwrap();
-                }
-                Err(crate::error::CuaError::Backend(msg)) => {
-                    // In some sandboxed CI runners
-                    // `CGDisplayCreateImageForRect` can return null
-                    // (Screen Recording permission denied). Surface a
-                    // typed Backend error and let the test pass — the
-                    // path is real, the environment just lacks the
-                    // permission grant.
-                    assert!(
-                        msg.contains("CGDisplay"),
-                        "expected CGDisplay-related backend error, got: {msg}"
-                    );
-                }
-                other => panic!("expected Screenshot or Backend err on macOS, got {other:?}"),
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert!(matches!(
-                r,
-                Err(crate::error::CuaError::UnsupportedPlatform(_))
-            ));
-        }
+        assert_eq!(
+            permissions::classify_denied_outcome(TccCapability::ScreenRecording, &r),
+            DeniedOutcome::TypedPermissionError,
+            "a denied Screen Recording grant must surface as the typed error naming \
+             System Settings -> Privacy & Security -> Screen Recording"
+        );
+        assert!(
+            r.unwrap_err()
+                .to_string()
+                .contains(TccCapability::ScreenRecording.settings_pane()),
+            "the rendered message must name the pane the user has to visit"
+        );
     }
 
     /// Combo parser unit-tests — macOS only because the keycode table is
@@ -732,22 +786,29 @@ mod tests {
         assert!(parse_combo_macos("nonsense+key").is_none());
     }
 
-    /// Scroll now ships real (W1 closeout of debt A.3) — verify the
-    /// dispatch path returns `Ok` on macOS and does NOT panic when
-    /// constructing the underlying `CGEvent`. The `UnsupportedPlatform`
-    /// stub message must NOT appear anywhere in the error chain.
+    /// Scroll ships real (W1 closeout of debt A.3). Authorised arm:
+    /// with Accessibility granted, every delta combination must
+    /// actually dispatch. Unauthorised hosts SKIP with a reason.
     ///
-    /// We exercise both vertical and horizontal deltas + the zero case
-    /// (the zero case still posts a 0-line scroll, which is a valid
-    /// Quartz event — useful for IME/UI repainters that watch wheel
-    /// events).
+    /// This replaces the arm that accepted any `Backend` error as
+    /// "sandboxed CI without Accessibility grant" — a tolerance so wide
+    /// the test could not fail on a real dispatch regression either.
     #[tokio::test]
-    async fn scroll_dispatches_real_event_on_macos() {
+    async fn scroll_dispatches_a_real_event_when_accessibility_is_granted() {
+        if !permissions::skip_unless(
+            TccCapability::Accessibility,
+            TccStatus::Granted,
+            "scroll_dispatches_a_real_event_when_accessibility_is_granted",
+        ) {
+            return;
+        }
+
         let b = MacOsBackend::new();
         let session = CuaSession::for_test("s");
-
+        // The zero case still posts a 0-line scroll, which is a valid
+        // Quartz event — UI repainters watch for it.
         for (dx, dy) in [(0, -3), (0, 3), (5, 0), (0, 0)] {
-            let r = b
+            match b
                 .dispatch(
                     &session,
                     CuaOp::Scroll {
@@ -757,35 +818,49 @@ mod tests {
                         dy,
                     },
                 )
-                .await;
-
-            #[cfg(target_os = "macos")]
+                .await
             {
-                // Must succeed: real CGEvent::new_scroll_event +
-                // CGEventPost(HID). Permission denial would surface as
-                // CuaError::Backend, NOT UnsupportedPlatform.
-                match r {
-                    Ok(CuaOpResult::Ok) => {}
-                    Err(crate::error::CuaError::Backend(msg)) => {
-                        // Accept Backend errors (sandboxed CI without
-                        // Accessibility grant) — the path is real, just
-                        // not authorized in this env.
-                        assert!(
-                            !msg.contains("UnsupportedPlatform"),
-                            "scroll must not stub: got {msg}"
-                        );
-                    }
-                    other => panic!("scroll(dx={dx}, dy={dy}) unexpected: {other:?}"),
-                }
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                assert!(matches!(
-                    r,
-                    Err(crate::error::CuaError::UnsupportedPlatform(_))
-                ));
+                Ok(CuaOpResult::Ok) => {}
+                other => panic!(
+                    "Accessibility is granted, so scroll(dx={dx}, dy={dy}) must succeed: {other:?}"
+                ),
             }
         }
+    }
+
+    /// Unauthorised arm for scroll: the denial must name the
+    /// Accessibility pane specifically. Notably it must NOT be
+    /// `UnsupportedPlatform` (which would mean the op was stubbed) and
+    /// must NOT be a bare `Backend` string (which is what the retired
+    /// test tolerated).
+    #[tokio::test]
+    async fn scroll_reports_the_accessibility_pane_when_the_grant_is_absent() {
+        if !permissions::skip_unless(
+            TccCapability::Accessibility,
+            TccStatus::Denied,
+            "scroll_reports_the_accessibility_pane_when_the_grant_is_absent",
+        ) {
+            return;
+        }
+
+        let b = MacOsBackend::new();
+        let r = b
+            .dispatch(
+                &CuaSession::for_test("s"),
+                CuaOp::Scroll {
+                    x: 100,
+                    y: 100,
+                    dx: 0,
+                    dy: -3,
+                },
+            )
+            .await;
+        assert_eq!(
+            permissions::classify_denied_outcome(TccCapability::Accessibility, &r),
+            DeniedOutcome::TypedPermissionError,
+            "a denied Accessibility grant must surface as the typed error naming \
+             System Settings -> Privacy & Security -> Accessibility"
+        );
     }
 
     /// Focus invariance: scroll, like click/move, posts at the HID tap
