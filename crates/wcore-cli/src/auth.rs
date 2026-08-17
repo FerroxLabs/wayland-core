@@ -5,8 +5,14 @@
 //!
 //!  * `auth list` — show every configured provider and a masked key.
 //!  * `auth add <provider|autodetect> <key>` — validate the key against
-//!    the provider's endpoint, then write `[providers.<slug>].api_key`.
-//!  * `auth remove <provider>` — drop a `[providers.<slug>]` table.
+//!    the provider's endpoint, then write it to the credential ladder.
+//!  * `auth remove <provider>` — drop a provider's key from both locations.
+//!
+//! Every verb also accepts an **account id** (#14): the name of a
+//! `[providers.<id>]` alias. A company with a dozen OpenRouter accounts defines
+//! one alias per account and runs `auth add <id> <key>` for each — every account
+//! then owns its own ladder slot instead of a cleartext key in `config.toml`,
+//! and a session picks one with `--provider <id>`.
 //!
 //! This is the lighter-weight sibling of the onboarding flow: it reuses
 //! the SAME recognizer ([`crate::provider_keys`]) — `detect_provider`,
@@ -38,11 +44,11 @@ pub enum AuthCmd {
     /// Add (or replace) a provider API key. The key is validated against
     /// the provider's endpoint before it is written.
     ///
-    /// `provider` is either a known provider slug (`anthropic`, `openai`,
-    /// …) or the literal `autodetect` — in which case the provider is
-    /// inferred from the key's prefix.
+    /// `provider` is a known provider slug (`anthropic`, `openai`, …), the
+    /// id of a `[providers.<id>]` account alias, or the literal `autodetect`
+    /// — in which case the provider is inferred from the key's prefix.
     Add {
-        /// Provider slug, or `autodetect` to infer it from the key.
+        /// Provider slug, account id, or `autodetect` to infer it from the key.
         provider: String,
         /// The API key to validate and store.
         key: String,
@@ -53,7 +59,7 @@ pub enum AuthCmd {
 
     /// Remove a provider's API key from the config.
     Remove {
-        /// Provider slug to remove (`anthropic`, `openai`, …).
+        /// Provider slug or account id to remove (`anthropic`, `openai`, …).
         provider: String,
     },
 
@@ -213,6 +219,103 @@ fn store_slot(provider: Provider) -> Option<String> {
     wcore_config::config::credentials_store_key(provider_type)
 }
 
+/// What an `auth` key verb is operating on.
+///
+/// #14 — one provider may hold SEVERAL accounts, and they are not
+/// interchangeable: they bill separately and carry separate quota. Each extra
+/// account is a `[providers.<id>]` alias owning its own ladder slot, so the CRUD
+/// verbs have to be able to name one instead of only a built-in provider.
+#[derive(Debug, Clone)]
+enum AuthTarget {
+    /// A built-in provider slug — that provider's single shared key slot.
+    Builtin(Provider),
+    /// A named account, i.e. a `[providers.<id>]` alias.
+    Account {
+        id: String,
+        /// The alias's `provider = "<builtin>"` field. Used ONLY to choose a
+        /// validation endpoint; `None` when the alias names no built-in (or
+        /// names one this recognizer does not know), which makes the account
+        /// unvalidatable rather than unusable.
+        underlying: Option<Provider>,
+        /// The alias overrides `base_url`, so its key belongs to a DIFFERENT
+        /// host than the built-in validation endpoint. Validating it would post
+        /// the operator's key to a host that never issued it.
+        custom_base_url: bool,
+    },
+}
+
+impl AuthTarget {
+    /// The `[providers.<slug>]` table name this target reads and writes.
+    fn slug(&self) -> &str {
+        match self {
+            AuthTarget::Builtin(p) => p.slug(),
+            AuthTarget::Account { id, .. } => id,
+        }
+    }
+
+    /// Human-readable name for messages.
+    fn label(&self) -> String {
+        match self {
+            AuthTarget::Builtin(p) => p.label().to_string(),
+            AuthTarget::Account { id, underlying, .. } => match underlying {
+                Some(p) => format!("account '{id}' ({})", p.label()),
+                None => format!("account '{id}'"),
+            },
+        }
+    }
+
+    /// The ladder slot. Single-sourced with resolution: `auth` writes exactly
+    /// the slot `resolve_api_key` reads back for `--provider <slug-or-id>`.
+    fn store_slot(&self) -> Option<String> {
+        match self {
+            AuthTarget::Builtin(p) => store_slot(*p),
+            AuthTarget::Account { id, .. } => {
+                wcore_config::config::credentials_store_account_key(id)
+            }
+        }
+    }
+}
+
+/// Resolve an explicit `auth` argument — a built-in slug, else a
+/// `[providers.<id>]` account alias already present in `doc`.
+///
+/// An unknown id is NOT silently promoted to an account: an account must be
+/// declared in config first (that declaration is what carries `provider =` and
+/// any `base_url`), so a typo'd slug still errors instead of quietly creating a
+/// slot nothing will ever read.
+fn resolve_explicit_target(arg: &str, doc: &Table) -> Result<AuthTarget> {
+    if let Some(provider) = Provider::from_slug(arg) {
+        return Ok(AuthTarget::Builtin(provider));
+    }
+    if let Some(entry) = providers_table(doc)
+        .and_then(|t| t.get(arg))
+        .and_then(toml::Value::as_table)
+    {
+        if wcore_config::config::credentials_store_account_key(arg).is_none() {
+            bail!(
+                "account id '{arg}' cannot own a credentials-store slot — use only \
+                 ASCII letters, digits, '_' and '-' (max {} characters)",
+                wcore_config::config::MAX_ACCOUNT_ID_LEN
+            );
+        }
+        return Ok(AuthTarget::Account {
+            id: arg.to_string(),
+            underlying: entry
+                .get("provider")
+                .and_then(toml::Value::as_str)
+                .and_then(Provider::from_slug),
+            custom_base_url: entry.contains_key("base_url"),
+        });
+    }
+    let known: Vec<&str> = Provider::ALL.iter().map(|p| p.slug()).collect();
+    Err(anyhow!(
+        "unknown provider '{arg}'. Known providers: {}. \
+         For a second account on a provider you already use, declare it first as \
+         `[providers.{arg}]` with `provider = \"<builtin>\"`, then re-run this command.",
+        known.join(", ")
+    ))
+}
+
 /// Read a provider's LEGACY cleartext key out of `[providers.<slug>].api_key`.
 ///
 /// This sink predates the credentials store and still OUTRANKS it in
@@ -281,10 +384,10 @@ fn mask_key(key: &str) -> String {
 /// `autodetect` runs the key through the prefix recognizer; an ambiguous
 /// or unrecognized key fails with a message telling the user to name the
 /// provider explicitly. A non-`autodetect` argument must be a known slug.
-fn resolve_provider(arg: &str, key: &str) -> Result<Provider> {
+fn resolve_target(arg: &str, key: &str, doc: &Table) -> Result<AuthTarget> {
     if arg.eq_ignore_ascii_case("autodetect") {
         return match detect_provider(key) {
-            Detected::One(p) => Ok(p),
+            Detected::One(p) => Ok(AuthTarget::Builtin(p)),
             Detected::Ambiguous => bail!(
                 "could not autodetect the provider — this key shape is shared by \
                  several providers. Re-run with an explicit provider, e.g. \
@@ -296,14 +399,7 @@ fn resolve_provider(arg: &str, key: &str) -> Result<Provider> {
             ),
         };
     }
-    Provider::from_slug(arg).ok_or_else(|| {
-        let known: Vec<&str> = Provider::ALL.iter().map(|p| p.slug()).collect();
-        anyhow::anyhow!(
-            "unknown provider '{arg}'. Known providers: {}. \
-             Or pass `autodetect` to infer it from the key.",
-            known.join(", ")
-        )
-    })
+    resolve_explicit_target(arg, doc)
 }
 
 /// List every provider that has a key, from BOTH locations.
@@ -316,11 +412,18 @@ fn resolve_provider(arg: &str, key: &str) -> Result<Provider> {
 ///
 /// The WHERE column is the point of the change: a user has to be able to see
 /// which of their keys are still sitting in cleartext.
-fn list_cmd(config_path: &std::path::Path) -> Result<()> {
-    let doc = load_doc(config_path)?;
-
+/// Build the `list` rows: `(slug, masked key, where it lives)`, one per
+/// configured provider OR account that actually holds a key.
+///
+/// Split out of [`list_cmd`] so it can be asserted on directly — the printed
+/// table is unreachable from a test, and "list did not error" is satisfied by a
+/// list that silently shows nothing.
+fn list_rows(
+    doc: &Table,
+    store: Option<&dyn wcore_config::credentials::CredentialsStore>,
+) -> Vec<(String, String, &'static str)> {
     // Every slug that could hold a key, from either side.
-    let mut slugs: Vec<String> = providers_table(&doc)
+    let mut slugs: Vec<String> = providers_table(doc)
         .map(|providers| providers.keys().cloned().collect())
         .unwrap_or_default();
     for provider in Provider::ALL {
@@ -329,6 +432,30 @@ fn list_cmd(config_path: &std::path::Path) -> Result<()> {
         }
     }
     slugs.sort();
+
+    let mut rows: Vec<(String, String, &'static str)> = Vec::new();
+    for slug in &slugs {
+        // #14: `credentials_store_account_key` covers BOTH — it delegates a
+        // built-in slug to that provider's shared slot and gives every other
+        // `[providers.<id>]` account its own. Keying this off `Provider::
+        // from_slug` alone made every account's stored key invisible here, and
+        // an invisible key is one the operator re-enters or leaves behind.
+        let stored = store
+            .zip(wcore_config::config::credentials_store_account_key(slug))
+            .and_then(|(store, slot)| store.get(&slot).ok().flatten());
+        if let Some(key) = stored {
+            rows.push((slug.clone(), mask_key(&key), "credentials store"));
+            continue;
+        }
+        if let Some(key) = legacy_config_key(doc, slug) {
+            rows.push((slug.clone(), mask_key(&key), "config.toml (CLEARTEXT)"));
+        }
+    }
+    rows
+}
+
+fn list_cmd(config_path: &std::path::Path) -> Result<()> {
+    let doc = load_doc(config_path)?;
 
     // A store that will not open is reported, not silently treated as empty —
     // "no providers configured" when the store is merely unreachable is the
@@ -341,20 +468,7 @@ fn list_cmd(config_path: &std::path::Path) -> Result<()> {
         }
     };
 
-    let mut rows: Vec<(String, String, &'static str)> = Vec::new();
-    for slug in &slugs {
-        let stored = store
-            .as_ref()
-            .zip(Provider::from_slug(slug).and_then(store_slot))
-            .and_then(|(store, slot)| store.get(&slot).ok().flatten());
-        if let Some(key) = stored {
-            rows.push((slug.clone(), mask_key(&key), "credentials store"));
-            continue;
-        }
-        if let Some(key) = legacy_config_key(&doc, slug) {
-            rows.push((slug.clone(), mask_key(&key), "config.toml (CLEARTEXT)"));
-        }
-    }
+    let rows = list_rows(&doc, store.as_deref());
 
     if rows.is_empty() {
         println!("No providers configured. Add one with `wayland-core auth add <provider> <key>`.");
@@ -387,10 +501,13 @@ fn add_cmd(
     if key.is_empty() {
         bail!("the API key is empty");
     }
-    let provider = resolve_provider(provider_arg, key)?;
+    let mut doc = load_doc(config_path)?;
+    let target = resolve_target(provider_arg, key, &doc)?;
+    let label = target.label();
 
     if !no_validate {
-        println!("Validating {} key…", provider.label());
+        let provider = validation_provider(&target)?;
+        println!("Validating {label} key…");
         match validate_key_blocking(provider, key) {
             ValidationOutcome::Ok => println!("Key accepted by {}.", provider.label()),
             ValidationOutcome::Failed(reason) => bail!(
@@ -401,13 +518,10 @@ fn add_cmd(
         }
     }
 
-    let mut doc = load_doc(config_path)?;
-    let slug = provider.slug();
-    let Some(slot) = store_slot(provider) else {
-        bail!(
-            "{} authenticates out-of-band and has no API key slot",
-            provider.label()
-        );
+    let slug = target.slug().to_string();
+    let slug = slug.as_str();
+    let Some(slot) = target.store_slot() else {
+        bail!("{label} authenticates out-of-band and has no API key slot");
     };
 
     let store = credentials_store(config_path, &doc)?;
@@ -421,15 +535,14 @@ fn add_cmd(
     // surfaced verbatim — there is no cleartext branch to take instead.
     store
         .put(&slot, key)
-        .with_context(|| format!("storing the {} API key", provider.label()))?;
+        .with_context(|| format!("storing the {label} API key"))?;
 
     // NON-VACUITY, at runtime: never report a write we cannot read back.
     match store.get(&slot) {
         Ok(Some(read_back)) if read_back == key => {}
         _ => bail!(
-            "the {} API key was accepted by the credentials store but did not read back; \
-             refusing to report a save that did not happen",
-            provider.label()
+            "the {label} API key was accepted by the credentials store but did not read back; \
+             refusing to report a save that did not happen"
         ),
     }
 
@@ -446,35 +559,68 @@ fn add_cmd(
     }
 
     if existed {
-        println!("Updated API key for {} ({slug}).", provider.label());
+        println!("Updated API key for {label} ({slug}).");
     } else {
-        println!("Added API key for {} ({slug}).", provider.label());
+        println!("Added API key for {label} ({slug}).");
+    }
+    if matches!(target, AuthTarget::Account { .. }) {
+        println!("Select this account for a session with `--provider {slug}`.");
     }
     Ok(())
 }
 
+/// The provider whose endpoint validates `target`'s key, or an actionable
+/// refusal.
+///
+/// SECURITY: an account that overrides `base_url` points at a host the built-in
+/// endpoint knows nothing about. Posting the key to the built-in endpoint to
+/// "validate" it would send the operator's credential to a third party that
+/// never issued it, so this refuses instead.
+fn validation_provider(target: &AuthTarget) -> Result<Provider> {
+    match target {
+        AuthTarget::Builtin(p) => Ok(*p),
+        AuthTarget::Account {
+            id,
+            custom_base_url: true,
+            ..
+        } => Err(anyhow!(
+            "account '{id}' overrides `base_url`, so its key belongs to that endpoint and \
+             cannot be validated against a built-in provider's. Re-run with `--no-validate`."
+        )),
+        AuthTarget::Account {
+            id,
+            underlying: None,
+            ..
+        } => Err(anyhow!(
+            "account '{id}' does not name a validatable built-in in \
+             `[providers.{id}].provider`. Re-run with `--no-validate`."
+        )),
+        AuthTarget::Account {
+            underlying: Some(p),
+            ..
+        } => Ok(*p),
+    }
+}
+
 fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
-    // `remove` never autodetects — it takes an explicit slug.
-    let provider = Provider::from_slug(provider_arg).ok_or_else(|| {
-        let known: Vec<&str> = Provider::ALL.iter().map(|p| p.slug()).collect();
-        anyhow::anyhow!(
-            "unknown provider '{provider_arg}'. Known providers: {}",
-            known.join(", ")
-        )
-    })?;
-    let slug = provider.slug();
+    // `remove` never autodetects — it takes an explicit slug or account id.
+    let mut doc = load_doc(config_path)?;
+    let target = resolve_explicit_target(provider_arg, &doc)?;
+    let label = target.label();
+    let slot = target.store_slot();
+    let slug = target.slug().to_string();
+    let slug = slug.as_str();
 
     // BOTH locations. A remove that clears only one leaves the key resolvable
     // from the other, and the one it would leave behind is the cleartext one.
-    let mut doc = load_doc(config_path)?;
     let removed_config = providers_table_mut(&mut doc)?.remove(slug).is_some();
 
-    let removed_store = match (credentials_store(config_path, &doc), store_slot(provider)) {
+    let removed_store = match (credentials_store(config_path, &doc), slot) {
         (Ok(store), Some(slot)) => {
             let had = store.get(&slot).unwrap_or_default().is_some();
-            store.delete(&slot).with_context(|| {
-                format!("removing the {} API key from the store", provider.label())
-            })?;
+            store
+                .delete(&slot)
+                .with_context(|| format!("removing the {label} API key from the store"))?;
             had
         }
         (Err(error), _) => {
@@ -487,12 +633,12 @@ fn remove_cmd(provider_arg: &str, config_path: &std::path::Path) -> Result<()> {
     };
 
     if !removed_config && !removed_store {
-        bail!("no API key configured for {} ({slug})", provider.label());
+        bail!("no API key configured for {label} ({slug})");
     }
     if removed_config {
         save_doc(&doc, config_path)?;
     }
-    println!("Removed API key for {} ({slug}).", provider.label());
+    println!("Removed API key for {label} ({slug}).");
     Ok(())
 }
 
@@ -837,6 +983,194 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Read an ACCOUNT's stored key back — the account-aware sibling of
+    /// [`stored_key`], which can only see a built-in provider's shared slot.
+    fn stored_account_key(config_path: &std::path::Path, id: &str) -> Option<String> {
+        let doc = load_doc(config_path).expect("load config");
+        let store = credentials_store(config_path, &doc).expect("open store");
+        store
+            .get(&wcore_config::config::credentials_store_account_key(id)?)
+            .ok()?
+    }
+
+    /// Write a `config.toml` that declares one account alias per line.
+    fn write_accounts(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write config");
+    }
+
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn add_stores_two_accounts_on_one_provider_in_two_separate_slots() {
+        // #14 end to end through the CLI: two OpenRouter accounts, two keys,
+        // neither in cleartext, and neither overwriting the other.
+        let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
+        let path = dir.path().join("config.toml");
+        write_accounts(
+            &path,
+            "[providers.acct-a]\nprovider = \"openrouter\"\n\n\
+             [providers.acct-b]\nprovider = \"openrouter\"\n",
+        );
+
+        for (id, key) in [("acct-a", "or-fixture-aaa"), ("acct-b", "or-fixture-bbb")] {
+            run_with_path(
+                AuthCmd::Add {
+                    provider: id.to_string(),
+                    key: key.to_string(),
+                    no_validate: true,
+                },
+                &path,
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            stored_account_key(&path, "acct-a").as_deref(),
+            Some("or-fixture-aaa")
+        );
+        assert_eq!(
+            stored_account_key(&path, "acct-b").as_deref(),
+            Some("or-fixture-bbb")
+        );
+        // The shared provider slot must be untouched: writing an account into
+        // it is exactly the one-key-per-provider defect this closes.
+        assert_eq!(stored_key(&path, "openrouter"), None);
+        let body = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !body.contains("or-fixture-aaa") && !body.contains("or-fixture-bbb"),
+            "an account key was written into config.toml in cleartext: {body}"
+        );
+        // The alias declarations themselves survive — only the secret moves.
+        assert!(body.contains("acct-a") && body.contains("acct-b"), "{body}");
+    }
+
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn add_moves_an_accounts_cleartext_key_out_of_config() {
+        let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
+        let path = dir.path().join("config.toml");
+        write_accounts(
+            &path,
+            "[providers.acct-a]\nprovider = \"openrouter\"\napi_key = \"or-fixture-old\"\n",
+        );
+
+        run_with_path(
+            AuthCmd::Add {
+                provider: "acct-a".to_string(),
+                key: "or-fixture-new".to_string(),
+                no_validate: true,
+            },
+            &path,
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_account_key(&path, "acct-a").as_deref(),
+            Some("or-fixture-new")
+        );
+        let body = fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            !body.contains("or-fixture-old") && !body.contains("or-fixture-new"),
+            "the cleartext account key survived: {body}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn add_refuses_to_validate_an_account_that_overrides_base_url() {
+        // SECURITY: the account's key belongs to its own endpoint. Validating
+        // it against the built-in provider would post the operator's
+        // credential to a host that never issued it.
+        let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
+        let path = dir.path().join("config.toml");
+        write_accounts(
+            &path,
+            "[providers.acct-gw]\nprovider = \"openai\"\n\
+             base_url = \"https://gateway.internal.example\"\n",
+        );
+
+        let err = run_with_path(
+            AuthCmd::Add {
+                provider: "acct-gw".to_string(),
+                key: "or-fixture-gw".to_string(),
+                no_validate: false,
+            },
+            &path,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("base_url"), "{msg}");
+        assert!(msg.contains("--no-validate"), "{msg}");
+        // Nothing was stored: a refusal must not half-succeed.
+        assert_eq!(stored_account_key(&path, "acct-gw"), None);
+    }
+
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn remove_clears_an_accounts_slot_and_list_shows_it_first() {
+        let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
+        let path = dir.path().join("config.toml");
+        write_accounts(&path, "[providers.acct-a]\nprovider = \"openrouter\"\n");
+        run_with_path(
+            AuthCmd::Add {
+                provider: "acct-a".to_string(),
+                key: "or-fixture-aaa".to_string(),
+                no_validate: true,
+            },
+            &path,
+        )
+        .unwrap();
+        assert!(stored_account_key(&path, "acct-a").is_some());
+
+        // `list` must SHOW the account's stored key, not merely not error: a
+        // key the operator cannot see is one they re-enter or leave behind.
+        let doc = load_doc(&path).unwrap();
+        let store = credentials_store(&path, &doc).unwrap();
+        let rows = list_rows(&doc, Some(store.as_ref()));
+        let row = rows
+            .iter()
+            .find(|(slug, _, _)| slug == "acct-a")
+            .unwrap_or_else(|| panic!("`auth list` does not show account 'acct-a': {rows:?}"));
+        assert_eq!(row.2, "credentials store");
+        assert_ne!(row.1, "or-fixture-aaa", "list printed the key unmasked");
+        run_with_path(AuthCmd::List, &path).unwrap();
+
+        run_with_path(
+            AuthCmd::Remove {
+                provider: "acct-a".to_string(),
+            },
+            &path,
+        )
+        .unwrap();
+        assert_eq!(stored_account_key(&path, "acct-a"), None);
+    }
+
+    #[test]
+    #[serial_test::serial(auth_credentials_env)]
+    fn an_undeclared_id_is_not_silently_promoted_to_an_account() {
+        // A typo'd slug must still be an error. Creating a slot for an
+        // undeclared id would write a key nothing can ever resolve.
+        let dir = tempdir().unwrap();
+        let _env = LadderEnv::scoped(dir.path());
+        let path = dir.path().join("config.toml");
+        let err = run_with_path(
+            AuthCmd::Add {
+                provider: "opnrouter".to_string(),
+                key: "or-fixture-typo".to_string(),
+                no_validate: true,
+            },
+            &path,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown provider 'opnrouter'"), "{msg}");
+        assert!(msg.contains("[providers.opnrouter]"), "{msg}");
+        assert_eq!(stored_account_key(&path, "opnrouter"), None);
     }
 
     #[test]

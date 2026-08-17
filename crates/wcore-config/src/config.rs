@@ -2197,7 +2197,7 @@ impl Config {
     /// The model is left as `self.model` — `list_models` does not consult it.
     pub fn for_provider_discovery(&self, provider: ProviderType) -> Self {
         let storage = crate::credentials::CredentialsStorageConfig::default();
-        let api_key = resolve_api_key(None, None, provider, &storage).unwrap_or_default();
+        let api_key = resolve_api_key(None, None, None, provider, &storage).unwrap_or_default();
         Self {
             provider,
             provider_label: provider_type_slug(provider).to_string(),
@@ -2231,6 +2231,17 @@ impl Config {
 struct ResolvedProviderConfig {
     requested_name: String,
     provider_type: ProviderType,
+    /// The selected **account id** — `Some(requested_name)` whenever the name
+    /// the user selected is NOT a built-in provider slug (a `[providers.<id>]`
+    /// alias or a bundled catalog id), and `None` when it is a built-in.
+    ///
+    /// This is what gives issue #14 (several accounts on the same provider) its
+    /// own credential: an account id owns a credentials-store slot of its own
+    /// (see [`credentials_store_account_key`]), whereas the built-in slot is
+    /// keyed by `ProviderType` and can therefore hold exactly one key per
+    /// provider. `None` for a built-in selection keeps single-account
+    /// resolution byte-for-byte unchanged.
+    account_id: Option<String>,
     effective_config: ProviderConfig,
     /// Set when `requested_name` matched a bundled data-driven catalog entry
     /// (rather than a built-in `ProviderType` or a user alias). The catalog
@@ -2334,6 +2345,8 @@ impl Config {
 
         let resolved_provider = resolve_provider_alias(&merged.providers, provider_str)?;
         let provider_label = resolved_provider.requested_name.clone();
+        // #14: the selected account, when the selection is not a built-in slug.
+        let account_id = resolved_provider.account_id.clone();
         let provider = resolved_provider.provider_type;
         let provider_config = resolved_provider.effective_config;
         // Set only when `--provider <id>` matched a bundled data-driven catalog
@@ -2419,6 +2432,7 @@ impl Config {
             .flatten();
         let mut api_key = match resolve_api_key(
             cli.api_key.as_deref(),
+            account_id.as_deref(),
             provider_config.api_key.as_deref(),
             provider,
             &merged.storage.credentials,
@@ -3128,6 +3142,10 @@ fn resolve_provider_alias(
         return Ok(ResolvedProviderConfig {
             requested_name: requested.to_string(),
             provider_type,
+            // A built-in selection is the provider's own shared identity, not a
+            // named account: it resolves through the existing per-ProviderType
+            // slot and nothing about its key resolution changes.
+            account_id: None,
             effective_config: providers.get(requested).cloned().unwrap_or_default(),
             catalog_entry: None,
         });
@@ -3148,6 +3166,7 @@ fn resolve_provider_alias(
             // user-config overlay for a bare catalog id; base_url/compat/key
             // are stamped from the entry by the resolver.
             provider_type: ProviderType::OpenAI,
+            account_id: Some(requested.to_string()),
             effective_config: ProviderConfig::default(),
             catalog_entry: Some(entry.clone()),
         });
@@ -3190,6 +3209,7 @@ fn resolve_provider_alias(
     Ok(ResolvedProviderConfig {
         requested_name: requested.to_string(),
         provider_type,
+        account_id: Some(requested.to_string()),
         effective_config: merge_provider_configs(
             providers.get(&underlying).cloned().unwrap_or_default(),
             alias_config,
@@ -3262,6 +3282,8 @@ pub fn resolve_council_provider(
     let resolved = resolve_provider_alias(providers, provider_id)
         .map_err(|_| CouncilProviderError::Unknown(provider_id.to_string()))?;
     let provider = resolved.provider_type;
+    // #14: read the selected account id before `resolved` is dismantled below.
+    let account_id = resolved.account_id.clone();
     let provider_config = resolved.effective_config;
     let catalog_entry = resolved.catalog_entry;
 
@@ -3309,6 +3331,7 @@ pub fn resolve_council_provider(
     // env var) is the genuine BYO-key-missing member the council skips.
     let api_key = match resolve_api_key(
         None,
+        account_id.as_deref(),
         provider_config.api_key.as_deref(),
         provider,
         &base.storage.credentials,
@@ -3382,6 +3405,7 @@ pub fn resolve_council_provider(
 
 fn resolve_api_key(
     cli_key: Option<&str>,
+    account_id: Option<&str>,
     config_key: Option<&str>,
     provider: ProviderType,
     storage: &crate::credentials::CredentialsStorageConfig,
@@ -3389,6 +3413,23 @@ fn resolve_api_key(
     // CLI arg takes precedence
     if let Some(key) = cli_key {
         return Ok(key.to_string());
+    }
+
+    // #14 — the NAMED ACCOUNT rung. When the session selected an account id
+    // (any non-builtin name: a `[providers.<id>]` alias or a catalog id), that
+    // account's OWN store slot is consulted before every shared rung below,
+    // including the inline `config_key`. It has to outrank the inline value
+    // because `merge_provider_configs` lets an alias INHERIT the underlying
+    // `[providers.<builtin>].api_key`, so an account whose key lives securely
+    // in the store would otherwise be silently billed to the shared cleartext
+    // key of a different account. `account_id` is `None` for a built-in
+    // selection, so single-account resolution is unchanged — and this rung is
+    // skipped entirely (no store is opened) for an id with no valid slot.
+    if let Some(slot) = account_id.and_then(credentials_store_account_key)
+        && let Ok(store) = crate::credentials::open_store(storage, &credentials_storage_path())
+        && let Some(key) = store.get(&slot).ok().flatten()
+    {
+        return Ok(key);
     }
 
     // Config file value
@@ -3667,6 +3708,51 @@ pub fn credentials_store_key(provider: ProviderType) -> Option<String> {
     Some(key.to_string())
 }
 
+/// Maximum length of a provider **account id** that may own a credentials-store
+/// slot. Generous for a human-chosen `[providers.<id>]` table name while staying
+/// far inside every backend's key-length limit.
+pub const MAX_ACCOUNT_ID_LEN: usize = 64;
+
+/// The credentials-store slot for a provider **account id** — the name the user
+/// actually selects with `--provider` / `[default].provider`.
+///
+/// Multi-account (issue #14): a user holding several accounts on the SAME
+/// provider gives each account its own `[providers.<id>]` alias. Each alias owns
+/// a store slot of its own, `providers.<id>.api_key`, so every account's
+/// credential can live in the keyring / encrypted vault. Without this the second
+/// account could only ever be a cleartext `api_key` in `config.toml`, because
+/// [`credentials_store_key`] is keyed by `ProviderType` and therefore holds
+/// exactly ONE key per provider.
+///
+/// A built-in slug delegates to [`credentials_store_key`], so the built-in slots
+/// keep their exact spelling and the mapping stays single-sourced (a key written
+/// through either function is read back by the other). A non-builtin id is
+/// namespaced identically but can never collide with a built-in slot, because
+/// [`resolve_provider_alias`] matches built-ins FIRST — a user alias may not
+/// shadow one, so an id that reaches the second branch here is not a built-in.
+///
+/// Returns `None` for a built-in that authenticates out-of-band, and for any id
+/// outside `[A-Za-z0-9_-]{1,64}`. That class is deliberately narrower than
+/// TOML's quoted-key grammar: a slot name is a keyring entry, a TOML key in the
+/// plaintext backend, and a prefix the chunked-write path appends to, so an id
+/// carrying a quote, a dot, a separator or whitespace could forge or collide
+/// with a neighbouring slot.
+pub fn credentials_store_account_key(account_id: &str) -> Option<String> {
+    if let Some(provider) = parse_builtin_provider(account_id) {
+        return credentials_store_key(provider);
+    }
+    if account_id.is_empty() || account_id.len() > MAX_ACCOUNT_ID_LEN {
+        return None;
+    }
+    if !account_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    Some(format!("providers.{account_id}.api_key"))
+}
+
 fn lookup_store_api_key(
     store: &dyn crate::credentials::CredentialsStore,
     provider: ProviderType,
@@ -3690,10 +3776,34 @@ fn lookup_store_api_key(
 /// ([`credentials_store_key`] returns `None`) or on a store write failure. The
 /// value is never logged.
 pub fn store_provider_api_key(provider: ProviderType, api_key: &str) -> anyhow::Result<()> {
-    let Some(store_key) = credentials_store_key(provider) else {
+    if credentials_store_key(provider).is_none() {
         anyhow::bail!(
             "provider {} authenticates out-of-band and has no credentials-store API key",
             provider_type_slug(provider)
+        );
+    }
+    // Delegates so there is ONE writer. The canonical slug round-trips through
+    // `credentials_store_account_key` back to `credentials_store_key`, which is
+    // asserted for every `ProviderType` arm by
+    // `account_key_round_trips_every_builtin_slug`.
+    store_provider_account_api_key(provider_type_slug(provider), api_key)
+}
+
+/// Persist an API key for a provider **account id** into the configured
+/// credentials store — the same store [`resolve_api_key`] reads from.
+///
+/// This is the write half of multi-account support (#14): it is what lets a
+/// second (third, twentieth) account on one provider hold its credential in the
+/// keyring / encrypted vault instead of as cleartext in `config.toml`. A
+/// built-in slug is accepted and lands in that provider's existing shared slot,
+/// so [`store_provider_api_key`] is a thin wrapper over it and there is exactly
+/// one writer. The value is never logged.
+pub fn store_provider_account_api_key(account_id: &str, api_key: &str) -> anyhow::Result<()> {
+    let Some(store_key) = credentials_store_account_key(account_id) else {
+        anyhow::bail!(
+            "'{account_id}' has no credentials-store API key slot: it is either a provider that \
+             authenticates out-of-band, or an account id outside [A-Za-z0-9_-] (max {} bytes)",
+            MAX_ACCOUNT_ID_LEN
         );
     };
 
@@ -7462,6 +7572,7 @@ mod tests {
         let storage = crate::credentials::CredentialsStorageConfig::default();
         let result = resolve_api_key(
             Some("cli-key"),
+            None,
             Some("config-key"),
             ProviderType::Anthropic,
             &storage,
@@ -7474,8 +7585,14 @@ mod tests {
     fn test_api_key_from_config() {
         // When CLI key is absent, config file key should be used.
         let storage = crate::credentials::CredentialsStorageConfig::default();
-        let result =
-            resolve_api_key(None, Some("config-key"), ProviderType::Anthropic, &storage).unwrap();
+        let result = resolve_api_key(
+            None,
+            None,
+            Some("config-key"),
+            ProviderType::Anthropic,
+            &storage,
+        )
+        .unwrap();
         assert_eq!(result, "config-key");
     }
 
@@ -7503,7 +7620,7 @@ mod tests {
         // Anthropic ships with API-key auth only: with no CLI key, no config key,
         // no store entry, and no env var, resolution must fail deterministically.
         let storage = crate::credentials::CredentialsStorageConfig::default();
-        let result = resolve_api_key(None, None, ProviderType::Anthropic, &storage);
+        let result = resolve_api_key(None, None, None, ProviderType::Anthropic, &storage);
 
         let e = result.expect_err("no credential anywhere must surface an error");
         assert!(e.to_string().contains("No API key found"));
@@ -7513,7 +7630,7 @@ mod tests {
     fn test_api_key_bedrock_returns_empty_without_key() {
         // Bedrock uses AWS credentials, so an empty key is the expected success value.
         let storage = crate::credentials::CredentialsStorageConfig::default();
-        let result = resolve_api_key(None, None, ProviderType::Bedrock, &storage).unwrap();
+        let result = resolve_api_key(None, None, None, ProviderType::Bedrock, &storage).unwrap();
         assert_eq!(result, "");
     }
 
@@ -7521,7 +7638,7 @@ mod tests {
     fn test_api_key_vertex_returns_empty_without_key() {
         // Vertex uses GCP credentials, so an empty key is the expected success value.
         let storage = crate::credentials::CredentialsStorageConfig::default();
-        let result = resolve_api_key(None, None, ProviderType::Vertex, &storage).unwrap();
+        let result = resolve_api_key(None, None, None, ProviderType::Vertex, &storage).unwrap();
         assert_eq!(result, "");
     }
 
@@ -7644,6 +7761,61 @@ mod tests {
             credentials_store_key(ProviderType::FluxRouter).as_deref(),
             Some("providers.flux-router.api_key")
         );
+    }
+
+    #[test]
+    fn account_key_round_trips_every_builtin_slug() {
+        // `store_provider_api_key` now delegates to
+        // `store_provider_account_api_key` through `provider_type_slug`. If any
+        // canonical slug failed to parse back to its own `ProviderType`, that
+        // delegation would write a DIFFERENT slot than `resolve_api_key` reads
+        // — a key that reports "saved" and then resolves to nothing.
+        //
+        // The list is explicit because `ProviderType` has no iterator. It is
+        // every arm of `provider_type_slug` as of this commit; a NEW provider
+        // added later is not covered here (named residual).
+        const ALL: [ProviderType; 23] = [
+            ProviderType::Anthropic,
+            ProviderType::OpenAI,
+            ProviderType::Bedrock,
+            ProviderType::Vertex,
+            ProviderType::Gemini,
+            ProviderType::AzureOpenAI,
+            ProviderType::Together,
+            ProviderType::Fireworks,
+            ProviderType::Nvidia,
+            ProviderType::Perplexity,
+            ProviderType::Cerebras,
+            ProviderType::OpenRouter,
+            ProviderType::FluxRouter,
+            ProviderType::Sakana,
+            ProviderType::Deepseek,
+            ProviderType::Xai,
+            ProviderType::Groq,
+            ProviderType::Moonshot,
+            ProviderType::Qwen,
+            ProviderType::Mistral,
+            ProviderType::Cohere,
+            ProviderType::OpenAIChatGpt,
+            ProviderType::MiniMax,
+        ];
+        let slugs: std::collections::HashSet<&str> =
+            ALL.iter().copied().map(provider_type_slug).collect();
+        assert_eq!(slugs.len(), ALL.len(), "duplicate slug in the arm list");
+
+        for provider in ALL {
+            let slug = provider_type_slug(provider);
+            assert_eq!(
+                parse_builtin_provider(slug),
+                Some(provider),
+                "canonical slug {slug:?} does not parse back to {provider:?}"
+            );
+            assert_eq!(
+                credentials_store_account_key(slug),
+                credentials_store_key(provider),
+                "the account writer and the provider reader disagree for {slug:?}"
+            );
+        }
     }
 
     #[test]
