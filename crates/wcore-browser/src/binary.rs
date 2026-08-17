@@ -81,6 +81,10 @@ pub enum BinaryError {
     MissingExecutable(String),
     #[error("unsafe path in configuration or archive: {0}")]
     UnsafePath(String),
+    #[error(
+        "refusing to fetch an executable over {scheme} - browser.camoufox_download artifact url {url} must use https (plain http is accepted only for a loopback host)"
+    )]
+    InsecureScheme { scheme: String, url: String },
 }
 
 /// Manager surface — `ensure_camoufox` downloads if missing, verifies SHA,
@@ -263,6 +267,7 @@ impl BrowserBinaryManager {
         if expected_sha.is_empty() {
             return Err(BinaryError::UnpinnedDigest(key));
         }
+        require_secure_url(&artifact.url)?;
         let downloaded = self.ensure_camoufox(&artifact.url, expected_sha).await?;
         let exe = self.materialize_executable(&downloaded, &artifact.archive_exe_path)?;
         Ok(Some(exe))
@@ -301,6 +306,45 @@ impl BrowserBinaryManager {
         set_executable(&exe)?;
         Ok(exe)
     }
+}
+
+/// Reject a configured artifact URL whose transport is not `https`.
+///
+/// Being precise about what this does and does not buy, because the module
+/// doc above makes the opposite claim ("the URL is documentation + default;
+/// the digest is the lock") and that claim is CORRECT: the operator-pinned
+/// SHA-256 is compared before anything is moved into place or made
+/// executable, so an active attacker on a plain-HTTP fetch can make
+/// provisioning FAIL but cannot swap the executable. This check is therefore
+/// defence in depth, not the security boundary. What it actually closes is
+/// (a) the artifact URL and anything an operator embedded in it - a signed
+/// query parameter, a token - travelling in clear text, and (b) a config typo
+/// silently downgrading the transport with no diagnostic.
+///
+/// Plain `http` to a LOOPBACK host is allowed. An operator serving a local
+/// mirror is not exposed to a network observer, so refusing it would cost a
+/// legitimate deployment and buy nothing.
+fn require_secure_url(url: &str) -> Result<(), BinaryError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| BinaryError::Network(format!("invalid artifact url {url}: {error}")))?;
+    let scheme = parsed.scheme();
+    if scheme.eq_ignore_ascii_case("https") {
+        return Ok(());
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if scheme.eq_ignore_ascii_case("http") && loopback {
+        return Ok(());
+    }
+    Err(BinaryError::InsecureScheme {
+        scheme: scheme.to_string(),
+        url: url.to_string(),
+    })
 }
 
 /// Reject configured member paths that are absolute or contain `..` -
@@ -865,5 +909,85 @@ mod tests {
             Err(BinaryError::UnsafePath(_))
         ));
         assert!(safe_relative_path("camoufox/camoufox").is_ok());
+    }
+
+    /// The transport check, both directions. The negative cases are the
+    /// point, but the positive ones are here too: a rule that refuses every
+    /// URL would pass the refusals and break every real deployment.
+    #[test]
+    fn require_secure_url_refuses_non_https_transports() {
+        for url in [
+            "http://mirror.example.com/camoufox.tar.gz",
+            "http://203.0.113.7:8080/camoufox.tar.gz",
+            "ftp://mirror.example.com/camoufox.tar.gz",
+            "file:///tmp/camoufox.tar.gz",
+        ] {
+            assert!(
+                matches!(
+                    require_secure_url(url),
+                    Err(BinaryError::InsecureScheme { .. })
+                ),
+                "{url} was accepted; an executable would be fetched over an \
+                 unauthenticated transport"
+            );
+        }
+    }
+
+    /// Positive control for the arm above: https anywhere, and plain http
+    /// only to a loopback host (the local-mirror carve-out the doc comment
+    /// justifies, and the transport the provisioning wiring tests use).
+    #[test]
+    fn require_secure_url_accepts_https_and_loopback_http() {
+        for url in [
+            "https://mirror.example.com/camoufox.tar.gz",
+            "HTTPS://mirror.example.com/camoufox.tar.gz",
+            "http://127.0.0.1:8080/camoufox.tar.gz",
+            "http://localhost:8080/camoufox.tar.gz",
+            "http://[::1]:8080/camoufox.tar.gz",
+        ] {
+            assert!(
+                require_secure_url(url).is_ok(),
+                "{url} was refused; the rule is stricter than intended"
+            );
+        }
+    }
+
+    /// The refusal must happen at the CONFIG surface, before any client is
+    /// built or any request is issued. Asserting on the returned error alone
+    /// would not distinguish "refused" from "tried and failed".
+    #[tokio::test]
+    async fn provision_camoufox_refuses_a_plain_http_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = BrowserBinaryManager::new(dir.path().to_path_buf(), false);
+        let mut artifacts = std::collections::BTreeMap::new();
+        artifacts.insert(
+            wcore_config::browser::platform_key(),
+            wcore_config::browser::BinaryArtifact {
+                url: "http://mirror.example.com/camoufox.tar.gz".to_string(),
+                sha256: sha256_hex(b"payload"),
+                archive_exe_path: "camoufox/camoufox".to_string(),
+            },
+        );
+        let cfg = wcore_config::browser::CamoufoxDownloadConfig {
+            enabled: true,
+            artifacts,
+        };
+
+        let err = mgr
+            .provision_camoufox(&cfg)
+            .await
+            .expect_err("a plain-http artifact url must be refused, not fetched");
+        assert!(
+            matches!(err, BinaryError::InsecureScheme { .. }),
+            "expected an InsecureScheme refusal, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("https"),
+            "the refusal must name the transport the operator has to switch to, got: {err}"
+        );
+        assert!(
+            !dir.path().join("camoufox.tar.gz").exists(),
+            "the refused path still wrote into the install root"
+        );
     }
 }
