@@ -176,28 +176,6 @@ fn format_plugin_rules(rules: &[RuleSpec], cwd: &str) -> String {
     format!("The following operating rules were contributed by installed plugins:\n\n{joined}")
 }
 
-/// Build the system prompt from config and environment.
-///
-/// Sections are assembled in this order:
-/// 1. Base intro (role, model identity, working directory, date)
-/// 2. Tool usage guidance (dedicated tools, parallel calls, etc.)
-///    2b. Terseness directive (output-side opt — only when `terse_enabled`)
-/// 3. Custom prompt (user config)
-/// 4. AGENTS.md (project instructions)
-/// 5. Memory system prompt (behavioral instructions + MEMORY.md content)
-/// 6. Plan mode instructions (when active)
-/// 7. Skills reminder (available skills listing)
-/// 8. Plugin rules (universal + project-scoped, gated on cwd)
-///
-/// `terse_enabled` gates the static [`TERSENESS_DIRECTIVE`] section. The caller
-/// passes the route-optimization flag here (`true` when
-/// `compat.input_optimization() == "client"`); the directive is byte-identical
-/// every turn so it stays inside the cached prefix without busting the cache.
-///
-/// Session-permanent sections (intro, tool guidance, custom prompt, AGENTS.md,
-/// plugin rules) are cached in `cache.sections` and reused across calls. The
-/// `joined` field caches the final concatenated result; it is returned on
-/// subsequent calls unless plan_mode_active has changed.
 /// Render the `<system-reminder>` skills listing block.
 ///
 /// Extracted from [`build_system_prompt`] so the wayland#562 late-bind path
@@ -225,6 +203,28 @@ pub fn format_skills_section(
     }
 }
 
+/// Build the system prompt from config and environment.
+///
+/// Sections are assembled in this order:
+/// 1. Base intro (role, model identity, working directory, date)
+/// 2. Tool usage guidance (dedicated tools, parallel calls, etc.)
+///    2b. Terseness directive (output-side opt — only when `terse_enabled`)
+/// 3. Custom prompt (user config)
+/// 4. AGENTS.md (project instructions)
+/// 5. Memory system prompt (behavioral instructions + MEMORY.md content)
+/// 6. Plan mode instructions (when active)
+/// 7. Skills reminder (available skills listing)
+/// 8. Plugin rules (universal + project-scoped, gated on cwd)
+///
+/// `terse_enabled` gates the static [`TERSENESS_DIRECTIVE`] section. The caller
+/// passes the route-optimization flag here (`true` when
+/// `compat.input_optimization() == "client"`); the directive is byte-identical
+/// every turn so it stays inside the cached prefix without busting the cache.
+///
+/// Session-permanent sections (intro, tool guidance, custom prompt, AGENTS.md,
+/// plugin rules) are cached in `cache.sections` and reused across calls. The
+/// `joined` field caches the final concatenated result; it is returned on
+/// subsequent calls unless plan_mode_active has changed.
 #[allow(clippy::too_many_arguments)]
 pub fn build_system_prompt(
     cache: &mut SystemPromptCache,

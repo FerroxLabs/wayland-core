@@ -7716,6 +7716,143 @@ mod tests {
         assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
     }
 
+    /// wayland#562 — WIRING gate. `LateMcpBinder` being correct in isolation
+    /// is not enough: `integrate_deferred_mcp` is the single site the deferred
+    /// config-MCP path funnels through, and it must actually CALL the binder.
+    /// The sibling tests above pass an inert binder, so none of them can
+    /// notice the `late_mcp.bind(..)` call being deleted; this one can.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the `late_mcp.bind(..)`
+    /// call from `integrate_deferred_mcp` and the assertions below fail by
+    /// name ("never reached the live catalog", "never rebound the plugin hook
+    /// dispatcher") rather than by a compile error.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_late_binds_skills_and_hooks() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        // Deferral's boot state: an empty catalog, a plugin hook that resolved
+        // to nothing, and no MCP manager at all.
+        let catalog = Arc::new(wcore_skills::refs::SkillCatalog::from_refs(Vec::new()));
+        engine.set_skill_catalog(Arc::clone(&catalog));
+        let hooks = vec![wcore_agent::plugins::runner::PluginHook {
+            plugin: "demo-plugin".to_string(),
+            phase: wcore_plugin_api::registry::hooks::HookPhase::SessionStart,
+            name: "demo_contribution".to_string(),
+        }];
+        engine.register_plugin_hooks(hooks.clone());
+        assert!(
+            !engine
+                .hook_engine()
+                .expect("bootstrap installs a HookEngine")
+                .has_dispatcher(),
+            "precondition: with config MCP deferred, boot binds no dispatcher"
+        );
+        let mut late_mcp = LateMcpBinder::new(Arc::clone(&catalog), &hooks, Vec::new(), true);
+
+        // The deferred server: advertises the plugin's hook tool, and (via the
+        // refs the async half already read off it) serves one skill.
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "late-srv",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("demo_contribution")],
+        )]));
+        let mut skill_refs = vec![SkillRef {
+            name: "late-srv:remote-helper".to_string(),
+            display_name: None,
+            description: "RESOURCE_SERVED_SKILL".to_string(),
+            when_to_use: None,
+            paths: Vec::new(),
+            source: wcore_skills::types::SkillSource::Project,
+            loaded_from: wcore_skills::types::LoadedFrom::Skills,
+            file_path: std::path::PathBuf::from("<mcp:late-srv>"),
+            skill_root: None,
+            content_length_hint: 0,
+            user_invocable: true,
+            disable_model_invocation: false,
+            has_artifacts: false,
+            inline_content: Some(
+                "---\nname: remote-helper\ndescription: RESOURCE_SERVED_SKILL\n---\nbody\n"
+                    .to_string(),
+            ),
+        }];
+
+        let resolved = HashMap::from([(
+            "late-srv".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let mut reservations = lifecycle_reservations(&resolved);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        assert!(
+            integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &resolved,
+                &mut reservations,
+                &writer,
+                &mut dynamic_managers,
+                &mut late_mcp,
+                &mut skill_refs,
+            ),
+            "integration must succeed on an idle engine"
+        );
+
+        // Gap 1 at the call site: the skill reached the SHARED catalog Arc and
+        // the model was told about it.
+        assert!(
+            catalog.find("late-srv:remote-helper").is_some(),
+            "the deferred server's skill never reached the live catalog through \
+             integrate_deferred_mcp; catalog = {:?}",
+            catalog.visible_names()
+        );
+        assert!(
+            engine.system_prompt().contains("RESOURCE_SERVED_SKILL"),
+            "integrate_deferred_mcp never told the model about the late skill"
+        );
+        assert!(
+            skill_refs.is_empty(),
+            "the refs must be consumed, not left to be merged twice on a retry"
+        );
+
+        // Gap 2 at the call site: the plugin hook dispatcher was rebound over
+        // the widened manager set.
+        assert!(
+            engine.hook_engine().expect("HookEngine").has_dispatcher(),
+            "integrate_deferred_mcp never rebound the plugin hook dispatcher"
+        );
+
+        // The already-closed tool-discovery defects must stay closed on this
+        // path: the late tool is still registered AND ToolSearch-discoverable.
+        let registry = engine.tools();
+        let result = registry
+            .get("ToolSearch")
+            .expect("ToolSearch must be registered")
+            .execute(json!({"query": "demo_contribution"}))
+            .await;
+        assert!(
+            result.content.contains("demo_contribution"),
+            "late-binding must not disturb late tool discovery; got {}",
+            result.content
+        );
+    }
+
     /// #562: `ToolSearch` is a reserved built-in name before boot MCP proxy
     /// delivery and is refreshed after live additions. A server exporting that
     /// literal name must remain callable under the deterministic MCP namespace,
