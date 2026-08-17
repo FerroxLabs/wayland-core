@@ -4,6 +4,11 @@
 //!
 //!   * **Launch:** `launch_camoufox` spawns the sidecar binary with
 //!     `kill_on_drop(true)` so a panic in the host kills the child.
+//!   * **Provisioning:** when the configured sidecar program does not resolve
+//!     and the operator opted in via `[browser.camoufox_download]`,
+//!     `ensure_ready` calls
+//!     `BrowserBinaryManager::provision_camoufox` to download + SHA-verify +
+//!     unpack it. Off by default; fail-closed without a pinned digest.
 //!   * **PID tracking:** `register` records the live child + parent PID.
 //!   * **Healthcheck:** `healthcheck` issues `GET /health` and returns
 //!     `Ok(true)` on 2xx.
@@ -44,6 +49,13 @@ pub struct SupervisorConfig {
     pub sidecar_program: Option<String>,
     /// Maximum time to wait for a newly spawned sidecar to become healthy.
     pub startup_timeout: Duration,
+    /// Opt-in auto-provisioning of the Camoufox binary. Default: **disabled**
+    /// (`CamoufoxDownloadConfig::default()`), so the supervisor fetches
+    /// nothing unless an operator turns it on in `[browser.camoufox_download]`
+    /// and pins a SHA-256 for their platform.
+    pub camoufox_download: wcore_config::browser::CamoufoxDownloadConfig,
+    /// Install root for auto-provisioned browser binaries.
+    pub binary_install_root: PathBuf,
 }
 
 impl Default for SupervisorConfig {
@@ -55,14 +67,21 @@ impl Default for SupervisorConfig {
             healthcheck_url: "http://localhost:9377/health".to_string(),
             sidecar_program: None,
             startup_timeout: Duration::from_secs(15),
+            camoufox_download: wcore_config::browser::CamoufoxDownloadConfig::default(),
+            binary_install_root: home_bin_dir(),
         }
     }
 }
 
 impl SupervisorConfig {
     /// Production configuration for the locally managed Camoufox sidecar.
-    /// The command may be overridden by Desktop or an operator; Core never
-    /// invokes a package manager or downloads executable code at runtime.
+    /// The command may be overridden by Desktop or an operator.
+    ///
+    /// Core still invokes no package manager. It downloads executable code
+    /// only when the operator has explicitly enabled
+    /// `[browser.camoufox_download]` AND pinned a SHA-256 for their platform;
+    /// the default config leaves that switch off, which is the pre-existing
+    /// "never downloads" behaviour verbatim.
     pub fn local_camoufox(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/');
         Self {
@@ -71,9 +90,34 @@ impl SupervisorConfig {
                 std::env::var("WAYLAND_CAMOUFOX_BIN")
                     .unwrap_or_else(|_| "camofox-browser".to_string()),
             ),
+            camoufox_download: configured_camoufox_download(),
             ..Self::default()
         }
     }
+}
+
+/// The operator's `[browser.camoufox_download]` block, read once per process.
+///
+/// `local_camoufox` is the only production constructor of the Camoufox
+/// supervisor (`adapter::from_spec`), and it already resolves the sidecar
+/// program from the environment, so config resolution belongs here too. A
+/// config that cannot be read yields the default - which is *disabled*, so
+/// the failure mode is "no auto-download", never "unverified download".
+fn configured_camoufox_download() -> wcore_config::browser::CamoufoxDownloadConfig {
+    static CACHE: OnceLock<wcore_config::browser::CamoufoxDownloadConfig> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            wcore_config::config::load_merged_config_file(None)
+                .map(|file| file.browser.camoufox_download)
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+fn home_bin_dir() -> PathBuf {
+    wcore_config::config::profile_home()
+        .join("browser")
+        .join("bin")
 }
 
 fn home_pid_dir() -> PathBuf {
@@ -280,7 +324,7 @@ impl BrowserSupervisor {
     /// externally managed service is reused. Otherwise Core starts only the
     /// already-installed command and waits under a fixed deadline.
     pub async fn ensure_ready(self: &Arc<Self>) -> Result<(), String> {
-        let Some(program) = self.config.sidecar_program.as_deref() else {
+        let Some(configured_program) = self.config.sidecar_program.clone() else {
             return Ok(());
         };
 
@@ -292,6 +336,9 @@ impl BrowserSupervisor {
         {
             return Ok(());
         }
+
+        let resolved_program = self.resolve_sidecar_program(&configured_program).await?;
+        let program = resolved_program.as_str();
 
         let session_id = format!("camoufox-sidecar-{}", std::process::id());
         // A prior owned sidecar may be alive but unhealthy. Remove it before
@@ -335,6 +382,45 @@ Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
                 ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// The executable [`Self::ensure_ready`] will actually spawn.
+    ///
+    /// Returns the configured program unchanged when it already resolves
+    /// (PATHEXT-aware via `which`, resolve-only - nothing is executed), and
+    /// unchanged when auto-download is off, which is the default. Only when
+    /// the program is missing AND the operator enabled
+    /// `[browser.camoufox_download]` does this reach the network, and then
+    /// only through the fail-closed
+    /// [`crate::binary::BrowserBinaryManager::provision_camoufox`]: an
+    /// unconfigured platform or an unpinned digest is an error here, never a
+    /// silent unverified fetch.
+    async fn resolve_sidecar_program(&self, program: &str) -> Result<String, String> {
+        if which::which(program).is_ok() {
+            return Ok(program.to_string());
+        }
+        if !self.config.camoufox_download.enabled {
+            // Unchanged pre-existing behaviour: let the spawn below fail with
+            // the actionable "install it / set WAYLAND_CAMOUFOX_BIN" message.
+            return Ok(program.to_string());
+        }
+        let manager = crate::binary::BrowserBinaryManager::new(
+            self.config.binary_install_root.clone(),
+            false,
+        );
+        match manager
+            .provision_camoufox(&self.config.camoufox_download)
+            .await
+        {
+            Ok(Some(path)) => path
+                .to_str()
+                .map(str::to_string)
+                .ok_or_else(|| "provisioned Camoufox path is not valid UTF-8".to_string()),
+            Ok(None) => Ok(program.to_string()),
+            Err(error) => Err(format!(
+                "Camoufox auto-download failed while provisioning `{program}`: {error}"
+            )),
         }
     }
 

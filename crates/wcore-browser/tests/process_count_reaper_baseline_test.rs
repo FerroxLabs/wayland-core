@@ -350,6 +350,7 @@ fn cfg_for(program: &std::path::Path, port: u16, pid_dir: PathBuf) -> Supervisor
         healthcheck_url: format!("http://127.0.0.1:{port}/health"),
         sidecar_program: Some(program.to_string_lossy().into_owned()),
         startup_timeout: Duration::from_secs(20),
+        ..SupervisorConfig::default()
     }
 }
 
@@ -482,6 +483,7 @@ async fn baseline_reaper_one_interval_both_directions() {
         healthcheck_url: "http://127.0.0.1:1/health".into(),
         sidecar_program: None,
         startup_timeout: Duration::from_secs(1),
+        ..SupervisorConfig::default()
     }));
     let (mut orphan_child, orphan_pid) = spawn_real_child();
     // Participant-started check (§6a-i).
@@ -545,6 +547,7 @@ async fn baseline_reaper_one_interval_both_directions() {
         healthcheck_url: "http://127.0.0.1:1/health".into(),
         sidecar_program: None,
         startup_timeout: Duration::from_secs(1),
+        ..SupervisorConfig::default()
     }));
     let (mut keep_child, keep_pid) = spawn_real_child();
     assert!(alive(keep_pid), "ARM 2: the child never started");

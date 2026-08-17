@@ -5221,6 +5221,11 @@ fn merge_config_files_with_trust(
     let browser = if project.browser.policy.default_action != default_browser_policy.default_action
         || !project.browser.policy.allowed_origins.is_empty()
         || !project.browser.policy.denied_origins.is_empty()
+        // A project block that configures ONLY [browser.camoufox_download]
+        // leaves every policy field at its default; without this term the
+        // whole block loses to global and the operator gets no diagnostic —
+        // the silent-drop failure mode config_hint.rs documents.
+        || project.browser.camoufox_download != crate::browser::CamoufoxDownloadConfig::default()
     {
         project.browser
     } else {

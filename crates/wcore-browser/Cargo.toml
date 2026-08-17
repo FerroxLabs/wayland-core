@@ -47,6 +47,12 @@ parking_lot.workspace = true
 # PATHEXT-aware on Windows; same version wcore-sandbox already pins.
 which = "6"
 
+# F7 — archive extraction for the opt-in Camoufox binary provisioning path.
+# Format is chosen by magic bytes, so both are needed on every platform.
+tar.workspace    = true
+flate2.workspace = true
+zip.workspace    = true
+
 # Wave BR — supervisor uses libc::kill(pid, 0) for parent-PID liveness probes.
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

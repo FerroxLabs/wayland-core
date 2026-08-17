@@ -9374,6 +9374,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chromiumoxide",
+ "flate2",
  "futures",
  "ipnet",
  "libc",
@@ -9382,6 +9383,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -9397,6 +9399,7 @@ dependencies = [
  "which 6.0.3",
  "wiremock",
  "workspace-hack",
+ "zip 2.4.2",
 ]
 
 [[package]]
