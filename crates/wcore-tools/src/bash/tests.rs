@@ -1241,7 +1241,8 @@ fn child_workspace_policy_strips_git_authority_env_and_denies_parent_roots() {
         .with_authority_read_deny([parent.clone(), git_common.clone()])
         .with_authority_write_deny([parent.clone(), git_common.clone()])
         .with_git_authority_env_deny();
-    let (manifest, _) = build_sandbox_pieces_for_session("git status", Some(&policy), Some(&allow));
+    let (manifest, _) =
+        build_sandbox_pieces_for_session("git status", Some(&policy), Some(&allow), true);
 
     assert!(manifest.fs_read_deny.contains(&parent));
     assert!(manifest.fs_read_deny.contains(&git_common));
