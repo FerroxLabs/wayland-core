@@ -27,10 +27,14 @@
 // v6 (F23-03): adds `memory_privacy_scope` and `memory_retention` — the
 // operator's controls over what may be recalled into a prompt. Both are
 // keyed by the same (partition, tier) grid cell the access gate governs.
+//
+// v7 (#694): rebuilds `evolved_prompts` with a NULLABLE `score` so "no scorer
+// has ever measured this row" is representable instead of being spelled with
+// a made-up number.
 
 use crate::error::{MemoryError, Result};
 
-pub const CURRENT_VERSION: u32 = 6;
+pub const CURRENT_VERSION: u32 = 7;
 
 const V1_SQL: &str = include_str!("v1.sql");
 const V2_SQL: &str = include_str!("v2_evolved_prompts.sql");
@@ -38,6 +42,7 @@ const V3_SQL: &str = include_str!("v3_vec_episodes.sql");
 const V4_SQL: &str = include_str!("v4_vec_episodes_dim.sql");
 const V5_SQL: &str = include_str!("v5_procedure_latency.sql");
 const V6_SQL: &str = include_str!("v6_recall_control.sql");
+const V7_SQL: &str = include_str!("v7_evolved_prompts_score_nullable.sql");
 
 /// Apply all pending migrations on the given connection.
 ///
@@ -74,6 +79,9 @@ pub fn apply_migrations(
     }
     if installed < 6 {
         apply_v6(conn)?;
+    }
+    if installed < 7 {
+        apply_v7(conn)?;
     }
     Ok(())
 }
@@ -214,6 +222,21 @@ fn apply_v6(conn: &mut rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_v7(conn: &mut rusqlite::Connection) -> Result<()> {
+    // v7 rebuilds `evolved_prompts` to drop NOT NULL from `score`, which SQLite
+    // cannot do in place. The rebuild copies every row and the version bump
+    // rides the same transaction, so a crash leaves the pre-migration table
+    // intact rather than a half-copied one.
+    let tx = conn.transaction().map_err(MemoryError::Db)?;
+    tx.execute_batch(V7_SQL)
+        .map_err(|e| MemoryError::Migration {
+            version: 7,
+            source: e,
+        })?;
+    tx.commit().map_err(MemoryError::Db)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,6 +319,117 @@ mod tests {
             .next()
             .is_some();
         assert!(has_col, "procedures.last_latency_ms must exist after v5");
+    }
+
+    /// #694 — upgrading a store that was already written under v6.
+    ///
+    /// The v6 table declared `score REAL NOT NULL`, so the auto-skill drafter
+    /// had to put *something* there and put a hardcoded 0.7. Those rows are
+    /// already on real users' disks. The migration must (a) preserve every
+    /// genuinely measured score untouched, (b) retire the fabricated ones to
+    /// NULL rather than carrying the defect forward, and (c) leave the column
+    /// able to accept NULL from now on.
+    #[test]
+    fn v7_retires_fabricated_auto_draft_scores_on_an_existing_store() {
+        let mut conn = open_conn_with_vec();
+        // Stop at v6 so this is a genuine upgrade of a pre-existing store,
+        // not a fresh database that never held the old shape.
+        conn.execute_batch(V1_SQL).unwrap();
+        conn.execute_batch(V2_SQL).unwrap();
+        conn.execute_batch(V3_SQL).unwrap();
+        conn.execute_batch(V4_SQL).unwrap();
+        conn.execute_batch(V5_SQL).unwrap();
+        conn.execute_batch(V6_SQL).unwrap();
+        assert_eq!(current_schema_version(&conn).unwrap(), 6);
+
+        // Control: the old shape really did reject NULL, which is why the
+        // drafter had a number to invent in the first place.
+        assert!(
+            conn.execute(
+                "INSERT INTO evolved_prompts \
+                 (id, skill_name, prompt_body, score, scorer, generation, created_at) \
+                 VALUES ('n', 's', 'b', NULL, 'bench', 0, 1)",
+                [],
+            )
+            .is_err(),
+            "pre-v7 `score` must be NOT NULL or this test proves nothing"
+        );
+
+        conn.execute(
+            "INSERT INTO evolved_prompts \
+             (id, skill_name, prompt_body, score, scorer, generation, created_at) \
+             VALUES ('measured', 'real-skill', 'body', 0.42, 'bench', 0, 100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO evolved_prompts \
+             (id, skill_name, prompt_body, score, scorer, generation, created_at) \
+             VALUES ('fabricated', 'auto-sig', 'body', 0.7, 'auto_drafter', 0, 200)",
+            [],
+        )
+        .unwrap();
+
+        apply_migrations(&mut conn, None).unwrap();
+        assert_eq!(current_schema_version(&conn).unwrap(), 7);
+
+        let measured: Option<f64> = conn
+            .query_row(
+                "SELECT score FROM evolved_prompts WHERE id = 'measured'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            measured,
+            Some(0.42),
+            "a real measurement must survive the rebuild unchanged"
+        );
+
+        let fabricated: Option<f64> = conn
+            .query_row(
+                "SELECT score FROM evolved_prompts WHERE id = 'fabricated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fabricated, None,
+            "the drafter's hardcoded score must be retired, not migrated"
+        );
+
+        // The column now accepts the absence of a measurement.
+        conn.execute(
+            "INSERT INTO evolved_prompts \
+             (id, skill_name, prompt_body, score, scorer, generation, created_at) \
+             VALUES ('fresh', 'auto-sig', 'body', NULL, 'auto_drafter', 1, 300)",
+            [],
+        )
+        .unwrap();
+
+        // Unmeasured rows sort below measured ones, so the ranking reads that
+        // consume this table cannot be misled by the NULL.
+        let top: String = conn
+            .query_row(
+                "SELECT id FROM evolved_prompts ORDER BY score DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(top, "measured");
+
+        // The rebuild must not leave the scratch table or drop the indexes.
+        let n = names(&conn);
+        assert!(!n.iter().any(|x| x == "evolved_prompts_v7"), "{n:?}");
+        assert!(
+            n.iter()
+                .any(|x| x == "idx_evolved_prompts_skill_scorer_score"),
+            "{n:?}"
+        );
+        assert!(
+            n.iter().any(|x| x == "idx_evolved_prompts_skill_gen"),
+            "{n:?}"
+        );
     }
 
     #[test]

@@ -30,9 +30,18 @@ pub struct EvolvedPrompt {
     /// Optional pointer to the prior winner that seeded this variant.
     pub parent_id: Option<String>,
     pub prompt_body: String,
-    /// `pass_ratio` for BenchScorer, `dimensions.combined` for DefaultScorer.
-    pub score: f64,
-    /// Stable scorer identifier — currently `"bench"` or `"default"`.
+    /// The measured quality of this variant: `pass_ratio` for BenchScorer,
+    /// `dimensions.combined` for DefaultScorer.
+    ///
+    /// `None` means **no scorer has ever measured this row** (#694). It is not
+    /// a zero and it is not a default — it is the absence of a measurement,
+    /// and readers must treat it as such rather than substituting a number.
+    /// Persisted as SQL NULL, which sorts below every real score under
+    /// `ORDER BY score DESC`, so an unmeasured row cannot outrank a measured
+    /// one.
+    pub score: Option<f64>,
+    /// Stable scorer identifier — currently `"bench"`, `"default"` or
+    /// `"auto_drafter"`.
     pub scorer: String,
     /// Zero-based generation index at which this variant was emitted.
     pub generation: u32,
@@ -108,7 +117,7 @@ impl PromptStore {
             skill_name: skill_name.to_string(),
             parent_id: None, // M5+ will thread parent chains
             prompt_body: winner.mutation.body.clone(),
-            score: winner.score.dimensions.combined,
+            score: Some(winner.score.dimensions.combined),
             scorer: scorer.to_string(),
             generation: outcome.generations_run.saturating_sub(1),
             created_at,
@@ -156,10 +165,15 @@ impl PromptStore {
     /// `wcore-skills::SkillRouter::restore_seeds`. For each name we look
     /// up the top-scored winner via [`PromptStore::best_for_skill`] and
     /// map `clamp(score, 0.0..=1.0)` × 5, rounded, to a simulated-success
-    /// count. Names with no winner, or a winner whose scaled value is 0,
-    /// are skipped. This is the inter-crate seam: `wcore-skills` cannot
-    /// depend on `wcore-evolve` (the dep already runs the other way), so
-    /// callers (e.g. agent bootstrap) bridge the two via this helper.
+    /// count. Names with no winner, a winner that was never measured
+    /// (`score: None`), or a winner whose scaled value is 0, are skipped.
+    ///
+    /// The unmeasured case is skipped rather than defaulted (#694): a prior is
+    /// a claim about observed performance, so a row nothing ever scored must
+    /// leave the arm at its cold-start posterior instead of inventing one.
+    /// This is the inter-crate seam: `wcore-skills` cannot depend on
+    /// `wcore-evolve` (the dep already runs the other way), so callers
+    /// (e.g. agent bootstrap) bridge the two via this helper.
     pub fn seed_pairs_for(
         &self,
         candidates: &[String],
@@ -172,8 +186,12 @@ impl PromptStore {
             let Some(top) = winners.first() else {
                 continue;
             };
+            // No measurement, no prior. See the doc comment above.
+            let Some(measured) = top.score else {
+                continue;
+            };
             // 0.0..=1.0 → 0..=5 simulated successes.
-            let scaled = (top.score.clamp(0.0, 1.0) * 5.0).round() as u64;
+            let scaled = (measured.clamp(0.0, 1.0) * 5.0).round() as u64;
             if scaled > 0 {
                 out.push((name.clone(), scaled));
             }
@@ -240,7 +258,7 @@ mod tests {
             skill_name: skill.to_string(),
             parent_id: None,
             prompt_body: format!("body for {id}"),
-            score,
+            score: Some(score),
             scorer: scorer.to_string(),
             generation,
             created_at: 1_000 + generation as i64,
@@ -417,5 +435,68 @@ mod tests {
                 .is_empty()
         );
         assert!(s.all_for_skill("never-evolved").unwrap().is_empty());
+    }
+
+    /// #694 — a row nothing has measured must not be handed a router prior.
+    /// The prior is a claim about observed performance; substituting any
+    /// number for a missing measurement is the defect, whatever the number.
+    #[test]
+    fn seed_pairs_for_skips_unmeasured_rows() {
+        let s = fresh_store();
+        let mut unmeasured = sample("u", "drafted", 0, 0.0, "auto_drafter");
+        unmeasured.score = None;
+        s.record_variant(&unmeasured).unwrap();
+
+        let pairs = s
+            .seed_pairs_for(&["drafted".to_string()], "auto_drafter", 1)
+            .unwrap();
+        assert!(
+            pairs.is_empty(),
+            "an unmeasured row must seed nothing, got {pairs:?}"
+        );
+
+        // Control: the same name with a real measurement DOES seed, so the
+        // assertion above is about the missing score and not about the query
+        // failing to find anything.
+        s.record_variant(&sample("m", "drafted", 1, 0.6, "auto_drafter"))
+            .unwrap();
+        let pairs = s
+            .seed_pairs_for(&["drafted".to_string()], "auto_drafter", 1)
+            .unwrap();
+        assert_eq!(pairs, vec![("drafted".to_string(), 3)]);
+    }
+
+    /// An unmeasured row must never sort above a measured one: `best_for_skill`
+    /// is `ORDER BY score DESC`, and SQL NULL sorts below every value there.
+    #[test]
+    fn unmeasured_rows_sort_below_measured_ones() {
+        let s = fresh_store();
+        let mut unmeasured = sample("u", "s", 0, 0.0, "bench");
+        unmeasured.score = None;
+        s.record_variant(&unmeasured).unwrap();
+        s.record_variant(&sample("low", "s", 1, 0.01, "bench"))
+            .unwrap();
+
+        let got = s.best_for_skill("s", "bench", 10).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0].id, "low",
+            "even a near-zero measurement outranks none"
+        );
+        assert_eq!(got[1].score, None);
+    }
+
+    /// The NULL score survives a write/read round trip as `None` rather than
+    /// being silently coerced to a number by the row mapper.
+    #[test]
+    fn unmeasured_score_round_trips_as_none() {
+        let s = fresh_store();
+        let mut unmeasured = sample("u", "s", 0, 0.0, "auto_drafter");
+        unmeasured.score = None;
+        s.record_variant(&unmeasured).unwrap();
+
+        let got = s.all_for_skill("s").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].score, None);
     }
 }
