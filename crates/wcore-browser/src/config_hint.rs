@@ -161,8 +161,9 @@ pub fn loopback_blocked_hint(refusal: &str) -> String {
          {}\n\
          {ENABLE_LOOPBACK_TOML}\n\
          Only the ports listed above become reachable. Private (RFC 1918), \
-         link-local and cloud-metadata addresses stay blocked, and a public \
-         hostname that resolves to 127.0.0.1 is still refused as DNS rebinding.",
+         link-local and cloud-metadata addresses stay blocked when they appear \
+         literally in the URL. The host is NOT re-checked after DNS resolution, \
+         so do not rely on this gate to stop a name that resolves inward.",
         config_target_block()
     )
 }
@@ -261,6 +262,30 @@ mod tests {
         assert!(
             hint.contains("[browser.policy.loopback]"),
             "hint never names the loopback setting:\n{hint}"
+        );
+    }
+
+    /// The hint must not promise DNS-rebinding protection while
+    /// `BrowserPolicy::check_resolved_host` has no production caller.
+    ///
+    /// The guard exists and is unit-tested, but every call site is in
+    /// `#[cfg(test)]` or `tests/` -- so on the executed path a public hostname
+    /// that resolves to a loopback or private address is never re-checked.
+    /// Claiming otherwise in a refusal message tells the operator they are
+    /// protected by something that does not run. If the guard is ever wired
+    /// into the live navigation path, update the hint AND this test together.
+    #[test]
+    fn loopback_hint_claims_no_protection_the_live_path_does_not_have() {
+        let hint = loopback_blocked_hint("loopback hostname blocked: localhost");
+        let lowered = hint.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("rebinding"),
+            "the hint promises DNS-rebinding protection, but check_resolved_host \
+             has no production caller, so nothing re-checks the resolved host:\n{hint}"
+        );
+        assert!(
+            lowered.contains("not re-checked after dns resolution"),
+            "the hint must state the real boundary so an operator is not misled:\n{hint}"
         );
     }
 
