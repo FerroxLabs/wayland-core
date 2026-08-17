@@ -74,6 +74,61 @@ Rules:
 
 This fits scenarios like DeepSeek gateways and internal OpenAI-compatible services.
 
+---
+
+## Multiple accounts on one provider
+
+A team that holds several accounts with the *same* provider — a dozen OpenRouter
+or NVIDIA accounts, say — gives each account its own alias. An alias used this
+way is an **account**: it names one credential, it is selected per session, and
+its spend is attributed to its own name.
+
+```toml
+[providers.or-research]
+provider = "openrouter"
+
+[providers.or-production]
+provider = "openrouter"
+model = "anthropic/claude-sonnet-4-6"
+```
+
+Store each account's key in the credential ladder (OS keyring, else the
+encrypted vault) — **never** as a cleartext `api_key` in this file:
+
+```bash
+wayland-core auth add or-research  <key>
+wayland-core auth add or-production <key>
+wayland-core auth list          # shows every account and where its key lives
+```
+
+Then pick one per run, or set a default:
+
+```bash
+wayland-core --provider or-research  "Draft the outline"
+wayland-core --provider or-production "Ship it"
+```
+
+```toml
+[default]
+provider = "or-production"
+```
+
+Rules:
+
+- There is no limit on the number of accounts per provider.
+- Each account gets its own ladder slot, `providers.<id>.api_key`. Account ids
+  may use ASCII letters, digits, `_` and `-` (max 64 characters).
+- An account id may not shadow a built-in provider slug — built-ins always win.
+- An account with **no** credential of its own inherits the underlying
+  provider's, exactly as it inherits `model` and `base_url`. Give every account
+  its own key if you want its spend separated.
+- `auth add` refuses to validate an account that overrides `base_url`: the key
+  belongs to that endpoint, and posting it to the built-in provider's endpoint
+  to "check" it would send your credential to a host that never issued it. Use
+  `--no-validate` for those.
+- Selection is explicit. There is no automatic rotation or failover between
+  accounts.
+
 ### Generic / self-hosted OpenAI-compatible endpoints (vLLM, llama.cpp, LM Studio)
 
 Point `base_url` at the server's API root **without** a trailing `/v1` — the engine
