@@ -34,7 +34,7 @@ use wcore_channels::event::{Attachment, ChannelEvent, ChatType, IncomingMessage,
 
 use crate::error::MatrixError;
 use crate::sync_store::{self, Loaded};
-use crate::token::{Renewal, TokenSource};
+use crate::token::{self, Renewal, TokenSource};
 
 /// Long-poll timeout (ms) handed to the homeserver's `/sync`. The HTTP read
 /// timeout is this plus a buffer so a wedged proxy can't park us forever.
@@ -364,13 +364,7 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                 // `AuthExpired` (exactly once, from the token source) and stops
                 // — because a refresh path that papers over a real revocation
                 // is worse than no refresh path.
-                if matches!(
-                    e,
-                    MatrixError::Http {
-                        status: 401 | 403,
-                        ..
-                    }
-                ) {
+                if token::is_credential_rejection(&e) {
                     match tokens.renew_after_rejection(&presented, &e).await {
                         Renewal::Renewed => {
                             consecutive_failures = 0;
@@ -1324,44 +1318,72 @@ mod tests {
         let _ = std::fs::remove_file(&state);
     }
 
-    /// The 400 cursor-rejection path predates this change and must keep its own
-    /// behaviour: re-seed, do NOT classify as an auth rejection. Without this,
-    /// a broad `4xx` classification would silently convert a recoverable cursor
-    /// fault into a terminal "rotate your token".
+    /// What counts as a CREDENTIAL rejection, asserted against the production
+    /// predicate.
+    ///
+    /// This test used to build a `MatrixError` and then `matches!` it against
+    /// the same `status: 401 | 403` pattern written inline — it asserted a fact
+    /// about `matches!`, referenced no production code, and would have stayed
+    /// green through any change to the real classification. It now calls
+    /// [`token::is_credential_rejection`], the one predicate both this loop and
+    /// the send path gate on.
+    ///
+    /// Three obligations, and each row can fail on its own:
+    ///
+    /// * The 400 cursor-rejection path predates #936 and must keep re-seeding
+    ///   rather than becoming a terminal "rotate your token".
+    /// * A token errcode IS the credential, on either status.
+    /// * `M_FORBIDDEN` on 403 is the bot's POWER LEVEL, not its identity.
+    ///   Classifying it as a credential rejection latches the channel
+    ///   `Unauthenticated` for a token that still works.
     #[test]
-    fn only_401_and_403_are_auth_rejections() {
+    fn credential_rejection_is_the_errcode_not_the_bare_status() {
         for status in [400_u16, 404, 429, 500, 502] {
-            let e = MatrixError::Http {
-                status,
-                body: r#"{"errcode":"M_UNKNOWN"}"#.to_string(),
-            };
             assert!(
-                !matches!(
-                    e,
-                    MatrixError::Http {
-                        status: 401 | 403,
-                        ..
-                    }
-                ),
+                !token::is_credential_rejection(&MatrixError::Http {
+                    status,
+                    body: r#"{"errcode":"M_UNKNOWN"}"#.to_string(),
+                }),
                 "HTTP {status} must not be classified as a credential rejection"
             );
         }
         for status in [401_u16, 403] {
-            let e = MatrixError::Http {
-                status,
-                body: r#"{"errcode":"M_UNKNOWN_TOKEN"}"#.to_string(),
-            };
             assert!(
-                matches!(
-                    e,
-                    MatrixError::Http {
-                        status: 401 | 403,
-                        ..
-                    }
-                ),
-                "HTTP {status} IS a credential rejection"
+                token::is_credential_rejection(&MatrixError::Http {
+                    status,
+                    body: r#"{"errcode":"M_UNKNOWN_TOKEN"}"#.to_string(),
+                }),
+                "HTTP {status} M_UNKNOWN_TOKEN IS a credential rejection"
             );
         }
+        // A gateway that stripped the Matrix body still refused our identity.
+        assert!(
+            token::is_credential_rejection(&MatrixError::Http {
+                status: 401,
+                body: "<html>Unauthorized</html>".to_string(),
+            }),
+            "a bare 401 is still a credential rejection; no retry fixes it"
+        );
+        // The row this predicate exists for.
+        assert!(
+            !token::is_credential_rejection(&MatrixError::Http {
+                status: 403,
+                body: r#"{"errcode":"M_FORBIDDEN","error":"no permission to redact"}"#.to_string(),
+            }),
+            "M_FORBIDDEN is a power level, not a dead token; classifying it \
+             latches the channel Unauthenticated while every send still works"
+        );
+        assert!(
+            !token::is_credential_rejection(&MatrixError::Http {
+                status: 403,
+                body: "blocked by upstream proxy".to_string(),
+            }),
+            "a bare 403 is an upstream block, not a credential verdict"
+        );
+        assert!(
+            !token::is_credential_rejection(&MatrixError::Network("timeout".to_string())),
+            "a network fault is not a credential verdict"
+        );
     }
 
     /// **Quadrant 2 — the token merely EXPIRED (#936).**

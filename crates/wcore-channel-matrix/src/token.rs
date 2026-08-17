@@ -457,6 +457,58 @@ fn refresh_lock_path(api_base: &str, access_handle: &str) -> PathBuf {
         .join(format!("matrix-{key:016x}.refresh.lock"))
 }
 
+/// Whether this rejection is about the CREDENTIAL, as opposed to the operation.
+///
+/// The single predicate both the `/sync` loop and the send path gate on, so
+/// there is exactly one definition of "the homeserver refused who we are".
+///
+/// Matrix spends 401 and 403 on two different questions, and the status alone
+/// cannot tell them apart:
+///
+/// * **401** — authentication. The token is not accepted. Always a credential
+///   rejection, errcode or not: a bare 401 from a gateway that stripped the
+///   Matrix body is still something no retry can fix.
+/// * **403 with a token errcode** — a credential rejection too. The spec puts
+///   `M_UNKNOWN_TOKEN` on 401, but deployments (and reverse proxies in front of
+///   them) do return it on 403, and refusing to renew there would strand a
+///   channel that a refresh would have healed.
+/// * **403 with anything else** — authorization, NOT authentication.
+///   `M_FORBIDDEN` on a redaction means the bot's power level is too low; a
+///   bare 403 usually means something in front of the homeserver blocked the
+///   request. The token is fine.
+///
+/// The last row is why this exists. Folding it in publishes `AuthExpired`,
+/// which the manager projects onto `HealthState::Unauthenticated` and which
+/// `TokenSource` latches so it can never be walked back — so ONE refused
+/// redaction would mark the channel permanently unauthenticated while every
+/// later send kept succeeding. That is the health surface lying in the
+/// direction the operator acts on, and `channel reload` cannot raise a power
+/// level.
+pub(crate) fn is_credential_rejection(e: &MatrixError) -> bool {
+    let MatrixError::Http { status, body } = e else {
+        return false;
+    };
+    match status {
+        401 => true,
+        403 => matches!(
+            errcode_of(body),
+            Some("M_UNKNOWN_TOKEN" | "M_MISSING_TOKEN")
+        ),
+        _ => false,
+    }
+}
+
+/// The homeserver's `errcode`, when the body is a readable Matrix error.
+fn errcode_of(body: &str) -> Option<&str> {
+    // Borrowed out of `body` rather than through a `Value`, so the caller can
+    // match on `&str` without an allocation per rejection.
+    let rest = body.split_once("\"errcode\"")?.1;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
 /// Whether the homeserver said this rejection is a SOFT logout — the access
 /// token is invalid but the device survives, so a refresh token can recover it.
 ///

@@ -173,13 +173,9 @@ impl MatrixChannel {
             Ok(value) => return Ok(value),
             Err(e) => e,
         };
-        if !matches!(
-            rejection,
-            MatrixError::Http {
-                status: 401 | 403,
-                ..
-            }
-        ) {
+        // The errcode, not the bare status: a 403 `M_FORBIDDEN` is the bot's
+        // power level and must not be reported as a dead credential.
+        if !token::is_credential_rejection(&rejection) {
             return Err(ChannelError::Transport(rejection.to_string()));
         }
         // Secret-free from here on: the homeserver's error body is an echo of
@@ -848,6 +844,90 @@ user_id = "@bot:matrix.example.org"
             "the homeserver's own errcode must reach the operator, got {err}"
         );
         ch.stop().await.unwrap();
+    }
+
+    /// A PERMISSION error must not be reported as a dead credential.
+    ///
+    /// `with_access_token` funnels every outbound call through one 401/403
+    /// decision, which is what stops the send path having its own opinion about
+    /// expiry. But Matrix uses those two statuses for two different things:
+    /// `M_UNKNOWN_TOKEN` says *who you are* is no longer accepted, while
+    /// `M_FORBIDDEN` says *what you asked for* is not allowed — an
+    /// under-privileged bot asked to redact someone else's event, with a
+    /// perfectly live token.
+    ///
+    /// Collapsing them publishes `AuthExpired`, which the channel manager
+    /// projects onto `HealthState::Unauthenticated` and which `TokenSource`
+    /// latches so it can never be walked back. One refused redaction would
+    /// therefore mark the channel permanently unauthenticated while every
+    /// subsequent send kept succeeding — health lying, in the direction the
+    /// operator acts on, because `channel reload` cannot fix a power level.
+    ///
+    /// **The negative half is paired with a known-positive on purpose.** An
+    /// "no `AuthExpired` was published" assertion passes just as happily if the
+    /// event can never be published at all, so the same shape is run against a
+    /// genuine `M_UNKNOWN_TOKEN` revocation, which must still fail closed.
+    #[tokio::test]
+    async fn a_permission_error_is_not_a_dead_credential() {
+        async fn auth_expired_after_a_refused_redaction(status: usize, body: &str) -> Vec<String> {
+            let mut server = mockito::Server::new_async().await;
+            let _m = server
+                .mock(
+                    "PUT",
+                    mockito::Matcher::Regex(
+                        r"/_matrix/client/v3/rooms/[^/]+/redact/.*".to_string(),
+                    ),
+                )
+                .with_status(status)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                .create_async()
+                .await;
+
+            let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+            let mut ch = MatrixChannel::with_base("test", cfg(), creds, server.url());
+            ch.start().await.unwrap();
+            let err = ch.delete_message(TEST_ROOM, "$orig123").await.unwrap_err();
+            assert!(
+                err.to_string().contains("M_"),
+                "the homeserver's errcode must reach the operator, got {err}"
+            );
+            let events = ch.poll_events().await.unwrap();
+            ch.stop().await.unwrap();
+            events
+                .into_iter()
+                .filter_map(|e| match e {
+                    ChannelEvent::AuthExpired { reason } => Some(reason),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        // Known-positive: a real revocation on the same route, same shape.
+        let revoked = auth_expired_after_a_refused_redaction(
+            401,
+            r#"{"errcode":"M_UNKNOWN_TOKEN","error":"Token is not active"}"#,
+        )
+        .await;
+        assert_eq!(
+            revoked.len(),
+            1,
+            "a revoked token must still fail closed on the send path, or the \
+             assertion below proves nothing: {revoked:?}"
+        );
+
+        // The case under test: a live token, an operation the bot may not do.
+        let forbidden = auth_expired_after_a_refused_redaction(
+            403,
+            r#"{"errcode":"M_FORBIDDEN","error":"You don't have permission to redact this event"}"#,
+        )
+        .await;
+        assert!(
+            forbidden.is_empty(),
+            "a permission error marked the credential dead; health would read \
+             Unauthenticated for a live token and `channel reload` cannot fix a \
+             power level: {forbidden:?}"
+        );
     }
 
     /// Declaration ↔ behaviour, both directions.
