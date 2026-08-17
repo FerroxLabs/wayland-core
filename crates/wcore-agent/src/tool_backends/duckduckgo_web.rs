@@ -84,26 +84,7 @@ impl WebBackend for DuckDuckGoWebBackend {
                 };
             }
         };
-        if !status.is_success() {
-            return WebOutcome::Err {
-                message: format!(
-                    "duckduckgo returned HTTP {} (body sniff: {})",
-                    status.as_u16(),
-                    html.chars().take(200).collect::<String>()
-                ),
-            };
-        }
-        let results = parse_duckduckgo_html(&html, limit);
-        if results.is_empty() {
-            return WebOutcome::Err {
-                message: "duckduckgo returned no parseable results (their HTML format may have \
-                          changed; try setting BRAVE_SEARCH_API_KEY for a structured API)"
-                    .to_string(),
-            };
-        }
-        WebOutcome::Ok {
-            payload: serde_json::json!({ "web": results }),
-        }
+        interpret_search_response(status, &html, limit)
     }
 
     async fn extract(&self, _req: ExtractRequest) -> WebOutcome {
@@ -126,6 +107,66 @@ impl WebBackend for DuckDuckGoWebBackend {
     fn backend_id(&self) -> &str {
         "duckduckgo"
     }
+}
+
+/// Classify a raw DuckDuckGo response into a [`WebOutcome`].
+///
+/// Split out of [`DuckDuckGoWebBackend::search`] so the decision — *which*
+/// of the failure modes actually happened — is testable without a network
+/// round-trip. Order matters: the anti-automation challenge is checked
+/// first because it arrives with a 2xx status and an empty result list, so
+/// every later branch would describe it wrongly.
+fn interpret_search_response(status: reqwest::StatusCode, html: &str, limit: usize) -> WebOutcome {
+    if let Some(message) = describe_challenge(status, html) {
+        return WebOutcome::Err { message };
+    }
+    if !status.is_success() {
+        return WebOutcome::Err {
+            message: format!(
+                "duckduckgo returned HTTP {} (body sniff: {})",
+                status.as_u16(),
+                html.chars().take(200).collect::<String>()
+            ),
+        };
+    }
+    let results = parse_duckduckgo_html(html, limit);
+    if results.is_empty() {
+        return WebOutcome::Err {
+            message: "duckduckgo returned no parseable results (their HTML format may have \
+                      changed; try setting BRAVE_SEARCH_API_KEY for a structured API)"
+                .to_string(),
+        };
+    }
+    WebOutcome::Ok {
+        payload: serde_json::json!({ "web": results }),
+    }
+}
+
+/// Markup fragments that appear only in DuckDuckGo's anti-automation
+/// interstitial ("Unfortunately, bots use DuckDuckGo too." plus an
+/// image puzzle) — the CSS block name and the challenge script.
+const CHALLENGE_MARKERS: [&str; 2] = ["anomaly-modal", "anomaly.js"];
+
+/// Detect a rate-limit / bot challenge and describe it truthfully.
+///
+/// DuckDuckGo serves the challenge with **HTTP 202** — a success status —
+/// and no `result__a` markup at all. Before this check existed the empty
+/// parse was reported as "their HTML format may have changed", which sent
+/// users hunting a parser bug that does not exist while the real cause was
+/// that the free HTML endpoint had throttled their IP (#930).
+fn describe_challenge(status: reqwest::StatusCode, html: &str) -> Option<String> {
+    let challenged = CHALLENGE_MARKERS.iter().any(|m| html.contains(m));
+    if !challenged && status.as_u16() != 429 {
+        return None;
+    }
+    Some(format!(
+        "duckduckgo refused this query as automated traffic (HTTP {}) and returned a bot \
+         challenge page instead of search results — nothing was searched, and this is NOT a \
+         parsing failure. The free HTML endpoint rate-limits by IP after a couple of rapid \
+         queries. Wait a minute and retry, or set BRAVE_SEARCH_API_KEY / TAVILY_API_KEY (or \
+         WAYLAND_WEB_BACKEND) to use a structured search API that does not throttle scrapers.",
+        status.as_u16()
+    ))
 }
 
 /// Parse DuckDuckGo's HTML-lite result list into `[{title,url,snippet}]`.
@@ -247,4 +288,113 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::StatusCode;
+
+    /// Excerpt of a real capture from `https://html.duckduckgo.com/html/`
+    /// (POST `q=rust+programming+language`, 2026-08-17, from a datacentre
+    /// IP): HTTP 202, 14 340 bytes, zero `result__a` occurrences.
+    const CHALLENGE_FIXTURE: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><title>DuckDuckGo</title>
+<script src="../anomaly.js?sv=html&cc=sre"></script></head>
+<body>
+  <div class="anomaly-modal__mask">
+    <div class="anomaly-modal__modal  is-ie" data-testid="anomaly-modal">
+      <div class="anomaly-modal__title">Unfortunately, bots use DuckDuckGo too.</div>
+      <div class="anomaly-modal__description">Please complete the following challenge to confirm this search was made by a human.</div>
+    </div>
+  </div>
+</body></html>"#;
+
+    /// A results page in the shape the parser expects.
+    const RESULTS_FIXTURE: &str = r#"<html><body>
+<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&amp;rut=x">Rust <b>Programming</b> Language</a>
+<a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F">A language empowering everyone.</a></div>
+</body></html>"#;
+
+    fn err_message(outcome: WebOutcome) -> String {
+        match outcome {
+            WebOutcome::Err { message } => message,
+            WebOutcome::Ok { payload } => panic!("expected Err, got Ok({payload})"),
+        }
+    }
+
+    /// The bug in #930: a throttled client is told its parser is stale.
+    #[test]
+    fn challenge_page_is_reported_as_rate_limit_not_format_change() {
+        let msg = err_message(interpret_search_response(
+            StatusCode::ACCEPTED,
+            CHALLENGE_FIXTURE,
+            5,
+        ));
+        assert!(
+            !msg.contains("HTML format may have changed"),
+            "rate-limit response misreported as a DuckDuckGo HTML format change: {msg}"
+        );
+        assert!(
+            msg.contains("202"),
+            "message must name the status the user can verify: {msg}"
+        );
+        assert!(
+            msg.contains("rate-limits") && msg.contains("bot challenge"),
+            "message must name the real cause: {msg}"
+        );
+    }
+
+    /// An explicit 429 is the same class of failure and must read the same,
+    /// even though it carries no challenge markup.
+    #[test]
+    fn http_429_is_reported_as_rate_limit() {
+        let msg = err_message(interpret_search_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "",
+            5,
+        ));
+        assert!(msg.contains("429") && msg.contains("rate-limits"), "{msg}");
+    }
+
+    /// Polarity control: the detector must NOT claim rate limiting for an
+    /// ordinary page that simply had nothing to parse. Without this, a
+    /// detector that fired on everything would still pass the test above.
+    #[test]
+    fn ordinary_empty_page_still_reports_a_parse_failure() {
+        let html = "<html><body><div class=\"no-results\">No results.</div></body></html>";
+        let msg = err_message(interpret_search_response(StatusCode::OK, html, 5));
+        assert!(
+            msg.contains("no parseable results"),
+            "an unchallenged empty page must keep the parser diagnosis: {msg}"
+        );
+    }
+
+    /// Non-2xx keeps its own diagnosis rather than being swept into either
+    /// of the other two.
+    #[test]
+    fn non_success_status_reports_the_http_error() {
+        let msg = err_message(interpret_search_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "<html>upstream down</html>",
+            5,
+        ));
+        assert!(msg.contains("returned HTTP 503"), "{msg}");
+    }
+
+    /// Positive control: a page that DOES carry results still parses, so a
+    /// zero above means "no results were served", not "the query failed".
+    #[test]
+    fn results_page_parses_into_web_payload() {
+        match interpret_search_response(StatusCode::OK, RESULTS_FIXTURE, 5) {
+            WebOutcome::Ok { payload } => {
+                let web = payload["web"].as_array().expect("web array");
+                assert_eq!(web.len(), 1);
+                assert_eq!(web[0]["title"], "Rust Programming Language");
+                assert_eq!(web[0]["url"], "https://www.rust-lang.org/");
+                assert_eq!(web[0]["snippet"], "A language empowering everyone.");
+            }
+            WebOutcome::Err { message } => panic!("expected Ok, got Err({message})"),
+        }
+    }
 }
