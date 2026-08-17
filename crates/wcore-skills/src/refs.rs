@@ -50,7 +50,16 @@ pub struct SkillRef {
 }
 
 pub struct SkillCatalog {
-    refs: Vec<SkillRef>,
+    /// wayland#562 — interior-mutable so a config MCP server that connects in
+    /// the BACKGROUND (json-stream `defer_config_mcp`) can merge its
+    /// `skill://` resources into the catalog the engine, `SkillTool` and the
+    /// skill router already share by `Arc`. Rebuilding the catalog and
+    /// re-installing it would only reach the engine's handle, leaving the
+    /// tool and the router on the boot-time snapshot. `std::sync::RwLock`
+    /// (not tokio) because every access is a short non-async read; no guard
+    /// is ever held across an `.await` (see `resolve`, which clones the ref
+    /// out before any await point).
+    refs: std::sync::RwLock<Vec<SkillRef>>,
     /// LRU-bounded cache of resolved bodies. Bounded so a runaway sequence
     /// of activations can't grow the session resident set unboundedly.
     /// 32 is a heuristic — typical sessions touch <10 distinct skills.
@@ -70,7 +79,7 @@ pub struct SkillCatalog {
 impl SkillCatalog {
     pub fn from_refs(refs: Vec<SkillRef>) -> Self {
         Self {
-            refs,
+            refs: std::sync::RwLock::new(refs),
             cache: Arc::new(Mutex::new(lru::LruCache::new(
                 // SAFETY: 32 is a non-zero compile-time constant.
                 std::num::NonZeroUsize::new(32).expect("32 is non-zero"),
@@ -111,40 +120,97 @@ impl SkillCatalog {
         cat
     }
 
+    /// Read the ref list, recovering from a poisoned lock. A panic while a
+    /// writer held the lock leaves the `Vec` structurally intact (the only
+    /// writers are whole-vector replacements and pushes), so refusing to read
+    /// would turn one unrelated panic into a permanently skill-less session.
+    fn read_refs(&self) -> std::sync::RwLockReadGuard<'_, Vec<SkillRef>> {
+        self.refs.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write_refs(&self) -> std::sync::RwLockWriteGuard<'_, Vec<SkillRef>> {
+        self.refs.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn len(&self) -> usize {
-        self.refs.len()
+        self.read_refs().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.refs.is_empty()
+        self.read_refs().is_empty()
     }
 
-    /// Iterate every ref, including those hidden from the model.
-    pub fn refs(&self) -> impl Iterator<Item = &SkillRef> {
-        self.refs.iter()
+    /// Snapshot every ref, including those hidden from the model.
+    ///
+    /// Returns owned clones rather than borrows: the backing list is
+    /// interior-mutable (wayland#562) so a borrow cannot outlive the lock
+    /// guard.
+    pub fn refs(&self) -> Vec<SkillRef> {
+        self.read_refs().clone()
     }
 
-    /// Iterate refs visible to the model (`!disable_model_invocation`).
-    pub fn visible(&self) -> impl Iterator<Item = &SkillRef> {
-        self.refs.iter().filter(|r| !r.disable_model_invocation)
+    /// Snapshot refs visible to the model (`!disable_model_invocation`).
+    pub fn visible(&self) -> Vec<SkillRef> {
+        self.read_refs()
+            .iter()
+            .filter(|r| !r.disable_model_invocation)
+            .cloned()
+            .collect()
     }
 
-    pub fn find(&self, name: &str) -> Option<&SkillRef> {
+    pub fn find(&self, name: &str) -> Option<SkillRef> {
         let name = name.trim_start_matches('/');
-        self.refs.iter().find(|r| r.name == name)
+        self.read_refs().iter().find(|r| r.name == name).cloned()
+    }
+
+    /// wayland#562 — merge late-arriving refs (today: `skill://` resources
+    /// from a config MCP server that finished connecting AFTER boot) into the
+    /// live catalog. Returns the refs actually added.
+    ///
+    /// A name already present is SKIPPED, so a late server can never displace
+    /// a skill that is already in this session's catalog and system-prompt
+    /// listing. That deliberately inverts boot precedence (where MCP outranks
+    /// filesystem, see `loader::load_all_skills_with_bundled`): mid-session,
+    /// silently re-pointing a name the model has already been told about is a
+    /// worse failure than the late server losing a collision. MCP skill names
+    /// are `<server>:<skill>`-namespaced, so a collision is already unusual.
+    pub fn merge_late(&self, incoming: Vec<SkillRef>) -> Vec<SkillRef> {
+        let mut guard = self.write_refs();
+        let mut added = Vec::new();
+        for r in incoming {
+            if guard.iter().any(|existing| existing.name == r.name) {
+                tracing::debug!(
+                    target: "wcore_skills::refs",
+                    skill = %r.name,
+                    "late skill merge skipped: name already in catalog"
+                );
+                continue;
+            }
+            guard.push(r.clone());
+            added.push(r);
+        }
+        added
     }
 
     /// Names visible to the model — used by SkillTool to render
     /// "available skills" in error messages.
     pub fn visible_names(&self) -> Vec<String> {
-        self.visible().map(|r| r.name.clone()).collect()
+        self.read_refs()
+            .iter()
+            .filter(|r| !r.disable_model_invocation)
+            .map(|r| r.name.clone())
+            .collect()
     }
 
     /// M3.6 — iterate every ref's name, including those hidden from the
     /// model. Used by the session-start `SkillPrioritizer` to surface the
     /// names it must reorder.
-    pub fn iter_names(&self) -> impl Iterator<Item = String> + '_ {
-        self.refs.iter().map(|r| r.name.clone())
+    pub fn iter_names(&self) -> impl Iterator<Item = String> + use<> {
+        self.read_refs()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     /// M3.6 — reorder the catalog in place so the names in `priority_order`
@@ -156,14 +222,15 @@ impl SkillCatalog {
     /// Stable for the unlisted suffix — important so the bootstrap-time
     /// reorder is a pure permutation when no telemetry exists.
     pub fn reorder_by(&mut self, priority_order: &[String]) {
-        let mut ordered: Vec<SkillRef> = Vec::with_capacity(self.refs.len());
+        let refs = self.refs.get_mut().unwrap_or_else(|e| e.into_inner());
+        let mut ordered: Vec<SkillRef> = Vec::with_capacity(refs.len());
         for name in priority_order {
-            if let Some(pos) = self.refs.iter().position(|r| &r.name == name) {
-                ordered.push(self.refs.remove(pos));
+            if let Some(pos) = refs.iter().position(|r| &r.name == name) {
+                ordered.push(refs.remove(pos));
             }
         }
-        ordered.append(&mut self.refs);
-        self.refs = ordered;
+        ordered.append(refs);
+        *refs = ordered;
     }
 
     /// Synchronous metadata lookup. Returns Some only when the catalog
@@ -210,8 +277,16 @@ impl SkillCatalog {
             }
         }
 
-        // Cache miss: look up the ref.
-        let r = match self.refs.iter().find(|r| r.name == normalized) {
+        // Cache miss: look up the ref. Cloned out of the lock: the body read
+        // below is `.await`ed and no lock guard may cross an await point.
+        // The guard is scoped to this block on purpose: it is NOT `Send`, and
+        // the body read below is `.await`ed, so a guard alive across the await
+        // would make every future holding a catalog non-`Send`.
+        let found = {
+            let guard = self.read_refs();
+            guard.iter().find(|r| r.name == normalized).cloned()
+        };
+        let r = match found {
             Some(r) => r,
             None => {
                 // W6 — not in the local catalog; widen the search to
@@ -290,7 +365,11 @@ impl SkillCatalog {
     pub async fn resolve_for_model(&self, name: &str) -> Result<Arc<SkillMetadata>, ResolveError> {
         let normalized = name.trim_start_matches('/');
 
-        if let Some(local) = self.refs.iter().find(|r| r.name == normalized) {
+        let local = {
+            let guard = self.read_refs();
+            guard.iter().find(|r| r.name == normalized).cloned()
+        };
+        if let Some(local) = local {
             if local.disable_model_invocation {
                 return Err(ResolveError::NotFound(normalized.to_string()));
             }
@@ -507,7 +586,7 @@ mod tests {
         a.disable_model_invocation = true;
         let b = make_ref("b", "");
         let cat = SkillCatalog::from_refs(vec![a, b]);
-        let visible: Vec<&str> = cat.visible().map(|r| r.name.as_str()).collect();
+        let visible: Vec<String> = cat.visible().into_iter().map(|r| r.name).collect();
         assert_eq!(
             visible,
             vec!["b"],

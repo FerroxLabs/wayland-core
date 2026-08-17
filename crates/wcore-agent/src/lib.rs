@@ -96,6 +96,7 @@ pub mod host_send_transport;
 pub mod inbound_webhook;
 pub mod journal_effects;
 pub mod journal_provider;
+pub mod late_mcp;
 pub mod mcp_curator;
 pub mod mcp_lifecycle;
 pub mod orchestration;

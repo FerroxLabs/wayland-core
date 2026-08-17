@@ -249,6 +249,24 @@ impl HookEngine {
         self.dispatcher = Some(dispatcher);
     }
 
+    /// wayland#562 — drop the dispatcher, returning plugin hooks to log-only.
+    ///
+    /// Needed by the late-MCP rebind path: when a config MCP server connects
+    /// after boot and makes a previously unique `plugin -> server` binding
+    /// AMBIGUOUS, the F5/F6 gate's answer is "do not bind". Leaving the
+    /// boot-time dispatcher installed would keep dispatching to a binding the
+    /// gate has just rejected.
+    pub fn clear_dispatcher(&mut self) {
+        self.dispatcher = None;
+    }
+
+    /// wayland#562 — whether a host dispatcher is currently installed.
+    /// Inspection only: lets a test assert that a late MCP connect actually
+    /// bound (or unbound) plugin hooks without driving a whole turn.
+    pub fn has_dispatcher(&self) -> bool {
+        self.dispatcher.is_some()
+    }
+
     /// Invoke the host dispatcher for every plugin hook registered at `phase`
     /// and fold each contribution into `outcome.injected_messages` as a
     /// provenance-labeled, untrusted **User-role** block — mirroring the

@@ -176,6 +176,33 @@ fn format_plugin_rules(rules: &[RuleSpec], cwd: &str) -> String {
     format!("The following operating rules were contributed by installed plugins:\n\n{joined}")
 }
 
+/// Render the `<system-reminder>` skills listing block.
+///
+/// Extracted from [`build_system_prompt`] so the wayland#562 late-bind path
+/// (`crate::late_mcp`) emits a byte-identical block for skills that arrive
+/// after boot, instead of inventing a second wording for the same contract.
+///
+/// Skill name/description come from plugins/MCP resources (untrusted). Forged
+/// host trust tags (e.g. a skill named `</system-reminder>...`) are defanged
+/// before embedding, matching the hook/memory sinks (hooks/mod.rs, engine.rs).
+/// Returns an empty string when nothing fits the budget.
+pub fn format_skills_section(
+    visible_skills: &[SkillRef],
+    context_window_tokens: Option<usize>,
+) -> String {
+    let listing = wcore_config::hooks::neutralize_trust_delimiters(&format_skills_within_budget(
+        visible_skills,
+        context_window_tokens,
+    ));
+    if listing.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n{listing}\n</system-reminder>"
+        )
+    }
+}
+
 /// Build the system prompt from config and environment.
 ///
 /// Sections are assembled in this order:
@@ -341,22 +368,10 @@ pub fn build_system_prompt(
         .collect();
 
     if !visible_skills.is_empty() {
-        let skills_section = cache.sections.entry("skills").or_insert_with(|| {
-            // Skill name/description come from plugins/MCP resources (untrusted).
-            // Defang any forged host trust tags (e.g. a skill named
-            // `</system-reminder>...`) before embedding in the system prompt,
-            // matching the hook/memory sinks (hooks/mod.rs, engine.rs).
-            let listing = wcore_config::hooks::neutralize_trust_delimiters(
-                &format_skills_within_budget(&visible_skills, context_window_tokens),
-            );
-            if listing.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n{listing}\n</system-reminder>"
-                )
-            }
-        });
+        let skills_section = cache
+            .sections
+            .entry("skills")
+            .or_insert_with(|| format_skills_section(&visible_skills, context_window_tokens));
         if !skills_section.is_empty() {
             parts.push(skills_section.clone());
         }
