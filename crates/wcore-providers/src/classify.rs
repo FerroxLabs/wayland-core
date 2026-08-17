@@ -23,6 +23,15 @@ pub fn classify_failover(
     if let Some(s) = http_status
         && let Some(r) = classify_by_status(s)
     {
+        // #949: for a generic 5xx, "transient" is a GUESS derived from the
+        // status alone. When the body the provider already sent says otherwise
+        // in unambiguous terms, the body is the better signal — see
+        // `permanent_reason_in_5xx_body`, which is deliberately narrow.
+        if let Some(b) = body_text
+            && let Some(p) = permanent_reason_in_5xx_body(s, b)
+        {
+            return p;
+        }
         return r;
     }
     // Tier 2: body text patterns
@@ -62,6 +71,53 @@ fn classify_by_status(status: u16) -> Option<FailoverReason> {
         400 => Some(FailoverReason::Format),
         _ => None,
     }
+}
+
+/// True when no retry of the SAME request against the SAME key can succeed.
+///
+/// Deliberately excludes `Overloaded`, `RateLimit` and `Timeout`: those are the
+/// reasons a retry exists for. `Format`/`ContextOverflow` are also excluded —
+/// they are resolved by rewriting or compacting the request, which is a
+/// different recovery path, not a refusal to retry.
+fn is_permanent_reason(r: FailoverReason) -> bool {
+    matches!(
+        r,
+        FailoverReason::Auth
+            | FailoverReason::AuthPermanent
+            | FailoverReason::Billing
+            | FailoverReason::ModelNotFound
+    )
+}
+
+/// #949: a 5xx that is not an explicit overload signal, carrying a body that
+/// names an unambiguous PERMANENT failure, is permanent.
+///
+/// FluxRouter answers a model-permission rejection ("key not allowed to access
+/// model") with HTTP 500 and `"type":"auth_error"`. Classified on status alone
+/// that is `Timeout`, and `is_retryable_http_status` calls any `>= 500`
+/// transient — so the entire request context is re-sent `DEFAULT_MAX_RETRIES`
+/// times for an outcome that cannot succeed, and the user reads "the provider
+/// is flaky" when the actionable truth is "this key cannot use this model".
+///
+/// The narrowing is the point:
+///   * 503 and 529 are EXPLICIT "overloaded" signals and are never overridden.
+///     A busy server frequently describes itself in words this body tier
+///     matches, and demoting a real overload to permanent would break failover.
+///   * only a permanent reason overrides. A body-derived `Overloaded` or
+///     `RateLimit` leaves the 5xx transient, exactly as before.
+///
+/// This is not a hardcoded provider quirk: the discriminator is the body the
+/// provider already sent, matched by the same provider-neutral
+/// [`classify_by_body`] used by tier 2.
+///
+/// Both the failover classifier and `ProviderError::is_retryable` gate on this
+/// one function, so the two cannot drift into disagreeing about whether the
+/// same response is worth re-sending.
+pub fn permanent_reason_in_5xx_body(status: u16, body: &str) -> Option<FailoverReason> {
+    if !(500..=599).contains(&status) || matches!(status, 503 | 529) {
+        return None;
+    }
+    classify_by_body(body).filter(|r| is_permanent_reason(*r))
 }
 
 fn classify_by_body(body: &str) -> Option<FailoverReason> {

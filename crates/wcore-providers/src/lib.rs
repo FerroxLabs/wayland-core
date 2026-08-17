@@ -258,7 +258,14 @@ impl ProviderError {
     pub fn is_retryable(&self) -> bool {
         match self {
             ProviderError::RateLimited { .. } | ProviderError::Connection(_) => true,
-            ProviderError::Api { status, .. } => crate::retry::is_retryable_http_status(*status),
+            // #949: the status alone only says "5xx, probably transient".
+            // `message` carries the body the provider sent; when that body names
+            // an unambiguous permanent failure, retrying re-sends the entire
+            // request context for an outcome that cannot succeed.
+            ProviderError::Api { status, message } => {
+                crate::retry::is_retryable_http_status(*status)
+                    && crate::classify::permanent_reason_in_5xx_body(*status, message).is_none()
+            }
             ProviderError::Http(_)
             | ProviderError::Parse(_)
             | ProviderError::PromptTooLong(_)
