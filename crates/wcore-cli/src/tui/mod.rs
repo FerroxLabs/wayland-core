@@ -94,7 +94,7 @@ use self::app::App;
 pub use self::app::{ConfigView, ContextView};
 pub use self::engine_bridge::{
     ChannelEmitter, ChannelSink, DedupeSet, EngineInventory, HookInfo, McpServerInfo, SkillInfo,
-    TuiEngine, approval_mode_to_session, build_rebind_system_prompt,
+    TuiEngine, approval_mode_to_session, build_rebind_system_prompt, restore_always_allows,
 };
 use self::protocol_bridge::spawn_bridge;
 // Resume repaint: the host (`main.rs::run_tui_mode`, a separate bin crate)

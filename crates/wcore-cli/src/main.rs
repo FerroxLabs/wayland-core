@@ -2720,6 +2720,17 @@ async fn run_tui_mode(
     // TUI's approval modal never opens (no `ApprovalRequired` event) and the
     // status bar renders the live mode so later de-escalation is visible.
     approval_manager.set_mode(approval_policy_to_session(approval_policy));
+    // #693 — replay the "always allow <tool>" grants the user made in earlier
+    // sessions. The manager's always-allow set is in-memory, so without this
+    // the durable grant `TuiEngine::approve` writes would never be read back
+    // and the user would be re-prompted for a tool they already answered.
+    match wcore_permissions::LearnedPolicy::default_path() {
+        Ok(path) => tui::restore_always_allows(&approval_manager, &path),
+        Err(error) => tracing::warn!(
+            %error,
+            "cannot resolve the permissions path; always-allow grants not restored"
+        ),
+    }
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
