@@ -1591,7 +1591,7 @@ mod tests {
             let manager =
                 WorktreeManager::new_with_workspace_root(source.path(), &checkouts).unwrap();
             let pinned_head = manager.pinned_head().await.unwrap();
-            let capacity = manager.workspace_capacity(1).await.unwrap();
+            let capacity = manager.workspace_capacity(1, 1).await.unwrap();
             let workspace = manager
                 .create_isolated_checkout(
                     "land-child",
@@ -1710,7 +1710,7 @@ mod tests {
             let manager =
                 WorktreeManager::new_with_workspace_root(source.path(), &checkouts).unwrap();
             let pinned_head = manager.pinned_head().await.unwrap();
-            let capacity = manager.workspace_capacity(1).await.unwrap();
+            let capacity = manager.workspace_capacity(1, 1).await.unwrap();
             let workspace = manager
                 .create_isolated_checkout(
                     "stale-child",
@@ -1789,7 +1789,7 @@ mod tests {
             let manager =
                 WorktreeManager::new_with_workspace_root(source.path(), &checkouts).unwrap();
             let pinned_head = manager.pinned_head().await.unwrap();
-            let capacity = manager.workspace_capacity(1).await.unwrap();
+            let capacity = manager.workspace_capacity(1, 1).await.unwrap();
             let workspace = manager
                 .create_isolated_checkout(
                     "filter-child",

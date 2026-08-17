@@ -1158,7 +1158,7 @@ pub mod mistral {
         for block in blocks {
             match block {
                 ContentBlock::Text { text } => out.push_str(text),
-                ContentBlock::Thinking { thinking } => out.push_str(thinking),
+                ContentBlock::Thinking { thinking, .. } => out.push_str(thinking),
                 ContentBlock::ToolResult { content, .. } => out.push_str(content),
                 ContentBlock::ToolUse { name, input, .. } => {
                     out.push_str(&format!("[tool_use: {name} {input}]"));

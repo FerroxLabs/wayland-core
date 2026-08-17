@@ -512,6 +512,26 @@ pub(super) fn lock_data_file(file: &File, path: &Path) -> Result<(), JournalErro
     }
 }
 
+/// Release the data-file lock taken by [`lock_data_file`].
+///
+/// `WriterLease::drop` already does this for the `.writer.lock` sentinel, and
+/// the data file must do the same. Relying on `close(2)` alone is NOT
+/// equivalent: `flock` binds to the OPEN FILE DESCRIPTION, and `close`
+/// releases the lock only when the last descriptor referring to that
+/// description goes away. `fork(2)` duplicates the descriptor table, so every
+/// subprocess spawned while a journal is open keeps that description alive
+/// until it execs (O_CLOEXEC) or exits - and the agent spawns subprocesses
+/// constantly through the Bash tool, `git status`, the spawner and the forge.
+///
+/// `LOCK_UN` reaches the duplicates that `close` cannot, so it closes the
+/// window rather than narrowing it. Without this call a journal that has
+/// already been dropped can still refuse its next opener with `AlreadyOwned`,
+/// and a long-lived child that never execs pins the lock for its whole life -
+/// a case no retry budget can survive.
+pub(super) fn unlock_data_file(file: &File) {
+    let _ = unlock_authority(file);
+}
+
 pub(super) fn reject_multiple_links(file: &File, path: &Path) -> Result<(), JournalError> {
     if link_count(file, path)? == 1 {
         Ok(())

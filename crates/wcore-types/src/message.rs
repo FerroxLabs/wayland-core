@@ -36,7 +36,16 @@ pub enum ContentBlock {
     /// Thinking / reasoning block. Serialized as `thinking` for Anthropic
     /// and as `reasoning_content` for OpenAI-compatible providers.
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        /// Opaque provider-specific metadata (e.g. Gemini thought_signature).
+        /// Round-tripped verbatim so the provider can include it in follow-up
+        /// requests. Mirrors `ToolUse.extra`; `skip_serializing_if` keeps the
+        /// wire shape byte-identical to v0.12.26 when unset, so old serialized
+        /// sessions and journals still deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra: Option<Value>,
+    },
 
     /// An inline image on a user turn (e.g. a composer-dropped local image).
     /// `data` is standard base64 (no data-URI prefix); `mime` is a sniffed
@@ -366,6 +375,66 @@ mod tests {
         assert_eq!(value["type"], "tool_use");
         assert_eq!(value["id"], "call_1");
         assert_eq!(value["name"], "bash");
+    }
+
+    // --- ContentBlock::Thinking ---
+
+    /// A provider signature attached to a thought part must survive a
+    /// deserialize → serialize round trip verbatim, exactly like the
+    /// `ToolUse.extra` idiom it mirrors.
+    #[test]
+    fn test_content_block_thinking_extra_round_trips_verbatim() {
+        // arrange
+        let raw = r#"{"type":"thinking","thinking":"pondering","extra":{"signature":"sig-abc"}}"#;
+        // act
+        let block: ContentBlock = serde_json::from_str(raw).unwrap();
+        let back = serde_json::to_string(&block).unwrap();
+        // assert
+        assert_eq!(back, raw, "thinking signature material was discarded");
+        match &block {
+            ContentBlock::Thinking { thinking, extra } => {
+                assert_eq!(thinking, "pondering");
+                assert_eq!(
+                    extra.as_ref().expect("extra parsed")["signature"],
+                    "sig-abc"
+                );
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    /// An OLD serialized session/journal — written before `extra` existed —
+    /// must still deserialize.
+    #[test]
+    fn test_content_block_thinking_legacy_json_still_deserializes() {
+        // arrange
+        let raw = r#"{"type":"thinking","thinking":"pondering"}"#;
+        // act
+        let block: ContentBlock = serde_json::from_str(raw).unwrap();
+        // assert
+        match block {
+            ContentBlock::Thinking { thinking, .. } => assert_eq!(thinking, "pondering"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    /// A thinking block with no signature must serialize byte-identically to
+    /// the pre-`extra` wire shape — no `"extra":null` may appear.
+    #[test]
+    fn test_content_block_thinking_without_extra_is_byte_identical() {
+        // arrange
+        let raw = r#"{"type":"thinking","thinking":"pondering"}"#;
+        // act
+        let block: ContentBlock = serde_json::from_str(raw).unwrap();
+        let back = serde_json::to_string(&block).unwrap();
+        // assert
+        assert_eq!(back, raw);
+        // …and the same holds for a freshly constructed block.
+        let built = ContentBlock::Thinking {
+            thinking: "pondering".to_string(),
+            extra: None,
+        };
+        assert_eq!(serde_json::to_string(&built).unwrap(), raw);
     }
 
     // --- ContentBlock::ToolResult ---

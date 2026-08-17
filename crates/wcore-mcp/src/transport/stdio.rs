@@ -70,9 +70,36 @@ pub struct StdioTransport {
     /// Shared with the reader task, which is the only writer of the
     /// EOF/error transition — so liveness has a single source of truth.
     alive: Arc<AtomicBool>,
+    /// Set by the reader task when the server sends
+    /// `notifications/tools/list_changed`; take-and-cleared by
+    /// [`McpTransport::take_tools_changed`]. A server that registers a tool
+    /// mid-session announces it this way and nothing else, so dropping the
+    /// notification (as every id-less line used to be) leaves the new tool
+    /// permanently uncallable.
+    tools_changed: Arc<AtomicBool>,
     /// Per-request timeout (audit C1). Defaults to [`DEFAULT_RPC_TIMEOUT`];
     /// `spawn_with_timeout` lets tests use a short bound.
     rpc_timeout: Duration,
+}
+
+/// The MCP notification a server sends when its tool list changes.
+pub(crate) const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
+
+/// Is this id-less inbound line the `tools/list_changed` notification?
+///
+/// Parsed as a generic JSON value rather than a typed notification struct:
+/// the only field that matters is `method`, and a malformed or unrelated
+/// notification must be a plain `false`, never an error that kills the reader.
+pub(crate) fn notified_tools_changed(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("method")
+                .and_then(|method| method.as_str())
+                .map(|method| method == TOOLS_LIST_CHANGED)
+        })
+        .unwrap_or(false)
 }
 
 /// Quote a single shell argument so it survives `sh -c` / `cmd /C` parsing.
@@ -553,11 +580,13 @@ impl StdioTransport {
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
+        let tools_changed = Arc::new(AtomicBool::new(false));
 
         let reader_task = Self::spawn_reader(
             stdout,
             Arc::clone(&pending),
             Arc::clone(&alive),
+            Arc::clone(&tools_changed),
             command.to_string(),
         );
         let stderr_task = Self::spawn_stderr_drain(stderr, command.to_string());
@@ -572,6 +601,7 @@ impl StdioTransport {
             reader_task: Mutex::new(Some(reader_task)),
             stderr_task: Mutex::new(Some(stderr_task)),
             alive,
+            tools_changed,
             rpc_timeout,
         })
     }
@@ -582,6 +612,7 @@ impl StdioTransport {
         stdout: ChildStdout,
         pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
         alive: Arc<AtomicBool>,
+        tools_changed: Arc<AtomicBool>,
         label: String,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -640,13 +671,27 @@ impl StdioTransport {
                                 }
                             }
                             None => {
-                                // Notification / log line with no id —
-                                // not a response to any request. Drop it
-                                // rather than mis-matching it (audit C3).
-                                debug!(
-                                    server = %label, line = %trimmed,
-                                    "[mcp] stdio notification ignored (no id)"
-                                );
+                                // Notification / log line with no id — not a
+                                // response to any request, so it must never be
+                                // mis-matched to a pending caller (audit C3).
+                                // One of them is load-bearing: a server that
+                                // registers a tool mid-session says so with
+                                // `notifications/tools/list_changed` and
+                                // nothing else. Raise the flag; the manager
+                                // re-issues `tools/list` when it next polls.
+                                // Everything else stays dropped.
+                                if notified_tools_changed(trimmed) {
+                                    tools_changed.store(true, Ordering::SeqCst);
+                                    debug!(
+                                        server = %label,
+                                        "[mcp] server signalled tools/list_changed"
+                                    );
+                                } else {
+                                    debug!(
+                                        server = %label, line = %trimmed,
+                                        "[mcp] stdio notification ignored (no id)"
+                                    );
+                                }
                             }
                         },
                         Err(e) => {
@@ -834,6 +879,10 @@ impl McpTransport for StdioTransport {
         self.alive.load(Ordering::SeqCst)
     }
 
+    fn take_tools_changed(&self) -> bool {
+        self.tools_changed.swap(false, Ordering::SeqCst)
+    }
+
     async fn close(&self) -> Result<(), McpError> {
         // Mark dead first so concurrent `request()` calls fast-fail.
         self.alive.store(false, Ordering::SeqCst);
@@ -913,6 +962,41 @@ impl Drop for StdioTransport {
 
 // ---------------------------------------------------------------------------
 // Tests — exercise the real StdioTransport against real child processes.
+/// Pure notification-parsing tests. Not gated on `unix`: the classifier runs
+/// on every platform and a Windows-only regression here would silently take
+/// the mid-session tool refresh with it.
+#[cfg(test)]
+mod notification_parse_tests {
+    use super::notified_tools_changed;
+
+    #[test]
+    fn only_the_tools_list_changed_method_matches() {
+        assert!(notified_tools_changed(
+            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#
+        ));
+        assert!(notified_tools_changed(
+            r#"{"method":"notifications/tools/list_changed","params":{},"jsonrpc":"2.0"}"#
+        ));
+        assert!(!notified_tools_changed(
+            r#"{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}"#
+        ));
+        assert!(!notified_tools_changed(
+            r#"{"jsonrpc":"2.0","method":"tools/list_changed"}"#
+        ));
+    }
+
+    #[test]
+    fn noise_is_false_not_an_error() {
+        assert!(!notified_tools_changed("plain stderr-ish noise on stdout"));
+        assert!(!notified_tools_changed("{"));
+        assert!(!notified_tools_changed(""));
+        assert!(!notified_tools_changed(r#"{"jsonrpc":"2.0","method":42}"#));
+        assert!(!notified_tools_changed(
+            r#"{"jsonrpc":"2.0","id":1,"result":{}}"#
+        ));
+    }
+}
+
 // Unix-only: the fixture shell snippets use POSIX `sh`. The CI matrix runs
 // Windows separately; the timeout/correlation logic is platform-agnostic and
 // the integration suite covers the cross-platform contract.
@@ -1034,6 +1118,72 @@ mod tests {
         let resp = transport.request(&req).await.expect("round-trip ok");
         assert_eq!(resp.id, Some(1));
         assert_eq!(resp.result.as_ref().unwrap()["ok"], serde_json::json!(true));
+
+        let _ = transport.close().await;
+    }
+
+    /// A9.1 — `notifications/tools/list_changed` must be OBSERVED, not just
+    /// tolerated. It carries no `id`, so it used to fall into the same
+    /// "drop it" branch as a log line; a server that registers a tool
+    /// mid-session announces it this way and nothing else, which made every
+    /// such tool permanently uncallable.
+    ///
+    /// The flag must also be TAKE-and-cleared, so one notification cannot
+    /// drive an unbounded re-list loop.
+    #[tokio::test]
+    async fn a11_tools_list_changed_notification_is_observed_and_take_cleared() {
+        // Emit the notification BEFORE the response, so the assertion cannot
+        // pass on ordering luck: by the time `request()` returns, the reader
+        // has already processed the notification line.
+        let script = r#"read line; printf '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'; printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n'"#;
+        let transport =
+            StdioTransport::spawn("sh", &["-c".to_string(), script.to_string()], &no_env())
+                .await
+                .expect("spawn sh fixture");
+
+        assert!(
+            !transport.take_tools_changed(),
+            "no notification has been sent yet"
+        );
+
+        let resp = transport
+            .request(&JsonRpcRequest::new(1, "tools/call", None))
+            .await
+            .expect("round-trip ok");
+        assert_eq!(resp.result.as_ref().unwrap()["ok"], serde_json::json!(true));
+
+        assert!(
+            transport.take_tools_changed(),
+            "the server announced tools/list_changed and the client must see it"
+        );
+        assert!(
+            !transport.take_tools_changed(),
+            "the flag must be cleared by reading it, or one signal re-lists forever"
+        );
+
+        let _ = transport.close().await;
+    }
+
+    /// The flag must not be raised by any OTHER id-less line: a log
+    /// notification, a differently-named notification, or unparseable noise.
+    /// A false positive costs a `tools/list` round trip per turn.
+    #[tokio::test]
+    async fn a11_unrelated_notifications_do_not_raise_tools_changed() {
+        let script = r#"read line; printf '{"jsonrpc":"2.0","method":"log/info"}\n'; printf '{"jsonrpc":"2.0","method":"notifications/resources/list_changed"}\n'; printf 'plain noise on stdout\n'; printf '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n'"#;
+        let transport =
+            StdioTransport::spawn("sh", &["-c".to_string(), script.to_string()], &no_env())
+                .await
+                .expect("spawn sh fixture");
+
+        transport
+            .request(&JsonRpcRequest::new(1, "ping", None))
+            .await
+            .expect("round-trip ok");
+
+        assert!(
+            !transport.take_tools_changed(),
+            "only notifications/tools/list_changed may raise the flag"
+        );
 
         let _ = transport.close().await;
     }

@@ -1,0 +1,244 @@
+name: mac remainder (unpublished)
+
+# macOS evidence for the `fix/macos-remainder` lane.
+#
+# Two things this lane cannot get anywhere else:
+#   1. RUNNING the `wcore-sandbox` unit tests on a real macOS kernel. The
+#      `backends::sandbox_exec` module is `#[cfg(target_os = "macos")]`, so its
+#      tests do not exist on Linux at all — `cargo test` on hetzner reports them
+#      as neither passed nor failed, it reports nothing. `clippy --target
+#      aarch64-apple-darwin` type-checks them there; only a Mac executes them.
+#   2. A native arm64 binary. The hetzner zig cross-link SIGSEGVs on the real
+#      binary (579 object files plus wasmtime/aws-lc-sys/ring/sqlite-vec/blake3
+#      and ~15 Apple frameworks).
+#
+# Artifact only. No tag, no release, no npm publish.
+
+on:
+  push:
+    branches:
+      - fix/macos-remainder
+      - fix/macos-toolchains-green
+      - accept2/integration
+  # The lane needs a binary on demand, not only when a commit lands: a macOS
+  # release build is the long pole in every fix/measure cycle and re-pushing
+  # just to re-trigger cancels the run already in flight.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox-tests:
+    name: wcore-sandbox tests on macOS
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          uname -mrs
+          getconf DARWIN_USER_TEMP_DIR
+
+      # The seatbelt tests spawn `sandbox-exec` for real. If the runner image
+      # cannot, they return early and prove nothing, so say so out loud.
+      - name: sandbox-exec is usable on this runner
+        run: |
+          sandbox-exec -p '(version 1)(allow default)' /usr/bin/true
+          echo "sandbox-exec probe exit=$?"
+
+      # `cargo test` is retained here DELIBERATELY, matching the sibling
+      # `.github/workflows/macos-native-suites.yml`, which runs the same
+      # `live_integrity_macos` target. Two reasons it is not swapped for
+      # `cargo nextest run --no-tests=fail`:
+      #
+      #   1. The "Assert both suites executed" step below is a STRONGER guard
+      #      than a non-zero-test check: it reads the EXECUTED COUNT back out
+      #      of the log, pins the census of the boundary suite, and catches an
+      #      env-gated early return (`skip:`) that leaves a case asserting
+      #      nothing while still counting as executed.
+      #   2. `live_integrity_macos::zero_execution_guard` disables ITSELF under
+      #      nextest (`if std::env::var_os("NEXTEST").is_some() { return; }`),
+      #      deferring to `--no-tests=fail`. Switching runners would therefore
+      #      REMOVE a live in-suite assertion from this invocation, not add one.
+      #
+      # Exit status is not what the gate trusts: `PIPESTATUS[0]` is recorded to
+      # a file the gate step reads back, and the gate is a separate step so a
+      # non-zero cargo exit cannot short-circuit the executed-count checks.
+      - name: cargo test -p wcore-sandbox --lib
+        # vacuity-checked: executed count asserted in the gate step below, which
+        # greps `running N tests` out of the tee'd log and fails on a zero.
+        run: |
+          set -uo pipefail
+          cargo test -p wcore-sandbox --lib -- --nocapture 2>&1 \
+            | tee /tmp/sandbox-lib.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/sandbox-lib.rc
+
+      # `--lib` does not reach `tests/`, so the live seatbelt boundary proofs
+      # were compiled by nobody and executed by nobody: `clippy --target
+      # aarch64-apple-darwin` on hetzner type-checks them, and this job only ran
+      # the unit tests. `--include-ignored` (not `--ignored`) so the suite's own
+      # zero-execution guard runs in the same invocation it is guarding.
+      - name: live seatbelt boundary proofs
+        if: always()
+        env:
+          WAYLAND_SANDBOX_LIVE_MACOS: "1"
+        run: |
+          set -uo pipefail
+          # vacuity-checked: executed count asserted in the gate step below,
+          # which pins this suite's census at 3 and fails on a `skip:`.
+          cargo test -p wcore-sandbox --test live_integrity_macos \
+            -- --include-ignored --nocapture 2>&1 \
+            | tee /tmp/sandbox-integrity.log
+          echo "rc=${PIPESTATUS[0]}" | tee -a /tmp/sandbox-integrity.rc
+
+      # The gate proper. Deliberately a separate step so a non-zero exit from
+      # either run above cannot short-circuit the executed-count checks, and so
+      # each asserted property fails with its own message.
+      - name: Assert both suites executed and did not skip
+        if: always()
+        run: |
+          set -uo pipefail
+          fail=0
+
+          # want: an exact census pin, or `min:<n>` where the census is not fixed.
+          # skip_policy: `fail` where an early return means the proof did nothing,
+          # `report` where a skip is a legitimate host fact (no docker daemon, no
+          # `yes` binary) and hard-failing on it would make this gate permanently red.
+          check_suite() {
+            local name="$1" log="$2" want="$3" skip_policy="$4"
+            echo "=== ${name} ==="
+            if [ ! -s "${log}" ]; then
+              echo "FAIL(${name}): no log produced — the suite never ran"
+              fail=1
+              return
+            fi
+            local ran
+            ran="$(sed -nE 's/^running ([0-9]+) tests?$/\1/p' "${log}" | head -1)"
+            if [ -z "${ran}" ]; then
+              echo "FAIL(${name}): no 'running N tests' line — the harness reported no census at all"
+              fail=1
+              return
+            fi
+            case "${want}" in
+              min:*)
+                if [ "${ran}" -lt "${want#min:}" ]; then
+                  echo "FAIL(${name}): executed ${ran}, expected at least ${want#min:} — collected (near-)nothing"
+                  fail=1
+                fi
+                ;;
+              *)
+                if [ "${ran}" -ne "${want}" ]; then
+                  echo "FAIL(${name}): executed ${ran}, expected exactly ${want} — the suite stopped collecting a case."
+                  echo "       Bump the pin in the same commit that adds or removes a case."
+                  fail=1
+                fi
+                ;;
+            esac
+            if ! grep -qE "test result: ok\. ${ran} passed; 0 failed" "${log}"; then
+              echo "FAIL(${name}): expected 'test result: ok. ${ran} passed; 0 failed'"
+              grep -E "test result" "${log}" || true
+              fail=1
+            fi
+            if grep -q "skip:" "${log}"; then
+              if [ "${skip_policy}" = "fail" ]; then
+                echo "FAIL(${name}): a case took an early return and asserted NOTHING:"
+                fail=1
+              else
+                echo "note(${name}): host-conditional early returns (not fatal for this suite):"
+              fi
+              grep "skip:" "${log}"
+            fi
+            echo "--- ${name} verdict lines ---"
+            grep -E "running [0-9]+ test|test result" "${log}" || true
+          }
+
+          # The whole reason this job exists is running `backends::sandbox_exec`
+          # (a `#[cfg(target_os = "macos")]` module) on a real macOS kernel. A
+          # green `--lib` that collected none of it certifies nothing, so the
+          # count of executed cases from that module is asserted directly rather
+          # than inferred from the total. `min:1` on the total is the
+          # anti-vacuity floor; this is the purpose check.
+          check_suite "wcore-sandbox --lib" /tmp/sandbox-lib.log min:1 report
+          seatbelt=0
+          if [ -s /tmp/sandbox-lib.log ]; then
+            seatbelt="$(grep -cE '^test backends::sandbox_exec::' /tmp/sandbox-lib.log || true)"
+          fi
+          echo "executed backends::sandbox_exec cases: ${seatbelt}"
+          if [ "${seatbelt}" -lt 1 ]; then
+            echo "FAIL(wcore-sandbox --lib): zero cases from the macOS-only"
+            echo "     backends::sandbox_exec module executed. On a Mac that module"
+            echo "     is compiled in, so a zero here means the one thing this job"
+            echo "     exists to prove did not happen."
+            fail=1
+          fi
+
+          # 3 = required_live_macos_retained_directory_confines_writes,
+          # required_live_macos_metadata_grant_permits_stat_and_nothing_else,
+          # and the always-on zero_execution_guard. This number is a PIN, not a
+          # formality: it is the only thing standing between this gate and a
+          # suite that quietly stops collecting a case.
+          check_suite live_integrity_macos /tmp/sandbox-integrity.log 3 fail
+
+          echo "=== recorded exit codes ==="
+          cat /tmp/sandbox-lib.rc /tmp/sandbox-integrity.rc 2>/dev/null || echo "(none recorded)"
+          if [ "${fail}" -ne 0 ]; then
+            echo "GATE: FAILED"
+            exit 1
+          fi
+          echo "GATE: PASSED — both suites executed on a real macOS kernel"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mac-remainder-sandbox-logs
+          path: |
+            /tmp/sandbox-lib.log
+            /tmp/sandbox-integrity.log
+            /tmp/sandbox-lib.rc
+            /tmp/sandbox-integrity.rc
+          if-no-files-found: warn
+
+  artifact:
+    name: build aarch64-apple-darwin
+    # Only when the commit asks for it: a release build of wcore-cli is ~1 h of
+    # macOS runner time and the red half of a red/green cycle does not need one.
+    # `workflow_dispatch` carries no `head_commit`, so without the explicit
+    # event check a manual run would silently produce no artifact — asking for
+    # a binary and getting a green run with nothing in it.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.head_commit.message, '[artifact]')
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustc --version
+          uname -m
+
+      - name: Build wcore-cli (release)
+        run: cargo build --release -p wcore-cli --target aarch64-apple-darwin
+
+      - name: Prove it is a real Mach-O arm64 binary
+        run: |
+          BIN=target/aarch64-apple-darwin/release/wayland-core
+          test -x "$BIN" || { echo "no binary produced"; exit 1; }
+          file "$BIN"
+          file "$BIN" | grep -q 'Mach-O 64-bit executable arm64' || {
+            echo "not a Mach-O arm64 executable"; exit 1; }
+          "$BIN" --version
+          shasum -a 256 "$BIN"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wayland-core-aarch64-apple-darwin
+          path: target/aarch64-apple-darwin/release/wayland-core
+          if-no-files-found: error
+          retention-days: 7

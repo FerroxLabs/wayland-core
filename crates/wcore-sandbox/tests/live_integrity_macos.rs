@@ -130,6 +130,153 @@ async fn required_live_macos_retained_directory_confines_writes() {
     );
 }
 
+/// Run `argv` under `manifest` and return `(exit_code, stdout)`.
+async fn run(
+    backend: &SandboxExecBackend,
+    manifest: &SandboxManifest,
+    argv: &[&str],
+) -> (i32, String) {
+    let out = backend
+        .execute(
+            manifest,
+            SandboxCommand {
+                argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+                cwd: None,
+            },
+        )
+        .await
+        .expect("backend must run even when the confined child fails");
+    (out.exit_code, String::from_utf8_lossy(&out.stdout).into())
+}
+
+/// `fs_metadata_read_allow` must buy EXACTLY one thing: the child can `stat`
+/// the named file. Not read it, not read its neighbours, not list its
+/// directory.
+///
+/// This is the grant that revives `cargo` on macOS. libgit2 derives the global
+/// git config path from `$HOME`, ignores `GIT_CONFIG_GLOBAL`, and treats the
+/// EPERM seatbelt returns for an ungranted path as fatal — `failed to stat
+/// '<home>/.gitconfig'; class=Config (7)` — so every `cargo new` died there.
+/// The grant lets the stat answer while the CONTENTS, which carry the
+/// operator's identity and any `[url … insteadOf]` credential rewrite, stay
+/// unreadable.
+///
+/// Written against a synthetic home so it proves the mechanism on any host,
+/// including one with no `~/.gitconfig` of its own.
+#[tokio::test]
+#[ignore = "live macOS metadata-grant acceptance; run via `--run-ignored all` with WAYLAND_SANDBOX_LIVE_MACOS=1"]
+async fn required_live_macos_metadata_grant_permits_stat_and_nothing_else() {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_MACOS").is_err() {
+        eprintln!("skip: WAYLAND_SANDBOX_LIVE_MACOS not set");
+        return;
+    }
+    let backend = SandboxExecBackend::new();
+    if !backend.is_available() {
+        eprintln!("skip: sandbox-exec probe failed on this host");
+        return;
+    }
+
+    let home_dir = tempfile::tempdir().expect("create synthetic home");
+    let home = std::fs::canonicalize(home_dir.path()).expect("canonicalize synthetic home");
+    let granted = home.join(".gitconfig");
+    std::fs::write(&granted, "[user]\n\tname = operator\n").expect("write granted file");
+    // A NEIGHBOUR in the same directory. Nothing about the grant may reach it.
+    let neighbour = home.join(".netrc");
+    std::fs::write(&neighbour, "machine example.com password hunter2\n")
+        .expect("write neighbour file");
+
+    let manifest = SandboxManifest {
+        fs_metadata_read_allow: vec![granted.clone()],
+        timeout: Some(Duration::from_secs(30)),
+        env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+        ..Default::default()
+    };
+
+    // POSITIVE CONTROL — the whole point of the channel. `stat -f %z` prints
+    // the size, so a success here is `file-read-metadata` actually working and
+    // not merely "the command did not crash".
+    let (code, stdout) = run(
+        &backend,
+        &manifest,
+        &["/usr/bin/stat", "-f", "%z", granted.to_str().unwrap()],
+    )
+    .await;
+    assert_eq!(
+        code, 0,
+        "the granted path must be stat-able; that is the entire grant"
+    );
+    let real_size = std::fs::metadata(&granted).expect("host stat").len();
+    assert_eq!(
+        stdout.trim(),
+        real_size.to_string(),
+        "stat must report the real size, not a placeholder: {stdout:?}"
+    );
+
+    // NEGATIVE CONTROL 1 — contents of the granted file stay denied.
+    let (code, stdout) = run(
+        &backend,
+        &manifest,
+        &["/bin/cat", granted.to_str().unwrap()],
+    )
+    .await;
+    assert_ne!(code, 0, "metadata grant must not permit reading contents");
+    assert!(
+        !stdout.contains("operator"),
+        "granted file's contents leaked: {stdout:?}"
+    );
+
+    // NEGATIVE CONTROL 2 — the neighbour is denied for BOTH operations, so the
+    // grant is scoped to one file and not to its directory.
+    for argv in [
+        vec!["/usr/bin/stat", "-f", "%z", neighbour.to_str().unwrap()],
+        vec!["/bin/cat", neighbour.to_str().unwrap()],
+    ] {
+        let (code, stdout) = run(&backend, &manifest, &argv).await;
+        assert_ne!(code, 0, "neighbour must stay denied for {argv:?}");
+        assert!(
+            !stdout.contains("hunter2"),
+            "neighbour secret leaked via {argv:?}: {stdout:?}"
+        );
+    }
+
+    // NEGATIVE CONTROL 3 — enumeration. `file-read-metadata` on the ancestors
+    // must not become `readdir` on them, or the grant would disclose every
+    // other dotfile in the home directory by name.
+    let (code, stdout) = run(&backend, &manifest, &["/bin/ls", home.to_str().unwrap()]).await;
+    assert_ne!(
+        code, 0,
+        "listing the granted file's directory must be denied"
+    );
+    assert!(
+        !stdout.contains(".netrc"),
+        "directory enumeration leaked neighbour names: {stdout:?}"
+    );
+
+    // NEGATIVE CONTROL 4 — `fs_read_deny` still outranks the grant.
+    //
+    // This one failed on the first CI cycle and the failure was real, not a
+    // flaky test: the backend originally emitted the grant and relied on the
+    // later deny to override it. SBPL does not work that way across
+    // operations — a `file-read*` deny is less specific than a
+    // `file-read-metadata` allow, and `stat` kept succeeding. The backend now
+    // withholds the grant instead, and this control is what proves the
+    // withholding reaches a real kernel.
+    let denied = SandboxManifest {
+        fs_read_deny: vec![granted.clone()],
+        ..manifest.clone()
+    };
+    let (code, stdout) = run(
+        &backend,
+        &denied,
+        &["/usr/bin/stat", "-f", "%z", granted.to_str().unwrap()],
+    )
+    .await;
+    assert_ne!(
+        code, 0,
+        "an explicit read-deny must beat a metadata grant; stdout={stdout:?}"
+    );
+}
+
 /// Zero-execution guard — and it has to RUN to be one.
 ///
 /// Every test in this binary is `#[ignore]`d, so `cargo test --test live_integrity_macos`

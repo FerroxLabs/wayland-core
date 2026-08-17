@@ -391,7 +391,7 @@ impl OpenAIProvider {
                             .content
                             .iter()
                             .filter_map(|b| {
-                                if let ContentBlock::Thinking { thinking } = b {
+                                if let ContentBlock::Thinking { thinking, .. } = b {
                                     Some(thinking.as_str())
                                 } else {
                                     None
@@ -457,7 +457,15 @@ impl OpenAIProvider {
                     if !text.is_empty() {
                         msg_json["content"] = json!(text);
                     } else if tool_calls.is_empty() {
-                        msg_json["content"] = json!("");
+                        // No text and no tool calls: this turn carries nothing.
+                        // Stamping `content: ""` puts an EMPTY MESSAGE BODY on
+                        // the wire. Strict endpoints reject it; tolerant
+                        // proxies rewrite it in place to satisfy the upstream
+                        // protocol, and that rewrite comes back as assistant
+                        // speech we then persist and replay forever. Drop the
+                        // message instead — the Anthropic builder has skipped
+                        // content-less turns since wayland#161.
+                        continue;
                     }
 
                     if !tool_calls.is_empty() {
@@ -521,9 +529,11 @@ impl OpenAIProvider {
         // and empty-id passes above can strip the last tool_call from a
         // tool-call-only (text-less) assistant turn — leaving `{"role":
         // "assistant"}`, which native DeepSeek 400s ("content or tool_calls
-        // must be set"). Stamp an empty-string content in that case so the
-        // request stays valid (FerroxLabs/wayland-core#123).
-        ensure_assistant_content_present(&mut result);
+        // must be set"). It carries nothing either way, so drop it rather than
+        // stamp an empty-string content: an empty message body on the wire is
+        // the thing an upstream proxy repairs in place, and that repair returns
+        // as assistant speech (FerroxLabs/wayland-core#123).
+        drop_contentless_assistant_messages(&mut result);
 
         result
     }
@@ -1192,26 +1202,48 @@ fn clean_orphaned_tool_calls(messages: &mut [Value]) {
     }
 }
 
-/// Guarantee every assistant message carries `content` or `tool_calls`.
+/// Drop assistant messages that carry neither `content` nor `tool_calls`.
 ///
 /// `build_messages` omits `content` for a tool-call-only assistant turn (its
 /// text is empty), and the orphan/empty-id cleanup passes can then strip that
 /// turn's only `tool_calls` entry — leaving `{"role":"assistant"}` with
 /// neither field. Strict OpenAI endpoints reject it: native DeepSeek returns
-/// HTTP 400 "Invalid assistant message: content or tool_calls must be set".
-/// Stamping an empty-string content (the same value `build_messages` uses for
-/// a genuinely empty assistant turn) keeps the request valid without inventing
-/// text (FerroxLabs/wayland-core#123).
-fn ensure_assistant_content_present(messages: &mut [Value]) {
-    for msg in messages.iter_mut() {
-        if msg["role"].as_str() == Some("assistant")
-            && msg.get("tool_calls").is_none()
-            && !msg["content"].is_string()
-            && let Some(obj) = msg.as_object_mut()
-        {
-            obj.insert("content".to_string(), json!(""));
+/// HTTP 400 "Invalid assistant message: content or tool_calls must be set"
+/// (FerroxLabs/wayland-core#123).
+///
+/// The earlier repair stamped `content: ""`. That satisfies the letter of the
+/// schema but still puts an EMPTY MESSAGE BODY in the `messages` array, which
+/// is precisely what an upstream proxy has to repair before it can forward the
+/// conversation to a provider that forbids empty content — and a proxy that
+/// repairs it in place announces the repair in the response stream, so the
+/// placeholder lands in the transcript as if the assistant had said it, is
+/// journaled as real history, and is replayed upstream on every later turn.
+/// A message with no content and no tool calls carries nothing, so drop it:
+/// same schema validity, no empty body. The Anthropic builder has skipped
+/// content-less turns since wayland#161; this brings the OpenAI-family builder
+/// in line.
+fn drop_contentless_assistant_messages(messages: &mut Vec<Value>) {
+    messages.retain(|msg| {
+        // `clean_orphaned_tool_calls` reaches every assistant message through
+        // `msg["tool_calls"]`, and `IndexMut` INSERTS a null for a key that was
+        // not there — so "the key exists" does not mean "this turn carries
+        // calls". Only a non-empty array does.
+        let carries_calls = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+        if msg["role"].as_str() != Some("assistant") || carries_calls {
+            return true;
         }
-    }
+        // Keep only if it carries a non-empty text body. Absent, null and ""
+        // are all "no content" — the empty-string case can survive
+        // `merge_consecutive_assistant`, which leaves `content` unset when both
+        // sides were text-less.
+        match msg.get("content") {
+            Some(Value::String(text)) => !text.is_empty(),
+            _ => false,
+        }
+    });
 }
 
 /// Merge consecutive assistant messages into one
@@ -2098,7 +2130,24 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
             ("stop", true) => StopReason::EndTurn,
             // "tool_calls" with empty accumulator — defensive; treat as ToolUse.
             ("tool_calls", true) => StopReason::ToolUse,
-            ("length", _) => StopReason::MaxTokens,
+            // An OUTPUT-cap cut can land in the MIDDLE of a tool call: the
+            // accumulated `arguments` are an unterminated JSON fragment and
+            // the call is unrunnable. This arm used to fall through without
+            // touching `state.tool_calls`, so the partial call was dropped
+            // with no event, no error and no diagnostic — the engine then saw
+            // a turn with no tool calls and ended the run as if the model had
+            // finished. Surface every pending call; the engine decides what
+            // the turn means. The accumulator is drained either way, so no
+            // fragment can leak into a later turn.
+            ("length", _) => {
+                for tc in state.tool_calls.drain(..) {
+                    events.push(LlmEvent::TruncatedToolCall {
+                        name: decode_tool_name(&tc.name),
+                        partial_arg_bytes: tc.arguments.len(),
+                    });
+                }
+                StopReason::MaxTokens
+            }
             // Unmapped: keep agent loop alive with EndTurn; FinishReason::Error
             // already flags the protocol-level signal.
             _ => StopReason::EndTurn,
@@ -3208,6 +3257,149 @@ mod tests {
         assert!(body.get("max_tokens").is_none());
     }
 
+    // --- T3: output-cap truncation mid tool call --------------------------
+
+    /// The field signature: `finish_reason: "length"` arrives while a `Write`
+    /// of the deliverable is still streaming. The partial call must be
+    /// reported, never run — its `arguments` stop mid-value.
+    #[test]
+    fn a_tool_call_severed_by_the_output_cap_is_reported_not_dropped() {
+        const PARTIAL: &str = r#"{"file_path": "/tmp/review.json""#;
+        let mut state = StreamState::new();
+        let opening = parse_sse_chunk(
+            &json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "Write", "arguments": PARTIAL}
+                    }]},
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+            &mut state,
+        );
+        assert!(
+            opening.is_empty(),
+            "an in-flight tool-call delta emits nothing yet, got {opening:?}"
+        );
+
+        let cut = parse_sse_chunk(
+            &json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+            })
+            .to_string(),
+            &mut state,
+        );
+
+        let reported: Vec<(&str, usize)> = cut
+            .iter()
+            .filter_map(|event| match event {
+                LlmEvent::TruncatedToolCall {
+                    name,
+                    partial_arg_bytes,
+                } => Some((name.as_str(), *partial_arg_bytes)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            vec![("Write", PARTIAL.len())],
+            "the severed call must be surfaced with its name and the bytes \
+             that did arrive; got {cut:?}"
+        );
+        assert!(
+            !cut.iter()
+                .any(|event| matches!(event, LlmEvent::ToolUse { .. })),
+            "a call missing half its arguments must NEVER be handed to the \
+             engine as runnable; got {cut:?}"
+        );
+        assert!(
+            state.tool_calls.is_empty(),
+            "the accumulator must be drained so no fragment leaks into a \
+             later turn"
+        );
+        assert!(
+            matches!(
+                state.pending_done,
+                Some(LlmEvent::Done {
+                    stop_reason: StopReason::MaxTokens,
+                    finish_reason: FinishReason::Length,
+                    ..
+                })
+            ),
+            "the turn still ends as a max_tokens stop; got {:?}",
+            state.pending_done
+        );
+    }
+
+    /// NEGATIVE CONTROL. `finish_reason=length` with nothing pending must not
+    /// invent a truncation event — otherwise the assertion above could not be
+    /// attributed to the severed call.
+    #[test]
+    fn a_length_stop_with_no_pending_call_reports_no_truncation() {
+        let mut state = StreamState::new();
+        let events = parse_sse_chunk(
+            &json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+            })
+            .to_string(),
+            &mut state,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TruncatedToolCall { .. })),
+            "a plain text-side length stop is not a severed tool call; \
+             got {events:?}"
+        );
+    }
+
+    /// NEGATIVE CONTROL. A COMPLETE tool call that happens to end on
+    /// `tool_calls` must still be handed over as runnable — the new arm must
+    /// not have widened into the normal path.
+    #[test]
+    fn a_complete_tool_call_is_still_runnable() {
+        let mut state = StreamState::new();
+        let _ = parse_sse_chunk(
+            &json!({
+                "choices": [{
+                    "index": 0,
+                    "delta": {"tool_calls": [{
+                        "index": 0,
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {"name": "Write", "arguments": r#"{"file_path": "/tmp/ok"}"#}
+                    }]},
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+            &mut state,
+        );
+        let done = parse_sse_chunk(
+            &json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+            })
+            .to_string(),
+            &mut state,
+        );
+        assert!(
+            done.iter()
+                .any(|event| matches!(event, LlmEvent::ToolUse { name, .. } if name == "Write")),
+            "a complete call must still run; got {done:?}"
+        );
+        assert!(
+            !done
+                .iter()
+                .any(|event| matches!(event, LlmEvent::TruncatedToolCall { .. })),
+            "a complete call must not be reported as truncated; got {done:?}"
+        );
+    }
+
     // --- map_openai_finish_reason (Task F) --------------------------------
 
     #[test]
@@ -4240,6 +4432,7 @@ mod tests {
                 vec![
                     ContentBlock::Thinking {
                         thinking: "secret prior-turn reasoning".into(),
+                        extra: None,
                     },
                     ContentBlock::Text {
                         text: "answer one".into(),
@@ -4288,6 +4481,7 @@ mod tests {
                 vec![
                     ContentBlock::Thinking {
                         thinking: "prior reasoning".into(),
+                        extra: None,
                     },
                     ContentBlock::Text {
                         text: "answer one".into(),
@@ -4763,6 +4957,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A conversation that already contains a content-free assistant turn —
+    /// the shape the engine used to commit when a provider stream carried
+    /// nothing, and the shape any imported/resumed session can still hold —
+    /// must not put an empty message body on the wire. `content: ""` satisfies
+    /// the schema but is exactly what an upstream proxy repairs in place, and
+    /// the repair returns as assistant speech.
+    #[test]
+    fn a_content_free_assistant_turn_never_reaches_the_wire() {
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "hello".into(),
+                }],
+            ),
+            // The empty turn.
+            Message::new(Role::Assistant, vec![]),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "still there?".into(),
+                }],
+            ),
+        ];
+
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+
+        for m in &result {
+            let blank_body = match m.get("content") {
+                None | Some(Value::Null) => true,
+                Some(Value::String(text)) => text.trim().is_empty(),
+                _ => false,
+            };
+            let carries_calls = m["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
+            assert!(
+                !blank_body || carries_calls,
+                "empty message body on the wire: {m}"
+            );
+        }
+        assert_eq!(
+            result.len(),
+            2,
+            "the content-free turn is dropped, not stamped: {result:?}"
+        );
     }
 
     // --- usage token parsing ---

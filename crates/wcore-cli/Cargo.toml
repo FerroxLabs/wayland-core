@@ -282,6 +282,12 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 libc.workspace = true
+# P2: `p2_open_admission_entry_points` asserts the refusal carries a real
+# admission-shape token. It pins the CURRENT encoding via
+# `ADMISSION_SHAPE_VERSION` rather than a literal, because a literal silently
+# went stale when the token gained `[options]`. Already in the build graph
+# through wcore-channels-registry, so this compiles no new crate.
+wcore-channels = { workspace = true }
 # F26-SC3-O1: `backup_sqlite_capture` builds a LIVE WAL database and asserts the
 # archive captures it as one consistent file. Needs a real SQLite client to make
 # the WAL non-empty — a fixture written with `fs::write` would not be a database.

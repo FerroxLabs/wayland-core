@@ -693,6 +693,10 @@ async fn worker_manifest(
             .sandbox_read_denies(workspace)
             .await
             .map_err(|error| format!("sandbox deny authority: {error}"))?,
+        // Nothing to stat: this manifest already points `HOME` at the private
+        // scratch, so libgit2's global-config probe resolves inside a granted
+        // writable root instead of into the operator's home.
+        fs_metadata_read_allow: Vec::new(),
         network: NetworkPolicy::Deny,
         syscall_policy: SyscallPolicy::Inherit,
         timeout: Some(timeout),

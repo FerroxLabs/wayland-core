@@ -15,6 +15,7 @@ use super::*;
 // case does not touch.
 use crate::ResourceLimitEnforcement;
 use crate::SandboxCommand;
+use crate::SandboxOutput;
 use crate::error::SandboxError;
 use crate::manifest::{NetworkPolicy, SandboxManifest};
 use std::sync::Arc;
@@ -744,9 +745,14 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
     let registry =
         crate::SandboxRegistry::required_for_session(None).expect("session selection must resolve");
 
+    // The Windows default is the relaxed Job Object backend; AppContainer stays
+    // reachable only through `WAYLAND_SANDBOX=appcontainer`, which this test
+    // asserts is unset. What matters here is that selection resolves to a REAL
+    // backend rather than the fail-closed placeholder, and does so without
+    // touching the probe.
     assert_eq!(
         registry.backend_name(),
-        "appcontainer",
+        "windows_job_object",
         "the session must take the real Windows backend, not a fail-closed placeholder"
     );
     assert_eq!(
@@ -758,7 +764,9 @@ fn session_selection_reaches_ready_without_running_the_appcontainer_probe() {
 
     // Anti-vacuity: the verdict IS reachable through the production path, so
     // "still None above" is an observation, not an inability to observe.
-    let available = registry.is_available();
+    // Driven off AppContainer directly, because the session no longer selects
+    // it and `registry.is_available()` would now settle nothing.
+    let available = AppContainerBackend::new().is_available();
     assert_eq!(
         settled_verdict(),
         Some(available),
@@ -1021,4 +1029,250 @@ async fn a_failed_probe_records_a_cause_the_operator_can_actually_read() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// W-B: a post-execution cleanup fault must not be reported as an execution
+// failure.
+//
+// The join at the bottom of `execute_blocking` used to be
+// `(_, Err(cleanup_error)) => Err(cleanup_error)`, which discarded a successful
+// `SandboxOutput` — exit code, stdout and stderr — whenever the AppContainer
+// ACL/profile teardown faulted. Under machine-wide mutation-lock contention
+// that is the observed production behaviour: the child had ALREADY written its
+// files, and the caller was told the command failed. An agent believes that
+// report and re-issues the command; for a non-idempotent command the retry is
+// real damage.
+//
+// These cases pin the join itself, so the contract is assertable without
+// standing up contention. The live counterpart, which drives a real child, a
+// real file on disk and a real mutation-lock timeout, is
+// `cleanup_timeout_reports_the_completed_command_as_completed` below.
+// ---------------------------------------------------------------------------
+
+fn cleanup_fault() -> SandboxError {
+    SandboxError::ExecFailed("timed out acquiring AppContainer ACL mutation lock".into())
+}
+
+fn succeeded() -> SandboxOutput {
+    SandboxOutput {
+        exit_code: 0,
+        stdout: b"side-effect-landed".to_vec(),
+        stderr: b"child-stderr".to_vec(),
+        resource_limits: ResourceLimitEnforcement::Enforced,
+    }
+}
+
+#[test]
+fn cleanup_fault_on_success_reports_success_and_the_true_exit_code() {
+    let joined = join_execution_and_cleanup(Ok(succeeded()), Err(cleanup_fault()))
+        .expect("a teardown fault must not turn a completed command into an execution failure");
+    assert_eq!(
+        joined.exit_code, 0,
+        "the child's real exit code must survive"
+    );
+    assert_eq!(
+        joined.stdout, b"side-effect-landed",
+        "the child's real stdout must survive"
+    );
+}
+
+#[test]
+fn cleanup_fault_on_success_surfaces_the_fault_distinctly() {
+    let joined = join_execution_and_cleanup(Ok(succeeded()), Err(cleanup_fault())).unwrap();
+    let stderr = String::from_utf8(joined.stderr).unwrap();
+    assert!(
+        stderr.starts_with("child-stderr"),
+        "the child's own stderr must be preserved ahead of the annotation: {stderr:?}"
+    );
+    assert!(
+        stderr.contains(CLEANUP_FAULT_PREFIX),
+        "the teardown fault must be surfaced as a teardown fault, not swallowed: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("timed out acquiring AppContainer ACL mutation lock"),
+        "the operator must get the real cleanup cause: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("do NOT retry"),
+        "the annotation exists to stop a retry of an already-applied command: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_non_zero_exit_still_reports_its_own_code_when_cleanup_faults() {
+    let ran = SandboxOutput {
+        exit_code: 3,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        resource_limits: ResourceLimitEnforcement::Enforced,
+    };
+    let joined = join_execution_and_cleanup(Ok(ran), Err(cleanup_fault())).unwrap();
+    assert_eq!(
+        joined.exit_code, 3,
+        "a command that ran and failed on its own terms must keep its exit code"
+    );
+}
+
+#[test]
+fn a_real_execution_failure_keeps_its_typed_variant_when_cleanup_also_faults() {
+    // Callers match on `Timeout` / `OutputLimitExceeded`. Substituting the
+    // teardown fault (the old behaviour) made those variants unreachable
+    // whenever teardown faulted too.
+    let joined = join_execution_and_cleanup(Err(SandboxError::Timeout), Err(cleanup_fault()));
+    assert!(
+        matches!(joined, Err(SandboxError::Timeout)),
+        "the execution failure is the cause and must not be replaced by its consequence: \
+         {joined:?}"
+    );
+}
+
+#[test]
+fn a_clean_teardown_passes_the_execution_result_through_untouched() {
+    let joined = join_execution_and_cleanup(Ok(succeeded()), Ok(())).unwrap();
+    assert_eq!(
+        joined.stderr, b"child-stderr",
+        "no annotation without a fault"
+    );
+    assert!(matches!(
+        join_execution_and_cleanup(Err(SandboxError::Timeout), Ok(())),
+        Err(SandboxError::Timeout)
+    ));
+}
+
+/// W-B, live on real hardware, through the real backend, with a real side
+/// effect graded from bytes on disk OUTSIDE the sandbox.
+///
+/// The lever is the one the field report named: a second process holding the
+/// machine-wide `Global\WaylandCore.AppContainerAclLease.v1.<sha>` mutex. The
+/// helper waits for a rendezvous file that the SANDBOXED CHILD itself writes,
+/// so the mutex is free while the identity is being set up and taken by the
+/// time teardown runs — which is precisely the window in which the product used
+/// to report "Failed to execute command" for a command that had already
+/// written its file.
+///
+/// Grading:
+///   * the marker file must exist with the expected bytes (world state, read by
+///     this process, not by the sandboxed child);
+///   * the call must return `Ok` with the child's real exit code;
+///   * stderr must carry the cleanup fault, distinctly labelled.
+///
+/// Against the pre-fix join this FAILS at the first assertion with the teardown
+/// error substituted for the result.
+///
+/// Residual, deliberately not hidden: a timed-out teardown strands one ACL
+/// grant and one AppContainer profile whose lease stays `GrantActive`. That is
+/// pre-existing behaviour of the timeout path, not something this test or this
+/// fix introduces, and it is what the lease-recovery sweep exists for.
+#[tokio::test]
+#[ignore = "explicit native Windows AppContainer acceptance"]
+async fn cleanup_timeout_reports_the_completed_command_as_completed() {
+    assert_eq!(
+        std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").as_deref(),
+        Ok("1")
+    );
+    let backend = AppContainerBackend::new();
+    assert!(backend.is_available(), "AppContainer must be available");
+
+    // %PUBLIC% for the same reason the rest of the live ACL suite uses it: a
+    // shallow, AppContainer-traversable ancestor chain, writable unelevated.
+    let root = std::path::PathBuf::from(std::env::var_os("PUBLIC").expect("PUBLIC"))
+        .join(format!("wcore-wb-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let side_effect = root.join("side-effect.txt");
+    let go = root.join("child-running.txt");
+    let held = root.join("mutex-held.txt");
+    let release = root.join("release.txt");
+
+    // Substring filter, NOT `--exact`: `--exact` matches the fully-qualified
+    // module path, so the bare name selects zero tests and the helper exits
+    // having acquired nothing.
+    let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["mutation_lock_helper_entry", "--nocapture"])
+        .env("WCORE_MUTEX_HELPER_MARKER", &held)
+        .env("WCORE_MUTEX_HELPER_GO", &go)
+        .env("WCORE_MUTEX_HELPER_RELEASE", &release)
+        .spawn()
+        .expect("spawn mutation-lock holder");
+
+    // Rendezvous, not sleeps: the child may only exit once the helper has
+    // actually taken the mutex, so the teardown timeout is forced rather than
+    // hoped for. (`timeout /t` is unusable here — it refuses a redirected
+    // stdin — and `ping` needs network DLLs an AppContainer child cannot map.)
+    let finish = root.join("finish.txt");
+    let watcher = {
+        let (held, finish) = (held.clone(), finish.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while !held.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::fs::write(&finish, b"go").ok();
+        })
+    };
+
+    // Child: land the side effect, release the helper onto the mutex, then spin
+    // until the watcher confirms the mutex is held.
+    // `for /L` with step 0 is the cmd command-line spin idiom; `goto`/labels
+    // need a batch context and do not exist under `cmd /c`.
+    let script = format!(
+        "echo LANDED>\"{}\" & echo go>\"{}\" & for /L %i in (1,0,2) do @if exist \"{}\" exit 0",
+        side_effect.display(),
+        go.display(),
+        finish.display()
+    );
+    let manifest = SandboxManifest {
+        fs_write_allow: vec![root.clone()],
+        // Comfortably past the child's ~8s idle; the 15s teardown timeout is
+        // separate and is what this test is actually driving.
+        timeout: Some(Duration::from_secs(60)),
+        ..Default::default()
+    };
+    let outcome = backend
+        .execute(
+            &manifest,
+            SandboxCommand {
+                argv: vec!["cmd.exe".into(), "/c".into(), script],
+                cwd: None,
+            },
+        )
+        .await;
+
+    std::fs::write(&release, b"go").ok();
+    let _ = helper.wait();
+    let _ = watcher.join();
+
+    // World state FIRST, so the grade never depends on the product's own
+    // report of itself.
+    let landed = std::fs::read(&side_effect);
+    println!(
+        "OBSERVED side_effect={} go={} held={} outcome={:?}",
+        landed.is_ok(),
+        go.exists(),
+        held.exists(),
+        outcome.as_ref().map(|o| o.exit_code)
+    );
+    assert!(
+        held.exists(),
+        "the contention lever never engaged — the helper never took the mutex, \
+         so this run proves nothing about the teardown path"
+    );
+    let landed = landed.expect("the sandboxed child must have written its side effect");
+    assert!(
+        String::from_utf8_lossy(&landed).contains("LANDED"),
+        "side effect on disk is {landed:?}"
+    );
+
+    let out = outcome.expect(
+        "the command RAN and its side effect is on disk; reporting an execution failure here is \
+         the defect — an agent retries a non-idempotent command on this report",
+    );
+    assert_eq!(out.exit_code, 0, "the child's real exit code must survive");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        stderr.contains(CLEANUP_FAULT_PREFIX),
+        "the teardown fault must still be surfaced, distinctly: {stderr:?}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }

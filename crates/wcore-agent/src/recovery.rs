@@ -44,6 +44,105 @@ pub enum RecoveryDisposition {
     },
 }
 
+/// Reconciler identity recorded when an INTERRUPTION, not an observation,
+/// decided a tool effect. The receipt it writes is `Failed` with
+/// [`INTERRUPTED_EFFECT_UNOBSERVED`]: the effect may or may not have landed
+/// and nothing claims either way.
+pub const INTERRUPTION_ADMISSION_RECONCILER: &str = "interruption-admission";
+
+/// The error text on an interrupted tool effect's terminal receipt. It says
+/// what is true — the outcome was never observed — rather than choosing
+/// between "it happened" and "it did not", both of which would be inventions.
+pub const INTERRUPTED_EFFECT_UNOBSERVED: &str = "the process was killed before this tool call's outcome was observed; the effect may or may \
+     not have landed";
+
+/// The tool result a resumed conversation carries for a call the crash cut off.
+///
+/// It replaces `"Turn cancelled before this tool ran."` — which for an
+/// interrupted call is simply FALSE, and measurably expensive: shown that
+/// sentence for a `curl -X POST /register` that had already booked a shipment,
+/// the model re-ran the command verbatim and the customer was billed twice.
+/// Losing the work and duplicating it are the same defect seen from two sides,
+/// and both are cured by telling the truth about what is unknown.
+pub const INTERRUPTED_TOOL_RESULT: &str = "INTERRUPTED: this tool call was cut off by a crash and its outcome was never observed. It \
+     may have run in full, in part, or not at all. Do NOT re-run it until you have checked the \
+     current state of everything it could have changed, and then act only on what that check \
+     shows.";
+
+/// What a crash left in flight, in terms an operator and a model can both act
+/// on.
+///
+/// Produced before recovery terminalizes anything: afterwards the journal
+/// records only that an outcome is unknown, not which operation it is unknown
+/// about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedTurnReport {
+    /// The turn the interruption caught.
+    pub turn_id: String,
+    /// The message that started it.
+    pub user_message: String,
+    /// One line per effect whose outcome nobody observed. Empty when the turn
+    /// was interrupted between effects — the turn still has to be closed, but
+    /// nothing is in doubt.
+    pub unobserved: Vec<String>,
+}
+
+impl InterruptedTurnReport {
+    /// The account handed to the model on the next turn.
+    ///
+    /// It is deliberately an instruction to VERIFY, not to redo and not to
+    /// skip. Redoing duplicates a billed effect; skipping loses one. Only the
+    /// world can say which happened, so the next turn is told to go and look.
+    #[must_use]
+    pub fn briefing(&self) -> String {
+        let mut briefing = String::from(
+            "[recovered session] Your previous turn did not finish: the process was killed \
+             part-way through it. The work you were asked to do is NOT complete just because \
+             this session has history of you starting it.",
+        );
+        if !self.unobserved.is_empty() {
+            briefing.push_str(
+                "\n\nThese operations were in flight when it died, and nothing observed how they \
+                 ended:",
+            );
+            for item in &self.unobserved {
+                briefing.push_str("\n  - ");
+                briefing.push_str(item);
+            }
+        }
+        briefing.push_str(
+            "\n\nDo not assume any of them succeeded, and do not assume any of them failed. \
+             Your FIRST action must be a read-only check of the current state of everything the \
+             interrupted work could have changed — and it must be a fresh check now, not a \
+             result you already have from before the crash, because the crash landed after it. \
+             Issue no request that creates, books, sends, charges or writes anything until that \
+             check has come back, then act only on what it shows. Then finish every remaining \
+             part of the original task, including any file you were asked to write and any \
+             commit you were asked to make.",
+        );
+        briefing
+    }
+}
+
+/// A bounded, redaction-safe rendering of a durable tool input, for naming an
+/// interrupted call in a report. Returns an empty string when the journal kept
+/// no summary — the digest alone tells a reader nothing.
+#[must_use]
+pub(crate) fn stored_input_summary(input: &crate::session_journal::StoredToolInput) -> String {
+    let crate::session_journal::StoredToolInput::Redacted {
+        summary: Some(summary),
+        ..
+    } = input
+    else {
+        return String::new();
+    };
+    let mut rendered = summary.to_string();
+    if rendered.chars().count() > 200 {
+        rendered = rendered.chars().take(200).collect::<String>() + "…";
+    }
+    format!(" {rendered}")
+}
+
 pub(crate) const RECOVERY_CHECKPOINT_VERSION: u64 = 4;
 pub(crate) const TOOL_HOOK_RECOVERY_AUTHORITY_VERSION: u64 = 1;
 
@@ -94,6 +193,20 @@ pub(crate) struct RecoveryPosture {
     /// conservatively after process restart. This may narrow availability for
     /// one cooldown, but can never erase an original same-turn denial.
     pub conservatively_open_breakers: Vec<String>,
+    /// Row B-3: the unreachable-human freeze, armed when the last word from
+    /// the outbound human-contact route was a failure.
+    ///
+    /// It lives in an in-memory `AtomicBool` on the tool registry, which a
+    /// crash destroys. Every other continuation authority here survived the
+    /// restart and this one did not, so a turn resumed from its own
+    /// checkpoint re-entered UNFROZEN and could take the world-changing
+    /// action it had just refused — a fail-open window.
+    ///
+    /// `default` keeps checkpoints written before this field decodable under
+    /// `deny_unknown_fields`. They decode as reachable, which is what they
+    /// recorded.
+    #[serde(default)]
+    pub human_unreachable: bool,
     /// Digest of independently reconstructed policy, workspace, cwd and tool
     /// inventory data. It is compared before any continuation authority is
     /// restored.
@@ -232,43 +345,74 @@ impl RecoveryCheckpoint {
                 )));
             }
 
-            let allows_transient_tail =
-                index + 1 == durable_messages.len() && matches!(durable.role, Role::User);
-            if prepared.content.len() < durable.content.len()
-                || (!allows_transient_tail && prepared.content.len() != durable.content.len())
-            {
+            let allows_transient = index + 1 == durable_messages.len()
+                && matches!(durable.role, Role::User)
+                && prepared.content.len() > durable.content.len();
+            if prepared.content.len() < durable.content.len() {
                 return Err(JournalError::InvalidTransition(format!(
                     "prepared request message {index} does not preserve durable content"
                 )));
             }
-            for (prepared_block, durable_block) in prepared.content.iter().zip(&durable.content) {
-                let prepared_value =
-                    serde_json::to_value(prepared_block).map_err(|source| JournalError::Json {
-                        context: "encoding prepared request block for recovery binding",
-                        source,
-                    })?;
-                let durable_value =
-                    serde_json::to_value(durable_block).map_err(|source| JournalError::Json {
-                        context: "encoding durable conversation block for recovery binding",
-                        source,
-                    })?;
-                if prepared_value != durable_value {
+            if !allows_transient {
+                if prepared.content.len() != durable.content.len() {
                     return Err(JournalError::InvalidTransition(format!(
-                        "prepared request message {index} changes durable content"
+                        "prepared request message {index} does not preserve durable content"
+                    )));
+                }
+                for (prepared_block, durable_block) in prepared.content.iter().zip(&durable.content)
+                {
+                    if Self::block_value(prepared_block)? != Self::block_value(durable_block)? {
+                        return Err(JournalError::InvalidTransition(format!(
+                            "prepared request message {index} changes durable content"
+                        )));
+                    }
+                }
+                continue;
+            }
+
+            // The durable blocks must survive IN ORDER; anything extra must be
+            // text. Extras may appear ANYWHERE in the message, not only at the
+            // end: `AgentEngine::attach_transient_block` deliberately
+            // places the per-turn skill hint, the current-date line and
+            // PrePrompt hook contributions BEFORE a trailing user text block,
+            // so product wording never sits downstream of a remote channel
+            // participant's words (P3). An append-only rule here would force
+            // those blocks back after the untrusted body.
+            //
+            // This still rejects every mutation the append-only rule rejected:
+            // a changed durable block matches nothing, so the walk finishes
+            // with durable blocks unconsumed and fails below.
+            let mut durable_blocks = durable.content.iter().peekable();
+            for prepared_block in &prepared.content {
+                if let Some(next_durable) = durable_blocks.peek()
+                    && Self::block_value(prepared_block)? == Self::block_value(next_durable)?
+                {
+                    durable_blocks.next();
+                    continue;
+                }
+                if !matches!(prepared_block, ContentBlock::Text { .. }) {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "prepared request message {index} carries a non-text transient block"
                     )));
                 }
             }
-            if prepared.content[durable.content.len()..]
-                .iter()
-                .any(|block| !matches!(block, ContentBlock::Text { .. }))
-            {
+            if durable_blocks.next().is_some() {
                 return Err(JournalError::InvalidTransition(format!(
-                    "prepared request message {index} carries a non-text transient tail"
+                    "prepared request message {index} changes durable content"
                 )));
             }
         }
 
         Ok(request)
+    }
+
+    /// Canonical JSON for one content block, used to compare a prepared
+    /// request against the durable conversation.
+    fn block_value(block: &ContentBlock) -> Result<serde_json::Value, JournalError> {
+        serde_json::to_value(block).map_err(|source| JournalError::Json {
+            context: "encoding a content block for recovery binding",
+            source,
+        })
     }
 
     fn validate(&self) -> Result<(), JournalError> {
@@ -459,6 +603,21 @@ fn locked_session_refusal(
     session_id: &str,
     cause: &crate::recovery_confidential::RecoveryConfidentialError,
 ) -> String {
+    // C-3: the unlock remedy belongs only to causes an unlock can change. A
+    // plaintext credentials backend is decided by config alone —
+    // `reject_backend_without_confidential_storage` runs first and reads no
+    // environment — so appending the passphrase advice for that cause would
+    // tell the operator to do something that provably cannot lift this
+    // refusal. Its own text already names the config change that can.
+    let unlock = if matches!(
+        cause,
+        crate::recovery_confidential::RecoveryConfidentialError::PlaintextBackendRejected
+    ) {
+        ""
+    } else {
+        " To restore the key, set WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — \
+         preferred) or WAYLAND_VAULT_PASSPHRASE and resume again."
+    };
     format!(
         "session '{session_id}' cannot be resumed on this host: it was interrupted while a \
          provider request was in flight, and continuing it means re-opening the sealed copy of \
@@ -466,9 +625,7 @@ fn locked_session_refusal(
          mean either re-sending a request that may already have been answered, or claiming to \
          have resumed a session nothing was read from. Only THIS session is refused — starting \
          a new session on this host works normally, and its journal is left untouched, so \
-         restoring the key and resuming again recovers it. To restore the key, set \
-         WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
-         WAYLAND_VAULT_PASSPHRASE and resume again."
+         restoring the key and resuming again recovers it.{unlock}"
     )
 }
 
@@ -1744,6 +1901,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -1969,6 +2127,34 @@ mod tests {
         }
     }
 
+    /// C-3, downstream half: this refusal interpolates the cause and then adds
+    /// its own remedy, so it can re-advertise dead advice even after the cause's
+    /// text is fixed.
+    ///
+    /// `PlaintextBackendRejected` is settled by config before any store or
+    /// environment is consulted, so no passphrase can lift it. Every other cause
+    /// here is about a store that exists, where the unlock is exactly the point —
+    /// hence the second half, which keeps this measuring suppression rather than
+    /// absence.
+    #[test]
+    fn the_locked_session_refusal_drops_an_unlock_remedy_that_cannot_apply() {
+        use crate::recovery_confidential::RecoveryConfidentialError as Cause;
+
+        let plaintext = locked_session_refusal("session-a", &Cause::PlaintextBackendRejected);
+        assert!(
+            !plaintext.contains("WAYLAND_VAULT_PASSPHRASE"),
+            "a plaintext credentials backend is decided by config alone; no passphrase can \
+             lift this refusal: {plaintext}"
+        );
+
+        let unavailable = locked_session_refusal("session-a", &Cause::NoSecureBackendAvailable);
+        assert!(
+            unavailable.contains("WAYLAND_VAULT_PASSPHRASE_FD"),
+            "the unlock remedy must survive for the causes an unlock can change, or the \
+             assertion above is measuring nothing: {unavailable}"
+        );
+    }
+
     /// The gate must not fire on a session that needs no key, whatever the key
     /// situation. Otherwise "the keyring went away" becomes "nothing resumes",
     /// which is the availability kill this remedy exists to avoid.
@@ -2103,6 +2289,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2186,6 +2373,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2269,6 +2457,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
@@ -2368,6 +2557,7 @@ mod tests {
                 pre_plan_allow_list: Vec::new(),
                 effective_allow_list: Vec::new(),
                 conservatively_open_breakers: Vec::new(),
+                human_unreachable: false,
                 authority_digest: "c".repeat(64),
                 authority_component_digests: BTreeMap::new(),
                 tool_hook_authority_version: TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,

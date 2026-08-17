@@ -144,3 +144,106 @@ async fn git_log_with_commit_returns_subject() {
         result.content
     );
 }
+
+// ── A-4: reviewing a pull request means seeing what it changed ──────────────
+
+/// Build the shape the A-4 job corpus row hands the agent: a `main` commit and
+/// a branch on top of it that rewrites one file.
+async fn repo_with_a_branch(tmp: &std::path::Path) {
+    make_repo(tmp).await;
+    std::fs::write(tmp.join("limiter.py"), "def allow():\n    return True\n").unwrap();
+    git_in(tmp, &["add", "-A"]);
+    git_in(tmp, &["commit", "-qm", "fixed window"]);
+    git_in(tmp, &["branch", "-M", "main"]);
+    git_in(tmp, &["checkout", "-qb", "pr/sliding-window"]);
+    std::fs::write(
+        tmp.join("limiter.py"),
+        "def allow():\n    # sliding window\n    return False\n",
+    )
+    .unwrap();
+    git_in(tmp, &["add", "-A"]);
+    git_in(tmp, &["commit", "-qm", "sliding window"]);
+}
+
+/// `diff` must be able to name a revision.
+///
+/// Measured (job corpus A-4, Linux, sealed binary): under the STRICT sandbox
+/// `git` cannot run from Bash at all, so this tool is the only git surface a
+/// contained session has. Asked to review a pull request, the agent called
+/// `diff` with the branch name and got an empty result every time — a
+/// revision handed to `path` lands after `--` as a pathspec, matches no file,
+/// and exits 0. It never saw the pull request and burned every turn it had
+/// without leaving the user a review.
+#[tokio::test]
+async fn diff_can_name_the_revision_a_pull_request_is_against() {
+    let tmp = tempfile::tempdir().unwrap();
+    repo_with_a_branch(tmp.path()).await;
+    let cwd = tmp.path().to_str().unwrap();
+    let tool = GitTool;
+
+    for rev in ["main", "main...HEAD", "main..pr/sliding-window"] {
+        let result = tool
+            .run_op(json!({"op": "diff", "rev": rev, "cwd": cwd}))
+            .await;
+        assert!(
+            !result.is_error,
+            "diff rev={rev:?} errored: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("sliding window"),
+            "diff rev={rev:?} must show what the branch changed, but the \
+             caller was handed {:?} — an empty diff reads as 'this branch \
+             changed nothing'",
+            result.content
+        );
+    }
+}
+
+/// The control, and the reason `rev` is a separate field: `path` stays a
+/// pathspec. A caller narrowing a revision diff to one file must still get
+/// only that file, and a `path` that happens to look like a branch name must
+/// never be silently promoted to a revision.
+#[tokio::test]
+async fn path_remains_a_pathspec_and_narrows_the_revision_diff() {
+    let tmp = tempfile::tempdir().unwrap();
+    repo_with_a_branch(tmp.path()).await;
+    let cwd = tmp.path().to_str().unwrap();
+    std::fs::write(tmp.path().join("README.md"), "docs\n").unwrap();
+    git_in(tmp.path(), &["add", "-A"]);
+    git_in(tmp.path(), &["commit", "-qm", "docs"]);
+    let tool = GitTool;
+
+    let narrowed = tool
+        .run_op(json!({"op": "diff", "rev": "main", "path": "limiter.py", "cwd": cwd}))
+        .await;
+    assert!(!narrowed.is_error, "{}", narrowed.content);
+    assert!(
+        narrowed.content.contains("limiter.py") && !narrowed.content.contains("README.md"),
+        "path must still narrow to a pathspec: {}",
+        narrowed.content
+    );
+
+    // `path: "main"` is a file that does not exist, not the branch. An empty
+    // diff is the CORRECT answer here; promoting it to a revision would be a
+    // silent reinterpretation of the caller's argument.
+    let as_path = tool
+        .run_op(json!({"op": "diff", "path": "main", "cwd": cwd}))
+        .await;
+    assert!(
+        as_path.content.trim().is_empty(),
+        "`path` must stay a pathspec: {}",
+        as_path.content
+    );
+
+    // An option-shaped revision is refused rather than handed to git.
+    let injected = tool
+        .run_op(json!({"op": "diff", "rev": "--output=/tmp/pwned", "cwd": cwd}))
+        .await;
+    assert!(
+        injected.is_error && injected.content.starts_with("Git: revision"),
+        "an option-shaped revision must be refused by name, never handed to \
+         git as a flag: {}",
+        injected.content
+    );
+}

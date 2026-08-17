@@ -93,12 +93,33 @@ pub(crate) struct PreparedRequestBinding<'a> {
 /// re-pointing or deleting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub(crate) enum RecoveryConfidentialError {
+    /// C-3: this variant deliberately offers NO vault-passphrase remedy.
+    ///
+    /// It is decided by [`reject_backend_without_confidential_storage`], a pure
+    /// function of `config.storage.credentials.backend` that reads no
+    /// environment, and the credentials layer refuses the plaintext backend at
+    /// the top of `confidential_backend_plan` — before
+    /// `vault_unlock_material_present()` is consulted at all. An unlock
+    /// passphrase therefore cannot move this verdict by one bit on either
+    /// level, and it used to be the FIRST thing the message told the operator
+    /// to try.
+    ///
+    /// Letting an unlocked vault override an explicit `backend = "plaintext"`
+    /// was the other way to make the advice true, and it is NOT available:
+    /// ADR 0003 §3 records `backend = "plaintext"` as "refuse (unchanged)"
+    /// while its neighbours were relaxed, and
+    /// `durable_sessions_must_be_disabled` short-circuits on it for the same
+    /// stated reason — "the operator configured a backend that can never hold
+    /// confidential material … it must keep failing loudly at session open".
+    /// Honouring the passphrase here would reverse that decision silently, so
+    /// the dead remedy is dropped instead.
     #[error(
         "storage.credentials.backend is set to \"plaintext\", which cannot hold the confidential \
-         key that durable session recovery requires. Unlock an encrypted vault by setting \
-         WAYLAND_VAULT_PASSPHRASE_FD (a passphrase file descriptor — preferred) or \
-         WAYLAND_VAULT_PASSPHRASE, or set [storage.credentials] backend = \"keyring\", or turn \
-         durable sessions off with [session] enabled = false"
+         key that durable session recovery requires. This is decided by your configuration \
+         alone, not by this host, so no vault passphrase can unlock it: set \
+         [storage.credentials] backend = \"keyring\", or delete that setting to get the default \
+         \"auto\" (OS keyring, then the encrypted vault), or turn durable sessions off with \
+         [session] enabled = false"
     )]
     PlaintextBackendRejected,
     #[error(
@@ -621,6 +642,118 @@ mod tests {
             toml::from_str::<wcore_config::config::SessionConfig>("enabled = false").is_ok(),
             "the key this message advertises must exist in SessionConfig"
         );
+    }
+
+    /// Uppercase `SNAKE_CASE` tokens are how every message in this enum spells
+    /// an environment variable, and the surrounding prose is lowercase, so this
+    /// cannot pick one up by accident. Deliberately not a `WAYLAND_` prefix
+    /// match: a future message that advertises some other process variable is
+    /// exactly as dead, and must be caught the same way.
+    fn env_vars_named_in(message: &str) -> Vec<String> {
+        message
+            .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .filter(|token| {
+                token.len() >= 4
+                    && token.contains('_')
+                    && token
+                        .chars()
+                        .any(|character| character.is_ascii_uppercase())
+                    && !token
+                        .chars()
+                        .any(|character| character.is_ascii_lowercase())
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sets one environment variable for the length of a probe and puts the
+    /// prior value back, including on unwind.
+    struct EnvVarProbe {
+        name: String,
+        prior: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarProbe {
+        fn set(name: &str, value: &str) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+            let prior = std::env::var_os(name);
+            // SAFETY: env mutation is serialized by `ENV_LOCK` and by
+            // `#[serial_test::serial]` on the only test that constructs this.
+            unsafe { std::env::set_var(name, value) };
+            Self {
+                name: name.to_owned(),
+                prior,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarProbe {
+        fn drop(&mut self) {
+            // SAFETY: as above.
+            match &self.prior {
+                Some(value) => unsafe { std::env::set_var(&self.name, value) },
+                None => unsafe { std::env::remove_var(&self.name) },
+            }
+        }
+    }
+
+    /// C-3: a remedy a message names must be able to change the verdict of the
+    /// code that emits it.
+    ///
+    /// `PlaintextBackendRejected` has exactly one producer,
+    /// [`reject_backend_without_confidential_storage`], whose only input is
+    /// `config.storage.credentials.backend`. The shipped message opened with
+    /// "Unlock an encrypted vault by setting WAYLAND_VAULT_PASSPHRASE_FD … or
+    /// WAYLAND_VAULT_PASSPHRASE" — the FIRST thing it told the operator to try,
+    /// and an operator who did it got the byte-identical refusal back. Three
+    /// remedies worked; the one printed first could not.
+    ///
+    /// Deliberately a property, not a string comparison: the variable names are
+    /// EXTRACTED from the message, actually set, and the verdict re-measured. A
+    /// reword that keeps dead env advice still reds, and if this function ever
+    /// does start honouring an unlock variable the gate goes green on its own
+    /// rather than having to be edited.
+    #[test]
+    #[serial_test::serial]
+    fn the_plaintext_refusal_names_no_remedy_its_own_verdict_cannot_honour() {
+        // Instrument control. An empty extraction below has to mean "no dead
+        // advice", never "the scanner stopped working", so prove the scanner
+        // finds the variables that ARE named elsewhere in this same enum.
+        let control =
+            env_vars_named_in(&RecoveryConfidentialError::NoSecureBackendAvailable.to_string());
+        for expected in ["WAYLAND_VAULT_PASSPHRASE_FD", "WAYLAND_VAULT_PASSPHRASE"] {
+            assert!(
+                control.iter().any(|found| found == expected),
+                "the env-var scanner is dead: it did not find {expected} in the unavailable \
+                 message, so this gate would pass vacuously. Fix the extraction, do not \
+                 delete the assert. Found: {control:?}"
+            );
+        }
+
+        let config = config_with_backend(CredentialsBackend::Plaintext);
+        let refused = reject_backend_without_confidential_storage(&config);
+        assert_eq!(
+            refused,
+            Err(RecoveryConfidentialError::PlaintextBackendRejected),
+            "positive control: this config must produce the message under test"
+        );
+
+        let message = RecoveryConfidentialError::PlaintextBackendRejected.to_string();
+        for name in env_vars_named_in(&message) {
+            let _probe = EnvVarProbe::set(&name, "c3-remedy-probe");
+            assert_ne!(
+                reject_backend_without_confidential_storage(&config),
+                refused,
+                "the message tells an operator to set {name}, but setting it leaves the \
+                 verdict of reject_backend_without_confidential_storage unchanged. That \
+                 function reads no environment, so this remedy can never resolve the error \
+                 it is attached to.\nmessage: {message}"
+            );
+        }
     }
 
     /// D3/D8: the plaintext backend and an unavailable secure backend are

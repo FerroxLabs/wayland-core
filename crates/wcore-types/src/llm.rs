@@ -139,6 +139,17 @@ pub enum LlmEvent {
     /// actually produce reasoning. The host renders it as the heading for
     /// the in-flight thinking block. Opaque — never switch on the value.
     ThinkingSubject(String),
+    /// C-4b — an opaque provider signature covering the reasoning of THIS
+    /// turn, carried on the thought part itself (Gemini `thoughtSignature`).
+    /// Gemini is stateless about reasoning: a signed thought must be sent
+    /// back verbatim, signature included, or the server rejects the replayed
+    /// turn. The signature on a `functionCall` part is a DIFFERENT value and
+    /// already rides on [`LlmEvent::ToolUse::extra`]; this variant carries the
+    /// one that arrives on a thought part, which had nowhere to go before.
+    /// The engine folds it into `ContentBlock::Thinking.extra` for replay.
+    /// Emitted at most once per turn (first signature wins); providers that
+    /// don't sign reasoning never emit it.
+    ThinkingSignature(String),
     /// Response complete
     Done {
         stop_reason: StopReason,
@@ -148,6 +159,25 @@ pub enum LlmEvent {
         /// warning in that case).
         finish_reason: FinishReason,
         usage: TokenUsage,
+    },
+    /// The provider stopped at its OUTPUT token cap (`finish_reason=length`)
+    /// while a tool call was still streaming, so the accumulated argument JSON
+    /// is an unterminated fragment. The call CANNOT be run — half its
+    /// arguments never arrived — but dropping it silently is what made a turn
+    /// cut off mid-deliverable indistinguishable from a model that had simply
+    /// finished talking: the engine saw an empty tool-call list and took the
+    /// natural-completion path. Providers emit one of these per pending call
+    /// so the engine has a condition to act on instead of a hole.
+    ///
+    /// NOT an [`LlmEvent::Error`]: the stream itself is well-formed, and the
+    /// right response to a severed output differs from a transport fault.
+    TruncatedToolCall {
+        /// Tool name accumulated before the cut (empty when the cut landed
+        /// before the name arrived).
+        name: String,
+        /// Bytes of argument JSON that did arrive. Sizes the loss for the user
+        /// without echoing a half-written payload back at them.
+        partial_arg_bytes: usize,
     },
     /// Error from the API
     Error(String),

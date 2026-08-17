@@ -1,9 +1,11 @@
 //! Bash command policy classification and denylists (F20-03 Task 2 split).
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use regex::RegexSet;
 use wcore_sandbox::NetworkPolicy;
+use wcore_sandbox::manifest::SandboxManifest;
 use wcore_types::tool::ToolResult;
 
 /// Does `command` look like it needs network egress? Used only to attach a
@@ -52,30 +54,478 @@ pub(super) fn looks_network_dependent(command: &str) -> bool {
     NEEDLES.iter().any(|n| c.contains(n))
 }
 
-/// When a network-dependent command FAILS and the sandbox blocks network,
-/// append a clear explanation + the right tools to use, and force `is_error`.
-/// This turns the silent "empty output" failure (the 2026-05-31 curl-thrash
-/// bug) into an actionable signal so the agent pivots to WebFetch / the `web`
-/// search tool instead of retrying curl (and re-prompting for approval) in a loop.
+/// The filesystem scope the OS sandbox was actually built from, captured
+/// before the [`SandboxCommand`](wcore_sandbox::SandboxCommand) is consumed by
+/// the backend, so a failed command can be attributed to a real policy
+/// decision rather than guessed at.
+#[derive(Debug, Clone, Default)]
+pub(super) struct SandboxScope {
+    /// The child's working directory — needed because tools report denied
+    /// paths RELATIVE to it (`fatal: unable to access '.git/config'`).
+    cwd: Option<PathBuf>,
+    /// `manifest.fs_read_deny` — paths the policy explicitly denies.
+    deny: Vec<PathBuf>,
+    /// `fs_read_allow` ∪ `fs_write_allow` — every root the manifest granted.
+    allow: Vec<PathBuf>,
+}
+
+impl SandboxScope {
+    pub(super) fn new(manifest: &SandboxManifest, cwd: Option<&Path>) -> Self {
+        let mut allow = manifest.fs_read_allow.clone();
+        allow.extend(manifest.fs_write_allow.iter().cloned());
+        Self {
+            cwd: cwd.map(Path::to_path_buf),
+            deny: manifest.fs_read_deny.clone(),
+            allow,
+        }
+    }
+
+    /// True when the manifest carried no FS scoping at all (no policy attached,
+    /// or `NoSandboxBackend`): nothing can be attributed, so stay silent.
+    fn is_unscoped(&self) -> bool {
+        self.deny.is_empty() && self.allow.is_empty()
+    }
+}
+
+/// The path syntax a prefix is written in. The two need different comparison
+/// rules — Windows is case-insensitive, accepts `/` and `\` interchangeably,
+/// and carries a `\\?\` verbatim decoration that POSIX has no equivalent for —
+/// so the syntax travels with the prefix instead of being inferred.
+#[derive(Clone, Copy)]
+enum PathSyntax {
+    Posix,
+    Windows,
+}
+
+/// Prefixes every supported backend grants unconditionally as part of process
+/// bootstrap (see `sandbox_exec::build_profile` / `bwrap` ro-binds). A path
+/// under one of these is NOT evidence of a policy denial, so it must never be
+/// reported as one. `/var`, `/tmp` and `/private` are deliberately ABSENT:
+/// macOS grants those three only as `literal` symlink nodes, not as subpaths,
+/// so `$TMPDIR/...` really is outside the sandbox.
+///
+/// Both spellings are live on every host rather than being `cfg`-selected. A
+/// Windows-spelled prefix cannot collide with a real POSIX path (`C:\…` is not
+/// a spelling a POSIX tool emits, and vice versa), the only consequence of a
+/// match is SILENCE — this annotation's safe direction — and keeping them live
+/// is what lets the Windows rule be exercised by the test suite on Linux and
+/// macOS instead of only on the one platform CI cannot introspect.
+const ALWAYS_GRANTED_PREFIXES: &[(PathSyntax, &str)] = &[
+    (PathSyntax::Windows, r"C:\Windows"),
+    (PathSyntax::Windows, r"C:\Program Files"),
+    (PathSyntax::Posix, "/usr"),
+    (PathSyntax::Posix, "/bin"),
+    (PathSyntax::Posix, "/sbin"),
+    (PathSyntax::Posix, "/dev"),
+    (PathSyntax::Posix, "/etc"),
+    (PathSyntax::Posix, "/opt"),
+    (PathSyntax::Posix, "/System"),
+    (PathSyntax::Posix, "/Library"),
+    (PathSyntax::Posix, "/proc"),
+    (PathSyntax::Posix, "/sys"),
+    (PathSyntax::Posix, "/nix"),
+];
+
+/// True when `path` names `prefix`, or something under it, in POSIX syntax.
+fn posix_path_is_under(path: &str, prefix: &str) -> bool {
+    // Only an ABSOLUTE path can be under an absolute system prefix: a relative
+    // `usr/local/thing` inside the workspace is not `/usr`.
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut actual = path.split('/').filter(|c| !c.is_empty());
+    prefix
+        .split('/')
+        .filter(|c| !c.is_empty())
+        .all(|want| actual.next() == Some(want))
+}
+
+/// True when `path` names `prefix`, or something under it, in Windows syntax.
+///
+/// [`Path::starts_with`] cannot do this job. `canonicalize` hands back the
+/// VERBATIM spelling of a Windows path (`\\?\C:\Windows\…`, whose prefix
+/// component is `VerbatimDisk('C')`) while the constants above are written in
+/// the ordinary form (`C:\Windows`, prefix component `Disk('C')`), and `Path`
+/// compares prefix KINDS: `VerbatimDisk('C') != Disk('C')`, so the comparison
+/// could never fire and every genuine `System32` path was reported as a sandbox
+/// denial. Normalising is the fix, not a second constant — the verbatim form is
+/// a decoration on the same path, not a different one:
+///
+/// * drop the `\\?\` decoration from both sides;
+/// * treat `/` and `\` alike, because Windows accepts both and its tools emit
+///   both (`C:/Windows/System32/…` from git, node, python; `C:\…` from cmd);
+/// * compare component-by-component and case-insensitively, because NTFS is
+///   case-insensitive and a component-wise compare is what stops
+///   `C:\Windowsfoo` from matching `C:\Windows`.
+fn windows_path_is_under(path: &str, prefix: &str) -> bool {
+    fn components(s: &str) -> impl Iterator<Item = &str> {
+        // `\\?\UNC\server\share` keeps its `UNC` component after the strip; it
+        // then fails to match any drive-rooted prefix, which is the safe
+        // direction (a UNC path is attributed exactly as it was before).
+        s.strip_prefix(r"\\?\")
+            .unwrap_or(s)
+            .split(['\\', '/'])
+            .filter(|c| !c.is_empty())
+    }
+    let mut actual = components(path);
+    components(prefix).all(|want| {
+        actual
+            .next()
+            .is_some_and(|got| got.eq_ignore_ascii_case(want))
+    })
+}
+
+/// True when `path` sits under a prefix the platform grants unconditionally,
+/// in either spelling.
+fn is_always_granted(path: &str) -> bool {
+    ALWAYS_GRANTED_PREFIXES
+        .iter()
+        .any(|(syntax, prefix)| match syntax {
+            PathSyntax::Posix => posix_path_is_under(path, prefix),
+            PathSyntax::Windows => windows_path_is_under(path, prefix),
+        })
+}
+
+/// Why a path named in a failed command's output was unreachable.
+#[derive(Debug, PartialEq, Eq)]
+enum DeniedBecause {
+    /// Explicitly listed in `manifest.fs_read_deny`.
+    PolicyDeny,
+    /// Not under any root the manifest granted.
+    NotGranted,
+}
+
+/// Is this token path-shaped at all?
+///
+/// A false-positive token is NOT free, contrary to what the old rule assumed:
+/// a token that reaches [`classify`] and lands outside the granted roots is
+/// reported to the user as a sandbox denial. The old rule's `starts_with('/')`
+/// arm therefore fabricated denials out of Windows command-line SWITCHES —
+/// `/NOLOGO`, `/c`, `/t:Build` — which `classify` joined onto the child's cwd
+/// (`\\?\D:\` + `/NOLOGO` = `\\?\D:\NOLOGO`) and the advisory then blamed the
+/// sandbox for, recommending the user turn their sandbox OFF to fix a problem
+/// that did not exist.
+///
+/// A switch has no separator INSIDE it; every real path shape does (`/a/b`,
+/// `./a`, `a/b`). Requiring an interior separator drops the switches and keeps
+/// the paths. It also drops a single-component absolute path (`/tmp`), which
+/// costs only silence — this annotation's default and its safe direction —
+/// whereas keeping it costs a fabricated accusation.
+fn is_path_token(token: &str) -> bool {
+    if token.len() < 2 || token.contains("://") {
+        return false;
+    }
+    token.trim_start_matches('/').contains('/')
+}
+
+/// Pull the path-shaped tokens out of a tool result body. Deliberately crude:
+/// the caller only trusts a token once it matches the manifest.
+fn candidate_paths(body: &str) -> Vec<&str> {
+    body.split(|c: char| c.is_whitespace() || c == '\'' || c == '"' || c == '`')
+        .map(|token| token.trim_end_matches([':', ',', '.', ';', ')', ']']))
+        .filter(|token| is_path_token(token))
+        .collect()
+}
+
+/// Classify one path token against the scope. `None` means "no evidence this
+/// path was blocked by the sandbox" — the default, so an unrelated failure is
+/// never given a fabricated cause.
+fn classify(scope: &SandboxScope, token: &str) -> Option<(PathBuf, DeniedBecause)> {
+    let raw = Path::new(token);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        scope
+            .cwd
+            .as_ref()?
+            .join(raw.strip_prefix("./").unwrap_or(raw))
+    };
+    // Manifest roots are canonicalized by `WorkspacePolicy`, but a child names
+    // whatever spelling it was given. On macOS the granted scratch root is
+    // `/private/tmp/...` while the shell reports `/tmp/...`, so a prefix match on
+    // the raw token would call a GRANTED path "outside every granted root" —
+    // this annotation would then state a falsehood. Resolve first; a path that
+    // does not exist keeps its literal spelling, which is the right answer for
+    // the "no such file" case.
+    let resolved = std::fs::canonicalize(&joined).unwrap_or(joined);
+    if scope.deny.iter().any(|d| resolved.starts_with(d)) {
+        return Some((resolved, DeniedBecause::PolicyDeny));
+    }
+    if scope.allow.iter().any(|a| resolved.starts_with(a)) {
+        return None;
+    }
+    // Checked in BOTH spellings: as the child wrote it, and as it resolved.
+    // The token as written is what carries a Windows drive path on a POSIX host
+    // (where the join above turns it into nonsense under the cwd), and the
+    // resolved form is what carries Windows' verbatim `\\?\` decoration.
+    if is_always_granted(token) || is_always_granted(&resolved.to_string_lossy()) {
+        return None;
+    }
+    Some((resolved, DeniedBecause::NotGranted))
+}
+
+/// When a sandboxed command FAILS and its output names a path this workspace's
+/// policy actually put out of reach, say so.
+///
+/// B1 (`+GIT-SBX`): under the STRICT profile — the default for every workspace
+/// that has not been trusted — `git` exits 128 on every invocation and the only
+/// thing the user sees is
+/// `fatal: unable to access '/Users/me/.gitconfig': Operation not permitted`,
+/// which reads like their machine is broken. Three separate policy decisions
+/// produce it (`$HOME/.gitconfig` is granted to the trusted profile but not the
+/// strict one; `<root>/.git/config` is on the secret deny-list; `<root>/.git/objects`
+/// is denied so `git log -p` cannot reconstruct a committed secret). The third is
+/// load-bearing anti-exfiltration and CANNOT be widened — measured on macOS
+/// seatbelt, `git status` / `diff` / `log` all need the object store, so there is
+/// no profile edit that restores git without also restoring `git log -p`. The
+/// denial therefore stays; what changes is that it is no longer mute.
+///
+/// Attribution is evidence-based, never guessed: a path is only named when it
+/// matches this manifest's own deny-list or falls outside every root the
+/// manifest granted.
+pub(super) fn annotate_sandbox_denial(scope: &SandboxScope, mut result: ToolResult) -> ToolResult {
+    if !result.is_error || scope.is_unscoped() {
+        return result;
+    }
+    let mut denied: Vec<(PathBuf, DeniedBecause)> = Vec::new();
+    for token in candidate_paths(&result.content) {
+        if let Some(hit) = classify(scope, token)
+            && !denied.iter().any(|(seen, _)| *seen == hit.0)
+        {
+            denied.push(hit);
+        }
+    }
+    if denied.is_empty() {
+        return result;
+    }
+
+    result.content.push_str(
+        "\n\n⚠ The OS sandbox — not a broken machine and not a missing tool — put these \
+         paths out of reach of this command:",
+    );
+    for (path, why) in &denied {
+        let reason = match why {
+            DeniedBecause::PolicyDeny => "explicitly denied by this workspace's policy",
+            DeniedBecause::NotGranted => "outside every root granted to this workspace",
+        };
+        result
+            .content
+            .push_str(&format!("\n  • {} — {reason}", path.display()));
+    }
+    result.content.push_str(
+        "\nThis workspace is running under the STRICT (untrusted) sandbox profile, which is \
+         the default until a workspace is trusted.",
+    );
+    if scope
+        .deny
+        .iter()
+        .any(|denied| denied.ends_with(".git/objects"))
+    {
+        result.content.push_str(
+            " That profile also denies the git object store (`.git/objects`) so a committed \
+             secret cannot be reconstructed with `git log -p` / `git show`. `git status`, \
+             `diff`, `log` and `commit` all read that store, so no git command run from \
+             Bash can succeed here — retrying will not help, and git is not broken or \
+             missing. The `Git` TOOL is a different surface and is NOT sandboxed: use it \
+             for status, diff, log, blame, add, commit, branch_checkout, push and \
+             pr_create instead of shelling out to git.",
+        );
+    }
+    // No clause here may forbid the model from reporting a cause: the W2/W3
+    // sandbox gate measured such a clause suppressing the TRUE cause of a
+    // failure while a false one was asserted elsewhere in the same message.
+    result.content.push_str(
+        "\nRemedy: run once with `--trust-workspace` in this directory to switch to the \
+         trusted-local profile, or `--dangerously-skip-permissions-and-sandbox` to turn the \
+         OS sandbox off entirely.",
+    );
+    result.is_error = true;
+    result
+}
+
+/// Output substrings that mean the command really did reach for the network and
+/// could not get there. Only these license the "egress is why it failed" claim.
+const EGRESS_FAILURE_NEEDLES: &[&str] = &[
+    "could not resolve host",
+    "couldn't resolve host",
+    "temporary failure in name resolution",
+    "name or service not known",
+    "nodename nor servname provided",
+    "getaddrinfo",
+    "enotfound",
+    "eai_again",
+    "network is unreachable",
+    "enetunreach",
+    "network is down",
+    "no route to host",
+    "ehostunreach",
+    "connection refused",
+    "econnrefused",
+    "connection reset",
+    "econnreset",
+    "connection timed out",
+    "etimedout",
+    "failed to connect to",
+    "couldn't connect to server",
+    "could not connect to server",
+    "failed to establish a new connection",
+    // `unable to access` is GIT'S phrasing for two unrelated failures:
+    //   fatal: unable to access 'https://github.com/o/r/': Could not resolve host
+    //   warning: unable to access '.git/config': Permission denied
+    // Only the first is egress. The bare needle claimed both, and because
+    // network evidence wins outright it beat the `permission denied` on the
+    // very same line — so the A-2 corpus row was told its `git remote get-url`
+    // failed for want of a network when the OS sandbox had denied a local
+    // file. Require the URL. The genuine remote failure still matches here AND
+    // on its own `could not resolve host` / `failed to connect to` clause, so
+    // narrowing this costs no true positive.
+    "unable to access 'http",
+    "unable to access \"http",
+    "ssl connect error",
+    "network-outbound",
+];
+
+/// Output substrings that name a cause which is NOT the network: a filesystem
+/// denial (macOS seatbelt names the path, and bwrap / AppContainer surface one
+/// of these too) or a refused process launch (Windows gives the NTSTATUS).
+///
+/// Checked only AFTER [`EGRESS_FAILURE_NEEDLES`], so a seatbelt socket denial
+/// reported as `Failed to connect to …: Operation not permitted` still counts
+/// as egress.
+const NON_EGRESS_FAILURE_NEEDLES: &[&str] = &[
+    // Filesystem denials.
+    "operation not permitted",
+    "permission denied",
+    "access is denied",
+    "eacces",
+    "eperm",
+    "read-only file system",
+    "erofs",
+    "deny file-read",
+    "deny file-write",
+    "outside sandbox root",
+    "no such file or directory",
+    "enoent",
+    // Refused process launches. Windows AppContainer refuses every external
+    // image with one of these; a POSIX shell reports the rest.
+    "0xc0000142",
+    "0xc0000135",
+    "status_dll_init_failed",
+    "status_dll_not_found",
+    "is not recognized as an internal or external command",
+    "exec format error",
+    "cannot execute binary file",
+];
+
+/// What the failed command's own output says about WHY it failed.
+#[derive(Debug, PartialEq, Eq)]
+enum FailureEvidence {
+    /// The output names a network failure.
+    Egress,
+    /// The output names a cause that is not the network. Carries the offending
+    /// line verbatim, so the path macOS names and the NTSTATUS Windows gives
+    /// both reach the model.
+    NotEgress(String),
+    /// The output names no cause at all (`curl -s`, a swallowed stderr).
+    Silent,
+}
+
+/// Read the cause out of the command's own output.
+///
+/// Network evidence wins outright: a seatbelt socket denial reads
+/// `curl: (7) Failed to connect to …: Operation not permitted`, which carries
+/// both a network needle and a filesystem-shaped one, and it really is egress.
+fn failure_evidence(body: &str) -> FailureEvidence {
+    let mut not_egress: Option<String> = None;
+    for line in body.lines() {
+        let lower = line.to_lowercase();
+        if EGRESS_FAILURE_NEEDLES.iter().any(|n| lower.contains(n)) {
+            return FailureEvidence::Egress;
+        }
+        if not_egress.is_none() && NON_EGRESS_FAILURE_NEEDLES.iter().any(|n| lower.contains(n)) {
+            not_egress = Some(line.trim().to_string());
+        }
+    }
+    match not_egress {
+        Some(line) => FailureEvidence::NotEgress(line),
+        None => FailureEvidence::Silent,
+    }
+}
+
+/// When a network-dependent command FAILS under a no-network sandbox, say what
+/// actually stopped it.
+///
+/// This keeps the signal the annotation was written for: the silent
+/// "empty output" failure (the 2026-05-31 curl-thrash bug) still gets an
+/// actionable message, so the agent pivots to WebFetch / the `web` search tool
+/// instead of retrying curl — and re-prompting for approval — in a loop.
+///
+/// What changed is where the cause comes from. It is read from the command's
+/// OUTPUT and never guessed from the command string.
+/// [`looks_network_dependent`] only decides whether this annotation has
+/// anything to say at all; it cannot decide *why* the command failed, and the
+/// revision that let it do so asserted egress on every failure of a
+/// network-shaped command. Measured on macOS and Windows in the W2/W3 sandbox
+/// gate: every failure observed there was a filesystem denial or a refused
+/// process launch — several with the network untouched, including an
+/// `npm install` of a `file:` dependency — and every one was told the network
+/// was to blame. So:
+///
+/// * output names a network failure  → egress is stated as the cause;
+/// * output names a different cause  → that cause is quoted and egress is
+///   ruled out;
+/// * output names nothing at all     → egress is offered as *one* possibility
+///   beside the others, not asserted.
+///
+/// No branch may instruct the model not to report a cause. The removed clause
+/// ("…do NOT claim… and do not invent any other cause") forbade reporting the
+/// true cause while the false one was being asserted, which left an agent no
+/// way to self-correct.
 pub(super) fn annotate_network_block(
     command: &str,
     policy: NetworkPolicy,
     mut result: ToolResult,
 ) -> ToolResult {
-    if result.is_error && matches!(policy, NetworkPolicy::Deny) && looks_network_dependent(command)
+    if !result.is_error
+        || !matches!(policy, NetworkPolicy::Deny)
+        || !looks_network_dependent(command)
     {
-        result.content.push_str(
-            "\n\n⚠ Bash network egress is OFF for this workspace (an untrusted / contained \
-             workspace denies network to prevent data exfiltration), so this command could \
-             not reach the network — that is why it failed. This is NOT a missing tool: do \
-             NOT claim that a package manager, node/npm, git, curl, or the Command Line \
-             Tools are absent or need installing, and do not invent any other cause. To \
-             enable installs, the user can run this on a trusted workspace or set \
-             WAYLAND_BASH_ALLOW_NETWORK=1 to approve egress. To read a URL now, use the \
-             WebFetch tool; to search the web, use the `web` tool with operation \"search\".",
-        );
-        result.is_error = true;
+        return result;
     }
+    match failure_evidence(&result.content) {
+        FailureEvidence::Egress => result.content.push_str(
+            "\n\n⚠ Bash network egress is OFF for this workspace (an untrusted / contained \
+             workspace denies network to prevent data exfiltration), and this command's own \
+             output reports a network failure — that is why it failed. To enable installs, \
+             the user can run this on a trusted workspace or add an entry to `[security] \
+             egress_allow` in their config file to approve egress (an environment variable \
+             cannot approve it). To read a URL now, use the WebFetch tool; to search the web, \
+             use the `web` tool with operation \"search\".",
+        ),
+        FailureEvidence::NotEgress(line) => result.content.push_str(&format!(
+            "\n\n⚠ Cause: Bash network egress is OFF for this workspace, but egress is NOT \
+             what stopped this command — its own output reports a different failure:\n  \
+             {line}\nThat is the cause to report. A named path means the OS sandbox put that \
+             path out of reach; a process-launch status (for example the Windows NTSTATUS \
+             0xC0000142) means the program could not start under the sandbox at all. Neither \
+             is fixed by retrying, and neither means the tool is missing from the machine."
+        )),
+        FailureEvidence::Silent => result.content.push_str(
+            "\n\n⚠ Cause: this annotation could not determine why the command failed — its \
+             output names neither a network failure nor a filesystem or process-launch \
+             denial. Bash network egress is OFF for this workspace (an untrusted / contained \
+             workspace denies network to prevent data exfiltration), which is one possible \
+             cause; a filesystem denial or a refused process launch under the same sandbox \
+             are others, and any note below this one about a specific denied path is better \
+             evidence than this paragraph. Read the command's own error output above; if it \
+             is empty, re-run with the tool's errors enabled (drop `-s` / `--quiet`, add \
+             `-v`). If it is egress: the user can run this on a trusted workspace or add an \
+             entry to `[security] egress_allow` in their config file to approve it (an \
+             environment variable cannot approve it); to read a URL now, use the WebFetch \
+             tool; to search the web, use the `web` tool with operation \"search\".",
+        ),
+    }
+    result.is_error = true;
     result
 }
 
@@ -355,4 +805,65 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_always_granted, is_path_token};
+
+    /// The verbatim spelling is the one `canonicalize` actually returns on
+    /// Windows, and it is a plain string here, so this runs on every host
+    /// rather than only on the platform it describes.
+    #[test]
+    fn every_spelling_of_a_granted_windows_system_path_matches() {
+        for path in [
+            r"\\?\C:\Windows\System32\kernel32.dll", // what canonicalize returns
+            r"C:\Windows\System32\kernel32.dll",     // what cmd / MSVC tools print
+            "C:/Windows/System32/kernel32.dll",      // what git / node / python print
+            r"\\?\c:\windows\system32\kernel32.dll", // NTFS is case-insensitive
+            r"C:\Windows",                           // the prefix itself
+        ] {
+            assert!(is_always_granted(path), "{path} must be always-granted");
+        }
+    }
+
+    #[test]
+    fn a_normalised_comparison_still_respects_component_boundaries() {
+        for path in [
+            r"C:\Windowsfoo\x",           // not under `C:\Windows`
+            r"D:\Windows\System32\x",     // a different drive
+            r"\\?\D:\Windows\System32\x", // …in verbatim form too
+            "/w/repo/.git/config",        // an ordinary workspace path
+            "usr/bin/foo",                // relative: not the system `/usr`
+            // The POSIX twin of the `C:\Windowsfoo` row above. A prefix that
+            // compares strings instead of components silently grants these, and
+            // a granted path is never reported — so the failure direction is a
+            // real denial the user is never told about.
+            "/usrfoo/x",
+            "/etcetera/passwd",
+        ] {
+            assert!(
+                !is_always_granted(path),
+                "{path} must NOT be treated as always-granted"
+            );
+        }
+        assert!(is_always_granted("/usr/bin/foo"));
+    }
+
+    #[test]
+    fn a_command_line_switch_is_not_a_path_token() {
+        for switch in ["/NOLOGO", "/c", "/S", "/t:Build", "/MIR"] {
+            assert!(!is_path_token(switch), "{switch} is a switch, not a path");
+        }
+        for path in [
+            "/w/repo/.git/config",
+            "./relative/file",
+            "src/main.rs",
+            "C:/Windows/System32/kernel32.dll",
+        ] {
+            assert!(is_path_token(path), "{path} is a path");
+        }
+        // A URL is not a filesystem path.
+        assert!(!is_path_token("https://example.com/a/b"));
+    }
 }

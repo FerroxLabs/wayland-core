@@ -64,6 +64,30 @@ pub struct ToolRegistry {
     /// orchestration `execute_*` call, so a new dispatch path cannot forget
     /// to plumb a parameter and silently lose the gate.
     read_only: bool,
+
+    /// Set when the most recent attempt to reach a human FAILED and no later
+    /// attempt has succeeded. While set, the orchestration dispatcher refuses
+    /// every tool that cannot claim [`crate::Tool::read_only_safe`], except
+    /// the human-contact surface itself — the one call that can clear it.
+    ///
+    /// Corpus row B-3. A failed `send_message` used to be an ordinary tool
+    /// error: the model saw a string, decided for itself what it meant, and
+    /// carried on. With the approval channel made undeliverable, one of two
+    /// graded runs went ahead and rewrote the dependency pin anyway. The
+    /// property has to hold whatever the model concludes, so it is enforced
+    /// here instead of asked for in a prompt.
+    ///
+    /// `AtomicBool` behind the shared registry for the same reason the
+    /// breakers are: the dispatch path holds `&ToolRegistry`, never `&mut`.
+    human_unreachable: Arc<std::sync::atomic::AtomicBool>,
+
+    /// The session's hydrated-tool set, published by the engine and read by
+    /// the registered `ToolSearch`. Owned HERE, not by the search tool, so
+    /// [`Self::refresh_tool_search_catalog`] can rebuild the tool without
+    /// forgetting what the engine has already admitted — a rebuild happens on
+    /// bootstrap, on every config-MCP registration, on `/mcp add`, and from
+    /// the TUI engine bridge.
+    hydrated_tools: crate::tool_search::HydratedTools,
 }
 
 impl Default for ToolRegistry {
@@ -82,7 +106,30 @@ impl ToolRegistry {
                 wcore_sandbox::FailClosedBackend::new(),
             ))),
             read_only: false,
+            human_unreachable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hydrated_tools: crate::tool_search::HydratedTools::default(),
         }
+    }
+
+    /// Handle onto the session's hydrated-tool set.
+    ///
+    /// The engine owns the decision (`AgentEngine::hydrated_tool_names`) and
+    /// publishes it here with [`Self::publish_hydrated_tools`]; the registered
+    /// `ToolSearch` reads it to decide whether a match is a first load or one
+    /// the engine has already admitted. Exposed so a host that keeps the
+    /// registry behind an `Arc` can still publish without `&mut`.
+    pub fn hydrated_tools(&self) -> crate::tool_search::HydratedTools {
+        self.hydrated_tools.clone()
+    }
+
+    /// Replace the session's hydrated-tool set. Takes `&self`: the engine
+    /// holds the registry behind an `Arc` and publishes on every hydration.
+    pub fn publish_hydrated_tools<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        *self.hydrated_tools.write() = names.into_iter().map(Into::into).collect();
     }
 
     /// Install the session's `[default] read_only` posture. Set once at
@@ -203,6 +250,13 @@ impl ToolRegistry {
     /// it can be discovered. Reapply the configured cold split so a newly
     /// added non-deferred proxy is still searchable when global cold deferral
     /// is enabled.
+    ///
+    /// The rebuilt tool is handed the registry's [`Self::hydrated_tools`]
+    /// handle, NOT a fresh one. A refresh runs on bootstrap, on every
+    /// config-MCP registration, on `/mcp add`, and from the TUI engine
+    /// bridge; without the shared handle each of those would forget what the
+    /// engine had already admitted and hand the model back the stale
+    /// pre-hydration answer, which is what it reads as "still not loaded".
     pub fn refresh_tool_search_catalog(
         &mut self,
         defer_cold: &wcore_config::tools::DeferColdConfig,
@@ -212,7 +266,12 @@ impl ToolRegistry {
         if defer_cold.enabled {
             apply_cold_deferral(&mut snapshot, &defer_cold.hot_allowlist);
         }
-        self.replace_by_name(Box::new(crate::tool_search::ToolSearchTool::new(snapshot)));
+        self.replace_by_name(Box::new(
+            crate::tool_search::ToolSearchTool::with_hydration(
+                snapshot,
+                self.hydrated_tools.clone(),
+            ),
+        ));
     }
 
     /// Find a tool by name
@@ -252,6 +311,72 @@ impl ToolRegistry {
                 breaker.record_success();
             }
         }
+    }
+
+    /// Record a dispatch outcome, skipping errors the tool itself attributes
+    /// to the caller's request rather than to its own machinery.
+    ///
+    /// See [`Tool::error_is_tool_fault`]. Such an outcome is NEUTRAL — the
+    /// breaker's failure window is left exactly as it was, so a genuinely
+    /// flaky tool is still caught while a shell reporting `exit 1` (or
+    /// refusing a command it cannot deliver) no longer removes itself from
+    /// the agent for a cooldown.
+    pub fn record_dispatch_outcome(&self, name: &str, result: &ToolResult) {
+        if result.is_error
+            && let Some(tool) = self.get(name)
+            && !tool.error_is_tool_fault(&result.content)
+        {
+            return;
+        }
+        self.record_breaker_outcome(name, result.is_error);
+    }
+
+    /// Record the outcome of one dispatched call against the human-contact
+    /// latch. A no-op for every tool that does not declare
+    /// [`crate::Tool::reaches_a_human`].
+    ///
+    /// A failure ARMS the latch; a success clears it. Counting is deliberately
+    /// NOT used: measured on this row, a run that eventually reached the
+    /// on-call took four attempts (three malformed-envelope errors, then a
+    /// delivery), while the run that gave up and acted unsupervised made only
+    /// two. No threshold separates "still trying" from "gave up", so the state
+    /// tracked is the one that matters — whether the LAST word from the
+    /// outbound route was a failure.
+    pub fn record_human_reach_outcome(&self, name: &str, is_error: bool) {
+        if !self.get(name).is_some_and(|tool| tool.reaches_a_human()) {
+            return;
+        }
+        self.human_unreachable
+            .store(is_error, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Is the session's route to a human currently down?
+    pub fn human_unreachable(&self) -> bool {
+        self.human_unreachable
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Re-arm the human-contact latch from durable recovery state.
+    ///
+    /// Deliberately arm-only, with no clearing counterpart. Restoring a
+    /// recovery checkpoint must be able to re-freeze a turn resumed after a
+    /// crash, and must never be able to LIFT a freeze this process has
+    /// already armed. Clearing stays with the two events that earn it: a
+    /// delivery, and a fresh user turn.
+    pub fn arm_human_unreachable(&self) {
+        self.human_unreachable
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Clear the human-contact latch.
+    ///
+    /// Called where the engine clears the per-tool breakers: at the start of a
+    /// new USER turn. A fresh user message is itself proof that a human is
+    /// present and reachable, which is the only evidence that should lift the
+    /// freeze other than a delivered message.
+    pub fn clear_human_unreachable(&self) {
+        self.human_unreachable
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// #403 — clear every tool circuit breaker back to Closed. Called at the
@@ -430,7 +555,7 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// already changes (a hydration admission).
 ///
 /// `catalog_max_chars` bounds the names portion of the line; overflow is
-/// replaced by a `+N more — search to discover` suffix, keeping the line a
+/// replaced by a `+N more not listed` suffix, keeping the line a
 /// bounded directory so an MCP swarm cannot balloon the prompt while every
 /// omitted tool stays discoverable through ToolSearch queries.
 ///
@@ -470,6 +595,12 @@ pub fn fold_deferred_into_catalog(
 /// cap). The fixed prefix and the constant-size `+N more` overflow suffix
 /// sit outside the budget; omitted names remain discoverable via ToolSearch
 /// queries.
+///
+/// The suffix STATES the omitted tools' reachability instead of advising a
+/// search for them. Measured (Wayland Desktop / GPT-5.6 Sol, 2026-08-08):
+/// with `search to discover` on the line, a model hunting two tools that did
+/// not exist ran ten consecutive searches, every one `status=Success`. The
+/// prompt's own inventory told it iterating was the way to find out.
 fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars: usize) -> String {
     const PREFIX: &str =
         "Deferred tools (name-only; load the full schema via this tool before calling): ";
@@ -490,7 +621,10 @@ fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars
         if included > 0 {
             list.push_str(", ");
         }
-        list.push_str(&format!("+{omitted} more — search to discover"));
+        list.push_str(&format!(
+            "+{omitted} more not listed — this tool searches every deferred \
+             tool, listed or not"
+        ));
     }
     format!("{PREFIX}{list}.")
 }
@@ -498,9 +632,13 @@ fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars
 #[async_trait]
 impl ToolDispatcher for ToolRegistry {
     async fn dispatch(&self, tool: &str, input: serde_json::Value) -> ToolResult {
-        // Check circuit breaker before executing.
+        // Check circuit breaker before executing. Row B-3: the human-contact
+        // surface is exempt — backing it off removes the session's only route
+        // to a person, which is the one failure this product must not absorb
+        // quietly.
         if let Some(breaker) = self.breakers.read().get(tool)
             && breaker.is_open()
+            && !self.get(tool).is_some_and(|t| t.reaches_a_human())
         {
             return ToolResult {
                 content: format!(
@@ -520,14 +658,26 @@ impl ToolDispatcher for ToolRegistry {
             }
         };
 
-        // Record outcome.
+        // Record outcome. An errored result that the tool itself says is the
+        // caller's request failing (see `Tool::error_is_tool_fault`) is
+        // NEUTRAL: it neither records a failure nor clears the window.
+        let counts = result.is_error
+            && self
+                .get(tool)
+                .is_none_or(|t| t.error_is_tool_fault(&result.content));
         if let Some(breaker) = self.breakers.read().get(tool) {
             if result.is_error {
-                breaker.record_failure();
+                if counts {
+                    breaker.record_failure();
+                }
             } else {
                 breaker.record_success();
             }
         }
+        // Row B-3: keep the human-contact latch in step on this path too, so
+        // a send routed through `ToolDispatcher` (ScriptTool sub-steps, plugin
+        // dispatchers) is not a hole in the freeze.
+        self.record_human_reach_outcome(tool, result.is_error);
 
         result
     }
@@ -541,9 +691,13 @@ impl ToolDispatcher for ToolRegistry {
         input: serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> ToolResult {
-        // Check circuit breaker before executing.
+        // Check circuit breaker before executing. Row B-3: the human-contact
+        // surface is exempt — backing it off removes the session's only route
+        // to a person, which is the one failure this product must not absorb
+        // quietly.
         if let Some(breaker) = self.breakers.read().get(tool)
             && breaker.is_open()
+            && !self.get(tool).is_some_and(|t| t.reaches_a_human())
         {
             return ToolResult {
                 content: format!(
@@ -563,14 +717,26 @@ impl ToolDispatcher for ToolRegistry {
             }
         };
 
-        // Record outcome.
+        // Record outcome. An errored result that the tool itself says is the
+        // caller's request failing (see `Tool::error_is_tool_fault`) is
+        // NEUTRAL: it neither records a failure nor clears the window.
+        let counts = result.is_error
+            && self
+                .get(tool)
+                .is_none_or(|t| t.error_is_tool_fault(&result.content));
         if let Some(breaker) = self.breakers.read().get(tool) {
             if result.is_error {
-                breaker.record_failure();
+                if counts {
+                    breaker.record_failure();
+                }
             } else {
                 breaker.record_success();
             }
         }
+        // Row B-3: keep the human-contact latch in step on this path too, so
+        // a send routed through `ToolDispatcher` (ScriptTool sub-steps, plugin
+        // dispatchers) is not a hole in the freeze.
+        self.record_human_reach_outcome(tool, result.is_error);
 
         result
     }
@@ -579,6 +745,143 @@ impl ToolDispatcher for ToolRegistry {
     /// the tool is not registered. Used by tests and observability hooks.
     fn breaker_state(&self, tool: &str) -> Option<BreakerState> {
         self.breakers.read().get(tool).map(|b| b.state())
+    }
+}
+
+#[cfg(test)]
+mod human_reach_latch_tests {
+    use super::*;
+    use crate::Tool;
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use wcore_protocol::events::ToolCategory;
+    use wcore_types::tool::{JsonSchema, ToolResult};
+
+    /// Minimal tool whose only interesting property is whether it claims to
+    /// reach a human and whether it errors.
+    struct Probe {
+        name: &'static str,
+        human: bool,
+        fails: bool,
+    }
+
+    #[async_trait]
+    impl Tool for Probe {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "probe"
+        }
+        fn input_schema(&self) -> JsonSchema {
+            serde_json::json!({"type": "object"})
+        }
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            false
+        }
+        fn reaches_a_human(&self) -> bool {
+            self.human
+        }
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: "probe".to_string(),
+                is_error: self.fails,
+            }
+        }
+    }
+
+    fn registry(tools: Vec<Probe>) -> ToolRegistry {
+        let mut r = ToolRegistry::new();
+        for t in tools {
+            r.register(Box::new(t));
+        }
+        r
+    }
+
+    #[test]
+    fn a_failed_human_contact_arms_the_latch_and_a_delivery_clears_it() {
+        let r = registry(vec![Probe {
+            name: "send_message",
+            human: true,
+            fails: false,
+        }]);
+        assert!(!r.human_unreachable(), "a fresh session starts reachable");
+        r.record_human_reach_outcome("send_message", true);
+        assert!(r.human_unreachable());
+        r.record_human_reach_outcome("send_message", false);
+        assert!(!r.human_unreachable(), "a delivery must clear the latch");
+    }
+
+    #[test]
+    fn an_ordinary_tool_failing_says_nothing_about_reachability() {
+        let r = registry(vec![
+            Probe {
+                name: "send_message",
+                human: true,
+                fails: false,
+            },
+            Probe {
+                name: "Bash",
+                human: false,
+                fails: true,
+            },
+        ]);
+        r.record_human_reach_outcome("Bash", true);
+        assert!(
+            !r.human_unreachable(),
+            "a failing shell command must not be read as losing the human"
+        );
+        // …and it must not CLEAR a real loss either.
+        r.record_human_reach_outcome("send_message", true);
+        r.record_human_reach_outcome("Bash", false);
+        assert!(
+            r.human_unreachable(),
+            "an unrelated success must not lift the freeze"
+        );
+    }
+
+    #[test]
+    fn an_unregistered_name_is_inert() {
+        let r = registry(vec![]);
+        r.record_human_reach_outcome("send_message", true);
+        assert!(
+            !r.human_unreachable(),
+            "a name this registry does not know cannot arm the latch"
+        );
+    }
+
+    #[test]
+    fn the_latch_clears_on_a_new_user_turn() {
+        let r = registry(vec![Probe {
+            name: "send_message",
+            human: true,
+            fails: false,
+        }]);
+        r.record_human_reach_outcome("send_message", true);
+        assert!(r.human_unreachable());
+        r.clear_human_unreachable();
+        assert!(
+            !r.human_unreachable(),
+            "a fresh user message is itself a reachable human"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_dispatcher_path_keeps_the_latch_in_step() {
+        // ScriptTool and plugin dispatchers go through `ToolDispatcher`, not
+        // the agent loop's `execute_single_with_streaming`. If that path did
+        // not record, a send routed through it would be a hole in the freeze.
+        let r = registry(vec![Probe {
+            name: "send_message",
+            human: true,
+            fails: true,
+        }]);
+        let out = r.dispatch("send_message", serde_json::json!({})).await;
+        assert!(out.is_error);
+        assert!(r.human_unreachable());
     }
 }
 
@@ -1099,8 +1402,11 @@ mod tests {
         // Budget fits only a handful of ~18-char names.
         let folded = fold_deferred_into_catalog(defs, 60);
         let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
+        // Truncation accounting only — the marker's WORDING is pinned by
+        // `the_overflow_marker_*` below, so this test does not have to move
+        // when that sentence is retuned.
         assert!(
-            ts.description.contains("more — search to discover"),
+            ts.description.contains(" more"),
             "overflow must be summarized: {}",
             ts.description
         );
@@ -1117,6 +1423,90 @@ mod tests {
             .expect("+N marker present");
         let included = ts.description.matches("mcp__srv__tool_").count();
         assert_eq!(included + omitted, 50);
+    }
+
+    /// The overflow marker as the model reads it — everything from `+N`
+    /// onward. Shared by the two tests below so they cannot drift apart.
+    fn overflow_marker(description: &str) -> String {
+        let at = description
+            .find('+')
+            .unwrap_or_else(|| panic!("no `+N` overflow marker in: {description}"));
+        description[at..].to_string()
+    }
+
+    /// A catalogue with far more deferred tools than the budget can name.
+    fn overflowing_catalog(max_chars: usize) -> String {
+        let mut defs = vec![catalog_def("ToolSearch", false)];
+        for i in 0..50 {
+            defs.push(catalog_def(&format!("mcp__srv__tool_{i:03}"), true));
+        }
+        fold_deferred_into_catalog(defs, max_chars)
+            .iter()
+            .find(|d| d.name == "ToolSearch")
+            .expect("ToolSearch carries the catalog")
+            .description
+            .clone()
+    }
+
+    /// The catalogue must not TELL the model to go searching.
+    ///
+    /// Measured, Wayland Desktop / GPT-5.6 Sol, 2026-08-08: ten consecutive
+    /// ToolSearch calls, every one `status=Success`, no matcher miss. The
+    /// model was hunting a web-search tool and a `research-advisor` skill
+    /// that DO NOT EXIST — one dead end, then four rephrasings. The overflow
+    /// marker read `+N more — search to discover`, i.e. the prompt's own
+    /// inventory line advised discovery-by-iteration, and until 0b94370f the
+    /// miss said nothing to stop it.
+    ///
+    /// The marker's job is to be an accurate DIRECTORY footnote: N tools are
+    /// not named here and are still reachable. It is not a suggested action.
+    ///
+    /// MUTANT: restore `search to discover` and this fails.
+    #[test]
+    fn the_overflow_marker_does_not_advise_discovery_by_searching() {
+        let marker = overflow_marker(&overflowing_catalog(60));
+        for invitation in [
+            "search to discover",
+            "to discover",
+            "search again",
+            "keep searching",
+        ] {
+            assert!(
+                !marker.to_lowercase().contains(invitation),
+                "the overflow marker must not read as an instruction to go \
+                 searching ({invitation:?}); got: {marker}"
+            );
+        }
+    }
+
+    /// NEGATIVE CONTROL for the test above. "Do not invite a search loop" is
+    /// trivially satisfiable by saying nothing, or by implying the omitted
+    /// tools are gone — both of which are WORSE than the invitation, because
+    /// a model that believes a tool is unavailable stops looking for a tool
+    /// that is right there.
+    ///
+    /// MUTANT: collapse the marker to a bare `+{omitted} more` and this fails
+    /// while `the_overflow_marker_does_not_advise_discovery_by_searching`
+    /// stays green.
+    #[test]
+    fn the_overflow_marker_still_says_the_omitted_tools_are_reachable() {
+        let marker = overflow_marker(&overflowing_catalog(60));
+        let lower = marker.to_lowercase();
+
+        assert!(
+            ["searches", "reachable", "loadable", "findable"]
+                .iter()
+                .any(|w| lower.contains(w)),
+            "the marker must state that the unlisted tools are still \
+             reachable through this tool; got: {marker}"
+        );
+        for absent in ["unavailable", "not available", "cannot be", "hidden"] {
+            assert!(
+                !lower.contains(absent),
+                "the marker must not imply the unlisted tools are gone \
+                 ({absent:?}); got: {marker}"
+            );
+        }
     }
 
     /// Codex verify finding: `catalog_max_chars` must be a HARD bound. The
@@ -1140,7 +1530,7 @@ mod tests {
             ts.description
         );
         assert!(
-            ts.description.contains("+2 more — search to discover"),
+            ts.description.contains("+2 more"),
             "all names collapse into the omitted marker: {}",
             ts.description
         );

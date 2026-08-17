@@ -11,6 +11,7 @@
 //!   --ro-bind /usr /usr        (allow standard binaries to run)
 //!   --ro-bind /lib /lib        (and libs for executables)
 //!   --ro-bind /lib64 /lib64    (64-bit libs if present)
+//!   --ro-bind-try <SYSTEM_RO_ETC>   (curated /etc — NEVER the whole directory)
 //!   --bind <fs_write_allow> <fs_write_allow>      (writable mounts)
 //!   --ro-bind <fs_read_allow> <fs_read_allow>     (readable mounts)
 //!   --setenv KEY VAL           (per-key env injection)
@@ -24,6 +25,18 @@
 //! Resource limits enforced via `--rlimit-as` / pre-exec setrlimit wrapper.
 //! Returns `ResourceLimitEnforcement::BestEffort` because rlimit is subject
 //! to OOM-killer races and Linux's overcommit semantics.
+//!
+//! `SandboxManifest::fs_metadata_read_allow` is deliberately NOT translated
+//! here, and that is not an oversight. bwrap builds the child's mount namespace
+//! CONSTRUCTIVELY: a path that was never bound is absent, so `stat` on it
+//! returns **ENOENT**, not EPERM. Measured on Ubuntu 24.04 / kernel 6.8 with
+//! `/root` unbound: `os.stat("/root/.gitconfig")` → `errno 2 No such file or
+//! directory`. That is strictly LESS information than a metadata grant asks
+//! for, and it is the answer libgit2 already tolerates — which is why `cargo
+//! new` works on Linux and died on macOS. Binding the path `--ro-bind` to
+//! satisfy the grant would hand the child the file's CONTENTS, a widening the
+//! caller never asked for, so the entry is dropped instead.
+//! `bwrap_argv_never_binds_a_metadata_only_path` pins that.
 
 use super::SandboxBackend;
 use crate::error::{Result, SandboxError};
@@ -36,7 +49,64 @@ use std::sync::Once;
 
 /// System directories bound read-only into every bwrap sandbox so the inner
 /// command can find standard binaries and their shared libraries.
-const SYSTEM_RO_DIRS: [&str; 6] = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"];
+///
+/// `/etc` is deliberately NOT here — see [`SYSTEM_RO_ETC`].
+const SYSTEM_RO_DIRS: [&str; 5] = ["/usr", "/lib", "/lib64", "/bin", "/sbin"];
+
+/// The ONLY host `/etc` entries bound read-only into the sandbox.
+///
+/// SEC-05 / SEC-07 / SEC-10: this list replaces a blanket `--ro-bind /etc /etc`
+/// that handed the child the host's entire system-configuration directory.
+/// Measured under the ACTIVE sandbox on Ubuntu 24.04, `cat /etc/passwd` (the
+/// host's full account list, real names included), `cat /etc/hosts` (the host's
+/// public IP and hostname) and their `../../../..`-traversal spellings all
+/// returned real host content, and those bytes reached the provider. The macOS
+/// backend never had this hole — its profile grants `(literal "/etc")`, the
+/// symlink node only, never `(subpath "/etc")` — so Linux was the permissive
+/// outlier of the three backends.
+///
+/// Every entry here is public, machine-invariant toolchain plumbing (dynamic
+/// linker configuration, the CA trust store, the timezone), NOT host-private
+/// state. Host identity, accounts, network topology and service configuration
+/// stay outside the namespace. Anything else a caller genuinely needs must be
+/// requested explicitly through `fs_read_allow` — which is exactly what
+/// `WorkspacePolicy::trusted_config_and_certificate_reads` already does.
+///
+/// Bound with `--ro-bind-try`, so a spelling a given distro does not use
+/// (`/etc/pki` on Debian, `/etc/ca-certificates.conf` on RHEL) is skipped
+/// rather than aborting the spawn.
+const SYSTEM_RO_ETC: [&str; 10] = [
+    // Dynamic linker: needed on distros whose library directories are not in
+    // glibc's built-in search path.
+    "/etc/ld.so.cache",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf.d",
+    // Symlink farm many distros route toolchain binaries through.
+    "/etc/alternatives",
+    // CA trust store — Debian and RHEL spellings.
+    "/etc/ssl",
+    "/etc/pki",
+    "/etc/ca-certificates",
+    "/etc/ca-certificates.conf",
+    // Clock.
+    "/etc/localtime",
+    "/etc/timezone",
+];
+
+/// Bound read-only ONLY when the manifest grants the child a network. The
+/// resolver configuration names the host's DNS servers and search domains, so
+/// under [`NetworkPolicy::Deny`] — the default for agent-initiated Bash — it is
+/// pure leak with no corresponding capability.
+///
+/// This gate covers the `/etc/resolv.conf` SPELLING only. It is not sufficient
+/// on its own: on a systemd-resolved host the file is a symlink, and a caller
+/// that grants the CANONICALIZED target through `fs_read_allow` puts the same
+/// bytes back in the namespace under `/run/systemd/resolve/stub-resolv.conf`.
+/// That is exactly what `WorkspacePolicy::trusted_local` used to do, which made
+/// this gate inert for the policy the product actually uses. The matching
+/// policy-side gate is `wcore_tools::workspace_policy::discovery::network_scoped_reads`;
+/// both are needed, and neither replaces the other.
+const NETWORK_RO_ETC: [&str; 1] = ["/etc/resolv.conf"];
 
 #[cfg(all(target_os = "linux", feature = "seccomp"))]
 static SECCOMP_UNAVAILABLE_WARN: Once = Once::new();
@@ -78,6 +148,13 @@ impl SandboxBackend for BubblewrapBackend {
     }
 
     fn enforces_read_deny(&self) -> bool {
+        true
+    }
+
+    /// bwrap builds the child's mount namespace from the manifest's grants
+    /// alone — an ungranted host path is simply not present in it — so a write
+    /// outside every granted root cannot land on the host.
+    fn confines_filesystem(&self) -> bool {
         true
     }
 
@@ -249,6 +326,86 @@ impl BubblewrapBackend {
                 bwrap_argv.push(sys.into());
             }
         }
+
+        // Curated `/etc` — public toolchain plumbing only. See SYSTEM_RO_ETC.
+        for etc in SYSTEM_RO_ETC {
+            bwrap_argv.push("--ro-bind-try".into());
+            bwrap_argv.push(etc.into());
+            bwrap_argv.push(etc.into());
+        }
+        if matches!(manifest.network, NetworkPolicy::Inherit) {
+            for etc in NETWORK_RO_ETC {
+                bwrap_argv.push("--ro-bind-try".into());
+                bwrap_argv.push(etc.into());
+                bwrap_argv.push(etc.into());
+            }
+        }
+
+        // A granted network needs a RESOLVER, or it is only a route. This is
+        // the SECOND half of that grant, and it is deliberately kept alongside
+        // the `NETWORK_RO_ETC` bind above rather than replaced by it.
+        //
+        // History, because the two halves were authored against different
+        // trees and the reason they now coexist is not obvious. When `/etc` was
+        // bound WHOLESALE from the host, the host's own `/etc/resolv.conf`
+        // symlink came with it, pointing into `/run`
+        // (`../run/systemd/resolve/stub-resolv.conf` on Ubuntu 24.04). `/run`
+        // is not in the namespace, so the symlink dangled: glibc found no
+        // nameserver and every hostname lookup failed with EAI_NONAME while
+        // raw-IP connections still worked. Measured then: `cat
+        // /etc/resolv.conf` inside → "No such file or directory", `curl
+        // https://example.com` → exit 6 "Could not resolve host", the same curl
+        // on the host → HTTP 200. Binding at `/etc/resolv.conf` could not fix
+        // it either — bwrap followed the dangling symlink when creating the
+        // destination and aborted the whole spawn with "Can't create file at
+        // /etc/resolv.conf" — so the fix bound the CANONICAL target at its own
+        // path and let the inherited symlink land on it.
+        //
+        // The blanket `/etc` bind is gone (SEC-05/07/10, see SYSTEM_RO_ETC), so
+        // that dangling symlink is gone with it: the namespace's `/etc` is
+        // synthesized, `NETWORK_RO_ETC` creates `/etc/resolv.conf` as a fresh
+        // file mount point, and bwrap resolves the SOURCE in the host namespace
+        // where the symlink is intact. The `/etc/resolv.conf` bind alone is
+        // therefore expected to be sufficient on a systemd host today.
+        //
+        // This canonical-target bind is retained anyway because it is free and
+        // not equivalent: it covers a resolver whose canonical path is reached
+        // through a chain `NETWORK_RO_ETC` does not reproduce, and it costs
+        // nothing when `/etc/resolv.conf` is a plain file (`canonicalize`
+        // returns it unchanged and the bind is a harmless self-bind). It
+        // exposes no bytes the `/etc/resolv.conf` bind has not already exposed
+        // — the same file, reachable under two names.
+        //
+        // Only when the manifest actually granted network. A `Deny` namespace
+        // has no use for a resolver, so this adds nothing to the default
+        // posture — and `fs_read_deny` is rendered after this point, so a
+        // policy that denies the path still shadows it.
+        if matches!(manifest.network, NetworkPolicy::Inherit)
+            && let Ok(resolved) = std::fs::canonicalize("/etc/resolv.conf")
+        {
+            let s = resolved.to_string_lossy().into_owned();
+            bwrap_argv.push("--ro-bind-try".into());
+            bwrap_argv.push(s.clone());
+            bwrap_argv.push(s);
+        }
+
+        // Synthesized replacements for the identity/name-resolution files the
+        // blanket `/etc` bind used to supply from the host. Held alive until
+        // this function returns so the sources still exist when bwrap builds
+        // its namespace. None of SYNTHETIC_ETC_FILES is `resolv.conf`, so this
+        // block cannot shadow either resolver bind above under later-arg-wins;
+        // the synthetic `nsswitch.conf` carries `hosts: files dns` so DNS is
+        // still consulted.
+        #[cfg(target_os = "linux")]
+        let _synthetic_etc = {
+            let scaffold = synthetic_etc_scaffold()?;
+            for name in SYNTHETIC_ETC_FILES {
+                bwrap_argv.push("--ro-bind".into());
+                bwrap_argv.push(scaffold.path().join(name).to_string_lossy().into_owned());
+                bwrap_argv.push(format!("/etc/{name}"));
+            }
+            scaffold
+        };
 
         // Manifest-declared mounts. Use the `--*-bind-try` variants so a
         // declared source that does not exist on THIS host is silently
@@ -450,6 +607,37 @@ impl BubblewrapBackend {
             });
         }
 
+        // SEC-06 / SEC-10 — every filesystem the manifest did NOT grant is
+        // remounted read-only, LAST, after every positive bind above.
+        //
+        // bubblewrap builds its new root as a fresh tmpfs and `--tmpfs /tmp`
+        // adds a second one, and both are WRITABLE. So a write to any path the
+        // manifest never granted — `/tmp/out.txt`, or `/opt/x` after the child
+        // creates `/opt` — succeeded, exited 0, read back correctly inside the
+        // namespace, and then vanished when the namespace was torn down. The
+        // host path never existed. macOS/sandbox-exec denies the same write
+        // with EPERM, so on macOS the agent is told the truth and on Linux it
+        // was told it had saved a file it had not. Data loss reported as
+        // success is worse than a refusal: an agent builds on the belief.
+        //
+        // `--remount-ro DEST` remounts only the mount point at DEST — SUBMOUNTS
+        // are untouched. Every `fs_write_allow` entry is its own bind mount, so
+        // a granted root keeps full write access even when it lives under
+        // `/tmp` (which is where `std::env::temp_dir()`-derived workspaces and
+        // the `wayland-scratch-u<uid>` scratch grants actually are). Verified
+        // on hetzner-dsm with bubblewrap 0.9.0: a rw bind under a read-only
+        // `/tmp` still writes, and both `/tmp/<ungranted>` and `/<ungranted>`
+        // fail with EROFS.
+        //
+        // The cost is that an ungranted `/tmp` write now FAILS instead of
+        // silently evaporating. Measured against git / node / python3 / gcc
+        // under this exact posture: all four still work, falling back to
+        // `TMPDIR` or the cwd.
+        bwrap_argv.push("--remount-ro".into());
+        bwrap_argv.push("/tmp".into());
+        bwrap_argv.push("--remount-ro".into());
+        bwrap_argv.push("/".into());
+
         // Separator + user command.
         bwrap_argv.push("--".into());
         bwrap_argv.push(program);
@@ -508,27 +696,39 @@ impl BubblewrapBackend {
         drop(seccomp_file);
 
         // 6. Timeout + wait.
-        let timeout = manifest
-            .timeout
-            .unwrap_or_else(|| std::time::Duration::from_secs(30));
-
+        //
+        // The wall-clock bound is the CALLER's, and only the caller's. This
+        // used to be `manifest.timeout.unwrap_or(30s)`, an invented Linux-only
+        // cap: `BashTool` advertises "default 120000, max 600000" ms to the
+        // model and passes no `manifest.timeout`, so every Bash command on
+        // Linux — and only on Linux — was killed at 30 s with all of its
+        // output discarded and nothing in the result saying why. macOS's
+        // `SandboxExecBackend` imposes no cap of its own; this now matches it,
+        // so the number the tool advertises is the number that is enforced.
+        // Every in-tree caller that leaves `timeout` at None wraps the call in
+        // its own `tokio::time::timeout`, and cancelling that future drops the
+        // child, which arms the guards below exactly as the explicit-timeout
+        // arm does.
         let wait_fut = super::wait_with_bounded_output_on_exit(&mut child, || {
             #[cfg(target_os = "linux")]
             sandbox_tree.disarm();
             process_tree.disarm();
         });
-        let output = match tokio::time::timeout(timeout, wait_fut).await {
-            Ok(Ok(out)) => out,
-            Ok(Err(e)) => {
-                return Err(e);
-            }
-            Err(_elapsed) => {
-                // Dropping this future arms `ProcessTreeGuard` before the
-                // direct bwrap handle is dropped. Linux descendant discovery
-                // kills the PID-namespace init and its complete tree; the
-                // dedicated outer process group is the final backstop.
-                return Err(SandboxError::Timeout);
-            }
+        let output = match manifest.timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, wait_fut).await {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => {
+                    return Err(e);
+                }
+                Err(_elapsed) => {
+                    // Dropping this future arms `ProcessTreeGuard` before the
+                    // direct bwrap handle is dropped. Linux descendant discovery
+                    // kills the PID-namespace init and its complete tree; the
+                    // dedicated outer process group is the final backstop.
+                    return Err(SandboxError::Timeout);
+                }
+            },
+            None => wait_fut.await?,
         };
 
         // 7. Return.
@@ -550,6 +750,76 @@ enum DenyMountKind {
     NonDirectory,
     /// Vanished between enumeration and render — nothing to mask.
     Absent,
+}
+
+/// Basenames written by [`synthetic_etc_scaffold`] and bound over `/etc/<name>`.
+#[cfg(target_os = "linux")]
+const SYNTHETIC_ETC_FILES: [&str; 4] = ["passwd", "group", "hosts", "nsswitch.conf"];
+
+/// Materialise minimal stand-ins for the four `/etc` files the blanket `/etc`
+/// bind used to supply from the host.
+///
+/// Dropping the host copies outright is not free: `getpwuid(3)` starts failing,
+/// which breaks `pwd.getpwuid()` in Python and throws outright in Node's
+/// `os.userInfo()`, and without `/etc/hosts` + an nsswitch policy glibc cannot
+/// resolve `localhost` at all. Both were measured, not assumed. So the child
+/// gets files with the same SHAPE and none of the host's content: its own uid
+/// under a fixed sandbox name, loopback only, and a `files dns` policy that
+/// matches what is actually present in the namespace. Nothing here is derived
+/// from the host beyond the uid/gid the child already runs as and can read from
+/// `getuid(2)` regardless.
+///
+/// KNOWN RESIDUAL (open, not reachable through `BashTool`). The synthetic
+/// `passwd` gives the sandbox user `pw_dir` `/`. With `HOME` UNSET the child
+/// therefore falls back to `/` as its home, and `cargo` goes exit 0 → exit 1
+/// with "rustup could not choose a version of cargo to run" because the rustup
+/// shim looks for its toolchain under `$HOME/.rustup`. Measured on Ubuntu
+/// 24.04. It is unreachable in production because `HOME` is on
+/// `BASE_SANDBOX_ENV_ALLOWLIST`, so every `BashTool` child receives a real
+/// `HOME`; cargo exit 0 was re-proved through the real env builder. A caller
+/// that builds a manifest by hand and omits `HOME` will hit it.
+///
+/// NOT to be confused with the toolchain-outside-`$HOME` defect, which printed
+/// the SAME rustup message from a completely different cause and WAS reachable
+/// through `BashTool`: `HOME` set and correct, but the toolchain living at
+/// `RUSTUP_HOME=/usr/local/rustup` (the official `rust:*` images, most
+/// devcontainers, Nix) while both the env allowlist and
+/// `minimal_toolchain_read_dirs` derived only from `$HOME`. Closed — see
+/// `crates/wcore-tools/tests/toolchain_outside_home.rs`. A future sighting of
+/// this error string should check `RUSTUP_HOME` before assuming it is the
+/// residual above.
+#[cfg(target_os = "linux")]
+fn synthetic_etc_scaffold() -> Result<tempfile::TempDir> {
+    // SAFETY: getuid/getgid are always-successful, thread-safe syscalls that
+    // take no arguments and cannot fail.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let dir = tempfile::tempdir()
+        .map_err(|e| SandboxError::ExecFailed(format!("create synthetic /etc scaffold: {e}")))?;
+    let files = [
+        (
+            "passwd",
+            format!(
+                "sandbox:x:{uid}:{gid}:sandboxed user:/:/bin/sh\n\
+                 nobody:x:65534:65534:nobody:/nonexistent:/bin/false\n"
+            ),
+        ),
+        ("group", format!("sandbox:x:{gid}:\nnogroup:x:65534:\n")),
+        (
+            "hosts",
+            "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n".to_owned(),
+        ),
+        (
+            "nsswitch.conf",
+            "passwd: files\ngroup: files\nshadow: files\n\
+             hosts: files dns\nservices: files\nprotocols: files\nnetworks: files\n"
+                .to_owned(),
+        ),
+    ];
+    for (name, body) in files {
+        std::fs::write(dir.path().join(name), body)
+            .map_err(|e| SandboxError::ExecFailed(format!("write synthetic /etc/{name}: {e}")))?;
+    }
+    Ok(dir)
 }
 
 /// Reduce classified `fs_read_deny` entries to the mounts bubblewrap can

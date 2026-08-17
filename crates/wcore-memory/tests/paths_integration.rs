@@ -313,15 +313,14 @@ fn entrypoint_name_constant_is_memory_md() {
 // Verifies the backward-compat aliasing introduced when the engine rebrand
 // landed: WCORE_MEMORY_DIR is the primary; AIONRS_MEMORY_DIR is a legacy alias.
 
-// WCORE_KEY is only consumed by the #[cfg(unix)] env-alias tests below;
-// AIONRS_KEY is consumed by env_key()/restore_env() which run on both
-// platforms (Windows tests in this file use `C:\\base` style paths
-// against the same helpers). Gate WCORE_KEY to cfg(unix) so Windows
-// clippy doesn't fire `never used`; leave AIONRS_KEY ungated.
-// (CI runs 25950354044 → 25951422906 — over-gating caused the inverse
-// problem: cannot find function `env_key` on Windows after gating
-// env_key itself, since the helpers ARE used cross-platform.)
-#[cfg(unix)]
+// Both keys are consumed on both platforms. WCORE_KEY used to be gated to
+// cfg(unix) because only the #[cfg(unix)] env-alias tests below read it, and
+// Windows clippy fired `never used` otherwise; the two ungated
+// `v2_project_db_path_*` tests now read it as well, so the gate would break the
+// Windows build instead of quieting it. (CI runs 25950354044 → 25951422906
+// record the inverse over-gating mistake: gating `env_key` itself produced
+// "cannot find function `env_key`" on Windows, since the helpers ARE
+// cross-platform.)
 const WCORE_KEY: &str = "WCORE_MEMORY_DIR";
 const AIONRS_KEY: &str = "AIONRS_MEMORY_DIR";
 
@@ -448,17 +447,76 @@ fn v2_global_session_audit_changelog_paths() {
     restore_pair(saved_w, saved_a);
 }
 
+/// A project that has never held an in-tree DB gets one in the USER's state
+/// directory, not inside its own working tree.
+///
+/// Measured before the change: 8 of 8 project directories in a UAT gained a
+/// 212,992-byte `.wayland-core/memory/memory.db`, two of them from runs that
+/// failed before completing a turn, and the product writes no `.gitignore`, so
+/// every one of them showed as `?? .wayland-core/` in `git status`.
+///
+/// Both halves are asserted. "Is under the base dir" alone would pass if the
+/// path were ALSO still in the tree (it cannot be both, but the assertion
+/// would not know that); "is not under the project root" alone would pass for
+/// a path pointing anywhere at all, including nowhere useful.
 #[test]
-fn v2_project_db_path_under_wayland_core() {
-    let root = Path::new("/home/user/project");
-    let p = paths::project_db_path(root);
-    let s = p.to_string_lossy();
+#[serial(env)]
+fn v2_project_db_path_for_a_fresh_project_stays_out_of_the_users_tree() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let project = tempfile::tempdir().expect("tempdir");
+    let saved_w = std::env::var(WCORE_KEY).ok();
+    let saved_a = std::env::var(AIONRS_KEY).ok();
+    // SAFETY: #[serial(env)] ensures no concurrent env mutation.
+    unsafe {
+        std::env::set_var(WCORE_KEY, base.path());
+        std::env::remove_var(AIONRS_KEY);
+    }
+
+    let p = paths::project_db_path(project.path());
+
+    let under_base = p.starts_with(base.path());
+    let under_project = p.starts_with(project.path());
+    restore_pair(saved_w, saved_a);
+
     assert!(
-        s.ends_with(".wayland-core/memory/memory.db")
-            || s.ends_with(".wayland-core\\memory\\memory.db"),
-        "{s}"
+        under_base,
+        "project DB must live under the memory base: {p:?}"
     );
-    assert!(s.starts_with("/home/user/project") || s.starts_with("\\home\\user\\project"));
+    assert!(
+        !under_project,
+        "the project DB must not be written into the user's own working tree: {p:?}"
+    );
+}
+
+/// A project that ALREADY holds an in-tree DB keeps using it.
+///
+/// Without this leg the move is silent data loss dressed as a fresh start: the
+/// user's existing memories stay on disk, unread, with no error to explain the
+/// amnesia.
+#[test]
+#[serial(env)]
+fn v2_project_db_path_keeps_using_an_existing_in_tree_db() {
+    let base = tempfile::tempdir().expect("tempdir");
+    let project = tempfile::tempdir().expect("tempdir");
+    let legacy = paths::legacy_project_db_path(project.path());
+    fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("mkdir legacy");
+    fs::write(&legacy, b"sqlite").expect("seed legacy db");
+
+    let saved_w = std::env::var(WCORE_KEY).ok();
+    let saved_a = std::env::var(AIONRS_KEY).ok();
+    // SAFETY: #[serial(env)] ensures no concurrent env mutation.
+    unsafe {
+        std::env::set_var(WCORE_KEY, base.path());
+        std::env::remove_var(AIONRS_KEY);
+    }
+
+    let p = paths::project_db_path(project.path());
+    restore_pair(saved_w, saved_a);
+
+    assert_eq!(
+        p, legacy,
+        "an existing in-tree DB must keep being opened where its owner put it"
+    );
 }
 
 #[cfg(unix)]
@@ -507,7 +565,8 @@ fn restore_env(saved: Option<String>) {
     }
 }
 
-#[cfg(unix)]
+// Ungated alongside WCORE_KEY: the two `v2_project_db_path_*` tests call it
+// on every platform.
 fn restore_pair(saved_w: Option<String>, saved_a: Option<String>) {
     // SAFETY: only called from #[serial(env)] tests.
     unsafe {

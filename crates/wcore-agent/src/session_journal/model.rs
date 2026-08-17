@@ -520,6 +520,12 @@ pub enum ProviderStreamEvent {
     ThinkingSubject {
         subject: String,
     },
+    /// C-4b — opaque provider signature over the turn's reasoning (Gemini
+    /// `thoughtSignature` on a thought part). Journaled so a recovered turn
+    /// replays the signed thought verbatim instead of stripping the signature.
+    ThinkingSignature {
+        signature: String,
+    },
     Done {
         stop_reason: serde_json::Value,
         finish_reason: serde_json::Value,
@@ -527,6 +533,14 @@ pub enum ProviderStreamEvent {
     },
     Error {
         message: String,
+    },
+    /// T3 — a tool call the provider severed at its OUTPUT token cap. Recorded
+    /// so the durable stream says what the live stream said: this attempt was
+    /// cut mid-call and produced nothing runnable. Additive to the tagged wire
+    /// contract; journals written before it simply never carry the variant.
+    TruncatedToolCall {
+        name: String,
+        partial_arg_bytes: u64,
     },
     Citations {
         urls: Vec<String>,

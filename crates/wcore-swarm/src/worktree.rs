@@ -29,7 +29,7 @@ use paths::normalized_root;
 mod security;
 use security::{
     DirectoryAuthority, DirectoryAuthorityIdentity, ensure_absent_destination,
-    ensure_real_directory, ensure_unchanged_real_directory, is_real_directory_entry,
+    ensure_real_directory, ensure_unchanged_real_directory, io_at, is_real_directory_entry,
     make_guard_dir_private, reject_option_like_ref, validate_worker_id, write_empty_private_config,
 };
 

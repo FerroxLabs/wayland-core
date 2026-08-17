@@ -12,6 +12,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
 use wcore_cli::budget_grants::BudgetGrantLedger;
 use wcore_cli::doctor;
+// B3: the exit-code contract. `ShutdownSignal` names which signal ended the
+// process so the code can be 128+N instead of a blanket SUCCESS.
+use wcore_cli::exit_code::ShutdownSignal;
 use wcore_cli::log_rotate;
 use wcore_cli::packaged_runtime::{
     LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
@@ -478,10 +481,10 @@ struct Cli {
     ///
     /// Accepts a skill NAME or a procedure UUID. The UUID form is what
     /// anyone who scripted the historical flag passes; the name form is
-    /// what `--skills-govern` prints. Reads and writes the project's
-    /// `.wayland-core/memory/memory.db`. Promotion is governed: the grant is
-    /// bound to a content digest, revoked artifacts are refused, and every
-    /// outcome is journalled.
+    /// what `--skills-govern` prints. Reads and writes this project's memory
+    /// DB (`wcore_memory::paths::project_db_path`). Promotion is governed:
+    /// the grant is bound to a content digest, revoked artifacts are refused,
+    /// and every outcome is journalled.
     #[arg(long, value_name = "SKILL_OR_PROCEDURE_ID")]
     skills_promote: Option<String>,
 
@@ -804,8 +807,13 @@ enum TopCmd {
     },
     /// Inspect platform containment — `status` reports the selected sandbox
     /// backend and its properties; `exec` runs a command through the agent's
-    /// own shell tool so you can observe, from the child's own output, that
-    /// the sandbox was ACTIVE rather than merely available.
+    /// own shell tool so you can observe, from the child's own output, what
+    /// the sandbox actually applied rather than merely that it was available.
+    ///
+    /// The properties differ by platform and some of them are `false`. Read
+    /// `confines_filesystem` for "can a command write outside my workspace" —
+    /// it is `false` on the Windows default, where a Job Object bounds process
+    /// lifetime but does not filter the filesystem.
     Sandbox(wcore_cli::sandbox_cmd::SandboxArgs),
 }
 
@@ -929,7 +937,13 @@ impl Drop for BundledSkillTmpCleanup {
     }
 }
 
-async fn shutdown_signal() {
+/// Await a shutdown signal and report WHICH one arrived.
+///
+/// B3: the caller needs the identity, not just the fact — an interrupted run
+/// must exit 130 and a terminated one 143, the codes a shell already
+/// understands. Returning `()` is what forced the old `Ok(ExitCode::SUCCESS)`
+/// below: with no signal to name, the only honest code was the wrong one.
+async fn shutdown_signal() -> ShutdownSignal {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -938,9 +952,9 @@ async fn shutdown_signal() {
         let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler install");
         let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler install");
         tokio::select! {
-            _ = term.recv() => {}
-            _ = int.recv()  => {}
-            _ = hup.recv()  => {}
+            _ = term.recv() => ShutdownSignal::Terminate,
+            _ = int.recv()  => ShutdownSignal::Interrupt,
+            _ = hup.recv()  => ShutdownSignal::Hangup,
         }
     }
     #[cfg(not(unix))]
@@ -948,24 +962,30 @@ async fn shutdown_signal() {
         tokio::signal::ctrl_c()
             .await
             .expect("Ctrl+C handler install");
+        ShutdownSignal::Interrupt
     }
 }
 
 async fn run_until_shutdown<R, S>(run_future: R, signal_future: S) -> anyhow::Result<ExitCode>
 where
     R: std::future::Future<Output = anyhow::Result<ExitCode>>,
-    S: std::future::Future<Output = ()>,
+    S: std::future::Future<Output = ShutdownSignal>,
 {
     let mut run_future = Box::pin(run_future);
     tokio::select! {
         result = &mut run_future => result,
-        _ = signal_future => {
+        signal = signal_future => {
             // Explicitly drop all bootstrap/session state before the outer
             // cleanup guard runs. This also releases every Windows capability
             // handle clone so the no-delete process root can be removed.
             drop(run_future);
             wcore_cli::profile_router::reap_all_children_blocking();
-            Ok(ExitCode::SUCCESS)
+            // B3: an interrupted run did NOT succeed. This used to return
+            // `ExitCode::SUCCESS`, so `kill -INT` mid-tool produced empty
+            // output and exit 0 — a caller checking `$?` could not tell a
+            // cancelled run from a completed one. 128+signal is the shell
+            // convention every other Unix program already follows.
+            Ok(ExitCode::from(signal.exit_code()))
         }
     }
 }
@@ -1039,6 +1059,24 @@ fn main() -> anyhow::Result<ExitCode> {
             if let Err(error) = &outcome {
                 wcore_cli::startup_error::report_startup_refusal(error);
             }
+            // Row B-3 — a finished run must END the process.
+            //
+            // Dropping a Tokio runtime WAITS, without bound, for every task on
+            // the blocking pool to return, and `spawn_blocking` tasks cannot be
+            // aborted. The email channel runs its IMAP poll loop there
+            // (`wcore_channel_email::imap::imap_poll_blocking`), and that loop
+            // only returns when its shutdown watch flips. Measured: a one-shot
+            // run whose work was DONE (last stdout byte 03:02:31) sat here
+            // polling IMAP every 10s until the harness SIGKILLed it at 03:16:07
+            // — 13m36s of hang scored as `exit_code:-9, timed_out:true`, which
+            // is how every positive run of corpus row B-3 has ever ended.
+            //
+            // The exit paths below stop the channel manager explicitly, so in
+            // the ordinary case this returns at once. This is the backstop that
+            // makes "the process exits" a property of the entry point rather
+            // than of five exit paths each remembering to clean up: any future
+            // leaked blocking task costs a bounded delay, never the whole run.
+            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
             outcome
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn wcore-cli entry thread: {e}"))?;
@@ -1105,6 +1143,21 @@ fn danger_tiers(cli: &Cli) -> (bool, bool) {
 const NON_TTY_NO_PROMPT_ADVICE: &str = "wayland-core: stdin is not a terminal and no prompt was given.\n\
      Use --json-stream for headless/piped use, or pass the prompt as an\n\
      argument: wayland-core \"your prompt here\".";
+
+/// Added when the user asked to RESUME and still got the advice above.
+///
+/// UAT-UXA2: recovering a crash-interrupted session begins with
+/// `wayland-core --resume <id>`, and the generic refusal above is all the
+/// product said — it never mentioned that resuming takes a message too, and
+/// never mentioned the reconcile/cancel path the engine's own interrupted-turn
+/// refusal names. A user who reads it learns nothing about the state they are
+/// actually in.
+const RESUME_NO_PROMPT_ADVICE: &str = "Resuming needs a message as well as the session:\n\
+     wayland-core --resume <id> \"your next message\"\n\
+     If that then refuses because the session was interrupted mid-turn, close the\n\
+     interrupted turn first — it prints the exact command for anything it cannot\n\
+     decide itself:\n\
+     wayland-core session cancel <id>";
 
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
@@ -1806,15 +1859,22 @@ async fn run() -> anyhow::Result<ExitCode> {
             session_dir_config.session.max_sessions,
         );
         let sessions = session_mgr.list()?;
+        // The session table is this flag's ANSWER, not a diagnostic, so it goes
+        // to STDOUT. It used to go to stderr, which left
+        // `wayland-core --list-sessions | grep <id>` silently matching nothing
+        // while the table scrolled past on the terminal. `--list-agents` above
+        // already prints its answer to stdout, and so does the
+        // `session list` subcommand, whose doc comment recorded this flag as
+        // the outlier; it no longer is.
         if sessions.is_empty() {
-            eprintln!("No saved sessions.");
+            println!("No saved sessions.");
         } else {
-            eprintln!(
+            println!(
                 "{:<8} {:<12} {:<30} {:>5}  Summary",
                 "ID", "Date", "Model", "Msgs"
             );
             for s in &sessions {
-                eprintln!(
+                println!(
                     "{:<8} {:<12} {:<30} {:>5}  {}",
                     s.id,
                     s.created_at.format("%Y-%m-%d"),
@@ -2114,6 +2174,9 @@ async fn run() -> anyhow::Result<ExitCode> {
         // Any flag this advice names is checked against the real clap
         // definition by `non_tty_advice_names_only_flags_that_do_what_it_says`.
         eprintln!("{NON_TTY_NO_PROMPT_ADVICE}");
+        if cli.resume.is_some() || cli.continue_latest {
+            eprintln!("{RESUME_NO_PROMPT_ADVICE}");
+        }
         return Ok(ExitCode::FAILURE);
     }
 
@@ -2158,6 +2221,46 @@ async fn run() -> anyhow::Result<ExitCode> {
     if resume.is_none() {
         engine.init_session(&provider_name, &cwd, cli.session_id.as_deref())?;
     }
+
+    // A resumed session may carry a turn a crash cut in half. Nothing on this
+    // path used to consult the recovery plan, so the next message hit
+    // `AgentEngine::run`'s fail-closed gate — and every remedy that gate names
+    // was unreachable from here (`session reconcile` only lists the item,
+    // `session cancel` refuses because it is outstanding), which left a killed
+    // job unresumable for the rest of its life. That is job corpus row B-1:
+    // ten kill boundaries, ten losses, zero duplication. Settle the
+    // interrupted turn first, say out loud what was in flight, and carry the
+    // same account into the model's next turn so it verifies the world instead
+    // of assuming it. The TUI and `--json-stream` paths return above this
+    // point and keep driving recovery through their own explicit surfaces.
+    let interruption_briefing = if resume.is_some() {
+        match engine.settle_interrupted_turn_for_resume().await {
+            Ok(Some(report)) => {
+                let briefing = report.briefing();
+                terminal.formatter().session_info(&briefing);
+                Some(briefing)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                output.emit_error(
+                    &format!(
+                        "the interrupted turn from the previous run could not be settled: {error}"
+                    ),
+                    false,
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // The briefing is part of what the model is asked this turn, not a note
+    // printed beside it: a resumed job that is never told it was interrupted
+    // has no reason to re-check anything.
+    let prompt = match &interruption_briefing {
+        Some(briefing) if !prompt.is_empty() => format!("{briefing}\n\n{prompt}"),
+        _ => prompt,
+    };
     // Move session-tier memory off the bootstrap "boot" DB onto the real
     // per-session file, now that the session id is known.
     engine.rebind_memory_session().await;
@@ -2236,6 +2339,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             .map_err(|e| anyhow::anyhow!("goal {} did not terminate: {e}", goal_id.as_str()))?;
         wcore_cli::goal_cmd::print_canonical_transition(&driver, &goal_id, "direct", &cursor);
         engine.run_stop_hooks().await;
+        shut_down_channels(&result.channel_manager).await;
         for mgr in &result.mcp_managers {
             mgr.shutdown().await;
         }
@@ -2263,24 +2367,91 @@ async fn run() -> anyhow::Result<ExitCode> {
                     run_result.usage.cache_read_tokens,
                     run_result.finish_reason,
                 );
-                ExitCode::SUCCESS
+                // Row B-3 — say out loud that this stop is waiting on a person,
+                // and how to pick it up. Without this the run is silent about
+                // the one thing the operator has to do, and its exit code is
+                // the only clue.
+                let awaiting_human = engine.awaiting_human();
+                if awaiting_human {
+                    terminal
+                        .formatter()
+                        .session_info(&awaiting_human_notice(engine.current_session_id()));
+                }
+                // B3: the one-shot path used to return SUCCESS for every
+                // completed `engine.run`, so a run stopped by the turn cap and
+                // one that gave up on a failing tool both reported 0. The
+                // contract lives in `wcore_cli::exit_code`.
+                ExitCode::from(wcore_cli::exit_code::for_run_outcome(
+                    run_result.stop_reason,
+                    run_result.ended_on_unrecovered_tool_failure,
+                    awaiting_human,
+                ))
             }
             SlashOrRun::Engine(Err(e)) => {
                 // Render the full anyhow chain (`{e:#}` flattens causes onto
                 // `\nCaused by: …` lines which the formatter recognises).
                 output.emit_error(&format!("{e:#}"), false);
-                ExitCode::FAILURE
+                ExitCode::from(wcore_cli::exit_code::FAILURE)
             }
         }
     };
 
     engine.run_stop_hooks().await;
 
+    shut_down_channels(&result.channel_manager).await;
+
     for mgr in &result.mcp_managers {
         mgr.shutdown().await;
     }
 
     Ok(exit_code)
+}
+
+/// Stop every configured channel before this path returns.
+///
+/// Row B-3. `AgentBootstrap::enable_inbound_dispatch(true)` starts inbound
+/// polling for the one-shot and REPL paths, but only `gateway.rs` ever stopped
+/// it again. An email channel polls IMAP from a `spawn_blocking` task that
+/// returns only when its shutdown watch flips, and a blocking task that never
+/// returns holds the whole runtime open at drop — so a run whose work was
+/// finished never exited and was eventually killed. `stop_all` flips that
+/// watch; the poll loop re-checks it every 100ms, so this is fast, and each
+/// channel is bounded by its own grace period regardless.
+///
+/// Failures are logged, not propagated: this runs after the exit code is
+/// already decided, and a channel that will not shut down cleanly must not
+/// change the verdict on the work that was done.
+async fn shut_down_channels(
+    channels: &std::sync::Arc<
+        tokio::sync::RwLock<wcore_channels_registry::wcore_channels::ChannelManager>,
+    >,
+) {
+    if let Err(error) = channels.write().await.stop_all().await {
+        tracing::warn!(
+            target: "wcore_cli",
+            %error,
+            "channel shutdown reported an error; continuing to exit"
+        );
+    }
+}
+
+/// The operator-facing line for a run that stopped needing a human (row B-3).
+///
+/// Names the two things a person woken by this has to know: what the process
+/// is waiting for, and the exact command that carries the work on. The session
+/// is already durable — this reuses the ordinary `--resume` path rather than
+/// introducing a second kind of saved state.
+fn awaiting_human_notice(session_id: Option<String>) -> String {
+    let resume = session_id.map_or_else(
+        || "wayland-core --continue \"<your reply>\"".to_string(),
+        |id| format!("wayland-core --resume {id} \"<your reply>\""),
+    );
+    format!(
+        "Stopped: this run needs a person and the outbound route to one is \
+         down, so nothing that changes the world was allowed to run. The work \
+         so far is saved. Fix the channel or answer directly, then resume:\n  \
+         {resume}"
+    )
 }
 
 async fn repl_loop(
@@ -4478,7 +4649,13 @@ async fn run_json_stream_mode(
             .with_advertised_capabilities(advertised_for_sink)
             // v0.9.4 W1.2 (F2): enable sub-agent event relay to the Desktop
             // host. Harmless when no sub-agents spawn (no-op emission path).
-            .with_sub_agent_traces(true),
+            .with_sub_agent_traces(true)
+            // The host reads the first stdout line as the handshake, so
+            // `ready` must be the first frame on every platform. Bootstrap
+            // emits diagnostics before `ready` exists (on Windows the
+            // `windows_job_object` local-shell notice does so on EVERY
+            // session); hold them until the handshake is out.
+            .deferring_info_until_ready(),
     );
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
@@ -6044,7 +6221,9 @@ mod tests {
         );
 
         // ── The assertion itself ──
-        let tokens: Vec<&str> = NON_TTY_NO_PROMPT_ADVICE
+        let tokens: Vec<&str> = [NON_TTY_NO_PROMPT_ADVICE, RESUME_NO_PROMPT_ADVICE]
+            .concat()
+            .leak()
             .split(|c: char| c.is_whitespace() || c == '"' || c == ',')
             .map(|t| t.trim_end_matches('.'))
             .filter(|t| t.starts_with('-') && t.len() > 1)
@@ -6058,15 +6237,50 @@ mod tests {
              or the advice stopped naming any flag"
         );
 
+        // Every token the advice may name, pinned to the ONE clap argument it
+        // must bind to. A map, not a set: a token that exists but binds to
+        // something else still fails, so the `-p` trap above stays live --
+        // `-p` resolves to `provider`, is absent from this map, and is
+        // reported as not doing what the advice would be claiming.
+        let expected: &[(&str, &str)] = &[
+            // "Use --json-stream for headless/piped use".
+            ("--json-stream", "json_stream"),
+            // UAT-UXA2: `wayland-core --resume <id> "your next message"`.
+            // `--resume` is clap `resume: Option<String>` -- "Resume a
+            // previous session" -- and this second paragraph only prints when
+            // the user ALREADY passed `--resume`/`--continue`, so the sentence
+            // names the flag that does exactly what the sentence says.
+            ("--resume", "resume"),
+        ];
+
+        // The allow-map may not carry an entry the advice no longer names, or
+        // it silently pre-authorises a flag that nothing actually checks.
+        for (token, _) in expected {
+            assert!(
+                tokens.contains(token),
+                "`{token}` is allow-listed but the advice no longer names it"
+            );
+        }
+
         for token in tokens {
             let id = resolve(&cmd, token).unwrap_or_else(|| {
                 panic!("the advice names `{token}`, which is not an argument at all")
             });
+            let want = expected
+                .iter()
+                .find(|(t, _)| *t == token)
+                .map(|(_, want)| *want)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the advice names `{token}` (clap argument `{id}`), which this \
+                         message is not allowed to offer. The prompt is a trailing \
+                         positional: wayland-core \"your prompt\"."
+                    )
+                });
             assert_eq!(
-                id, "json_stream",
-                "the advice names `{token}`, which is clap argument `{id}` — \
-                 that is not a way to pass a prompt. The prompt is a trailing \
-                 positional: wayland-core \"your prompt\"."
+                id, want,
+                "the advice names `{token}`, which is clap argument `{id}`, not \
+                 `{want}` -- it does not do what the advice says"
             );
         }
     }
@@ -7056,12 +7270,13 @@ mod tests {
         let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
+        let raised = kind.clone();
         let trigger = tokio::spawn(async move {
             ready_rx
                 .await
                 .expect("reference extraction reaches signal point");
             tokio::task::yield_now().await;
-            raise_native_shutdown_signal(&kind);
+            raise_native_shutdown_signal(&raised);
         });
 
         let cleanup = BundledSkillTmpCleanup;
@@ -7069,7 +7284,16 @@ mod tests {
             .await
             .expect("native signal shutdown must complete cleanly");
         trigger.await.expect("native signal trigger task");
-        assert_eq!(status, ExitCode::SUCCESS);
+        // B3: a signalled shutdown reports 128+signal, not SUCCESS. This
+        // assertion previously demanded `ExitCode::SUCCESS`, which is what let
+        // `kill -INT` mid-run look identical to a completed one.
+        let expected = match kind.as_str() {
+            "sigint" | "ctrl-c" => ShutdownSignal::Interrupt,
+            "sigterm" => ShutdownSignal::Terminate,
+            "sighup" => ShutdownSignal::Hangup,
+            other => panic!("unsupported native test signal: {other}"),
+        };
+        assert_eq!(status, ExitCode::from(expected.exit_code()));
         let process_root = extracted_root
             .lock()
             .expect("read extraction root")

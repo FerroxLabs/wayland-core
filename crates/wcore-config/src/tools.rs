@@ -49,7 +49,7 @@ pub struct DeferColdConfig {
     pub catalog: bool,
     /// HARD cap on the catalog line's name-list length in chars — even a
     /// single name is dropped when it alone exceeds the budget (the suffix
-    /// "+N more — search to discover" replaces the overflow, so an MCP
+    /// "+N more not listed" replaces the overflow, so an MCP
     /// swarm or a pathological name cannot balloon the prompt). Applies
     /// strictly to the names portion; the fixed prefix and the
     /// constant-size suffix sit outside it.

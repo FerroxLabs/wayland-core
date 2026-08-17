@@ -1006,6 +1006,30 @@ impl ChannelManager {
         out
     }
 
+    /// Names of every registered channel whose [`Channel::platform`] equals
+    /// `platform`, sorted alphabetically.
+    ///
+    /// A channel's INSTANCE NAME and its PLATFORM are independent: an operator
+    /// may call an email channel "mail", "work", or anything else, and the
+    /// name is what [`Self::send_to`] keys on. Callers that hold a platform
+    /// token (`send_message`'s `email:...` target, say) and need a channel
+    /// name must ask the adapters what platform they actually are — guessing
+    /// from the name is what made every non-default-named channel
+    /// unaddressable.
+    pub async fn names_for_platform(&self, platform: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for name in self.list_names() {
+            let Some(slot) = self.channels.get(&name) else {
+                continue;
+            };
+            let guard = slot.lock().await;
+            if guard.platform() == platform {
+                out.push(name);
+            }
+        }
+        out
+    }
+
     /// List names of registered channels, sorted alphabetically.
     pub fn list_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.channels.keys().cloned().collect();

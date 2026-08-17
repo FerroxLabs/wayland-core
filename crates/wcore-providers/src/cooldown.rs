@@ -182,10 +182,14 @@ impl CooldownTracker {
             inner.state = CooldownState::HalfOpen { reason };
             inner.probe_lease_until = None;
         }
-        if matches!(inner.state, CooldownState::HalfOpen { .. })
-            && inner
-                .probe_lease_until
-                .is_some_and(|lease_until| self.clock.now() >= lease_until)
+        // The lease is a LIVENESS guard on a probe owner that may have died,
+        // so it expires on its own clock in every state. Gating expiry on
+        // `HalfOpen` left a lease taken while `Cooling` (an unprotected probe)
+        // pinned until the cooldown elapsed, which is the one state where the
+        // owner is least likely to come back.
+        if inner
+            .probe_lease_until
+            .is_some_and(|lease_until| self.clock.now() >= lease_until)
         {
             inner.probe_lease_until = None;
         }
@@ -211,6 +215,32 @@ impl CooldownTracker {
             }
             CooldownState::HalfOpen { .. } | CooldownState::Cooling { .. } => None,
         }
+    }
+
+    /// Acquire dispatch permission for a caller that has nowhere else to send.
+    ///
+    /// Identical to [`Self::try_acquire`] except that an open circuit does not
+    /// refuse outright: a `Cooling` candidate can still yield one probe. Use
+    /// it ONLY where refusing cannot protect anything because there is no
+    /// alternate route (see `ResilientProvider` with an empty fallback chain);
+    /// with a fallback present, refusal IS the protection and
+    /// [`Self::try_acquire`] is the correct call.
+    ///
+    /// The single-probe lease is the same one [`Self::try_acquire`] takes, so
+    /// this cannot become a hole in the concurrency guard: at most one probe
+    /// is in flight per tracker, and every other concurrent caller is denied
+    /// until that probe records an outcome or the lease expires.
+    pub fn try_acquire_unprotected_probe(&self) -> Option<CooldownPermit> {
+        let mut inner = self.inner.lock();
+        self.refresh_expiry(&mut inner);
+        if matches!(inner.state, CooldownState::Ready) {
+            return Some(CooldownPermit::Ready);
+        }
+        if inner.probe_lease_until.is_some() {
+            return None;
+        }
+        inner.probe_lease_until = Some(self.clock.now().saturating_add(self.probe_lease));
+        Some(CooldownPermit::HalfOpen)
     }
 
     pub fn record_failure(&self, reason: FailoverReason, retry_after: Option<Duration>) {
@@ -324,6 +354,66 @@ mod tests {
             threshold,
             probe_lease,
         )
+    }
+
+    /// Finding 3, round 2: `ResilientProvider` used to manufacture a bare
+    /// `CooldownPermit::HalfOpen` when `try_acquire` refused, taking no lease
+    /// — so N concurrent sessions against a single-provider install all sent
+    /// at once, which is exactly what the single-probe guard exists to stop.
+    /// The unprotected probe now goes through the tracker and through the
+    /// same lease.
+    #[test]
+    fn an_unprotected_probe_is_still_single_flight_while_cooling() {
+        let clock = Arc::new(ManualClock::default());
+        // A long cooldown so the state stays `Cooling` for the whole test and
+        // the lease, not a state transition, is what is being measured.
+        let tracker = CooldownTracker::with_clock_and_probe_lease(
+            Arc::clone(&clock) as Arc<dyn CooldownClock>,
+            Duration::from_secs(600),
+            1,
+            Duration::from_secs(30),
+        );
+        tracker.record_failure(FailoverReason::Timeout, None);
+        assert!(matches!(tracker.state(), CooldownState::Cooling { .. }));
+
+        // Unchanged: a caller with somewhere else to go is refused outright.
+        assert!(tracker.try_acquire().is_none());
+
+        // The caller with nowhere to go gets exactly one probe...
+        assert!(matches!(
+            tracker.try_acquire_unprotected_probe(),
+            Some(CooldownPermit::HalfOpen)
+        ));
+        // ...and every other caller is refused while that probe is in flight.
+        assert!(tracker.try_acquire_unprotected_probe().is_none());
+        assert!(tracker.try_acquire().is_none());
+
+        clock.advance(Duration::from_secs(29));
+        assert!(
+            tracker.try_acquire_unprotected_probe().is_none(),
+            "the lease must still hold one second before it expires"
+        );
+        clock.advance(Duration::from_secs(2));
+        assert!(
+            tracker.try_acquire_unprotected_probe().is_some(),
+            "a probe owner that died must not pin the lease past its expiry"
+        );
+    }
+
+    #[test]
+    fn an_unprotected_probe_records_its_outcome_and_can_close_the_circuit() {
+        let clock = Arc::new(ManualClock::default());
+        let tracker = CooldownTracker::with_clock_and_probe_lease(
+            Arc::clone(&clock) as Arc<dyn CooldownClock>,
+            Duration::from_secs(600),
+            1,
+            Duration::from_secs(30),
+        );
+        tracker.record_failure(FailoverReason::Timeout, None);
+        assert!(tracker.try_acquire_unprotected_probe().is_some());
+        tracker.record_success();
+        assert!(matches!(tracker.state(), CooldownState::Ready));
+        assert!(matches!(tracker.try_acquire(), Some(CooldownPermit::Ready)));
     }
 
     #[test]

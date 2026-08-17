@@ -809,6 +809,7 @@ mod tests {
             vec![
                 ContentBlock::Thinking {
                     thinking: "Let me think...".to_string(),
+                    extra: None,
                 },
                 ContentBlock::Text {
                     text: "Here is the answer.".to_string(),
@@ -841,6 +842,7 @@ mod tests {
                 Role::Assistant,
                 vec![ContentBlock::Thinking {
                     thinking: "interrupted...".to_string(),
+                    extra: None,
                 }],
             ),
         ];
@@ -871,6 +873,7 @@ mod tests {
                 Role::Assistant,
                 vec![ContentBlock::Thinking {
                     thinking: "reasoning minted by the previous model...".to_string(),
+                    extra: None,
                 }],
             ),
             // User continues; the session is now on a DIFFERENT model.
@@ -886,6 +889,7 @@ mod tests {
                 vec![
                     ContentBlock::Thinking {
                         thinking: "new model reasoning...".to_string(),
+                        extra: None,
                     },
                     ContentBlock::Text {
                         text: "done".to_string(),

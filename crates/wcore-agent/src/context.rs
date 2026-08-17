@@ -118,7 +118,19 @@ However, if one call depends on a previous result, run them sequentially.
 the diff, which is easier to review.
  - Always Read a file before editing it.
  - Some tools are deferred — only their names are visible. Before calling \
-a deferred tool, use ToolSearch to load its full schema first."
+a deferred tool, use ToolSearch to load its full schema first.
+ - An action on a system outside this machine — an HTTP request that \
+creates, books, sends, charges or publishes, or a write to a remote API, \
+service or database — cannot be undone by you, and may cost the user money \
+every time it runs. Take one ONLY as a step the task actually calls for, and \
+only with the task's own real data. Never take one to find out whether an \
+endpoint works, to smoke-test it, or with placeholder, example or test data. \
+When you need to know whether such an action already happened, look it up the \
+read-only way; never repeat the action to find out.
+ - Leave behind only what the task asked for. Helper scripts, probe programs, \
+scratch notes and intermediate files belong in a temporary directory outside \
+the working tree; if you do create one inside it, delete it before you \
+finish."
 }
 
 /// Render plugin-contributed rules into a single system-prompt section.
@@ -1011,6 +1023,52 @@ mod tests {
             result.contains("Write"),
             "should mention Write as echo/heredoc replacement"
         );
+    }
+
+    /// A booking POST to a billing endpoint, a scratch script left in the
+    /// user's repo: two ways an agent damages a world it was only asked to
+    /// read. Job-corpus row B-1 caught both — a `TEST-PING` order booked
+    /// against a service that bills per call and never de-duplicates, and a
+    /// `book.sh` helper abandoned in the working tree. Nothing in the prompt
+    /// spoke to either, so assert the two rules that now do, and assert the
+    /// specific words that make them actionable rather than the headings.
+    #[test]
+    fn tool_guidance_forbids_trial_external_effects_and_scratch_in_worktree() {
+        let result = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false,
+        );
+        for needle in [
+            "cannot be undone by you",
+            "the task's own real data",
+            "smoke-test it",
+            "placeholder, example or test data",
+            "never repeat the action to find out",
+        ] {
+            assert!(
+                result.contains(needle),
+                "external-effect rule must contain {needle:?}"
+            );
+        }
+        for needle in [
+            "Leave behind only what the task asked for",
+            "temporary directory outside",
+            "delete it before you",
+        ] {
+            assert!(
+                result.contains(needle),
+                "scratch-file rule must contain {needle:?}"
+            );
+        }
     }
 
     #[test]

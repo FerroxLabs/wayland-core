@@ -7,7 +7,7 @@
 use chrono::{Duration, Utc};
 use serde_json::json;
 use wcore_agent::compact::micro::{
-    CLEARED_TOOL_RESULT, MicrocompactResult, microcompact, should_microcompact,
+    CLEARED_TOOL_RESULT, ContextPressure, MicrocompactResult, microcompact, should_microcompact,
 };
 use wcore_config::compact::CompactConfig;
 use wcore_types::message::{ContentBlock, Message, Role};
@@ -49,6 +49,26 @@ fn assistant_at(blocks: Vec<ContentBlock>, ts: chrono::DateTime<Utc>) -> Message
         content: blocks,
         timestamp: Some(ts),
         cache_breakpoint: None,
+    }
+}
+
+/// The autocompact threshold for the default config on a 200k window:
+/// 200_000 - 20_000 output reserve - 13_000 buffer.
+const THRESHOLD: usize = 167_000;
+
+/// Pressure above the default gate (0.5 * THRESHOLD = 83_500).
+fn high_pressure() -> ContextPressure {
+    ContextPressure {
+        real_input_tokens: 120_000,
+        autocompact_threshold: THRESHOLD,
+    }
+}
+
+/// Pressure a real A-6-shaped session sits at: ~16k tokens in a 200k window.
+fn low_pressure() -> ContextPressure {
+    ContextPressure {
+        real_input_tokens: 16_000,
+        autocompact_threshold: THRESHOLD,
     }
 }
 
@@ -177,7 +197,7 @@ fn tc_2_3_04_time_trigger_exceeds_threshold() {
         micro_gap_seconds: 3600,
         ..Default::default()
     };
-    assert!(should_microcompact(&msgs, &config));
+    assert!(should_microcompact(&msgs, &config, high_pressure()));
 }
 
 // ── TC-2.3-05: Time trigger — within threshold ─────────────────────────────
@@ -190,7 +210,7 @@ fn tc_2_3_05_time_trigger_within_threshold() {
         micro_gap_seconds: 3600,
         ..Default::default()
     };
-    assert!(!should_microcompact(&msgs, &config));
+    assert!(!should_microcompact(&msgs, &config, high_pressure()));
 }
 
 // ── TC-2.3-06: Count trigger ────────────────────────────────────────────────
@@ -209,7 +229,7 @@ fn tc_2_3_06_count_trigger() {
         micro_keep_recent: 5,
         ..Default::default()
     };
-    assert!(should_microcompact(&msgs, &config));
+    assert!(should_microcompact(&msgs, &config, high_pressure()));
 }
 
 // ── TC-2.3-07: No timestamp — time check skipped ───────────────────────────
@@ -231,7 +251,7 @@ fn tc_2_3_07_no_timestamp_skips_time_check() {
     };
     // No timestamp → time trigger skipped.
     // 2 results ≤ 5*2=10 → count trigger false.
-    assert!(!should_microcompact(&msgs, &config));
+    assert!(!should_microcompact(&msgs, &config, high_pressure()));
 }
 
 // ── TC-2.3-08: Token estimation after clearing ──────────────────────────────
@@ -335,4 +355,107 @@ fn tc_2_3_11_message_order_preserved() {
         ContentBlock::Text { text } => assert_eq!(text, "please continue"),
         _ => panic!("expected Text"),
     }
+}
+
+// ── A-6 regression: the count trigger is not a pressure signal ─────────────
+
+/// Corpus row A-6 (`migration`) failed 0/2 with a byte-identical README and an
+/// unmoved version pin. The transcript showed why: 25 microcompacts inside 60
+/// turns, each freeing ~2k tokens while real input pressure never passed ~10%
+/// of the window. The agent re-read the same thirteen files nineteen times and
+/// never held enough of the tree at once to write the migration.
+///
+/// Twelve tool results in an almost-empty window must NOT clear anything.
+#[test]
+fn a6_count_trigger_is_silent_under_low_pressure() {
+    let mut msgs = Vec::new();
+    for i in 0..12 {
+        let id = format!("t{i}");
+        msgs.push(assistant(vec![tool_use(&id, "Read")]));
+        msgs.push(user(vec![tool_result(&id, "data")]));
+    }
+    let config = CompactConfig {
+        micro_keep_recent: 5,
+        ..Default::default()
+    };
+    // Count trigger alone would fire: 12 > 5 * 2.
+    assert!(
+        !should_microcompact(&msgs, &config, low_pressure()),
+        "microcompact fired at 16k/167k pressure — this is the A-6 defect"
+    );
+}
+
+/// Same conversation, same count, pressure past the gate: it must still fire.
+/// Without this the fix would be a gate that can never pass.
+#[test]
+fn a6_count_trigger_still_fires_once_pressure_arrives() {
+    let mut msgs = Vec::new();
+    for i in 0..12 {
+        let id = format!("t{i}");
+        msgs.push(assistant(vec![tool_use(&id, "Read")]));
+        msgs.push(user(vec![tool_result(&id, "data")]));
+    }
+    let config = CompactConfig {
+        micro_keep_recent: 5,
+        ..Default::default()
+    };
+    assert!(should_microcompact(&msgs, &config, high_pressure()));
+}
+
+/// The gate boundary itself: 0.5 * 167_000 = 83_500. One token below is
+/// silent, exactly at it fires.
+#[test]
+fn a6_pressure_gate_boundary_is_exact() {
+    let mut msgs = Vec::new();
+    for i in 0..12 {
+        let id = format!("t{i}");
+        msgs.push(assistant(vec![tool_use(&id, "Read")]));
+        msgs.push(user(vec![tool_result(&id, "data")]));
+    }
+    let config = CompactConfig {
+        micro_keep_recent: 5,
+        ..Default::default()
+    };
+    let below = ContextPressure {
+        real_input_tokens: 83_499,
+        autocompact_threshold: THRESHOLD,
+    };
+    let at = ContextPressure {
+        real_input_tokens: 83_500,
+        autocompact_threshold: THRESHOLD,
+    };
+    assert!(!should_microcompact(&msgs, &config, below));
+    assert!(should_microcompact(&msgs, &config, at));
+}
+
+/// Negative control for the gate: an operator who sets the fraction to 0
+/// gets the old unconditional count trigger back. If this assertion failed,
+/// the two tests above would be measuring something other than the gate.
+#[test]
+fn a6_zero_fraction_restores_unconditional_count_trigger() {
+    let mut msgs = Vec::new();
+    for i in 0..12 {
+        let id = format!("t{i}");
+        msgs.push(assistant(vec![tool_use(&id, "Read")]));
+        msgs.push(user(vec![tool_result(&id, "data")]));
+    }
+    let config = CompactConfig {
+        micro_keep_recent: 5,
+        micro_pressure_fraction: 0.0,
+        ..Default::default()
+    };
+    assert!(should_microcompact(&msgs, &config, low_pressure()));
+}
+
+/// The time trigger is a different signal (the session was idle for an hour)
+/// and is deliberately NOT pressure-gated. Low pressure must not suppress it.
+#[test]
+fn a6_time_trigger_is_not_pressure_gated() {
+    let old_ts = Utc::now() - Duration::seconds(3660);
+    let msgs = vec![assistant_at(vec![text("thinking")], old_ts)];
+    let config = CompactConfig {
+        micro_gap_seconds: 3600,
+        ..Default::default()
+    };
+    assert!(should_microcompact(&msgs, &config, low_pressure()));
 }

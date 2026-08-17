@@ -227,13 +227,20 @@ async fn required_live_windows_public_dispatch_refuses_bash_worker_and_preserves
     };
     // Legible: an operator can act on the message instead of decoding an
     // NTSTATUS out of an empty stderr.
+    //
+    // The refusal is raised by the delegated-dispatch admission gate on the
+    // BACKEND, before argv is ever examined, so it names the backend and the
+    // capability it lacks rather than argv[0]. It used to come from the
+    // AppContainer argv[0] classifier; Windows now defaults to the relaxed Job
+    // Object backend, which cannot enforce delegated read denial and so refuses
+    // one step earlier. Fail-closed either way — that is what this test grades.
     assert!(
-        reason.contains("not supported under the Windows AppContainer sandbox"),
-        "refusal must name the sandbox and the unsupported shell: {reason}"
+        reason.contains("sandbox backend"),
+        "refusal must name the sandbox: {reason}"
     );
     assert!(
-        reason.contains("bash"),
-        "refusal must name argv[0]: {reason}"
+        reason.contains("cannot enforce delegated read denial"),
+        "refusal must name the capability the backend lacks: {reason}"
     );
 
     // Fail-closed means nothing executed, so nothing can have been disclosed.

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -38,9 +39,43 @@ struct McpServer {
     #[allow(dead_code)]
     name: String,
     transport: Box<dyn McpTransport>,
-    tools: Vec<McpToolDef>,
+    /// The tools this server advertises.
+    ///
+    /// Behind a lock because the set is NOT fixed at connect: a server that
+    /// declares `tools.listChanged` may register or drop tools mid-session
+    /// and announce it with `notifications/tools/list_changed`. The manager
+    /// is shared as an `Arc` by every tool proxy, so interior mutability is
+    /// the only way a refresh can land
+    /// ([`McpManager::refresh_signalled_tools`]).
+    tools: RwLock<Vec<McpToolDef>>,
     /// Whether the server declared resources capability in its initialize response
     supports_resources: bool,
+}
+
+impl McpServer {
+    /// Snapshot the advertised tools. A poisoned lock cannot happen (nothing
+    /// panics while holding it) but must not take the session down either, so
+    /// it degrades to the inner value.
+    fn tools_snapshot(&self) -> Vec<McpToolDef> {
+        match self.tools.read() {
+            Ok(tools) => tools.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn tool_count(&self) -> usize {
+        match self.tools.read() {
+            Ok(tools) => tools.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        }
+    }
+
+    fn advertises(&self, name: &str) -> bool {
+        match self.tools.read() {
+            Ok(tools) => tools.iter().any(|tool| tool.name == name),
+            Err(poisoned) => poisoned.into_inner().iter().any(|tool| tool.name == name),
+        }
+    }
 }
 
 /// The connect-time outcome for one server, kept on the manager so the cause of
@@ -217,13 +252,13 @@ impl McpManager {
                     eprintln!(
                         "[mcp] Connected to '{}': {} tools, resources={}",
                         name,
-                        server.tools.len(),
+                        server.tool_count(),
                         server.supports_resources,
                     );
                     health.insert(
                         name.clone(),
                         McpServerHealth::Ready {
-                            tool_count: server.tools.len(),
+                            tool_count: server.tool_count(),
                         },
                     );
                     servers.insert(name, *server);
@@ -364,7 +399,11 @@ impl McpManager {
             .get(&name)
             .filter(|server| server.transport.is_alive())
         {
-            return Ok(server.tools.iter().map(|tool| tool.name.clone()).collect());
+            return Ok(server
+                .tools_snapshot()
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect());
         }
 
         match Self::connect_server_outcome(
@@ -382,17 +421,21 @@ impl McpManager {
                 if let Some(readiness) = executable_readiness {
                     self.executable_readiness.insert(name.clone(), readiness);
                 }
-                let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
+                let tool_names: Vec<String> = server
+                    .tools_snapshot()
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
                 eprintln!(
                     "[mcp] Connected to '{}': {} tools, resources={}",
                     name,
-                    server.tools.len(),
+                    server.tool_count(),
                     server.supports_resources,
                 );
                 self.health.insert(
                     name.clone(),
                     McpServerHealth::Ready {
-                        tool_count: server.tools.len(),
+                        tool_count: server.tool_count(),
                     },
                 );
                 self.servers.insert(name, *server);
@@ -565,7 +608,7 @@ impl McpManager {
             Ok(Ok((tools, supports_resources))) => Ok(McpServer {
                 name: name.to_string(),
                 transport,
-                tools,
+                tools: RwLock::new(tools),
                 supports_resources,
             }),
             Ok(Err(error)) => {
@@ -601,17 +644,103 @@ impl McpManager {
     /// on the dynamic add path; a server that connects then dies between
     /// boot and a re-registration will not contribute phantom tools the
     /// model can call but never run.
-    pub fn all_tools(&self) -> Vec<(&str, &McpToolDef)> {
+    /// Returns owned pairs rather than borrows: a server's tool list lives
+    /// behind a lock now that it can change mid-session, so no reference into
+    /// it can outlive the read guard.
+    pub fn all_tools(&self) -> Vec<(String, McpToolDef)> {
         let mut result = Vec::new();
         for (server_name, server) in &self.servers {
             if !server.transport.is_alive() {
                 continue;
             }
-            for tool in &server.tools {
-                result.push((server_name.as_str(), tool));
+            for tool in server.tools_snapshot() {
+                result.push((server_name.clone(), tool));
             }
         }
         result
+    }
+
+    /// Re-list tools for every live server that has signalled
+    /// `notifications/tools/list_changed` since the last poll, and return the
+    /// names of the servers whose advertised set actually changed.
+    ///
+    /// Tool discovery used to be one-shot at connect. A server that registers
+    /// a tool mid-session — the mechanism the MCP `tools.listChanged`
+    /// capability exists for — therefore stayed invisible for the life of the
+    /// session: not in `all_tools()`, not in the registry, not in the
+    /// outbound `tools[]`, and so permanently uncallable however clearly the
+    /// server announced it.
+    ///
+    /// The signal is take-and-cleared by the transport, so an idle poll costs
+    /// one atomic load per server and issues no traffic. Only servers that
+    /// spoke are re-listed. A server whose re-list fails keeps its previous
+    /// catalogue and is reported as unchanged: a transient `tools/list`
+    /// failure must not delete tools the model is mid-way through using.
+    pub async fn refresh_signalled_tools(&self) -> Vec<String> {
+        let mut refreshed = Vec::new();
+        for (server_name, server) in &self.servers {
+            if !server.transport.is_alive() || !server.transport.take_tools_changed() {
+                continue;
+            }
+            let request = JsonRpcRequest::new(
+                self.next_id.fetch_add(1, Ordering::Relaxed),
+                "tools/list",
+                None,
+            );
+            let tools = match server.transport.request(&request).await {
+                Ok(response) => match response.result {
+                    Some(result) => match serde_json::from_value::<ToolsListResult>(result) {
+                        Ok(parsed) => parsed.tools,
+                        Err(error) => {
+                            warn!(
+                                server = %server_name, %error,
+                                "[mcp] tools/list_changed refresh returned an unparseable list; \
+                                 keeping the previous catalogue"
+                            );
+                            continue;
+                        }
+                    },
+                    None => {
+                        warn!(
+                            server = %server_name,
+                            "[mcp] tools/list_changed refresh returned no result; \
+                             keeping the previous catalogue"
+                        );
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    warn!(
+                        server = %server_name, %error,
+                        "[mcp] tools/list_changed refresh failed; keeping the previous catalogue"
+                    );
+                    continue;
+                }
+            };
+
+            let changed = {
+                let previous = server.tools_snapshot();
+                previous.len() != tools.len()
+                    || previous
+                        .iter()
+                        .zip(tools.iter())
+                        .any(|(before, after)| before.name != after.name)
+            };
+            if !changed {
+                continue;
+            }
+            let count = tools.len();
+            match server.tools.write() {
+                Ok(mut guard) => *guard = tools,
+                Err(poisoned) => *poisoned.into_inner() = tools,
+            }
+            tracing::info!(
+                server = %server_name, tools = count,
+                "[mcp] server tool catalogue changed mid-session; re-listed"
+            );
+            refreshed.push(server_name.clone());
+        }
+        refreshed
     }
 
     /// Check if a tool name exists across any *live* server (audit C4).
@@ -619,7 +748,7 @@ impl McpManager {
         self.servers
             .values()
             .filter(|s| s.transport.is_alive())
-            .any(|s| s.tools.iter().any(|t| t.name == name))
+            .any(|s| s.advertises(name))
     }
 
     /// Count how many *live* servers have a tool with the given name.
@@ -627,7 +756,7 @@ impl McpManager {
         self.servers
             .values()
             .filter(|s| s.transport.is_alive())
-            .filter(|s| s.tools.iter().any(|t| t.name == name))
+            .filter(|s| s.advertises(name))
             .count()
     }
 
@@ -861,7 +990,7 @@ impl McpManager {
                 McpServer {
                     name: name.to_string(),
                     transport,
-                    tools: vec![],
+                    tools: RwLock::new(vec![]),
                     supports_resources,
                 },
             );
@@ -894,7 +1023,7 @@ impl McpManager {
                 McpServer {
                     name: name.to_string(),
                     transport,
-                    tools,
+                    tools: RwLock::new(tools),
                     supports_resources,
                 },
             );
@@ -1785,14 +1914,17 @@ mod tests {
             ),
         ]);
 
-        let tools: Vec<&str> = manager
+        let tools: Vec<String> = manager
             .all_tools()
-            .iter()
-            .map(|(_, t)| t.name.as_str())
+            .into_iter()
+            .map(|(_, t)| t.name)
             .collect();
-        assert!(tools.contains(&"live_tool"), "live tool must be advertised");
         assert!(
-            !tools.contains(&"dead_tool"),
+            tools.iter().any(|t| t == "live_tool"),
+            "live tool must be advertised"
+        );
+        assert!(
+            !tools.iter().any(|t| t == "dead_tool"),
             "dead server's tool must NOT be advertised (audit C4)"
         );
         assert!(!manager.has_tool_name("dead_tool"));

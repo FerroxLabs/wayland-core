@@ -42,8 +42,11 @@
 //! consulted a probe at all, so (b) would pass while the lie stood.
 //!
 //! The expected values come from environment facts the test *plants*
-//! (`WAYLAND_CAMOUFOX_BIN`, `DISPLAY`), never from calling the probe under
-//! test — otherwise the assertion would be `f(x) == f(x)`. Asserting both
+//! (`WAYLAND_CAMOUFOX_BIN`, `WAYLAND_CAMOUFOX_URL`, `DISPLAY`), never from
+//! calling the probe under test — otherwise the assertion would be
+//! `f(x) == f(x)`. Every input the probe reads has to be one of them: leaving
+//! the sidecar base URL to the ambient host made the Dead leg fail on any
+//! machine with a Camoufox sidecar running on the default port. Asserting both
 //! polarities rather than "the flag changed" matters because inverted
 //! behaviour also changes.
 //!
@@ -83,6 +86,23 @@ fn apply_backend_env(cmd: &mut Command, backends: Backends) {
     // matches what is actually being measured.
     cmd.env_remove("BROWSERBASE_API_KEY");
     cmd.env_remove("BROWSERBASE_PROJECT_ID");
+
+    // The browser probe mirrors `ensure_ready`'s TWO real startup paths: a
+    // resolvable sidecar program, OR an externally managed sidecar already
+    // answering `/health` at the configured base URL. Only the first was ever
+    // planted here; the second fell through to the shipped default
+    // (`http://localhost:9377`), an ambient fact this test does not own. On a
+    // host actually running a Camoufox sidecar there — a supported deployment,
+    // and the standing state of the Linux build box — the Dead leg was not
+    // dead, the probe correctly answered `Ready`, and the leg failed against a
+    // product that was telling the truth.
+    //
+    // Pinned to a reserved loopback port in BOTH legs, so the only inputs that
+    // move between them are the sidecar binary and the display. That makes the
+    // Live leg a statement about the binary path specifically: if binary
+    // resolution rots, Live goes red instead of being propped up by whatever
+    // happens to be listening on 9377.
+    cmd.env("WAYLAND_CAMOUFOX_URL", "http://127.0.0.1:1");
 
     match backends {
         Backends::Live => {

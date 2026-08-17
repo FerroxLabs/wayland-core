@@ -97,6 +97,47 @@ async fn live_lsa_dependent_tool_fails_under_hardened_sandbox() {
         ..Default::default()
     };
 
+    // IN-TEST POSITIVE CONTROL. Everything below is an ABSENCE assertion —
+    // `whoami` must NOT succeed — and a sandbox that cannot start ANY child
+    // satisfies it perfectly. That exact shape was proven vacuous four times on
+    // the Linux side (wave 2: `bwrap_confines_filesystem_writes_outside_allowlist`
+    // and three `secret_read_deny` cases all passed against a dead sandbox), and
+    // on Windows the measured `0xC0000142 STATUS_DLL_INIT_FAILED` failure mode
+    // makes a dead child the LIKELY state, not a hypothetical one.
+    //
+    // `live_cmd_builtin_runs_under_hardened_sandbox` is the matched pair, but it
+    // is a SEPARATE test: when it fails, this one still reports `ok` on its own.
+    // A gate has to be able to fail by itself, so the control runs here too.
+    let control = b
+        .execute(
+            &m,
+            SandboxCommand {
+                argv: vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "echo lsa-control-alive".into(),
+                ],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("POSITIVE CONTROL: AppContainer must be able to spawn cmd.exe at all");
+    let control_stdout = String::from_utf8_lossy(&control.stdout).into_owned();
+    assert_eq!(
+        control.exit_code,
+        0,
+        "POSITIVE CONTROL FAILED: the hardened sandbox cannot run `cmd /c echo`, so the \
+         whoami absence assertion below would pass against a sandbox that runs NOTHING and \
+         would certify a containment property nobody measured. stdout={control_stdout:?} \
+         stderr={:?}",
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        control_stdout.contains("lsa-control-alive"),
+        "POSITIVE CONTROL FAILED: exit 0 but the child's own output never arrived, so stdout \
+         capture is dead and no observation below can be trusted. stdout={control_stdout:?}"
+    );
+
     // `whoami /groups` enumerates group SIDs and calls LsaLookupSids2
     // to format friendly names like `BUILTIN\Administrators`. The lookup
     // requires the calling thread's token to grant access to the LSA

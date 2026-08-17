@@ -146,7 +146,16 @@ pub struct RecoveredProviderRound {
     pub response_digest: String,
     pub assistant_text: String,
     pub thinking_text: String,
+    /// C-4b — opaque provider signature over the recovered turn's reasoning.
+    /// `None` for providers that don't sign reasoning, and for journals
+    /// written before the signature was captured.
+    pub thinking_signature: Option<String>,
     pub tool_calls: Vec<ContentBlock>,
+    /// T3 — calls the provider severed at its output cap, as
+    /// `(tool name, bytes of argument JSON that arrived)`. Deliberately NOT
+    /// folded into `tool_calls`: their arguments stop mid-value, so they are
+    /// evidence of a truncated turn, never something to run.
+    pub truncated_tool_calls: Vec<(String, u64)>,
     pub stop_reason: StopReason,
     pub finish_reason: FinishReason,
     pub usage: TokenUsage,
@@ -449,8 +458,10 @@ pub fn recover_provider_round(
 
     let mut assistant_text = String::new();
     let mut thinking_text = String::new();
+    let mut thinking_signature: Option<String> = None;
     let mut tool_calls = Vec::new();
     let mut tool_call_ids = BTreeSet::new();
+    let mut truncated_tool_calls: Vec<(String, u64)> = Vec::new();
     let mut citations = Vec::new();
     let mut search_results = Vec::new();
     let mut provider_metadata = RecoveredProviderMetadata::default();
@@ -482,6 +493,10 @@ pub fn recover_provider_round(
             }
             ProviderStreamEvent::ThinkingDelta { text } => thinking_text.push_str(&text),
             ProviderStreamEvent::ThinkingSubject { .. } => {}
+            ProviderStreamEvent::ThinkingSignature { signature } => {
+                // C-4b — first signature wins, matching the live stream path.
+                thinking_signature.get_or_insert(signature);
+            }
             ProviderStreamEvent::Done {
                 stop_reason,
                 finish_reason,
@@ -494,6 +509,10 @@ pub fn recover_provider_round(
                     "successful response contains an Error event".to_owned(),
                 ));
             }
+            ProviderStreamEvent::TruncatedToolCall {
+                name,
+                partial_arg_bytes,
+            } => truncated_tool_calls.push((name, partial_arg_bytes)),
             ProviderStreamEvent::Citations { urls } => citations = urls,
             ProviderStreamEvent::SearchResults { results } => {
                 search_results = results
@@ -539,6 +558,7 @@ pub fn recover_provider_round(
         ProviderRecoveryError::InvalidStream("finished stream has no Done event".to_owned())
     })?;
     Ok(RecoveredProviderRound {
+        truncated_tool_calls,
         dispatch_id: dispatch_id.to_owned(),
         attempt_id: attempt_id.to_owned(),
         stream_id: (*stream_id).clone(),
@@ -549,6 +569,7 @@ pub fn recover_provider_round(
         response_digest,
         assistant_text,
         thinking_text,
+        thinking_signature,
         tool_calls,
         stop_reason,
         finish_reason,

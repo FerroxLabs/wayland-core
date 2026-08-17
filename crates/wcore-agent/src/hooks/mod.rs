@@ -179,7 +179,7 @@ impl HookOutcome {
                 match block {
                     ContentBlock::Text { text } => scrub(text),
                     ContentBlock::ToolResult { content, .. } => scrub(content),
-                    ContentBlock::Thinking { thinking } => scrub(thinking),
+                    ContentBlock::Thinking { thinking, .. } => scrub(thinking),
                     ContentBlock::ToolUse { input, extra, .. } => {
                         redact_json_strings(input);
                         if let Some(extra) = extra {

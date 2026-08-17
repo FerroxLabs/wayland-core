@@ -1321,6 +1321,24 @@ async fn run_gateway(scope: &ScopeArgs, detach: bool) -> Result<()> {
                 // rather than fatal — a gateway with no model still runs its
                 // schedule — but it is carried into `registration_error`, which
                 // `channel health` reads, rather than left as a log line.
+                // P2. An admits-everyone inbound config is fatal WHATEVER the
+                // webhook setting is. The other failures below degrade because
+                // their consequence is "this process receives nothing", which
+                // is safe; this one's consequence is "anyone can drive the
+                // agent", which is not, and degrading it would leave the
+                // dangerous configuration merely discouraged.
+                //
+                // `PolicyLoad` is fatal in the SAME arm, and that is the point:
+                // an unreadable channel directory means the gate does not know
+                // what it is being asked to approve. Degrading it would restore
+                // the bypass by another route — carry on with zero policies,
+                // and the refusal above has nothing to fire on.
+                Err(
+                    e @ (wcore_agent::channel_inbound_host::InboundHostError::OpenAdmission(_)
+                    | wcore_agent::channel_inbound_host::InboundHostError::PolicyLoad(_)),
+                ) => {
+                    return Err(anyhow::anyhow!("gateway refusing to start. {e}"));
+                }
                 Err(e) if config.inbound_webhook.enabled => {
                     return Err(anyhow::anyhow!(
                         "gateway refusing to start: [inbound_webhook] enabled = true but \

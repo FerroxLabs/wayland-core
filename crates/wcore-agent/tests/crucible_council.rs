@@ -33,7 +33,16 @@ struct ErrorProvider;
 #[async_trait]
 impl LlmProvider for ErrorProvider {
     async fn stream(&self, _r: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        Err(ProviderError::Connection("proposer boom".into()))
+        // A SERVED failure, deliberately. `ProviderError::Connection` classifies as
+        // UNSERVED, and since 7d6b5384 the engine rides an unserved outage out for
+        // `UNSERVED_OUTAGE_BUDGET` (900 s) rather than `MAX_STREAM_RETRIES` - measured
+        // 901.58 s for one such test. These tests need a PERSISTENT stage failure, not a
+        // provider outage; an HTTP 500 is persistent, is retried the bounded number of
+        // times, and reaches the same failure path in ~1.5 s.
+        Err(ProviderError::Api {
+            status: 500,
+            message: "proposer boom".into(),
+        })
     }
 }
 

@@ -103,10 +103,14 @@ fn render_from_names(registered: &[String]) -> Option<String> {
     }
     let mut out = String::new();
     out.push_str("\n\n# Unavailable capabilities\n");
+    // No clause here may forbid the model from reporting a cause. The W2/W3
+    // sandbox gate measured that shape suppressing a TRUE cause elsewhere in
+    // the product, so the instruction is written positively: name the reason
+    // below, which is the accurate one for an absent capability tool.
     out.push_str(
         "The capabilities below are NOT available in this session because their backend \
-         is not configured. If the user asks for one, do NOT claim the ability does not \
-         exist or invent another reason — tell them exactly what to configure:\n",
+         is not configured. If the user asks for one, tell them exactly what to configure \
+         — that is the real reason, and it is the actionable one:\n",
     );
     for c in missing {
         out.push_str(&format!("- {} — unavailable: {}\n", c.label, c.hint));
@@ -166,10 +170,24 @@ mod tests {
     }
 
     #[test]
-    fn honest_instruction_forbids_fabricating_a_cause() {
-        // The advisory must instruct the model to name the fix, not fabricate.
+    fn instruction_names_the_fix_without_forbidding_a_cause() {
+        // The advisory must instruct the model to name the fix. It must NOT do
+        // it with a clause that forbids reporting a cause: the W2/W3 sandbox
+        // gate measured that shape (in `bash/policy.rs`) suppressing the true
+        // cause of a failure while a false one was asserted. Same wording, same
+        // trap, so the same rule applies here.
         let advisory = render_from_names(&[]).expect("advisory when nothing registered");
-        assert!(advisory.contains("do NOT claim the ability does not exist"));
+        assert!(
+            advisory.contains("tell them exactly what to configure"),
+            "the advisory must still point at the fix: {advisory}"
+        );
+        for clause in ["do NOT claim", "do not invent", "invent another reason"] {
+            assert!(
+                !advisory.contains(clause),
+                "no advisory may forbid the model from reporting a cause \
+                 (found {clause:?}): {advisory}"
+            );
+        }
     }
 
     /// Pull the argument of each `read_env_key("NAME")` call out of resolver

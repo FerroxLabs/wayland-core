@@ -266,6 +266,16 @@ pub fn channels_dir() -> PathBuf {
     wcore_config::config::profile_home().join("channels")
 }
 
+/// Where DM-pairing state lives: `<channels_dir>/pairings`.
+///
+/// Derived from [`channels_dir`] rather than resolved independently, for the
+/// same reason the `[inbound]` policy is (F24-C3-H1): pairing state that is
+/// minted into one directory and read from another is a gate that silently
+/// never opens. Every operator verb and every runtime host calls THIS.
+pub fn pairings_dir() -> PathBuf {
+    channels_dir().join("pairings")
+}
+
 /// Test-visible variant of [`auto_register_from_user_config`] that
 /// takes an explicit directory instead of resolving `$HOME`. Lets
 /// unit tests point at a tempdir without juggling the `HOME` env

@@ -700,7 +700,7 @@ pub async fn drive_climb_full(
         .await
         .map_err(|e| ForgeError::Worktree(format!("probe pinned head: {e}")))?;
     let probe_capacity = worktrees
-        .workspace_capacity(1)
+        .workspace_capacity(1, 1)
         .await
         .map_err(|e| ForgeError::Worktree(format!("probe capacity: {e}")))?;
     let probe_ws = worktrees

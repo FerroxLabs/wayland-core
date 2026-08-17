@@ -20,8 +20,25 @@ pub mod bwrap_seccomp;
 pub mod docker;
 pub mod no_sandbox;
 pub mod process_tree;
-#[cfg(target_os = "macos")]
+// Compiled on every platform, like `appcontainer` and `bwrap`, so the SBPL
+// PROFILE GENERATOR — pure string generation — is unit-testable off macOS.
+// It was previously `#[cfg(target_os = "macos")]`, which made the macOS
+// grant set the only sandbox policy in the workspace that no Linux or
+// Windows CI job could ever exercise. Backend SELECTION is unchanged:
+// `default_for_platform` still only reaches for this backend on macOS, and
+// `is_available()` probes a real `sandbox-exec` spawn, so it reports false
+// everywhere else.
 pub mod sandbox_exec;
+// Compiled on every platform for the same reason `sandbox_exec` is: the
+// `cmd /C` join rules are pure string handling, and they are the difference
+// between the command the operator wrote and the command that runs.
+pub(crate) mod windows_cmdline;
+// The Windows RELAXED session default (kill-on-close Job Object only). Like
+// `appcontainer` and `sandbox_exec` it is compiled on every target so its
+// capability claims — above all the trait-default `enforces_read_deny() ==
+// false` that the channel-posture safety net depends on — are unit-testable
+// off Windows. Selection still reaches for it only on Windows.
+pub mod windows_job_object;
 
 /// Channel buffer for the streaming receiver. The default buffered impl
 /// only sends three messages, so any positive value works; a small buffer
@@ -310,6 +327,31 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// `Workspace` posture. Default `false` — a backend opts in by overriding
     /// AND actually implementing the deny.
     fn enforces_read_deny(&self) -> bool {
+        false
+    }
+
+    /// True if the OS confines the child to the manifest's filesystem grants
+    /// (`fs_read_allow` / `fs_write_allow`), so a write to a path outside every
+    /// granted root FAILS rather than landing on the host.
+    ///
+    /// This is a SEPARATE question from [`Self::enforces_read_deny`] (which is
+    /// about subtracting named secrets from an otherwise-granted root) and from
+    /// `SandboxRegistry::bypasses_containment` (which is session AUTHORITY —
+    /// "is this the operator's explicit no-sandbox launch" — and is `false` for
+    /// every non-Dangerous session whatever the backend can enforce). Neither
+    /// of those answers "can a shell command write outside my workspace", and
+    /// an operator reading a status surface reasonably thinks one of them does.
+    ///
+    /// Default `false`. A backend opts in by overriding this AND actually
+    /// implementing the confinement. The Windows session default
+    /// (`windows_job_object`) keeps the default: a Job Object bounds process
+    /// lifetime and resource use, it does not filter the filesystem, so a child
+    /// there really can write anywhere this user can.
+    ///
+    /// Nothing gates execution on this predicate — it exists so the reported
+    /// posture can be checked against a real escape attempt (see
+    /// `wcore-cli/tests/sandbox_activeness.rs`) rather than drifting from it.
+    fn confines_filesystem(&self) -> bool {
         false
     }
 

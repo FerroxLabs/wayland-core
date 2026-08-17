@@ -43,6 +43,12 @@ One command. The agent reads the file, runs `grep`/`glob` across the tree, reaso
 
 **Paste a key, get a provider.** Paste an API key (or run `/connect` in the TUI) and the engine fingerprints the provider from the key's shape, validates it live, and stores it in your OS keyring. From there, `/config` exposes Essentials and Advanced editors, `/doctor` shows provider, key, and MCP health, and `/effective` prints the resolved config with secrets redacted.
 
+**Your whole MCP toolset stays reachable.** `ToolSearch` is the hydration path
+for deferred tools, so its result is treated as structured data end to end and
+is never passed through a lossy text transform. A large MCP catalogue arrives
+intact and parseable, which is what makes the tool genuinely callable on the
+next turn rather than merely mentioned. Fixed in v0.13.0.
+
 ## What it is
 
 - **A standalone engine.** The engine is the product, not a feature bolted onto an editor and not a wrapper around one vendor's API.
@@ -248,7 +254,7 @@ Shipped in v0.12.11. The council pipeline carries 84 unit tests plus 31 integrat
 
 Security here is a posture, not a checkbox. When the safe thing and the convenient thing disagree, the engine picks safe and makes you opt out on purpose. Four mechanisms carry that, and they hold up when someone reads the source.
 
-- **No unsandboxed default.** Model-driven shell and tools run inside an OS-native sandbox — bubblewrap on Linux, `sandbox-exec` on macOS, AppContainer on Windows, Docker if you opt in. When no real sandbox is available, execution is refused, not quietly downgraded to host permissions. Running with no isolation takes an explicit `WAYLAND_ALLOW_NO_SANDBOX=1`. A stray `WAYLAND_SANDBOX=none` does nothing without it.
+- **No unsandboxed default.** Model-driven shell and tools run inside an OS-native sandbox — bubblewrap on Linux, `sandbox-exec` on macOS, Docker if you opt in. When no real sandbox is available, execution is refused, not quietly downgraded to host permissions. Running with no isolation takes an explicit `WAYLAND_ALLOW_NO_SANDBOX=1`. A stray `WAYLAND_SANDBOX=none` does nothing without it. **Windows is different and we say so:** the default there is a kill-on-close Job Object that owns the whole process tree and a scrubbed child environment, with **no** filesystem or network confinement — measured, AppContainer STRICT could not launch a usable shell, so it is now opt-in via `WAYLAND_SANDBOX=appcontainer`. Because the Windows default cannot enforce a secret read-deny, the engine withholds `Bash` from remote/channel workspace sessions there rather than pretending otherwise.
 - **One egress chokepoint, enforced by a lint.** Every outbound HTTP request flows through a single client, and a clippy lint bans constructing a raw `reqwest` client anywhere else — so a missed migration fails the build instead of leaking a hole. On that seam sits a fail-closed host allowlist for untrusted URLs, an exfil-shape classifier that hard-denies suspicious POSTs and high-entropy paths to non-allowlisted hosts, a hard byte-cap body reader, and a resolve-once resolver that re-checks the IP at connect time to close DNS-rebinding races. Deny stops *before* the socket opens. Shared multi-tenant suffixes — `amazonaws.com`, `*.workers.dev`, `*.vercel.app`, around 45 of them — can never be apex-allowlisted.
 - **SSRF and metadata floor, always on.** Cloud-metadata endpoints (`169.254.169.254` and the GCP, AWS, Alibaba, and Oracle equivalents) and lookalike hosts are rejected outright, independent of any allowlist you configure.
 - **Output validation and secret scrubbing.** Model output runs through a validator (refusal, credential-leak, and format checks) and a scrubber that redacts about 30 credential and PII shapes — AWS, OpenAI, Anthropic, GitHub, Slack, and Stripe keys, JWTs, PEM private keys, DB connection strings — down to `[REDACTED:KIND]`. An optional LLM-judge validator is budget-capped and fails *open*: it skips when the budget is spent and never blocks your turn.

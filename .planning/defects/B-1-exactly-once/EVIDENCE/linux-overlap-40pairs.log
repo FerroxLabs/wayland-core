@@ -1,0 +1,5 @@
+PAIRS=40 exit0=80 parked90=0 other=0 pairs_with_a_decline=40
+sample pair 1: observed_total=1
+PAIRS_WITH_DUPLICATE=0  (0 is the PASS)
+PAIRS_WITH_NO_EFFECT=0  (0 is the PASS)
+PAIRS_PARKED=0  (0 is the PASS: before the overlap wait this was 14/40)

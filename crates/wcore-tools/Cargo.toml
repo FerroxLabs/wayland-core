@@ -9,10 +9,22 @@ rust-version.workspace = true
 
 [dependencies]
 wcore-types.workspace         = true
+# `std::fs::canonicalize` returns the verbatim `\\?\C:\…` form on Windows, and
+# the tools' own path validation refuses that namespace, so nothing may hand it
+# such a path. `dunce::simplified` reduces that spelling to the ordinary one as a
+# pure string operation, which is how `unsaved_work` keys one file under one name
+# whichever tool reached it; `dunce::canonicalize` is the same reduction after a
+# real canonicalize. Both are plain no-ops on Unix.
+dunce                         = "1"
 wcore-protocol.workspace      = true
 wcore-config.workspace        = true
 wcore-repomap.workspace       = true
 wcore-observability.workspace = true
+# SR-05: `grep_policy` scrubs Grep match CONTENT with the SAME `PIIScrubber`
+# the engine already applies to tool output. Grep's `path:lineno:` prefix
+# defeats the scrubber's line-anchored rules, so the content field must be
+# handed over on its own — reusing the scrubber, never reimplementing it.
+wcore-safety.workspace        = true
 # T3-3.1.7: SessionSearchTool queries past-session episodes via MemoryApi.
 wcore-memory.workspace        = true
 # S9: BashTool routes all 4 execute paths through the sandbox backend.
@@ -161,6 +173,9 @@ image-inspect = ["dep:image", "dep:kamadak-exif"]
 doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
 
 [dev-dependencies]
+# Backdates a loose object for the gc prune-window arm. `touch -d "3 weeks
+# ago"` is a GNU extension that the BSD touch macOS ships rejects.
+filetime = "0.2"
 tempfile.workspace  = true
 criterion.workspace = true
 # R2 fix A2: debug_helpers tests mutate process-wide env vars; serialize

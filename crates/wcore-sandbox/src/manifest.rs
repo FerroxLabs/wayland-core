@@ -55,16 +55,58 @@ pub struct SandboxManifest {
     /// under an `fs_read_allow` subtree. Empty = today's behavior.
     #[serde(default)]
     pub fs_read_deny: Vec<PathBuf>,
+    /// Paths the child may `stat` but may NEVER read the CONTENTS of.
+    ///
+    /// This exists because "denied" is not one behaviour across the three host
+    /// sandboxes, and one caller — libgit2 — can survive one spelling of it and
+    /// not the other. Measured, not assumed:
+    ///
+    /// * **bwrap** builds the child's mount namespace CONSTRUCTIVELY, so a path
+    ///   that was never bound is simply **absent**: `stat("/root/.gitconfig")`
+    ///   returns **ENOENT**. libgit2 reads that as "this user has no global
+    ///   config" and carries on.
+    /// * **seatbelt** overlays rules on the REAL filesystem, so an ungranted
+    ///   path returns **EPERM** whether or not it exists. libgit2 treats EPERM
+    ///   as a hard error — `failed to stat '<home>/.gitconfig'; class=Config
+    ///   (7)` — and every `cargo new` on macOS died there, taking `cargo build`
+    ///   with it.
+    ///
+    /// The narrowest repair is to let the child learn the file EXISTS without
+    /// letting it read a byte, which is exactly `file-read-metadata` in SBPL.
+    /// Redirecting the env instead does not work: libgit2 derives the global
+    /// config path from `$HOME` and ignores `GIT_CONFIG_GLOBAL` (measured), and
+    /// redirecting `$HOME` breaks the rustup shim (`Unable to proceed. Could
+    /// not locate working directory`, also measured).
+    ///
+    /// **Backend contract.** A metadata grant is a grant of METADATA. No
+    /// backend may widen it into a content read, and every backend must leave
+    /// the contents unreadable:
+    ///
+    /// | Backend | Translation |
+    /// |---|---|
+    /// | `sandbox_exec` (macOS) | `(allow file-read-metadata (literal …))` — exact, and emitted before `fs_read_deny` so a deny still wins |
+    /// | `bwrap` (Linux) | Not expressible, and NOT NEEDED: an unbound path already answers ENOENT, which is strictly less information than this grant asks for. Deliberately not bound — see the `bwrap` module docs |
+    /// | `appcontainer` (Windows) | **Not yet honoured** — the ACL lease has no metadata-only mask, so the path stays Access Denied and Windows keeps the libgit2 failure. The fix is a `FILE_READ_ATTRIBUTES`-only mask in `acl_lease::canonical_intents`; it is deliberately not made here because it mutates an ACE on a file in the operator's own home and no Windows host was available to prove it |
+    /// | `docker` | Same shape as bwrap — an unmounted path is absent |
+    ///
+    /// Entries are absolute host paths and are deliberately **NOT** gated on
+    /// existence by the caller: under seatbelt a MISSING file is EPERM too, so
+    /// gating on `exists()` would leave a host with no `~/.gitconfig` broken
+    /// (measured).
+    #[serde(default)]
+    pub fs_metadata_read_allow: Vec<PathBuf>,
     /// Network policy.
     #[serde(default)]
     pub network: NetworkPolicy,
     /// Syscall policy (Linux only, ignored elsewhere).
     #[serde(default)]
     pub syscall_policy: SyscallPolicy,
-    /// Wall-clock timeout for the child process. Optional; backends pick a
-    /// sane default if None. TOML encoding uses serde's default struct form
-    /// (`{ secs = N, nanos = M }`); programmatic callers pass a `Duration`
-    /// directly.
+    /// Wall-clock timeout for the child process. `None` means the CALLER owns
+    /// the bound: the host backends (bwrap, sandbox-exec) impose no cap of
+    /// their own, so a caller that passes `None` must apply its own timeout.
+    /// The container/AppContainer backends still fall back to 60 s. TOML
+    /// encoding uses serde's default struct form (`{ secs = N, nanos = M }`);
+    /// programmatic callers pass a `Duration` directly.
     #[serde(default)]
     pub timeout: Option<Duration>,
     /// Max RSS bytes for the child. Enforced where the backend can;
@@ -213,6 +255,10 @@ impl HardContainmentFilesystem {
             fs_read_allow: vec![self.read_only_candidate.clone()],
             fs_write_allow: self.private_writable_roots.clone(),
             fs_read_deny: Vec::new(),
+            // Hard containment names its whole filesystem shape up front and
+            // has no channel through which a caller could request a stat on a
+            // host path, so there is nothing to lower here.
+            fs_metadata_read_allow: Vec::new(),
             network: NetworkPolicy::Deny,
             syscall_policy: self.syscall_policy,
             timeout: None,

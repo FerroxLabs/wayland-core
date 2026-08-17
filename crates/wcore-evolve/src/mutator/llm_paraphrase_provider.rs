@@ -217,7 +217,9 @@ async fn collect_text(
             // Flux web-search citations/results — none belong in a paraphrase.
             LlmEvent::ThinkingDelta(_)
             | LlmEvent::ThinkingSubject(_)
+            | LlmEvent::ThinkingSignature(_)
             | LlmEvent::ToolUse { .. }
+            | LlmEvent::TruncatedToolCall { .. }
             | LlmEvent::Citations(_)
             | LlmEvent::SearchResults(_)
             | LlmEvent::ProviderMeta { .. } => {}

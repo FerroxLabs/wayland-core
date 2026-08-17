@@ -9,13 +9,37 @@ use std::path::Path;
 /// inside the bootstrap future that blocks the TUI's first paint, so on a large
 /// tree it cost seconds of dead startup time.
 ///
-/// This asserts construction no longer walks, and it is stated as a RATIO
-/// against the walk it must not be doing rather than an absolute duration, so
-/// the machine's speed and any concurrent build load cancel out. If someone
-/// reintroduces an eager walk, construction and the explicit walk converge and
-/// the ratio collapses toward 1.
+/// Stated against baselines taken over an EMPTY tree rather than as a bare
+/// `walk > construct * 10` ratio, because construction carries a per-platform
+/// CONSTANT — canonicalization plus a handful of well-known-path probes — that
+/// the old form silently assumed was zero. MEASURED on Windows, where that
+/// constant is the same order as the walk itself at this tree size:
+///
+/// ```text
+///   dirs   construct     walk
+///    300    12.4 ms    11.6 ms
+///   3000    10.4 ms   112.7 ms
+///  12000    25.7 ms  1011.9 ms
+/// ```
+///
+/// Construction is FLAT while the walk is linear, so the property holds — but
+/// the ratio at 3000 sat on the 10x line and flapped (a failing CI run
+/// measured 6.5x). Comparing construction against construction removes the
+/// constant instead of pretending it is absent, and an eager walk still cannot
+/// pass: it would add a whole walk to the big-tree construction.
 #[test]
 fn contained_construction_does_not_walk_the_workspace() {
+    // Baselines over an empty tree. Taken FIRST so they absorb the cold cost
+    // of the fixed path probes, which would otherwise land on the measurement
+    // below and flatter it.
+    let empty = tempfile::tempdir().unwrap();
+    let t = std::time::Instant::now();
+    let baseline = WorkspacePolicy::contained(empty.path());
+    let construct_empty = t.elapsed();
+    let t = std::time::Instant::now();
+    let _ = baseline.secret_deny_paths_dynamic();
+    let walk_empty = t.elapsed();
+
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     // Enough directories that a walk is unmistakably more expensive than not
@@ -31,18 +55,27 @@ fn contained_construction_does_not_walk_the_workspace() {
     let construct = t0.elapsed();
 
     // Known-positive control in the same test: the walk this construction must
-    // NOT be doing is still reachable, still happens, and is measurably slow.
-    // Without this the assertion below could pass on a machine where BOTH are
-    // instant — i.e. where the instrument is dead.
+    // NOT be doing is still reachable, still happens, and its cost really is
+    // driven by the tree. Without this the assertion below could pass on a
+    // machine where BOTH are instant — i.e. where the instrument is dead.
     let t1 = std::time::Instant::now();
     let dynamic = p.secret_deny_paths_dynamic();
     let walk = t1.elapsed();
     let _ = dynamic;
 
     assert!(
-        walk > construct * 10,
+        walk > walk_empty * 10 && walk > construct_empty,
+        "instrument is dead: the walk must be reachable and tree-driven; \
+         walk={walk:?} walk_empty={walk_empty:?} construct_empty={construct_empty:?}"
+    );
+
+    // An eager walk would put a whole `walk` inside `construct`. Half of one is
+    // far below that and far above the noise on the constant.
+    assert!(
+        construct < construct_empty + walk / 2,
         "construction must not walk the workspace: construct={construct:?} \
-         walk={walk:?} (an eager walk makes these converge)"
+         construct_empty={construct_empty:?} walk={walk:?} \
+         (an eager walk adds a whole walk to construction)"
     );
 }
 
@@ -60,7 +93,33 @@ fn trusted_local_sets_cwd_and_does_not_redirect_caches() {
             .as_path()
     );
     // Trusted reuses the user's global caches — no redirect.
-    assert!(p.cache_env().is_empty());
+    for (var, _) in CACHE_ENV_DIRS {
+        assert!(
+            p.cache_env().iter().all(|(k, _)| k != var),
+            "Trusted must not redirect {var}"
+        );
+    }
+    // ...but TMPDIR/TMP/TEMP MUST be redirected into the writable scratch
+    // grant, because the sandbox backends remount the ungranted host `/tmp`
+    // read-only. Leaving them alone is what made `sort` print nothing and
+    // still report success (see `temp_env`).
+    let scratch = p
+        .writable_roots()
+        .into_iter()
+        .find(|w| w != p.root())
+        .expect("Trusted has a writable scratch grant");
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        let value = p
+            .cache_env()
+            .iter()
+            .find(|(k, _)| k == var)
+            .unwrap_or_else(|| panic!("Trusted must redirect {var}"));
+        assert_eq!(
+            Path::new(&value.1),
+            scratch,
+            "{var} must point at the writable scratch grant"
+        );
+    }
 }
 
 #[test]
@@ -183,13 +242,33 @@ fn contained_redirects_caches_into_workspace() {
     assert!(Path::new(&cargo.1).starts_with(p.root()));
     assert!(p.cache_env().iter().any(|(k, _)| k == "npm_config_cache"));
     assert!(p.cache_env().iter().any(|(k, _)| k == "PIP_CACHE_DIR"));
+
+    // TMPDIR/TMP/TEMP go to the Contained scratch grant, NOT into the
+    // workspace and NOT left on the read-only host `/tmp` (see `temp_env`).
+    let scratch = p
+        .writable_roots()
+        .into_iter()
+        .find(|w| w != p.root())
+        .expect("Contained has a writable scratch grant");
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        let value = p
+            .cache_env()
+            .iter()
+            .find(|(k, _)| k == var)
+            .unwrap_or_else(|| panic!("Contained must redirect {var}"));
+        assert_eq!(
+            Path::new(&value.1),
+            scratch,
+            "{var} must point at the writable scratch grant"
+        );
+    }
 }
 
 #[test]
 fn network_is_gated_on_trust_posture() {
     // #657 (Overwatch ruling, Sean-confirmed): the bare `trusted_local`
     // constructor is fail-safe — it seeds network from the shared helper
-    // (Deny unless `WAYLAND_BASH_ALLOW_NETWORK`), NOT unconditional Inherit.
+    // (an unconditional Deny), NOT unconditional Inherit.
     // Egress is granted only at bootstrap for a genuinely-local session; see
     // `local_bash_network` + `with_network`. Contained stays denied too.
     let dir = tempfile::tempdir().unwrap();
@@ -833,4 +912,251 @@ fn scratch_dir_is_a_real_directory_we_own() {
             .any(|c| c.as_os_str().to_string_lossy().starts_with(SCRATCH_ROOT)),
         "scratch {scratch:?} is not under the {SCRATCH_ROOT} tree"
     );
+}
+
+/// Measured under the macOS seatbelt sandbox: with only the executable's own
+/// directory granted, `npm --version` dies with
+/// `Error: Cannot find module '../lib/cli.js'` — the entry shim lives in
+/// `<pkg>/bin` while the code it requires lives in `<pkg>/lib`.
+#[test]
+fn capability_roots_grants_the_node_package_root_not_just_its_bin_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let package = tmp.path().join("lib").join("node_modules").join("npm");
+    std::fs::create_dir_all(package.join("bin")).expect("bin");
+    std::fs::create_dir_all(package.join("lib")).expect("lib");
+    let executable = package.join("bin").join("npm-cli.js");
+    std::fs::write(&executable, b"#!/usr/bin/env node\n").expect("write shim");
+    let executable = std::fs::canonicalize(&executable).expect("canonicalize");
+
+    let roots = capability_roots(&executable);
+    let want = std::fs::canonicalize(&package).expect("canonicalize package");
+    assert!(
+        roots.contains(&want),
+        "package root {want:?} must be granted so the shim can require ../lib; got {roots:?}"
+    );
+
+    // Narrowness: the shared node_modules tree must NOT become readable.
+    let node_modules =
+        std::fs::canonicalize(tmp.path().join("lib").join("node_modules")).expect("canonicalize");
+    assert!(
+        !roots.contains(&node_modules),
+        "grant widened to the whole node_modules tree {node_modules:?}: {roots:?}"
+    );
+}
+
+#[test]
+fn capability_roots_keeps_the_scope_segment_for_a_scoped_node_package() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let package = tmp
+        .path()
+        .join("lib")
+        .join("node_modules")
+        .join("@acme")
+        .join("cli");
+    std::fs::create_dir_all(package.join("bin")).expect("bin");
+    let executable = package.join("bin").join("cli.js");
+    std::fs::write(&executable, b"#!/usr/bin/env node\n").expect("write shim");
+    let executable = std::fs::canonicalize(&executable).expect("canonicalize");
+
+    let roots = capability_roots(&executable);
+    let want = std::fs::canonicalize(&package).expect("canonicalize package");
+    assert!(
+        roots.contains(&want),
+        "scoped package root {want:?} must be granted; got {roots:?}"
+    );
+    let scope =
+        std::fs::canonicalize(package.parent().expect("scope dir")).expect("canonicalize scope");
+    assert!(
+        !roots.contains(&scope),
+        "grant widened to the whole @acme scope {scope:?}: {roots:?}"
+    );
+}
+
+/// The `contained` profile must stop git reading the operator's global config
+/// instead of being granted it.
+///
+/// This profile is what a workspace gets BY DEFAULT — `EffectiveWorkspaceTrust`
+/// starts untrusted — and `$HOME/.gitconfig` is deliberately not in its
+/// readable roots. git opens that file unconditionally, so before this redirect
+/// every git invocation under macOS seatbelt died with
+/// `fatal: unable to access '<home>/.gitconfig': Operation not permitted`.
+///
+/// Both values must be ABSOLUTE paths inside the workspace cache root: git
+/// requires an absolute path for these variables, and the cache root is already
+/// a writable root, so `git config --global` inside the sandbox lands in a real
+/// scoped file rather than being silently discarded.
+#[test]
+fn contained_redirects_git_global_config_into_the_workspace_cache() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let cache_root = policy.root().join(".wcache");
+
+    for var in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        let value = policy
+            .cache_env()
+            .iter()
+            .find(|(k, _)| k == var)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| {
+                panic!("{var} must be redirected; git reads the host file without it")
+            });
+        let value = Path::new(&value);
+        assert!(
+            value.is_absolute(),
+            "git rejects a relative {var}, so the redirect would be silently ignored: {value:?}"
+        );
+        assert!(
+            value.starts_with(&cache_root),
+            "{var} must point inside the workspace cache root {cache_root:?}, got {value:?}"
+        );
+    }
+}
+
+/// The same redirect must NOT be applied to `trusted_local`.
+///
+/// That profile grants `$HOME/.gitconfig` on purpose — a local operator working
+/// in their own trusted checkout should keep their identity, aliases and
+/// includes. Redirecting there would be a silent behaviour change for the
+/// common case, dressed up as a security fix.
+#[test]
+fn trusted_local_keeps_the_operators_own_git_config() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::trusted_local(dir.path());
+    for var in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        assert!(
+            policy.cache_env().iter().all(|(k, _)| k != var),
+            "the trusted profile grants the operator's own ~/.gitconfig and must \
+             not redirect {var} away from it"
+        );
+    }
+}
+
+/// The `contained` profile must let a child STAT both paths libgit2 probes for
+/// a global git configuration.
+///
+/// libgit2 derives them from `$HOME` / `$XDG_CONFIG_HOME` and ignores
+/// `GIT_CONFIG_GLOBAL`, so the redirect in `git_config_env` — which does fix
+/// `git(1)` — leaves `cargo new` dead: measured on Darwin 25.3.0, exit 101,
+/// `failed to stat '<home>/.gitconfig'; class=Config (7)`. Under seatbelt an
+/// ungranted path is EPERM and libgit2 treats that as fatal; ENOENT it would
+/// have tolerated, which is why the identical code works on Linux bwrap.
+///
+/// BOTH paths, not just the first: with only `~/.gitconfig` granted, a host
+/// that has an XDG git config failed identically one path along (measured).
+#[test]
+fn contained_grants_stat_on_both_libgit2_global_config_probes() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let home = dirs::home_dir().expect("home directory");
+    let granted = policy.metadata_readable_roots();
+    for expected in [
+        home.join(".gitconfig"),
+        home.join(".config").join("git").join("config"),
+    ] {
+        assert!(
+            granted.contains(&expected),
+            "libgit2 probes {expected:?} and dies on EPERM; granted={granted:?}"
+        );
+    }
+}
+
+/// The grant must NOT be gated on the file existing.
+///
+/// A bwrap-shaped intuition ("no file, no problem") is wrong here: seatbelt
+/// answers EPERM for an ungranted path whether or not it exists. Measured — a
+/// profile granting metadata on a decoy path instead left `cargo new` at exit
+/// 101 with the same `failed to stat` error, on the same host.
+#[test]
+fn contained_metadata_grant_is_not_gated_on_existence() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let granted = policy.metadata_readable_roots();
+    assert_eq!(
+        granted.len(),
+        2,
+        "both probes must be granted unconditionally, not filtered by exists(); \
+         granted={granted:?}"
+    );
+    for path in &granted {
+        assert!(
+            path.is_absolute(),
+            "seatbelt needs a literal path: {path:?}"
+        );
+    }
+}
+
+/// A metadata grant must never become a READ grant. `~/.gitconfig` carries the
+/// operator's identity and any `[url … insteadOf]` rewrite, which can embed a
+/// credential — the exact thing `git_config_env` was written to keep away from
+/// untrusted workspace content.
+#[test]
+fn contained_never_makes_the_global_git_config_readable() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let policy = WorkspacePolicy::contained(dir.path());
+    let readable = policy.readable_roots();
+    let metadata = policy.metadata_readable_roots();
+    // Without this the assertion below is satisfied by an EMPTY grant list —
+    // confirmed by mutation: reverting the policy to `Vec::new()` left this
+    // test green while the other three went red.
+    assert!(
+        !metadata.is_empty(),
+        "nothing was granted, so the no-widening assertion would be vacuous"
+    );
+    for metadata_only in metadata {
+        assert!(
+            !readable.iter().any(|root| metadata_only.starts_with(root)),
+            "{metadata_only:?} became readable via {readable:?}"
+        );
+    }
+}
+
+/// The interpreter grant gives the contained shell a package manager's PROGRAM
+/// FILES and never its configuration or its state.
+///
+/// Before this the contained profile knew only about Rust, so `node` and `npm`
+/// were exit 127 on a Homebrew host — not because the tool was missing but
+/// because `ls -l /opt/homebrew/bin/node` was `Operation not permitted`. The
+/// repair must not swing to the other extreme: `<prefix>/var` holds live
+/// service state (`postgresql@16`, `postgresql@17` on the host this was
+/// measured on) and `<prefix>/etc` holds service configuration.
+#[test]
+fn contained_interpreter_grant_excludes_package_manager_config_and_state() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let readable = WorkspacePolicy::contained(dir.path()).readable_roots();
+    let mut saw_a_prefix = false;
+    for prefix in ["/opt/homebrew", "/opt/local", "/usr/local"] {
+        let prefix = Path::new(prefix);
+        if !prefix.exists() {
+            continue;
+        }
+        for root in &readable {
+            if !root.starts_with(prefix) {
+                continue;
+            }
+            saw_a_prefix = true;
+            assert_ne!(
+                root.as_path(),
+                prefix,
+                "the whole package prefix was granted to untrusted content"
+            );
+            for forbidden in ["var", "Caskroom", "Library"] {
+                assert!(
+                    !root.starts_with(prefix.join(forbidden)),
+                    "{root:?} reaches {forbidden} — configuration/state, not program files"
+                );
+            }
+            // `etc` yields exactly one thing: the OpenSSL config FILE that
+            // every keg-linked binary opens at init. Never the directory —
+            // an OpenSSL etc directory has a `private/` sibling.
+            if root.starts_with(prefix.join("etc")) {
+                assert!(
+                    root.is_file() && root.file_name() == Some(std::ffi::OsStr::new("openssl.cnf")),
+                    "{root:?} is an etc grant that is not the openssl config file"
+                );
+            }
+        }
+    }
+    if !saw_a_prefix {
+        eprintln!("note: no package-manager prefix on this host; prefix assertions vacuous");
+    }
 }
