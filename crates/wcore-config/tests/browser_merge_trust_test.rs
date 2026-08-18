@@ -188,6 +188,23 @@ fn download_only_project_body() -> String {
     )
 }
 
+/// An operator global that allows one origin AND holds a loopback grant.
+fn operator_global_policy_with_loopback() -> String {
+    format!(
+        "[browser.policy]\ndefault_action = \"allow\"\nallowed_origins = [\"{OPERATOR_ORIGIN}\"]\n\n\
+         [browser.policy.loopback]\nenabled = true\nschema_version = 1\n\
+         session_scope = \"operator-scope\"\nports = [3000]\n"
+    )
+}
+
+/// A project block that configures ONLY a loopback grant — it says nothing
+/// about `default_action` or either origin list.
+fn loopback_only_project_body() -> String {
+    "[browser.policy.loopback]\nenabled = true\nschema_version = 1\n\
+     session_scope = \"project-scope\"\nports = [4000]\n"
+        .to_owned()
+}
+
 // ── 1. Cross-field clobbering (trusted path) ─────────────────────────────────
 
 /// A trusted project that configures only `[browser.camoufox_download]` must
@@ -340,5 +357,94 @@ fn the_same_project_bodies_do_take_effect_when_the_workspace_is_trusted() {
         widened.browser.policy.default_action, "allow",
         "control failed: the policy-widening fixture does not take effect even \
          when trusted, so the untrusted arm proves nothing"
+    );
+}
+
+/// A trusted project that configures ONLY `[browser.policy.loopback]` must
+/// keep that grant AND the operator's policy it never mentioned.
+///
+/// Red arm: with `loopback` folded into the origin-triple predicate, a project
+/// that sets only a grant fails the predicate, the whole project policy is
+/// discarded, and `enabled` comes back false — the capability is inert.
+#[test]
+#[serial(browser_merge_trust_env)]
+fn a_project_that_configures_only_loopback_keeps_that_grant() {
+    let config = load(
+        &operator_global_policy(),
+        &loopback_only_project_body(),
+        Trust::Granted,
+    );
+
+    assert!(
+        config.browser.policy.loopback.enabled,
+        "the trusted project's [browser.policy.loopback] grant was dropped \
+         because it did not also set default_action or an origin list"
+    );
+    assert_eq!(
+        config.browser.policy.loopback.ports,
+        vec![4000],
+        "the grant survived as a flag but lost its port list"
+    );
+    // The other half: the operator's policy must not have been clobbered.
+    assert_eq!(
+        config.browser.policy.allowed_origins,
+        vec![OPERATOR_ORIGIN.to_string()],
+        "the operator's origin allowlist was dropped by a project config that \
+         mentioned only [browser.policy.loopback]"
+    );
+}
+
+/// The opposite direction. A trusted project that sets an origin list wins the
+/// origin triple, and that must NOT take the operator's loopback grant with it.
+///
+/// Red arm: with the unit merge, `project.browser.policy` replaces the global
+/// wholesale and `enabled` comes back false.
+#[test]
+#[serial(browser_merge_trust_env)]
+fn a_project_policy_override_does_not_drop_the_operator_loopback_grant() {
+    let config = load(
+        &operator_global_policy_with_loopback(),
+        "[browser.policy]\nallowed_origins = [\"https://project.example.com\"]\n",
+        Trust::Granted,
+    );
+
+    assert!(
+        config.browser.policy.loopback.enabled,
+        "the operator's loopback grant was dropped because the project set an \
+         unrelated origin allowlist"
+    );
+    assert_eq!(
+        config.browser.policy.loopback.ports,
+        vec![3000],
+        "the operator's grant survived as a flag but lost its port list"
+    );
+    // And the project's own override still took effect, so this cannot pass
+    // by hard-wiring the global.
+    assert_eq!(
+        config.browser.policy.allowed_origins,
+        vec!["https://project.example.com".to_string()],
+        "the trusted project's origin override was itself dropped; this arm \
+         would then pass for the wrong reason"
+    );
+}
+
+/// Trust gate. Resolving `loopback` independently must not become a route for
+/// an UNTRUSTED project to grant itself local network authority.
+#[test]
+#[serial(browser_merge_trust_env)]
+fn an_untrusted_project_cannot_enable_a_loopback_grant() {
+    let config = load(
+        &operator_global_policy(),
+        &loopback_only_project_body(),
+        Trust::Untrusted,
+    );
+
+    assert!(
+        !config.browser.policy.loopback.enabled,
+        "an untrusted project granted itself a loopback capability"
+    );
+    assert!(
+        config.browser.policy.loopback.ports.is_empty(),
+        "an untrusted project supplied loopback ports"
     );
 }

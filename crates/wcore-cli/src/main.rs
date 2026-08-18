@@ -28,6 +28,7 @@ use wcore_cli::runtime_diagnostics::RuntimeDiagnosticsState;
 use wayland_ollama::OllamaProvider;
 
 use wcore_agent::bootstrap::{AgentBootstrap, PluginProviderRouter};
+use wcore_agent::late_mcp::LateMcpBinder;
 use wcore_agent::mcp_lifecycle::{
     McpConfigIdentity, McpConnectionReservation, McpLifecycleCatalog, McpLifecycleState,
     McpReservationOutcome,
@@ -55,6 +56,7 @@ use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_providers::LlmProvider;
+use wcore_skills::refs::SkillRef;
 use wcore_types::execution_policy::{ApprovalPolicy, DEFAULT_DANGEROUS_SESSION_TTL_SECS};
 
 // v0.8.0 N.1+N.2+N.3 — slash-runtime dispatch helpers.
@@ -465,6 +467,17 @@ struct Cli {
     /// them. Off by default so bare --doctor stays side-effect-free.
     #[arg(long, requires = "doctor")]
     probe_mcp: bool,
+
+    /// macOS only: ask the OS to show the TCC consent prompts that
+    /// computer-use needs (Accessibility, Screen Recording), then print
+    /// the resulting state.
+    ///
+    /// This is the ONLY path that raises a system dialog. `--doctor`
+    /// and every agent run use the non-prompting probe instead, so a
+    /// user is never surprised by a consent sheet mid-task. Off macOS
+    /// it prints that there is nothing to grant and exits 0.
+    #[arg(long)]
+    request_permissions: bool,
 
     /// Run the skills audit. Writes JSON to .wayland-core/skills-audit.json
     /// and renders Markdown to stdout.
@@ -1126,6 +1139,23 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 ///
 /// `run()` and the tier-regression test both read the wiring from here, so an
 /// edit that moves a tier-1 alias into tier 2 cannot pass the test.
+/// The directory that identifies the workspace this session operates against:
+/// `--project-dir` when given, else the process CWD.
+///
+/// #693 — every workspace-keyed decision must resolve this the SAME way.
+/// `--project-dir` moves the config, the project skills, the MCP servers and
+/// the workspace-trust entry without moving the CWD, so two sessions launched
+/// from one shell against two different projects have one CWD and two
+/// workspaces. The durable learned-permission grants key off this too; keying
+/// them off the CWD alone let a grant made against project A auto-approve the
+/// same tool name against project B.
+fn workspace_root(project_dir: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    Ok(match project_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    })
+}
+
 fn danger_tiers(cli: &Cli) -> (bool, bool) {
     (cli.dangerously_skip_permissions, cli.dangerous)
 }
@@ -1595,7 +1625,19 @@ async fn run() -> anyhow::Result<ExitCode> {
                     DEFAULT_DANGEROUS_SESSION_TTL_SECS,
                     false,
                 )?;
-                run_tui_mode(config, &cwd, None, None, None, true, execution, false).await?;
+                let tui_workspace = workspace_root(cli.project_dir.as_deref())?;
+                run_tui_mode(
+                    config,
+                    &cwd,
+                    &tui_workspace,
+                    None,
+                    None,
+                    None,
+                    true,
+                    execution,
+                    false,
+                )
+                .await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1711,6 +1753,13 @@ async fn run() -> anyhow::Result<ExitCode> {
     // touching config files, OAuth, or the engine bootstrap.
     if cli.doctor {
         return Ok(doctor::run(cli.probe_mcp).await);
+    }
+
+    // Issue #114: the explicit, user-initiated TCC prompt. Kept next to
+    // --doctor so it runs before config/OAuth/engine bootstrap — a user
+    // fixing permissions must not have to get past anything else first.
+    if cli.request_permissions {
+        return Ok(request_permissions());
     }
 
     // Handle --build-info: print version + embedded source SHA and exit.
@@ -1909,7 +1958,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     // Resolve config from files + CLI args + env vars
-    let workspace_for_trust = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
+    let workspace_for_trust = workspace_root(cli.project_dir.as_deref())?;
     let trust_store = wcore_config::workspace_trust::WorkspaceTrustStore::for_current_home();
     if cli.trust_workspace {
         let fingerprint = trust_store.grant(&workspace_for_trust)?;
@@ -2025,6 +2074,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 run_tui_mode(
                     onboarding_config,
                     &cwd,
+                    &workspace_for_trust,
                     None,
                     cli.session_id.clone(),
                     cli.assistant.clone(),
@@ -2144,6 +2194,7 @@ async fn run() -> anyhow::Result<ExitCode> {
         run_tui_mode(
             config,
             &cwd,
+            &workspace_for_trust,
             resume,
             cli.session_id,
             cli.assistant,
@@ -2626,6 +2677,7 @@ fn wire_force_opt_in_env() -> bool {
 async fn run_tui_mode(
     config: Config,
     cwd: &str,
+    workspace_root: &std::path::Path,
     resume: Option<String>,
     session_id: Option<String>,
     active_assistant: Option<String>,
@@ -2720,6 +2772,22 @@ async fn run_tui_mode(
     // TUI's approval modal never opens (no `ApprovalRequired` event) and the
     // status bar renders the live mode so later de-escalation is visible.
     approval_manager.set_mode(approval_policy_to_session(approval_policy));
+    // #693 — replay the "always allow <tool>" grants the user made in earlier
+    // sessions IN THIS WORKSPACE. The manager's always-allow set is in-memory,
+    // so without this the durable grant `TuiEngine::approve` writes would never
+    // be read back and the user would be re-prompted for a tool they already
+    // answered. The policy file is user-global, so the workspace filter is what
+    // keeps a grant made in another checkout from applying here; the key comes
+    // from the same helper `TuiEngine` stamps a grant with, so the write and
+    // the read cannot disagree.
+    let learned_workspace = wcore_permissions::LearnedPolicy::workspace_key(workspace_root);
+    match wcore_permissions::LearnedPolicy::default_path() {
+        Ok(path) => tui::restore_always_allows(&approval_manager, &path, &learned_workspace),
+        Err(error) => tracing::warn!(
+            %error,
+            "cannot resolve the permissions path; always-allow grants not restored"
+        ),
+    }
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
@@ -2842,9 +2910,10 @@ async fn run_tui_mode(
         .skill_catalog()
         .map(|cat| {
             cat.visible()
+                .into_iter()
                 .map(|r| tui::SkillInfo {
-                    name: r.name.clone(),
-                    description: r.description.clone(),
+                    name: r.name,
+                    description: r.description,
                     user_invocable: r.user_invocable,
                 })
                 .collect()
@@ -2875,7 +2944,8 @@ async fn run_tui_mode(
 
     // The `TuiEngine` controller keeps the last `tx` clone so it can
     // synthesize the `StreamEnd` the engine never emits itself.
-    let mut tui_engine = tui::TuiEngine::new(engine, approval_manager, tx);
+    let mut tui_engine = tui::TuiEngine::new(engine, approval_manager, tx)
+        .with_learned_policy_workspace(learned_workspace);
     tui_engine.set_active_assistant(active_assistant);
     tui_engine.set_inventory(tui::EngineInventory {
         skills: skills_snapshot,
@@ -3564,13 +3634,14 @@ async fn remove_runtime_mcp_server(
 /// the registry is momentarily borrowed so the caller can retry between
 /// turns); on failure, surface the error with bootstrap's inline-connect
 /// wording. Shared by the loop-top non-blocking poll and the select arm.
-fn note_deferred_mcp_connect(
+async fn note_deferred_mcp_connect(
     result: DeferredMcpConnectResult,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    late_mcp: &mut LateMcpBinder,
 ) -> Option<PendingDeferredMcp> {
     let DeferredMcpConnectResult {
         outcome,
@@ -3589,6 +3660,12 @@ fn note_deferred_mcp_connect(
                 }
             }
             let mgr = Arc::new(mgr);
+            // wayland#562 — the `skill://` read is the only ASYNC part of
+            // late-binding, so it happens here, before the sync integrate
+            // step whose "registry borrowed, retry between turns" contract
+            // must stay sync. The refs ride along on `PendingDeferredMcp` so a
+            // retry never re-reads the server.
+            let mut skill_refs = LateMcpBinder::skill_refs_for(&mgr).await;
             if integrate_deferred_mcp(
                 engine,
                 mgr.clone(),
@@ -3596,6 +3673,8 @@ fn note_deferred_mcp_connect(
                 &mut reservations,
                 writer,
                 dynamic_managers,
+                late_mcp,
+                &mut skill_refs,
             ) {
                 None
             } else {
@@ -3603,6 +3682,7 @@ fn note_deferred_mcp_connect(
                     manager: mgr,
                     resolved,
                     reservations,
+                    skill_refs,
                 })
             }
         }
@@ -3620,6 +3700,7 @@ fn note_deferred_mcp_connect(
 /// Returns `false` when the registry Arc is currently borrowed (a turn is
 /// mid-flight) — the caller parks the manager and retries at the next
 /// between-turns boundary.
+#[allow(clippy::too_many_arguments)]
 fn integrate_deferred_mcp(
     engine: &mut wcore_agent::engine::AgentEngine,
     mgr: Arc<McpManager>,
@@ -3627,6 +3708,8 @@ fn integrate_deferred_mcp(
     reservations: &mut HashMap<String, McpConnectionReservation>,
     writer: &ProtocolWriter,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
+    late_mcp: &mut LateMcpBinder,
+    skill_refs: &mut Vec<SkillRef>,
 ) -> bool {
     let builtin_names = engine.tool_names();
     let defer_cold = engine.defer_cold_config();
@@ -3660,6 +3743,21 @@ fn integrate_deferred_mcp(
     for event in mcp_failed_events_for(&mgr) {
         let _ = writer.emit(&event);
     }
+    // wayland#562 — tools are only one of the three boot-time consumers of a
+    // config MCP manager. Bind the other two now: merge the server's
+    // `skill://` skills into the live shared catalog (+ prompt listing) and
+    // re-resolve the plugin hook dispatcher over the widened manager set.
+    // Taken (not cloned) because everything above this point has committed —
+    // the only early return is the borrowed-registry check at the top.
+    let report = late_mcp.bind(engine, mgr.clone(), std::mem::take(skill_refs));
+    if !report.skills_added.is_empty() {
+        tracing::info!(
+            target: "wcore_cli::mcp",
+            skills = ?report.skills_added,
+            prompt_updated = report.prompt_updated,
+            "deferred config MCP: late-bound skills into the live session"
+        );
+    }
     dynamic_managers.push(mgr);
     true
 }
@@ -3674,6 +3772,10 @@ struct PendingDeferredMcp {
     manager: Arc<McpManager>,
     resolved: HashMap<String, McpServerConfig>,
     reservations: HashMap<String, McpConnectionReservation>,
+    /// wayland#562 — `skill://` refs already read off `manager`. Held across
+    /// the retry so a borrowed registry never costs a second server round
+    /// trip (and never loses the skills).
+    skill_refs: Vec<SkillRef>,
 }
 
 type DeferredMcpReceiver = tokio::sync::oneshot::Receiver<DeferredMcpConnectResult>;
@@ -3699,6 +3801,7 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// boundary. Hosts may send setup commands (`InitHistory`, `SetMode`, etc.)
 /// before their first `Message`; those commands must not let the message race
 /// ahead of the already-running MCP handshake.
+#[allow(clippy::too_many_arguments)]
 async fn settle_deferred_mcp_before_message(
     deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
     pending_deferred_mcp: &mut Option<PendingDeferredMcp>,
@@ -3707,6 +3810,7 @@ async fn settle_deferred_mcp_before_message(
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
     runtime_diagnostics: Option<&mut RuntimeDiagnosticsState>,
+    late_mcp: &mut LateMcpBinder,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
         && let Ok(result) = rx.await
@@ -3718,7 +3822,9 @@ async fn settle_deferred_mcp_before_message(
             writer,
             output,
             dynamic_managers,
-        );
+            late_mcp,
+        )
+        .await;
     }
 
     if let Some(mut pending) = pending_deferred_mcp.take()
@@ -3729,6 +3835,8 @@ async fn settle_deferred_mcp_before_message(
             &mut pending.reservations,
             writer,
             dynamic_managers,
+            late_mcp,
+            &mut pending.skill_refs,
         )
     {
         *pending_deferred_mcp = Some(pending);
@@ -3784,7 +3892,7 @@ fn resolve_live_mcp_credential_references(config: &mut McpServerConfig) -> Resul
     let store = resolved
         .open_credentials_store()
         .map_err(|error| format!("credentials store unavailable: {error}"))?;
-    wcore_config::mcp_cred_refs::resolve_server_headers(config, &*store)
+    wcore_config::mcp_cred_refs::resolve_server_credential_refs(config, &*store)
         .map_err(|error| error.to_string())
 }
 
@@ -4763,6 +4871,11 @@ async fn run_json_stream_mode(
     };
     let session_control = result.cancel_root.clone();
     runtime_diagnostics.record_plugin_declarations(&result.plugin_mcp_declarations);
+    // wayland#562 — the late-bind seam for config MCP servers deferred out of
+    // `build()`. Moved out of `result` (which stays alive for its other
+    // fields) so the command loop can hand each settled background manager to
+    // it.
+    let mut late_mcp = result.late_mcp;
     let mut engine = result.engine;
     let session_egress_policy = engine.egress_policy();
     let workspace_policy = engine
@@ -4967,7 +5080,9 @@ async fn run_json_stream_mode(
                         &writer,
                         &output,
                         &mut dynamic_managers,
-                    );
+                        &mut late_mcp,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -5253,7 +5368,9 @@ async fn run_json_stream_mode(
                         &writer,
                         &output,
                         &mut dynamic_managers,
-                    );
+                        &mut late_mcp,
+                    )
+                    .await;
                 }
                 first_cmd = Some(other);
                 break;
@@ -5282,7 +5399,9 @@ async fn run_json_stream_mode(
                 &writer,
                 &output,
                 &mut dynamic_managers,
-            );
+                &mut late_mcp,
+            )
+            .await;
         }
         if let Some(mut pending) = pending_deferred_mcp.take()
             && !integrate_deferred_mcp(
@@ -5292,6 +5411,8 @@ async fn run_json_stream_mode(
                 &mut pending.reservations,
                 &writer,
                 &mut dynamic_managers,
+                &mut late_mcp,
+                &mut pending.skill_refs,
             )
         {
             pending_deferred_mcp = Some(pending);
@@ -5324,7 +5445,9 @@ async fn run_json_stream_mode(
                                 &writer,
                                 &output,
                                 &mut dynamic_managers,
-                            );
+                                &mut late_mcp,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -5345,6 +5468,7 @@ async fn run_json_stream_mode(
                 &output,
                 &mut dynamic_managers,
                 Some(&mut runtime_diagnostics),
+                &mut late_mcp,
             )
             .await;
             if !ready {
@@ -6148,14 +6272,131 @@ async fn run_json_stream_mode(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// `wayland-core --request-permissions` — the single explicit path that
+/// is allowed to raise a macOS TCC consent dialog (issue #114).
+///
+/// Everything else in the binary uses `wcore_cua::permissions::probe`,
+/// which never shows UI. Accessibility consent is not granted
+/// in-process: macOS opens the Settings pane and the grant takes effect
+/// only after the user adds the binary and restarts it, so a still-
+/// denied result here is the expected first-run answer and NOT an
+/// error — the exit code stays 0 either way so a first run is not
+/// reported as a failure.
+fn request_permissions() -> ExitCode {
+    use wcore_cua::permissions::{TccCapability, TccStatus, prime};
+
+    if !cfg!(target_os = "macos") {
+        println!("No permissions to request on this platform — TCC is macOS-only.");
+        return ExitCode::SUCCESS;
+    }
+
+    println!("Requesting macOS computer-use permissions. Approve the prompts that appear.\n");
+    for capability in TccCapability::ALL {
+        match prime(capability) {
+            TccStatus::Granted => println!("[GRANTED] {}", capability.settings_pane()),
+            TccStatus::Denied => {
+                println!("[PENDING] {}", capability.settings_pane());
+                println!("          {}", capability.remediation());
+            }
+            TccStatus::NotApplicable => {
+                println!(
+                    "[SKIP]    {} — not applicable here",
+                    capability.settings_pane()
+                );
+            }
+        }
+    }
+    println!("\nRe-run `wayland-core --doctor` to confirm the grants took effect.");
+    ExitCode::SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// wayland#562 — an inert `LateMcpBinder` for tests that only exercise the
+    /// tool-registration half of deferred-MCP integration: empty catalog, no
+    /// plugin hooks, no boot managers. `bind` still runs against it, so these
+    /// tests also prove late-binding cannot panic or disturb tool registration
+    /// when there is nothing to bind.
+    fn inert_late_binder() -> LateMcpBinder {
+        LateMcpBinder::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_refs(Vec::new())),
+            &[],
+            Vec::new(),
+            true,
+        )
+    }
     use async_trait::async_trait;
     use serde_json::{Value, json};
     use std::time::Duration;
-    use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    /// #693 — `--project-dir` moves the workspace without moving the CWD, so
+    /// a durable grant keyed off the CWD alone is shared by two sessions
+    /// pointed at two different projects.
+    ///
+    /// The scenario is the one the flag makes trivial: ONE shell, two
+    /// `wayland-core --project-dir ...` invocations, two projects. The
+    /// same-workspace arm is the positive control — without it this would
+    /// pass just as well against a `restore_always_allows` that restored
+    /// nothing at all.
+    #[test]
+    fn a_grant_under_one_project_dir_does_not_restore_under_another() {
+        use wcore_cli::tui::restore_always_allows;
+        use wcore_permissions::learning::{LearnedDecision, LearnedPolicy};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_a = tmp.path().join("repo-a");
+        let repo_b = tmp.path().join("repo-b");
+        std::fs::create_dir_all(&repo_a).expect("mkdir a");
+        std::fs::create_dir_all(&repo_b).expect("mkdir b");
+        let path = tmp.path().join("permissions.toml");
+
+        // The CWD is whatever the test binary runs in — identical for both,
+        // which is exactly the point.
+        let ws_a =
+            LearnedPolicy::workspace_key(&workspace_root(Some(&repo_a)).expect("workspace root a"));
+        let ws_b =
+            LearnedPolicy::workspace_key(&workspace_root(Some(&repo_b)).expect("workspace root b"));
+        assert_ne!(
+            ws_a, ws_b,
+            "two --project-dir values from one shell must not collapse to one \
+             permissions key"
+        );
+
+        let mut policy = LearnedPolicy::new();
+        policy.record_in("Write", None, LearnedDecision::AllowAlways, &ws_a);
+        policy.save_to(&path).expect("save");
+
+        let session_a = ToolApprovalManager::new();
+        restore_always_allows(&session_a, &path, &ws_a);
+        assert!(
+            session_a.is_tool_name_auto_approved("Write"),
+            "control: the grant must still restore in the project it was made in"
+        );
+
+        let session_b = ToolApprovalManager::new();
+        restore_always_allows(&session_b, &path, &ws_b);
+        assert!(
+            !session_b.is_tool_name_auto_approved("Write"),
+            "a grant made against {} auto-approved Write against {} — \
+             --project-dir is the workspace, and the permissions key must \
+             follow it just as the trust store already does",
+            repo_a.display(),
+            repo_b.display()
+        );
+    }
+
+    /// The no-flag arm: `workspace_root(None)` is the CWD, which is what the
+    /// trust store resolved before this existed.
+    #[test]
+    fn workspace_root_without_the_flag_is_the_cwd() {
+        assert_eq!(
+            workspace_root(None).expect("workspace root"),
+            std::env::current_dir().expect("cwd")
+        );
+    }
 
     /// UAT-W1 — the product's own error advised the wrong flag.
     ///
@@ -7593,6 +7834,8 @@ mod tests {
                 &mut reservations,
                 &writer,
                 &mut dynamic_managers,
+                &mut inert_late_binder(),
+                &mut Vec::new(),
             ),
             "integration must succeed on an idle engine"
         );
@@ -7644,6 +7887,143 @@ mod tests {
         assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
     }
 
+    /// wayland#562 — WIRING gate. `LateMcpBinder` being correct in isolation
+    /// is not enough: `integrate_deferred_mcp` is the single site the deferred
+    /// config-MCP path funnels through, and it must actually CALL the binder.
+    /// The sibling tests above pass an inert binder, so none of them can
+    /// notice the `late_mcp.bind(..)` call being deleted; this one can.
+    ///
+    /// HOW THIS FAILS IF THE DEFECT RETURNS: delete the `late_mcp.bind(..)`
+    /// call from `integrate_deferred_mcp` and the assertions below fail by
+    /// name ("never reached the live catalog", "never rebound the plugin hook
+    /// dispatcher") rather than by a compile error.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_late_binds_skills_and_hooks() {
+        let config = wcore_config::config::Config::default();
+        let defer_cold = config.builtin_tools.defer_cold.clone();
+        let (mut engine, _sink) =
+            wcore_agent::bootstrap::AgentBootstrap::build_for_test(config, vec![]);
+        engine
+            .registry_mut()
+            .expect("idle fixture registry must be mutable")
+            .refresh_tool_search_catalog(&defer_cold);
+
+        // Deferral's boot state: an empty catalog, a plugin hook that resolved
+        // to nothing, and no MCP manager at all.
+        let catalog = Arc::new(wcore_skills::refs::SkillCatalog::from_refs(Vec::new()));
+        engine.set_skill_catalog(Arc::clone(&catalog));
+        let hooks = vec![wcore_agent::plugins::runner::PluginHook {
+            plugin: "demo-plugin".to_string(),
+            phase: wcore_plugin_api::registry::hooks::HookPhase::SessionStart,
+            name: "demo_contribution".to_string(),
+        }];
+        engine.register_plugin_hooks(hooks.clone());
+        assert!(
+            !engine
+                .hook_engine()
+                .expect("bootstrap installs a HookEngine")
+                .has_dispatcher(),
+            "precondition: with config MCP deferred, boot binds no dispatcher"
+        );
+        let mut late_mcp = LateMcpBinder::new(Arc::clone(&catalog), &hooks, Vec::new(), true);
+
+        // The deferred server: advertises the plugin's hook tool, and (via the
+        // refs the async half already read off it) serves one skill.
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "late-srv",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("demo_contribution")],
+        )]));
+        let mut skill_refs = vec![SkillRef {
+            name: "late-srv:remote-helper".to_string(),
+            display_name: None,
+            description: "RESOURCE_SERVED_SKILL".to_string(),
+            when_to_use: None,
+            paths: Vec::new(),
+            source: wcore_skills::types::SkillSource::Project,
+            loaded_from: wcore_skills::types::LoadedFrom::Skills,
+            file_path: std::path::PathBuf::from("<mcp:late-srv>"),
+            skill_root: None,
+            content_length_hint: 0,
+            user_invocable: true,
+            disable_model_invocation: false,
+            has_artifacts: false,
+            inline_content: Some(
+                "---\nname: remote-helper\ndescription: RESOURCE_SERVED_SKILL\n---\nbody\n"
+                    .to_string(),
+            ),
+        }];
+
+        let resolved = HashMap::from([(
+            "late-srv".to_string(),
+            to_mcp_server_config(
+                "stdio",
+                Some("unused-test-command".to_string()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("valid test server config"),
+        )]);
+        let mut reservations = lifecycle_reservations(&resolved);
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        assert!(
+            integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &resolved,
+                &mut reservations,
+                &writer,
+                &mut dynamic_managers,
+                &mut late_mcp,
+                &mut skill_refs,
+            ),
+            "integration must succeed on an idle engine"
+        );
+
+        // Gap 1 at the call site: the skill reached the SHARED catalog Arc and
+        // the model was told about it.
+        assert!(
+            catalog.find("late-srv:remote-helper").is_some(),
+            "the deferred server's skill never reached the live catalog through \
+             integrate_deferred_mcp; catalog = {:?}",
+            catalog.visible_names()
+        );
+        assert!(
+            engine.system_prompt().contains("RESOURCE_SERVED_SKILL"),
+            "integrate_deferred_mcp never told the model about the late skill"
+        );
+        assert!(
+            skill_refs.is_empty(),
+            "the refs must be consumed, not left to be merged twice on a retry"
+        );
+
+        // Gap 2 at the call site: the plugin hook dispatcher was rebound over
+        // the widened manager set.
+        assert!(
+            engine.hook_engine().expect("HookEngine").has_dispatcher(),
+            "integrate_deferred_mcp never rebound the plugin hook dispatcher"
+        );
+
+        // The already-closed tool-discovery defects must stay closed on this
+        // path: the late tool is still registered AND ToolSearch-discoverable.
+        let registry = engine.tools();
+        let result = registry
+            .get("ToolSearch")
+            .expect("ToolSearch must be registered")
+            .execute(json!({"query": "demo_contribution"}))
+            .await;
+        assert!(
+            result.content.contains("demo_contribution"),
+            "late-binding must not disturb late tool discovery; got {}",
+            result.content
+        );
+    }
+
     /// #562: `ToolSearch` is a reserved built-in name before boot MCP proxy
     /// delivery and is refreshed after live additions. A server exporting that
     /// literal name must remain callable under the deterministic MCP namespace,
@@ -7689,6 +8069,8 @@ mod tests {
             &mut reservations,
             &writer,
             &mut dynamic_managers,
+            &mut inert_late_binder(),
+            &mut Vec::new(),
         ));
 
         let registry = engine.tools();
@@ -7795,6 +8177,7 @@ mod tests {
         ];
         let mut readiness_trace = Vec::new();
         let mut init_history_applied = false;
+        let mut late_mcp = inert_late_binder();
 
         for command in commands {
             let readiness = session_command_readiness(&command);
@@ -7810,6 +8193,7 @@ mod tests {
                         &output,
                         &mut dynamic_managers,
                         None,
+                        &mut late_mcp,
                     ),
                 )
                 .await
@@ -7911,7 +8295,9 @@ mod tests {
                 &HashMap::new(),
                 &mut reservations,
                 &writer,
-                &mut dynamic_managers
+                &mut dynamic_managers,
+                &mut inert_late_binder(),
+                &mut Vec::new(),
             ),
             "integration must decline while the registry is borrowed"
         );
@@ -7945,10 +8331,12 @@ mod tests {
             manager,
             resolved: HashMap::new(),
             reservations: HashMap::new(),
+            skill_refs: Vec::new(),
         });
         let writer = ProtocolWriter::new();
         let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
         let mut dynamic_managers = Vec::new();
+        let mut late_mcp = inert_late_binder();
 
         assert!(
             !settle_deferred_mcp_before_message(
@@ -7959,6 +8347,7 @@ mod tests {
                 &output,
                 &mut dynamic_managers,
                 None,
+                &mut late_mcp,
             )
             .await,
             "a retained registry reader must block the provider boundary"
@@ -7979,6 +8368,7 @@ mod tests {
                 &output,
                 &mut dynamic_managers,
                 None,
+                &mut late_mcp,
             )
             .await,
             "the parked manager must integrate after the reader is released"

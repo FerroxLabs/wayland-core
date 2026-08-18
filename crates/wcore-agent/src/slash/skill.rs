@@ -276,7 +276,7 @@ fn revoke_named(catalog: &SkillCatalog, store: &GovernanceStore, name: &str) -> 
              Run `/skill list` to see available skills."
         );
     };
-    let dir = match revocable_dir(r) {
+    let dir = match revocable_dir(&r) {
         Ok(d) => d,
         Err(why) => return format!("/skill revoke '{name}': {why}"),
     };

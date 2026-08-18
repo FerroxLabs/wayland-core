@@ -22,6 +22,19 @@ pub enum CuaError {
     #[error("backend error: {0}")]
     Backend(String),
 
+    /// macOS TCC: the process lacks the grant the op needs.
+    ///
+    /// Carries the capability so the message can name the exact System
+    /// Settings pane instead of leaving the user to guess. A permission
+    /// failure MUST surface here and never as [`Self::Backend`] — a
+    /// denied grant makes the guarded CoreGraphics call silently no-op
+    /// or return null, which is indistinguishable from a real backend
+    /// fault once it has been flattened to a string.
+    #[error("{}", capability.remediation())]
+    PermissionDenied {
+        capability: crate::permissions::TccCapability,
+    },
+
     /// IO-level failure (read/write screenshot, AT-SPI socket, etc.).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
