@@ -14740,20 +14740,39 @@ impl AgentEngine {
                 });
                 Some(self.crucible_result(outcome.final_text))
             }
-            Err(e) => {
-                let msg = format!("crucible: {e}");
-                let _ = writer.emit(&ProtocolEvent::ToolResult {
-                    msg_id: self.current_msg_id.clone(),
-                    call_id,
-                    tool_name: "Crucible".to_string(),
-                    status: ToolStatus::Error,
-                    output: msg.clone(),
-                    output_type: OutputType::Text,
-                    metadata: None,
-                });
-                Some(self.crucible_result(msg))
-            }
+            Err(e) => Some(self.emit_crucible_error(writer, call_id, &e)),
         }
+    }
+
+    /// Emit the Crucible failure card and produce the matching turn result.
+    ///
+    /// Split out of `try_crucible_council` so the scrub below is reachable from
+    /// a test: driving the council to its `Err` arm end-to-end needs a keyed
+    /// provider, a live host, and an approved plan, so the scrub would
+    /// otherwise be verifiable only by reading the source.
+    fn emit_crucible_error(
+        &self,
+        writer: &Arc<dyn wcore_protocol::writer::ProtocolEmitter>,
+        call_id: String,
+        e: &anyhow::Error,
+    ) -> AgentResult {
+        use wcore_protocol::events::{OutputType, ProtocolEvent, ToolStatus};
+
+        // #584: an `anyhow` chain from the council can quote arbitrary upstream
+        // text, including an in-flight `apr-` token. The scrub removes only
+        // exact live tokens, so the underlying error (errno, checksum, provider
+        // name) survives intact.
+        let msg = crate::output_redaction::redact_active_tokens(&format!("crucible: {e}"));
+        let _ = writer.emit(&ProtocolEvent::ToolResult {
+            msg_id: self.current_msg_id.clone(),
+            call_id,
+            tool_name: "Crucible".to_string(),
+            status: ToolStatus::Error,
+            output: msg.clone(),
+            output_type: OutputType::Text,
+            metadata: None,
+        });
+        self.crucible_result(msg)
     }
 
     /// Minimal end-of-turn `AgentResult` for the Crucible front door, which
@@ -33071,5 +33090,105 @@ mod b3_latch_recovery_tests {
             "an absent latch decodes as reachable, which is what those \
              journals recorded"
         );
+    }
+}
+
+#[cfg(test)]
+mod crucible_error_card_tests {
+    //! #584 — the Crucible failure card is the one `ToolResult` whose `output`
+    //! is an `anyhow` chain, i.e. arbitrary upstream text. If the council fails
+    //! while an approval is in flight, that chain can quote the live
+    //! `apr-<uuid>` and hand a snooping tool its own gate.
+
+    use std::sync::{Arc, Mutex};
+
+    use wcore_tools::registry::ToolRegistry;
+
+    use crate::output::protocol_sink::ActiveTokenRedactor;
+    use crate::test_utils::ScriptedProvider;
+
+    #[derive(Default)]
+    struct CapturingEmitter(Mutex<Vec<wcore_protocol::events::ProtocolEvent>>);
+
+    impl wcore_protocol::writer::ProtocolEmitter for CapturingEmitter {
+        fn emit(&self, event: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            if let Ok(mut events) = self.0.lock() {
+                events.push(event.clone());
+            }
+            Ok(())
+        }
+    }
+
+    fn engine() -> super::AgentEngine {
+        super::AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(crate::output::null_sink::NullSink),
+        )
+    }
+
+    /// The token is published through an `ActiveTokenRedactor` that this engine
+    /// has never seen — the engine holds no redactor handle at all on this path,
+    /// which is precisely why the card has to consult the process-wide set.
+    #[test]
+    fn crucible_error_card_scrubs_a_live_approval_token() {
+        let token = "apr-33333333-4444-5555-6666-777777777777".to_string();
+        // Held for the whole test: sources are registered WEAKLY, so dropping
+        // this redactor would prune the set under test.
+        let redactor = ActiveTokenRedactor::new();
+        redactor.set(vec![token.clone()]);
+
+        let recorder = Arc::new(CapturingEmitter::default());
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> = recorder.clone();
+        let result = engine().emit_crucible_error(
+            &writer,
+            "c-584".to_string(),
+            &anyhow::anyhow!("council member deepseek:v4 failed: {token} rejected (os error 111)"),
+        );
+
+        let (status, output) = recorder
+            .0
+            .lock()
+            .expect("recorder mutex")
+            .iter()
+            .find_map(|e| match e {
+                wcore_protocol::events::ProtocolEvent::ToolResult { status, output, .. } => {
+                    Some((*status, output.clone()))
+                }
+                _ => None,
+            })
+            .expect("the failure path must write a ToolResult card");
+
+        // CONTROL: this really is the error card and the payload really rode
+        // the frame, so a missing token below means it was scrubbed and not
+        // that the emit never happened.
+        assert!(
+            matches!(status, wcore_protocol::events::ToolStatus::Error),
+            "control failed: the failure path did not emit an error card"
+        );
+        assert!(
+            output.starts_with("crucible: council member deepseek:v4 failed:"),
+            "control failed: the card lost the error text: {output}"
+        );
+        // CONTROL: the scrub is exact-token only — it must not eat the
+        // underlying error an operator needs to read.
+        assert!(
+            output.contains("(os error 111)"),
+            "the scrub ate the underlying error: {output}"
+        );
+
+        assert!(
+            !output.contains(&token),
+            "the crucible error card leaked the live approval token: {output}"
+        );
+        // The same text is also replayed into the conversation as the turn
+        // result, so a leak there reaches the model even if the wire is clean.
+        assert!(
+            !result.text.contains(&token),
+            "the crucible turn result leaked the live approval token: {}",
+            result.text
+        );
+        drop(redactor);
     }
 }

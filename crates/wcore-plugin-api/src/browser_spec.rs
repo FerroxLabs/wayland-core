@@ -35,6 +35,22 @@ pub enum BrowserProviderHint {
     Browserbase,
 }
 
+/// Mirror of `wcore_browser::policy::LoopbackCapability` (gh#911).
+///
+/// Lives here rather than in `wcore-browser` for the same reason the rest of
+/// this file does: plugin shells may not depend on `wcore-browser` (audit
+/// F2). `wcore_agent`'s `HostBrowserRegistrar` translates it, and
+/// `wcore_browser` re-validates every field, so this type carries data and
+/// grants nothing on its own.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct BrowserLoopbackSpec {
+    pub enabled: bool,
+    pub schema_version: u32,
+    pub session_scope: String,
+    pub ports: Vec<u16>,
+}
+
 /// Serde-friendly mirror of `wcore_browser::BrowserPolicy`.
 ///
 /// `default_action` defaults to `"deny"` (fail-closed) since v0.2.1 —
@@ -48,6 +64,8 @@ pub struct BrowserPolicySpec {
     pub default_action: String,
     pub allowed_origins: Vec<String>,
     pub denied_origins: Vec<String>,
+    /// Recoverable local-only loopback grant (gh#911). Off by default.
+    pub loopback: BrowserLoopbackSpec,
 }
 
 impl Default for BrowserPolicySpec {
@@ -57,6 +75,7 @@ impl Default for BrowserPolicySpec {
             default_action: "deny".into(),
             allowed_origins: Vec::new(),
             denied_origins: Vec::new(),
+            loopback: BrowserLoopbackSpec::default(),
         }
     }
 }
@@ -86,6 +105,12 @@ mod tests {
                 default_action: "deny".into(),
                 allowed_origins: vec!["*.example.com".into()],
                 denied_origins: vec!["*.evil.example".into()],
+                loopback: BrowserLoopbackSpec {
+                    enabled: true,
+                    schema_version: 1,
+                    session_scope: "dev".into(),
+                    ports: vec![3000],
+                },
             },
             allow_cloud: false,
         };
@@ -94,6 +119,18 @@ mod tests {
         assert_eq!(parsed.tool_namespace, "Browser");
         assert_eq!(parsed.preferred_provider, BrowserProviderHint::Camoufox);
         assert_eq!(parsed.policy.allowed_origins.len(), 1);
+        // The grant must survive the wire hop the host reads it back off.
+        assert_eq!(parsed.policy.loopback.ports, vec![3000]);
+        assert_eq!(parsed.policy.loopback.session_scope, "dev");
+    }
+
+    /// A spec written by an older plugin has no `loopback` key at all. It must
+    /// deserialize to the no-authority value, never to an enabled grant.
+    #[test]
+    fn absent_loopback_key_deserializes_to_no_authority() {
+        let parsed: BrowserPolicySpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.loopback, BrowserLoopbackSpec::default());
+        assert!(!parsed.loopback.enabled);
     }
 
     #[test]

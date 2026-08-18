@@ -20,6 +20,7 @@ fn spec_fields_present_for_constructor_args() {
             default_action: "ask".into(),
             allowed_origins: vec!["*.example.com".into()],
             denied_origins: vec![],
+            loopback: Default::default(),
         },
         allow_cloud: true,
     };

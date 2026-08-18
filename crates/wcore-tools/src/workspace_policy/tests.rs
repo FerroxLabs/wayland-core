@@ -1160,3 +1160,155 @@ fn contained_interpreter_grant_excludes_package_manager_config_and_state() {
         eprintln!("note: no package-manager prefix on this host; prefix assertions vacuous");
     }
 }
+
+// ── #922 R1 acceptance tests (A1, A3, A4) ────────────────────────────────────
+
+/// Build a fixture tree carrying every entry class the deny list must cover.
+///
+/// Returns the tempdir (kept alive by the caller) and the canonical root.
+fn secret_fixture_tree() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::write(root.join(".env"), b"TOKEN=1").unwrap();
+    // gitignored, and still denied — the #234 anti-bypass property.
+    std::fs::write(root.join(".gitignore"), b"id.pem\nnode_modules/\ntarget/\n").unwrap();
+    std::fs::write(root.join("id.pem"), b"key").unwrap();
+    std::fs::create_dir_all(root.join("node_modules/vendor")).unwrap();
+    std::fs::write(root.join("node_modules/vendor/x.pem"), b"key").unwrap();
+    std::fs::create_dir_all(root.join("target/debug/build")).unwrap();
+    std::fs::write(root.join("target/debug/build/secret.pem"), b"key").unwrap();
+    std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+    std::fs::write(root.join(".git/objects/keep"), b"x").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+    (dir, root)
+}
+
+/// A1 — #922 R1: the deny walk is not run for a backend that discards the list.
+///
+/// Modelled on `contained_construction_does_not_walk_the_workspace` above,
+/// including its known-positive control: the `true` arm must be materially
+/// more expensive on the big tree than on an empty one, so a host where both
+/// arms are instant FAILS the instrument instead of passing the assertion
+/// vacuously.
+#[test]
+fn r1_skips_the_walk_for_a_non_enforcing_backend() {
+    let empty = tempfile::tempdir().unwrap();
+    let baseline = WorkspacePolicy::contained(empty.path());
+    // Taken first so the cold cost of the fixed path probes lands here.
+    let t = std::time::Instant::now();
+    let _ = baseline.secret_deny_paths_for_backend(true);
+    let enforcing_empty = t.elapsed();
+    let t = std::time::Instant::now();
+    let _ = baseline.secret_deny_paths_for_backend(false);
+    let skipped_empty = t.elapsed();
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..3000 {
+        let sub = root.join(format!("d{i}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.rs"), b"fn main() {}").unwrap();
+    }
+    // One real secret, so the enforcing arm's output is non-empty for a reason
+    // this test controls. Without it the arm is non-empty only when the HOST
+    // happens to have a Tier-0 credential store (`/etc/docker` on the Linux box,
+    // nothing at all under a Windows service account with no `HOME`), and the
+    // liveness assertion below then fails for an environmental reason rather
+    // than a product one. Found by running this test on SeanDesktop.
+    std::fs::write(root.join(".env"), b"TOKEN=1").unwrap();
+    let p = WorkspacePolicy::contained(root);
+
+    let t = std::time::Instant::now();
+    let enforcing = p.secret_deny_paths_for_backend(true);
+    let enforcing_big = t.elapsed();
+    let t = std::time::Instant::now();
+    let skipped = p.secret_deny_paths_for_backend(false);
+    let skipped_big = t.elapsed();
+
+    // KNOWN-POSITIVE CONTROL: the walk this test claims to be skipping is
+    // reachable, does happen, and its cost really is driven by the tree.
+    assert!(
+        enforcing_big > enforcing_empty * 10,
+        "instrument is dead: the enforcing arm must be tree-driven; \
+         enforcing_big={enforcing_big:?} enforcing_empty={enforcing_empty:?}"
+    );
+
+    // THE CLAIM: the skipped arm is flat — the big tree costs no more than the
+    // empty one. Stated against the empty-tree baseline plus half a walk, the
+    // same shape the construction pin uses, so the platform constant is
+    // subtracted rather than assumed to be zero.
+    assert!(
+        skipped_big < skipped_empty + enforcing_big / 2,
+        "R1 must not walk on a non-enforcing backend: skipped_big={skipped_big:?} \
+         skipped_empty={skipped_empty:?} enforcing_big={enforcing_big:?}"
+    );
+
+    // And the skipped arm produces nothing at all, while the enforcing arm does.
+    assert!(
+        skipped.is_empty(),
+        "non-enforcing backend gets no list: {skipped:?}"
+    );
+    let want = std::fs::canonicalize(root.join(".env")).unwrap();
+    assert!(
+        enforcing.contains(&want),
+        "instrument is dead: the enforcing arm must carry the tree's own secret; got {enforcing:?}"
+    );
+}
+
+/// A3 — the enforcing path is byte-identical to the pre-#922 producer.
+///
+/// This is the "no security delta" claim. `secret_deny_paths_dynamic` is the
+/// function every `#234` / `#667` test already grades; R1 must not have become
+/// a second, drifting producer.
+#[test]
+fn r1_enforcing_arm_is_identical_to_the_dynamic_list() {
+    let (_dir, root) = secret_fixture_tree();
+    let p = WorkspacePolicy::contained(&root);
+
+    let via_gate = p.secret_deny_paths_for_backend(true);
+    let direct = p.secret_deny_paths_dynamic();
+    assert_eq!(
+        via_gate, direct,
+        "the enforcing arm must be the same list, element for element"
+    );
+
+    // Not vacuous: the list actually carries the entry classes that matter.
+    let has = |needle: &str| via_gate.iter().any(|p| p.ends_with(needle));
+    assert!(has(".env"), "fixture .env missing from {via_gate:?}");
+    assert!(has("id.pem"), "gitignored id.pem missing from {via_gate:?}");
+    assert!(
+        via_gate.iter().any(|p| p.ends_with(".git/objects")),
+        "git object store missing from {via_gate:?}"
+    );
+}
+
+/// A4 — the NO-PRUNE property survives #922.
+///
+/// The guard rail for the next reader who sees "436x" and reaches for a
+/// `filter_entry`. Pruning `node_modules` / `target` is a PERMANENT
+/// stale-negative: `is_project_secret` (the in-process file-tool predicate)
+/// covers a secret anywhere under root, so the OS list must too, or
+/// `Bash cat node_modules/vendor/x.pem` reads what `Read` refuses.
+///
+/// See the "NO directory prune" comment in `project_committed_secrets`.
+#[test]
+fn no_prune_survives_the_922_backend_gate() {
+    let (_dir, root) = secret_fixture_tree();
+    let p = WorkspacePolicy::contained(&root);
+    let deny = p.secret_deny_paths_for_backend(true);
+
+    for buried in ["node_modules/vendor/x.pem", "target/debug/build/secret.pem"] {
+        let want = std::fs::canonicalize(root.join(buried)).unwrap();
+        assert!(
+            deny.contains(&want),
+            "a secret under {buried} must still be denied — do NOT prune the walk; got {deny:?}"
+        );
+        // The two layers must agree: what the OS list denies, the in-process
+        // predicate denies too.
+        assert!(
+            p.is_project_secret(&want),
+            "in-process predicate must also cover {buried}"
+        );
+    }
+}

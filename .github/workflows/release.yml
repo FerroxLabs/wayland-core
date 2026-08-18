@@ -32,6 +32,23 @@ env:
   CARGO_HTTP_TIMEOUT: "600"
   CARGO_NET_RETRY: "10"
 
+  # ── TEMPORARY ESCAPE HATCH — DELETE ONCE THE AZURE CREDENTIALS EXIST ───────
+  # The Windows Authenticode gate in `build` is fail-closed: every run of this
+  # workflow IS a release build (it only fires on a release tag, a
+  # workflow_dispatch with a tag, or a workflow_call), so with no signing
+  # credentials it stops the build rather than publishing an unsigned
+  # wayland-core.exe. Those credentials do not exist in this repo yet — the
+  # secrets today are NPM_TOKEN and WAYLAND_RELEASE_ACCEPTANCE_SEED — so arming
+  # the gate without this switch would brick the very next Core release.
+  #
+  #   "1" -> publish Windows binaries UNSIGNED, with a loud ::warning.
+  #   "0" or line removed -> the gate is live and a credential-less tag FAILS.
+  #
+  # To close this out: provision AZURE_TENANT_ID / AZURE_CLIENT_ID plus either
+  # AZURE_SUBSCRIPTION_ID (OIDC federation, preferred) or AZURE_CLIENT_SECRET,
+  # then delete this line and the comment above it.
+  WAYLAND_ALLOW_UNSIGNED_WINDOWS: "1"
+
 jobs:
   prepare-release:
     name: Prepare Release Metadata
@@ -135,6 +152,15 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     needs: prepare-release
+    # A job-level block REPLACES the workflow-level `contents: write` — the same
+    # trap the `github-release` job below documents — so `contents` is restated
+    # here. `read` is all this job needs: it checks out a tag and uploads build
+    # artifacts, it publishes nothing. `id-token: write` is what lets
+    # `azure/login` mint a short-lived OIDC token and federate into Azure
+    # Trusted Signing WITHOUT a client secret stored in this repo.
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -315,6 +341,172 @@ jobs:
         if: runner.os != 'Linux'
         shell: bash
         run: vx cargo build --release --target ${{ matrix.target }} -p wcore-cli --features voice
+
+      # ── Windows Authenticode, via Azure Trusted Signing ────────────────────
+      # What was missing: nothing in this repo has ever produced an Authenticode
+      # signature. The two crypto controls it does have — keyless Sigstore SLSA
+      # provenance (`Attest build provenance` below) and the signed release
+      # manifest (SR-29-9) — are supply-chain controls read by
+      # `gh attestation verify` and by `wayland-core self-update`. Windows reads
+      # NEITHER. SmartScreen, Smart App Control / WDAC and the loader itself all
+      # look at the PE Authenticode signature and nothing else, so every
+      # wayland-core.exe published so far has been unsigned as far as the OS is
+      # concerned. Nobody noticed because both existing controls verify green:
+      # the pipeline looks signed, just not to the only verifier that gates
+      # execution on a user's machine.
+      #
+      # ORDERING IS LOAD-BEARING, for exactly the reason the SR-29-9 block in
+      # `github-release` states in its own words — "a manifest cannot digest
+      # itself". Signing REWRITES the .exe, so it has to land after `cargo
+      # build` and before the first thing that records those bytes. Everything
+      # downstream records the PACKAGED archive:
+      #   `Package binary (Windows)` (zip)
+      #     -> `Upload release artifact`
+      #     -> `github-release` / `Attest build provenance`
+      #     -> `Generate checksums`
+      #     -> `Build and sign the release manifest`.
+      # Signing anywhere after `Package binary (Windows)` would leave the
+      # attestation, the checksum and the signed manifest describing bytes that
+      # are not the bytes users run. So these steps sit HERE: immediately after
+      # the build, before any packaging.
+      #
+      # Two credential modes are supported, chosen by which secrets exist:
+      #   oidc   — AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_SUBSCRIPTION_ID.
+      #            `azure/login` federates with a short-lived OIDC token; there
+      #            is NO long-lived secret in the repo. This is the default and
+      #            the recommended mode.
+      #   secret — AZURE_TENANT_ID + AZURE_CLIENT_ID + AZURE_CLIENT_SECRET,
+      #            matching what the Desktop repo does today. Works, but parks a
+      #            long-lived credential in repo secrets that has to be rotated.
+      - name: Guard — Authenticode signing credentials (Windows)
+        id: winsign
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          mode=none
+          if [ -n "${AZURE_TENANT_ID:-}" ] && [ -n "${AZURE_CLIENT_ID:-}" ]; then
+            # OIDC wins when it is available: it needs no stored secret.
+            if [ -n "${AZURE_SUBSCRIPTION_ID:-}" ]; then
+              mode=oidc
+            elif [ -n "${AZURE_CLIENT_SECRET:-}" ]; then
+              mode=secret
+            fi
+          fi
+
+          if [ "${mode}" != "none" ]; then
+            echo "mode=${mode}" >> "$GITHUB_OUTPUT"
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+            echo "Authenticode signing enabled (${mode} credentials)."
+            exit 0
+          fi
+
+          if [ "${WAYLAND_ALLOW_UNSIGNED_WINDOWS:-0}" = "1" ]; then
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Windows binaries are UNSIGNED::No Azure Trusted \
+          Signing credentials are configured, and WAYLAND_ALLOW_UNSIGNED_WINDOWS=1 in \
+          release.yml is letting this release ship anyway. The published \
+          wayland-core.exe carries NO Authenticode signature: Windows SmartScreen will \
+          warn on it and Smart App Control / WDAC will block it. Set AZURE_TENANT_ID, \
+          AZURE_CLIENT_ID and AZURE_SUBSCRIPTION_ID (OIDC federation) or \
+          AZURE_CLIENT_SECRET, then delete WAYLAND_ALLOW_UNSIGNED_WINDOWS from \
+          release.yml."
+            exit 0
+          fi
+
+          echo "::error title=Windows signing not configured::Refusing to publish an \
+          UNSIGNED wayland-core.exe. Set the repo secrets AZURE_TENANT_ID, \
+          AZURE_CLIENT_ID and AZURE_SUBSCRIPTION_ID (OIDC federation, no stored \
+          secret — preferred), or AZURE_TENANT_ID, AZURE_CLIENT_ID and \
+          AZURE_CLIENT_SECRET (client-secret auth, matching the Desktop repo). To \
+          ship unsigned deliberately, set WAYLAND_ALLOW_UNSIGNED_WINDOWS=1 in \
+          release.yml."
+          exit 1
+
+      # OIDC mode only. This leaves an authenticated Azure CLI session on the
+      # runner; the signing action's DefaultAzureCredential chain picks it up as
+      # AzureCliCredential, which is one of the two credential types that action
+      # leaves ENABLED by default (the other being EnvironmentCredential, used
+      # by `secret` mode below).
+      - name: Azure login (OIDC federation, no stored secret)
+        if: steps.winsign.outputs.mode == 'oidc'
+        uses: azure/login@v3.0.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # electron-builder's `azureSignOptions` (what Desktop uses) is Electron
+      # specific and cannot sign a bare Rust binary, so this is the first-party
+      # action instead. The endpoint / account / profile below are the SAME
+      # Trusted Signing resources Desktop signs with, and are non-secret — the
+      # signature discloses the publisher anyway.
+      #
+      # In `oidc` mode AZURE_CLIENT_SECRET is empty, so EnvironmentCredential
+      # reports itself unavailable and the chain falls through to the Azure CLI
+      # session established above. In `secret` mode all three are populated and
+      # EnvironmentCredential matches first. One set of inputs covers both.
+      - name: Sign wayland-core.exe (Authenticode)
+        if: steps.winsign.outputs.sign == 'true'
+        uses: azure/trusted-signing-action@v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: ferrox-labs-signing
+          certificate-profile-name: ferroxlabs
+          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\${{ matrix.binary_name }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Prove the signature is really on the bytes before they are packaged.
+      # The action exiting 0 is not evidence: a signature can be absent,
+      # untrusted, or untimestamped (an untimestamped Authenticode signature
+      # dies with the short-lived Trusted Signing certificate, in days). The
+      # self-test first shows this predicate can actually reject something —
+      # without it a green check here proves only that the check ran.
+      - name: Verify the Authenticode signature on the built binary
+        if: steps.winsign.outputs.sign == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = "target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+
+          # Self-test: an unsigned file must come back NotSigned, or the
+          # assertions below are measuring nothing.
+          $probe = Get-AuthenticodeSignature -FilePath 'Cargo.toml'
+          if ($probe.Status -eq 'Valid') {
+            Write-Error "self-test failed: Cargo.toml reported a valid Authenticode signature, so this gate cannot reject anything"
+            exit 1
+          }
+          Write-Host "self-test: unsigned file correctly reports '$($probe.Status)'"
+
+          $sig = Get-AuthenticodeSignature -FilePath $exe
+          Write-Host "Status:      $($sig.Status)"
+          Write-Host "Subject:     $($sig.SignerCertificate.Subject)"
+          Write-Host "Timestamped: $($null -ne $sig.TimeStamperCertificate)"
+
+          if ($sig.Status -ne 'Valid') {
+            Write-Error "$exe is not validly signed (status: $($sig.Status)). Refusing to package it."
+            exit 1
+          }
+          if ($sig.SignerCertificate.Subject -notmatch 'Ferrox Labs') {
+            Write-Error "$exe is signed, but not by Ferrox Labs (subject: $($sig.SignerCertificate.Subject))."
+            exit 1
+          }
+          if ($null -eq $sig.TimeStamperCertificate) {
+            Write-Error "$exe carries no RFC3161 timestamp. Trusted Signing certificates are short-lived, so an unstamped signature stops verifying within days."
+            exit 1
+          }
+          Write-Host "OK: Authenticode signature present, valid, Ferrox Labs, timestamped."
 
       - name: Package binary (Unix)
         if: runner.os != 'Windows'
