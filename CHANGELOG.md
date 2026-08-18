@@ -5,10 +5,11 @@
 **Release highlights.** A fast follow-up to v0.13.0, and most of it is Windows.
 The command-execution cluster that users have been reporting since 0.12 —
 "Bash not working", "echo times out", "sandbox child timed out" — turned out to
-be two separate defects with one shared symptom. One is fixed and measured; the
-other is fixed but has not yet been witnessed failing on Windows hardware, and
-is called out as such below. Windows binaries are also Authenticode-signed for
-the first time. No breaking changes, and no barrier to rolling back.
+be two separate defects with one shared symptom. Both are fixed, and both have
+now been exercised on real Windows hardware — for one of them we reproduced the
+exact failing bytes and watched the fix remove them. Windows binaries are also
+Authenticode-signed for the first time. No breaking changes, and no barrier to
+rolling back.
 
 **Windows commands stop timing out.** Every `Bash` invocation computed an
 OS-level read-deny list by walking the entire workspace with no pruning, and the
