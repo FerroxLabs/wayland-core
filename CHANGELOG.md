@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.13.1](https://github.com/FerroxLabs/wayland-core/compare/v0.13.0...v0.13.1) (2026-08-18)
+
+**Release highlights.** A fast follow-up to v0.13.0, and almost all of it is
+Windows. The command-execution cluster that users have been reporting since
+0.12 — "Bash not working", "echo times out", "sandbox child timed out" — turned
+out to be two separate defects with one shared symptom, and both are closed
+here. No breaking changes.
+
+**Windows commands stop timing out.** Every `Bash` invocation computed an
+OS-level read-deny list by walking the entire workspace with no pruning, and the
+default Windows backend then discarded the result. The cost was paid on every
+command and scaled with the size of the tree: measured on a real profile, one
+`echo` took **39,278 ms cold; it now takes 349 ms**. A clean temp directory hid
+it completely, which is why it survived so long — the reproduction only appears
+against a real checkout. The deny list is now computed only for a backend that
+actually enforces it, read off the same backend handle that runs the command, so
+it fails safe. Closes #892, #912, #918 and the core half of #921.
+
+**Windows stops corrupting command output.** `cmd /c` was invoked without `/S`,
+so it took the quote-preserving branch and a nested `cmd /c echo …` came back
+with a stray trailing double-quote. A single wrong byte on stdout that the model
+then reasons over. Closes #943 and the residual half of #929.
+
+**Approval prompts fail closed.** An EOF on the approval prompt was read as
+approval. It is now a denial. Approval tokens are also scrubbed from the
+tool-result wire rather than travelling on it, and a learned always-allow
+decision now persists instead of being asked again next session.
+
+**Credentials.** Providers can hold per-account credential slots, so more than
+one account for the same provider no longer collide. The `${cred:KEY}` rail now
+extends to MCP stdio server environments, so a stdio server can be given a
+secret by reference instead of by value.
+
+**Browser.** Denial messages name the actual config file and setting that would
+change the outcome, instead of naming a setting that never existed — and the
+message no longer claims DNS-rebinding protection the code does not implement.
+A project config that sets only a loopback grant no longer has that grant
+silently dropped by the config merge, and a project that sets an origin list no
+longer drops the operator's grant. Opt-in Camoufox binary provisioning is wired.
+
+**Providers.** A 5xx whose body names a permanent error is no longer retried
+through the full backoff ladder; one predicate now governs both the failover
+classifier and the retry decision, so they cannot disagree.
+
+**Web search.** A DuckDuckGo anti-bot challenge answers HTTP 202, which read as
+success and produced an empty parse — reported as a parser bug. It is now
+classified as the throttle it is.
+
+**macOS.** Establishing process-tree containment no longer fails when the child
+has already exited: an unreaped corpse keeps its process group alive, so the
+sentinel joins and containment is real. Screen-Recording and Accessibility
+permissions are primed rather than discovered at first use.
+
+**MCP.** Skills and hooks provided by deferred-config MCP servers are late-bound
+instead of missed.
+
 ## [0.13.0](https://github.com/FerroxLabs/wayland-core/compare/v0.12.26...v0.13.0) (2026-08-13)
 
 **Release highlights.** 255 commits (3 `feat`, 140 `fix`, 64 `test`, 20 `docs`)
