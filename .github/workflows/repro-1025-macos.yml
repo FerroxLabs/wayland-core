@@ -16,7 +16,7 @@ name: repro-1025-macos
 on:
   push:
     branches:
-      - 'verify/1025-macos'
+      - 'verify/1025-instr'
 
 permissions:
   contents: read
@@ -70,7 +70,7 @@ jobs:
               echo ""
               echo "########## ITERATION $i FAILED ##########"
               # The assertion prints the verdict vector; that is the payload.
-              grep -E "panicked|assertion|verdict|results|worktree io|io:|No such file|exhausted" "$LOG" | head -25
+              grep -E "gh1025 step|panicked|assertion|verdict|results|worktree io|io:|No such file|exhausted" "$LOG" | head -25
               echo "########## end iteration $i ##########"
             fi
           done
@@ -87,7 +87,7 @@ jobs:
         run: |
           set +e
           echo "=== distinct error lines across all failing iterations ==="
-          grep -h -E "worktree io|io: |No such file" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -30
+          grep -h -E "gh1025 step|worktree io|io: |No such file" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -30
           echo ""
           echo "=== distinct verdict vectors ==="
           grep -h -E "results|verdict" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -20

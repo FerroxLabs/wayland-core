@@ -877,13 +877,33 @@ impl WorktreeManager {
             ));
         }
 
-        self.validate_repo_authority()?;
-        self.reject_executable_checkout_config().await?;
-        self.assert_clean().await?;
-        self.validate_swarm_root()?;
+        // gh#1025 INSTRUMENTATION (temporary, lane-only): these six steps run
+        // with NO cross-process lock, and each shells out to git against a
+        // repository the peer worker is using at the same instant. The macOS
+        // ENOENT reaches the caller through the catch-all rather than any named
+        // site, so tag each step to find out which one produces it.
+        fn tag(step: &'static str, e: SwarmError) -> SwarmError {
+            SwarmError::WorktreeIo(format!("gh1025 step[{step}]: {e}"))
+        }
+        self.validate_repo_authority()
+            .map_err(|e| tag("validate_repo_authority", e))?;
+        self.reject_executable_checkout_config()
+            .await
+            .map_err(|e| tag("reject_executable_checkout_config", e))?;
+        self.assert_clean()
+            .await
+            .map_err(|e| tag("assert_clean", e))?;
+        self.validate_swarm_root()
+            .map_err(|e| tag("validate_swarm_root", e))?;
         let _admission = self.admission_lock.lock().await;
-        let closure_bytes = self.transfer_closure_bytes(pinned_head).await?;
-        let checkout_bytes = self.checkout_logical_bytes(pinned_head).await?;
+        let closure_bytes = self
+            .transfer_closure_bytes(pinned_head)
+            .await
+            .map_err(|e| tag("transfer_closure_bytes", e))?;
+        let checkout_bytes = self
+            .checkout_logical_bytes(pinned_head)
+            .await
+            .map_err(|e| tag("checkout_logical_bytes", e))?;
         let initial_bytes = closure_bytes.checked_add(checkout_bytes).ok_or_else(|| {
             SwarmError::WorktreeIo("initial workspace size overflowed".to_owned())
         })?;
