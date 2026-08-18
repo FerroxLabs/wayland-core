@@ -1037,7 +1037,8 @@ impl WorktreeManager {
         )?;
         // The clone boundary must still refer to the directory object retained
         // at construction, not a same-path replacement.
-        self.validate_repo_authority()?;
+        self.validate_repo_authority()
+            .map_err(|e| tag("postlock_validate_repo_authority", e))?;
         let source = self.repo_root.to_string_lossy().into_owned();
         let destination = checkout.to_string_lossy().into_owned();
         let clone_args = [
@@ -1077,7 +1078,9 @@ impl WorktreeManager {
         make_guard_dir_private(&checkout)
             .map_err(|error| io_at("private-mode set on the cloned checkout", &checkout, error))?;
 
-        Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
+        Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"]))
+            .await
+            .map_err(|e| tag("checkout_remote_remove", e))?;
         let actual = Box::pin(
             self.checkout_git_stdout(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"]),
         )
@@ -1099,8 +1102,9 @@ impl WorktreeManager {
         } else {
             checkout.join(common)
         };
-        let common = normalized_root(&common)?;
-        let checkout_root = normalized_root(&checkout)?;
+        let common = normalized_root(&common).map_err(|e| tag("normalized_root_common", e))?;
+        let checkout_root =
+            normalized_root(&checkout).map_err(|e| tag("normalized_root_checkout", e))?;
         if !common.starts_with(&checkout_root) {
             return Err(SwarmError::WorktreeIo(format!(
                 "isolated checkout Git authority escaped its root: {}",
@@ -1404,7 +1408,8 @@ impl WorktreeManager {
         )?;
         // The clone boundary must still refer to the directory object retained
         // at construction, not a same-path replacement.
-        self.validate_repo_authority()?;
+        self.validate_repo_authority()
+            .map_err(|e| tag("postlock_validate_repo_authority", e))?;
         let source = self.repo_root.to_string_lossy().into_owned();
         let destination = checkout.to_string_lossy().into_owned();
         // Clone the target branch through the same object-isolating path
@@ -1450,7 +1455,9 @@ impl WorktreeManager {
         make_guard_dir_private(&checkout)
             .map_err(|error| io_at("private-mode set on the cloned checkout", &checkout, error))?;
 
-        Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
+        Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"]))
+            .await
+            .map_err(|e| tag("checkout_remote_remove", e))?;
 
         // Prove the clone landed the exact requested tip on the target branch,
         // non-detached, with a clean working tree — the preconditions the
@@ -1488,8 +1495,9 @@ impl WorktreeManager {
         } else {
             checkout.join(common)
         };
-        let common = normalized_root(&common)?;
-        let checkout_root = normalized_root(&checkout)?;
+        let common = normalized_root(&common).map_err(|e| tag("normalized_root_common", e))?;
+        let checkout_root =
+            normalized_root(&checkout).map_err(|e| tag("normalized_root_checkout", e))?;
         if !common.starts_with(&checkout_root) {
             return Err(SwarmError::WorktreeIo(format!(
                 "integration checkout Git authority escaped its root: {}",
