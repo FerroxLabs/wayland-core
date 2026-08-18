@@ -38,7 +38,7 @@ pub enum SwarmError {
 
     /// Generic IO error (filesystem operations on `.swarm-worktrees`).
     #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
     /// Failure inside the Auto-Mode audit trail (sqlite open / record /
     /// query). T3-2. Carries the human-readable diagnostic; callers route
@@ -48,3 +48,22 @@ pub enum SwarmError {
 }
 
 pub type Result<T> = std::result::Result<T, SwarmError>;
+
+// gh#1025 INSTRUMENTATION (temporary, lane-only). `#[from]` was replaced with
+// this hand-written impl purely so the ONE funnel every bare `?` on an
+// `io::Error` passes through can print where it came from. The returned value
+// is byte-for-byte what `#[from]` produced, so no control flow changes and the
+// race cannot move under observation. Gated on an env var so it is inert unless
+// the repro workflow asks for it.
+impl From<std::io::Error> for SwarmError {
+    fn from(error: std::io::Error) -> Self {
+        if std::env::var_os("WCORE_GH1025_TRACE").is_some() {
+            eprintln!(
+                "gh1025 bare-io kind={:?} err={error}\n{}",
+                error.kind(),
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        SwarmError::Io(error)
+    }
+}
