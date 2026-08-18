@@ -590,7 +590,8 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 None if call_id.starts_with("egress:") => {
                     app.session.tool_cards.push(ToolCardModel {
                         call_id: call_id.clone(),
-                        tool_name: "egress".to_string(),
+                        tool_name:
+                            crate::tui::permission::EGRESS_CARD_TOOL_NAME.to_string(),
                         summary: reason.clone(),
                         status: ToolCardStatus::AwaitingApproval,
                         output: None,
@@ -600,7 +601,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                         plan_body: None,
                         crucible_plan: None,
                     });
-                    Some("egress".to_string())
+                    Some(crate::tui::permission::EGRESS_CARD_TOOL_NAME.to_string())
                 }
                 None => {
                     push_system(app, format!("Approval required: {reason}"));
@@ -4766,6 +4767,112 @@ mod tests {
         assert!(
             matches!(app.session.phase, StreamingPhase::AwaitingApproval { .. }),
             "the awaiting-approval phase must fire so the user is told input is required"
+        );
+    }
+
+    /// #693 — the egress consent footer must not name a scope the egress
+    /// grant has no concept of.
+    ///
+    /// This drives the WHOLE chain the user sees, with nothing hand-built:
+    /// the real `ApprovalRequired` handler synthesizes the card, the real
+    /// `permission_component_for` routes it (`"egress"` has no arm, so it
+    /// falls through to `FallbackComponent`), and the real `keys()` renders
+    /// the footer. A unit test on a hand-built `ToolCardModel` would assert
+    /// the same string while the synthesis site drifted to another tool name
+    /// and the card silently started rendering the workspace wording again.
+    ///
+    /// `[a]` on THIS card never reaches the learned policy: `TuiEngine::
+    /// approve` sees the `egress:` prefix and returns to `resolve_egress`,
+    /// which emits `{"egress_scope":"always"}` and ends in
+    /// `AgentEgressPolicy::resolve_ask` adding the registrable domain to the
+    /// in-memory allowlist. There is no workspace anywhere on that path.
+    #[test]
+    fn egress_consent_footer_does_not_promise_a_workspace_scope() {
+        use crate::tui::permission::{PermissionContext, permission_component_for};
+        use crate::tui::theme::Theme;
+
+        fn footer(app: &App, call_id: &str) -> String {
+            let card = app
+                .session
+                .tool_cards
+                .iter()
+                .find(|c| c.call_id == call_id)
+                .expect("the approval must have produced a card");
+            let theme = Theme::hearth();
+            let ctx = PermissionContext {
+                card,
+                theme: &theme,
+                width: 100,
+                always_allow_available: true,
+                editable_prefix: None,
+                selected_choice: 0,
+                expanded: false,
+            };
+            permission_component_for(&card.tool_name)
+                .keys(&ctx)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect()
+        }
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::ApprovalRequired {
+                call_id: "egress:abc-123".into(),
+                resume_token: "egress:abc-123".into(),
+                correlation_id: String::new(),
+                reason: "Allow network access to `react.dev`? (data-less GET)".into(),
+                context: String::new(),
+                plan: None,
+            },
+        );
+        let egress = footer(&app, "egress:abc-123");
+        assert!(
+            !egress.contains("workspace"),
+            "the egress consent prompt claims a workspace scope the grant does not \
+             have — `[a]` here allows a DOMAIN for the life of this process and \
+             knows nothing about workspaces: {egress}"
+        );
+        assert!(
+            egress.contains("[a] always this session"),
+            "the egress footer must still say what `[a]` grants: {egress}"
+        );
+
+        // POSITIVE CONTROL, same helper, same real dispatch path: an ordinary
+        // tool card DOES take the learned-policy path, and its footer DOES say
+        // "in this workspace". Without this arm the assertion above would pass
+        // just as happily against a footer that said nothing at all.
+        apply_event(
+            &mut app,
+            ProtocolEvent::ToolRequest {
+                msg_id: "m1".into(),
+                call_id: "call-1".into(),
+                tool: ToolInfo {
+                    name: "mcp__acme__deploy".into(),
+                    category: ToolCategory::Exec,
+                    args: json!({}),
+                    description: "deploy".into(),
+                },
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::ApprovalRequired {
+                call_id: "call-1".into(),
+                resume_token: "tok-1".into(),
+                correlation_id: String::new(),
+                reason: "needs approval".into(),
+                context: String::new(),
+                plan: None,
+            },
+        );
+        let tool = footer(&app, "call-1");
+        assert!(
+            tool.contains("[a] always in this workspace"),
+            "control: a real learned-policy card must still name the workspace \
+             scope, or this test proves nothing about the egress card: {tool}"
         );
     }
 

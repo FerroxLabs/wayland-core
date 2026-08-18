@@ -19,6 +19,16 @@ pub mod dispatch;
 
 pub use dispatch::permission_component_for;
 
+/// The synthetic tool name `protocol_bridge` stamps on the card it builds for
+/// an `egress:` consent request, which has no tool call — and therefore no
+/// tool card — of its own.
+///
+/// #693 — it deliberately has no `permission_component_for` arm, so the card
+/// renders through [`components::FallbackComponent`], whose footer keys off
+/// this name to describe what the egress `[a]` actually grants. The synthesis
+/// site and the footer must not drift apart, so they share this constant.
+pub const EGRESS_CARD_TOOL_NAME: &str = "egress";
+
 /// The default action a bare-Enter performs on a card. PRESERVE: Enter =
 /// approve once (§0 #3). Components override `default_action` only for
 /// special cases (e.g. AskUserQuestion answers, ExitPlanMode approve-plan).

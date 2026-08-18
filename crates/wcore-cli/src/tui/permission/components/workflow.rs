@@ -119,7 +119,7 @@ impl PermissionComponent for WorkflowComponent {
     fn keys(&self, ctx: &PermissionContext) -> Line<'static> {
         let _ = ctx;
         Line::from(Span::styled(
-            "[enter/y] approve   [a] always for this tool   [n] deny   [esc] cancel",
+            "[enter/y] approve   [a] always in this workspace   [n] deny   [esc] cancel",
             Style::default(),
         ))
     }

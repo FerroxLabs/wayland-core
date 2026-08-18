@@ -1126,6 +1126,23 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 ///
 /// `run()` and the tier-regression test both read the wiring from here, so an
 /// edit that moves a tier-1 alias into tier 2 cannot pass the test.
+/// The directory that identifies the workspace this session operates against:
+/// `--project-dir` when given, else the process CWD.
+///
+/// #693 — every workspace-keyed decision must resolve this the SAME way.
+/// `--project-dir` moves the config, the project skills, the MCP servers and
+/// the workspace-trust entry without moving the CWD, so two sessions launched
+/// from one shell against two different projects have one CWD and two
+/// workspaces. The durable learned-permission grants key off this too; keying
+/// them off the CWD alone let a grant made against project A auto-approve the
+/// same tool name against project B.
+fn workspace_root(project_dir: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    Ok(match project_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()?,
+    })
+}
+
 fn danger_tiers(cli: &Cli) -> (bool, bool) {
     (cli.dangerously_skip_permissions, cli.dangerous)
 }
@@ -1595,7 +1612,19 @@ async fn run() -> anyhow::Result<ExitCode> {
                     DEFAULT_DANGEROUS_SESSION_TTL_SECS,
                     false,
                 )?;
-                run_tui_mode(config, &cwd, None, None, None, true, execution, false).await?;
+                let tui_workspace = workspace_root(cli.project_dir.as_deref())?;
+                run_tui_mode(
+                    config,
+                    &cwd,
+                    &tui_workspace,
+                    None,
+                    None,
+                    None,
+                    true,
+                    execution,
+                    false,
+                )
+                .await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1909,7 +1938,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     // Resolve config from files + CLI args + env vars
-    let workspace_for_trust = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
+    let workspace_for_trust = workspace_root(cli.project_dir.as_deref())?;
     let trust_store = wcore_config::workspace_trust::WorkspaceTrustStore::for_current_home();
     if cli.trust_workspace {
         let fingerprint = trust_store.grant(&workspace_for_trust)?;
@@ -2025,6 +2054,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                 run_tui_mode(
                     onboarding_config,
                     &cwd,
+                    &workspace_for_trust,
                     None,
                     cli.session_id.clone(),
                     cli.assistant.clone(),
@@ -2144,6 +2174,7 @@ async fn run() -> anyhow::Result<ExitCode> {
         run_tui_mode(
             config,
             &cwd,
+            &workspace_for_trust,
             resume,
             cli.session_id,
             cli.assistant,
@@ -2626,6 +2657,7 @@ fn wire_force_opt_in_env() -> bool {
 async fn run_tui_mode(
     config: Config,
     cwd: &str,
+    workspace_root: &std::path::Path,
     resume: Option<String>,
     session_id: Option<String>,
     active_assistant: Option<String>,
@@ -2720,6 +2752,22 @@ async fn run_tui_mode(
     // TUI's approval modal never opens (no `ApprovalRequired` event) and the
     // status bar renders the live mode so later de-escalation is visible.
     approval_manager.set_mode(approval_policy_to_session(approval_policy));
+    // #693 — replay the "always allow <tool>" grants the user made in earlier
+    // sessions IN THIS WORKSPACE. The manager's always-allow set is in-memory,
+    // so without this the durable grant `TuiEngine::approve` writes would never
+    // be read back and the user would be re-prompted for a tool they already
+    // answered. The policy file is user-global, so the workspace filter is what
+    // keeps a grant made in another checkout from applying here; the key comes
+    // from the same helper `TuiEngine` stamps a grant with, so the write and
+    // the read cannot disagree.
+    let learned_workspace = wcore_permissions::LearnedPolicy::workspace_key(workspace_root);
+    match wcore_permissions::LearnedPolicy::default_path() {
+        Ok(path) => tui::restore_always_allows(&approval_manager, &path, &learned_workspace),
+        Err(error) => tracing::warn!(
+            %error,
+            "cannot resolve the permissions path; always-allow grants not restored"
+        ),
+    }
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
@@ -2875,7 +2923,8 @@ async fn run_tui_mode(
 
     // The `TuiEngine` controller keeps the last `tx` clone so it can
     // synthesize the `StreamEnd` the engine never emits itself.
-    let mut tui_engine = tui::TuiEngine::new(engine, approval_manager, tx);
+    let mut tui_engine = tui::TuiEngine::new(engine, approval_manager, tx)
+        .with_learned_policy_workspace(learned_workspace);
     tui_engine.set_active_assistant(active_assistant);
     tui_engine.set_inventory(tui::EngineInventory {
         skills: skills_snapshot,
@@ -6156,6 +6205,72 @@ mod tests {
     use std::time::Duration;
     use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    /// #693 — `--project-dir` moves the workspace without moving the CWD, so
+    /// a durable grant keyed off the CWD alone is shared by two sessions
+    /// pointed at two different projects.
+    ///
+    /// The scenario is the one the flag makes trivial: ONE shell, two
+    /// `wayland-core --project-dir ...` invocations, two projects. The
+    /// same-workspace arm is the positive control — without it this would
+    /// pass just as well against a `restore_always_allows` that restored
+    /// nothing at all.
+    #[test]
+    fn a_grant_under_one_project_dir_does_not_restore_under_another() {
+        use wcore_cli::tui::restore_always_allows;
+        use wcore_permissions::learning::{LearnedDecision, LearnedPolicy};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo_a = tmp.path().join("repo-a");
+        let repo_b = tmp.path().join("repo-b");
+        std::fs::create_dir_all(&repo_a).expect("mkdir a");
+        std::fs::create_dir_all(&repo_b).expect("mkdir b");
+        let path = tmp.path().join("permissions.toml");
+
+        // The CWD is whatever the test binary runs in — identical for both,
+        // which is exactly the point.
+        let ws_a =
+            LearnedPolicy::workspace_key(&workspace_root(Some(&repo_a)).expect("workspace root a"));
+        let ws_b =
+            LearnedPolicy::workspace_key(&workspace_root(Some(&repo_b)).expect("workspace root b"));
+        assert_ne!(
+            ws_a, ws_b,
+            "two --project-dir values from one shell must not collapse to one \
+             permissions key"
+        );
+
+        let mut policy = LearnedPolicy::new();
+        policy.record_in("Write", None, LearnedDecision::AllowAlways, &ws_a);
+        policy.save_to(&path).expect("save");
+
+        let session_a = ToolApprovalManager::new();
+        restore_always_allows(&session_a, &path, &ws_a);
+        assert!(
+            session_a.is_tool_name_auto_approved("Write"),
+            "control: the grant must still restore in the project it was made in"
+        );
+
+        let session_b = ToolApprovalManager::new();
+        restore_always_allows(&session_b, &path, &ws_b);
+        assert!(
+            !session_b.is_tool_name_auto_approved("Write"),
+            "a grant made against {} auto-approved Write against {} — \
+             --project-dir is the workspace, and the permissions key must \
+             follow it just as the trust store already does",
+            repo_a.display(),
+            repo_b.display()
+        );
+    }
+
+    /// The no-flag arm: `workspace_root(None)` is the CWD, which is what the
+    /// trust store resolved before this existed.
+    #[test]
+    fn workspace_root_without_the_flag_is_the_cwd() {
+        assert_eq!(
+            workspace_root(None).expect("workspace root"),
+            std::env::current_dir().expect("cwd")
+        );
+    }
 
     /// UAT-W1 — the product's own error advised the wrong flag.
     ///
