@@ -34,10 +34,11 @@ use wcore_channels::event::{Attachment, ChannelEvent, ChatType, IncomingMessage,
 
 use crate::error::MatrixError;
 use crate::sync_store::{self, Loaded};
+use crate::token::{self, Renewal, TokenSource};
 
 /// Long-poll timeout (ms) handed to the homeserver's `/sync`. The HTTP read
 /// timeout is this plus a buffer so a wedged proxy can't park us forever.
-const SYNC_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const SYNC_TIMEOUT_MS: u64 = 30_000;
 
 /// Hard cap on a single `/sync` response body. The body is buffered fully to
 /// parse `SyncResponse`, so without a cap a homeserver (or a wedged proxy)
@@ -53,7 +54,11 @@ const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 pub(crate) struct SyncArgs {
     pub http: wcore_egress::EgressClient,
     pub api_base: String,
-    pub access_token: String,
+    /// The live access token and the only path that renews it. Shared with
+    /// `MatrixChannel`, so a renewal driven from here is immediately visible
+    /// to the send path (and vice versa) rather than leaving the outbound
+    /// half authenticating with a token this loop already replaced.
+    pub tokens: Arc<TokenSource>,
     pub user_id: String,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
     pub shutdown: watch::Receiver<bool>,
@@ -196,7 +201,7 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
     let SyncArgs {
         http,
         api_base,
-        access_token,
+        tokens,
         user_id,
         inbox,
         mut shutdown,
@@ -246,6 +251,31 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
             break;
         }
 
+        // Proactive renewal. The homeserver states `expires_in_ms` on every
+        // refresh, so once this adapter has renewed once it knows the deadline
+        // and replaces the token BEFORE a call fails. Without this the only
+        // trigger is a 401, i.e. at least one rejected `/sync` per expiry.
+        if tokens.renewal_due() {
+            match tokens.renew_before_expiry().await {
+                Renewal::Renewed => {}
+                Renewal::Deferred(why) => {
+                    tracing::warn!(
+                        target: "wcore_channel_matrix::sync",
+                        reason = %why,
+                        "could not renew the Matrix access token ahead of expiry; continuing on the current one",
+                    );
+                }
+                // `AuthExpired` is already published by the token source.
+                Renewal::Fatal => break,
+            }
+        }
+
+        // The token this iteration authenticates with. Captured before the
+        // call so the 401 handler can tell "the token I presented" from "the
+        // token in the store now", which is how a peer process's refresh is
+        // detected without POSTing.
+        let presented = tokens.access();
+
         // Race the next API call against a shutdown signal so we don't get
         // stuck for ~SYNC_TIMEOUT_MS after stop() flips the flag.
         let result = tokio::select! {
@@ -254,12 +284,15 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                 if *shutdown.borrow() { break; }
                 continue;
             }
-            r = sync_once(&http, &api_base, &access_token, since.as_deref()) => r,
+            r = sync_once(&http, &api_base, &presented, since.as_deref()) => r,
         };
 
         match result {
             Ok(resp) => {
                 consecutive_failures = 0;
+                // A served `/sync` proves the token in play is live, which
+                // releases the renewal-loop guard.
+                tokens.mark_progress();
                 // The homeserver accepted whatever cursor we presented, so a
                 // resumed one is now proven good.
                 resumed_unverified = false;
@@ -315,40 +348,50 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                 }
                 // A 401/403 is the homeserver REJECTING the access token
                 // (`M_UNKNOWN_TOKEN` on a revoked one), not a transient fault.
-                // Backoff cannot recover a dead credential, and — this is the
-                // defect — the manager cannot infer it either: this loop owns
-                // `consecutive_failures` privately, `poll_events()` drains an
-                // empty inbox and returns `Ok(vec![])`, and the manager's Ok arm
-                // RESETS its error count. So the channel reported `Healthy` while
-                // every single sync 401'd, measured live at 21 consecutive
-                // failures. Publish the rejection as the event the health
-                // projection already understands, and stop: the manager records
-                // `Unauthenticated` and ends the poll loop rather than reconnect-
-                // looping against a token that will never be accepted.
-                if matches!(
-                    e,
-                    MatrixError::Http {
-                        status: 401 | 403,
-                        ..
+                // Backoff cannot recover a dead credential, and — this was the
+                // original defect — the manager cannot infer it either: this
+                // loop owns `consecutive_failures` privately, `poll_events()`
+                // drains an empty inbox and returns `Ok(vec![])`, and the
+                // manager's Ok arm RESETS its error count. So the channel
+                // reported `Healthy` while every single sync 401'd, measured
+                // live at 21 consecutive failures.
+                //
+                // #936 splits that one verdict into three. A token the
+                // homeserver says is merely EXPIRED (`soft_logout: true`) is
+                // renewed in place and the loop continues; a transient fault on
+                // the refresh endpoint backs off WITHOUT accusing the
+                // credential; and a genuine revocation still publishes
+                // `AuthExpired` (exactly once, from the token source) and stops
+                // — because a refresh path that papers over a real revocation
+                // is worse than no refresh path.
+                if token::is_credential_rejection(&e) {
+                    match tokens.renew_after_rejection(&presented, &e).await {
+                        Renewal::Renewed => {
+                            consecutive_failures = 0;
+                            continue;
+                        }
+                        Renewal::Deferred(why) => {
+                            tracing::warn!(
+                                target: "wcore_channel_matrix::sync",
+                                reason = %why,
+                                "the Matrix access token was rejected and could not be renewed yet; backing off",
+                            );
+                        }
+                        Renewal::Fatal => {
+                            tracing::error!(
+                                target: "wcore_channel_matrix::sync",
+                                "homeserver rejected the access token and it cannot be renewed; stopping /sync",
+                            );
+                            break;
+                        }
                     }
-                ) {
-                    let reason = auth_rejection_label(&e);
-                    tracing::error!(
+                } else {
+                    tracing::warn!(
                         target: "wcore_channel_matrix::sync",
-                        reason = %reason,
-                        "homeserver rejected the access token; stopping /sync. Rotate the token and run `channel reload`"
+                        error = %e,
+                        "/sync failed; backing off"
                     );
-                    inbox
-                        .lock()
-                        .await
-                        .push_back(ChannelEvent::AuthExpired { reason });
-                    break;
                 }
-                tracing::warn!(
-                    target: "wcore_channel_matrix::sync",
-                    error = %e,
-                    "/sync failed; backing off"
-                );
                 consecutive_failures = consecutive_failures.saturating_add(1);
                 let sleep_secs = (2_u64.saturating_mul(consecutive_failures as u64)).min(30);
                 tokio::select! {
@@ -360,30 +403,6 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                 }
             }
         }
-    }
-}
-
-/// A short, SECRET-FREE label for a credential rejection, suitable for the
-/// health surface's operator-facing `reason`.
-///
-/// Only the homeserver's `errcode` — a fixed spec vocabulary such as
-/// `M_UNKNOWN_TOKEN` — is surfaced, never the raw response body. The body is an
-/// echo of a request we authenticated, so treating it as printable would make
-/// the health surface a place a token could appear; `ProbeReport` holds the same
-/// line ("the NAME of a rejected item, never its value") and this must not be the
-/// weaker of the two. A body we cannot parse yields the status alone.
-fn auth_rejection_label(e: &MatrixError) -> String {
-    let MatrixError::Http { status, body } = e else {
-        return "platform rejected the credential".to_string();
-    };
-    match serde_json::from_str::<serde_json::Value>(body)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.get("errcode"))
-        .and_then(|c| c.as_str())
-    {
-        Some(errcode) => format!("homeserver rejected the access token: HTTP {status} {errcode}"),
-        None => format!("homeserver rejected the access token: HTTP {status}"),
     }
 }
 
@@ -825,7 +844,7 @@ mod tests {
         let handle = tokio::spawn(sync_loop(SyncArgs {
             http,
             api_base: server_url.to_string(),
-            access_token: "syt_test".to_string(),
+            tokens: crate::token::tests::plain_source(server_url, "syt_test", &inbox),
             user_id: BOT.to_string(),
             inbox: Arc::clone(&inbox),
             shutdown: rx,
@@ -1152,7 +1171,7 @@ mod tests {
         let handle = tokio::spawn(sync_loop(SyncArgs {
             http,
             api_base: server_url.to_string(),
-            access_token: TOKEN_CANARY.to_string(),
+            tokens: crate::token::tests::plain_source(server_url, TOKEN_CANARY, &inbox),
             user_id: BOT.to_string(),
             inbox: Arc::clone(&inbox),
             shutdown: rx,
@@ -1299,72 +1318,200 @@ mod tests {
         let _ = std::fs::remove_file(&state);
     }
 
-    /// The 400 cursor-rejection path predates this change and must keep its own
-    /// behaviour: re-seed, do NOT classify as an auth rejection. Without this,
-    /// a broad `4xx` classification would silently convert a recoverable cursor
-    /// fault into a terminal "rotate your token".
+    /// What counts as a CREDENTIAL rejection, asserted against the production
+    /// predicate.
+    ///
+    /// This test used to build a `MatrixError` and then `matches!` it against
+    /// the same `status: 401 | 403` pattern written inline — it asserted a fact
+    /// about `matches!`, referenced no production code, and would have stayed
+    /// green through any change to the real classification. It now calls
+    /// [`token::is_credential_rejection`], the one predicate both this loop and
+    /// the send path gate on.
+    ///
+    /// Three obligations, and each row can fail on its own:
+    ///
+    /// * The 400 cursor-rejection path predates #936 and must keep re-seeding
+    ///   rather than becoming a terminal "rotate your token".
+    /// * A token errcode IS the credential, on either status.
+    /// * `M_FORBIDDEN` on 403 is the bot's POWER LEVEL, not its identity.
+    ///   Classifying it as a credential rejection latches the channel
+    ///   `Unauthenticated` for a token that still works.
     #[test]
-    fn only_401_and_403_are_auth_rejections() {
+    fn credential_rejection_is_the_errcode_not_the_bare_status() {
         for status in [400_u16, 404, 429, 500, 502] {
-            let e = MatrixError::Http {
-                status,
-                body: r#"{"errcode":"M_UNKNOWN"}"#.to_string(),
-            };
             assert!(
-                !matches!(
-                    e,
-                    MatrixError::Http {
-                        status: 401 | 403,
-                        ..
-                    }
-                ),
+                !token::is_credential_rejection(&MatrixError::Http {
+                    status,
+                    body: r#"{"errcode":"M_UNKNOWN"}"#.to_string(),
+                }),
                 "HTTP {status} must not be classified as a credential rejection"
             );
         }
         for status in [401_u16, 403] {
-            let e = MatrixError::Http {
-                status,
-                body: r#"{"errcode":"M_UNKNOWN_TOKEN"}"#.to_string(),
-            };
             assert!(
-                matches!(
-                    e,
-                    MatrixError::Http {
-                        status: 401 | 403,
-                        ..
-                    }
-                ),
-                "HTTP {status} IS a credential rejection"
+                token::is_credential_rejection(&MatrixError::Http {
+                    status,
+                    body: r#"{"errcode":"M_UNKNOWN_TOKEN"}"#.to_string(),
+                }),
+                "HTTP {status} M_UNKNOWN_TOKEN IS a credential rejection"
             );
         }
+        // A gateway that stripped the Matrix body still refused our identity.
+        assert!(
+            token::is_credential_rejection(&MatrixError::Http {
+                status: 401,
+                body: "<html>Unauthorized</html>".to_string(),
+            }),
+            "a bare 401 is still a credential rejection; no retry fixes it"
+        );
+        // The row this predicate exists for.
+        assert!(
+            !token::is_credential_rejection(&MatrixError::Http {
+                status: 403,
+                body: r#"{"errcode":"M_FORBIDDEN","error":"no permission to redact"}"#.to_string(),
+            }),
+            "M_FORBIDDEN is a power level, not a dead token; classifying it \
+             latches the channel Unauthenticated while every send still works"
+        );
+        assert!(
+            !token::is_credential_rejection(&MatrixError::Http {
+                status: 403,
+                body: "blocked by upstream proxy".to_string(),
+            }),
+            "a bare 403 is an upstream block, not a credential verdict"
+        );
+        assert!(
+            !token::is_credential_rejection(&MatrixError::Network("timeout".to_string())),
+            "a network fault is not a credential verdict"
+        );
     }
 
-    /// The label is the string an operator reads on the health surface. It must
-    /// carry the errcode and never the response body, which is an echo of a
-    /// request we authenticated.
-    #[test]
-    fn the_auth_label_names_the_errcode_and_never_the_body() {
-        let label = auth_rejection_label(&MatrixError::Http {
-            status: 401,
-            body: format!(r#"{{"errcode":"M_UNKNOWN_TOKEN","error":"{TOKEN_CANARY}"}}"#),
-        });
-        assert!(label.contains("M_UNKNOWN_TOKEN"), "got {label:?}");
-        assert!(label.contains("401"), "got {label:?}");
-        assert!(
-            !label.contains(TOKEN_CANARY),
-            "the label echoed the response body verbatim: {label:?}"
-        );
+    /// **Quadrant 2 — the token merely EXPIRED (#936).**
+    ///
+    /// This is the case the adapter had no answer for: a homeserver on the
+    /// OIDC / Matrix Authentication Service path answers `M_UNKNOWN_TOKEN`
+    /// with `soft_logout: true` when a short-lived access token ages out. The
+    /// loop must refresh in place and keep delivering — no `AuthExpired`, no
+    /// exit. Before the fix the identical response took the channel down
+    /// permanently.
+    ///
+    /// It is deliberately paired with the hard-revocation test above, which
+    /// still exits: a refresh path that recovered from BOTH would be worse
+    /// than no refresh path.
+    #[tokio::test]
+    async fn a_soft_logout_is_refreshed_in_place_and_delivery_continues() {
+        let mut server = mockito::Server::new_async().await;
+        let state = tmp_state_path("softlogout");
+        let _ = std::fs::remove_file(&state);
 
-        // An unparseable body must degrade to the status alone, never to the
-        // raw bytes.
-        let label = auth_rejection_label(&MatrixError::Http {
-            status: 403,
-            body: TOKEN_CANARY.to_string(),
-        });
-        assert!(label.contains("403"), "got {label:?}");
-        assert!(
-            !label.contains(TOKEN_CANARY),
-            "an unparseable body must not be echoed: {label:?}"
+        // The aged-out token is refused ...
+        let refused = server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_header("authorization", "Bearer syt_expired")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"errcode":"M_UNKNOWN_TOKEN","soft_logout":true}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        // ... the refresh endpoint mints a replacement pair, exactly once ...
+        let refreshed = server
+            .mock("POST", "/_matrix/client/v3/refresh")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"syt_renewed","refresh_token":"rot_next","expires_in_ms":3600000}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        // ... and only the replacement is served.
+        server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_header("authorization", "Bearer syt_renewed")
+            .match_query(initial_query())
+            .with_status(200)
+            .with_body(body_empty("g1"))
+            .create_async()
+            .await;
+        server
+            .mock("GET", "/_matrix/client/v3/sync")
+            .match_header("authorization", "Bearer syt_renewed")
+            .match_query(resume_query("g1"))
+            .with_status(200)
+            .with_body(body_with_event("g2", "$after_refresh", "delivered anyway"))
+            .create_async()
+            .await;
+
+        let lock_dir = tempfile::tempdir().unwrap();
+        let inbox: Arc<Mutex<VecDeque<ChannelEvent>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let creds = crate::token::tests::MemCreds::new(&[
+            ("matrix.test.access", "syt_expired"),
+            ("matrix.test.refresh", "rot_first"),
+        ]);
+        let tokens = crate::token::tests::refreshing_source(
+            &server.url(),
+            "syt_expired",
+            creds.clone(),
+            lock_dir.path(),
+            &inbox,
         );
+        let (tx, rx) = watch::channel(false);
+        let handle = tokio::spawn(sync_loop(SyncArgs {
+            http: wcore_egress::EgressClient::builder()
+                .user_agent("wcore-matrix-936-test")
+                .build()
+                .unwrap_or_default(),
+            api_base: server.url(),
+            tokens: Arc::clone(&tokens),
+            user_id: BOT.to_string(),
+            inbox: Arc::clone(&inbox),
+            shutdown: rx,
+            state_path: state.clone(),
+        }));
+
+        // Bounded wait for the post-refresh cursor; the loop persists it only
+        // after the message it accompanied is already in the inbox.
+        let mut reached = false;
+        for _ in 0..200 {
+            if matches!(sync_store::load_from(&state), Loaded::Cursor(ref c) if c == "g2") {
+                reached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        let events: Vec<ChannelEvent> = inbox.lock().await.drain(..).collect();
+
+        assert!(
+            reached,
+            "the loop never got past the expired token: {:?}",
+            auth_events(&events),
+        );
+        refused.assert_async().await;
+        refreshed.assert_async().await;
+        assert_eq!(
+            message_ids(&events),
+            vec!["$after_refresh".to_string()],
+            "the message that arrived after the renewal must be delivered",
+        );
+        assert!(
+            auth_events(&events).is_empty(),
+            "a credential that was RECOVERED must not be reported unauthenticated: {:?}",
+            auth_events(&events),
+        );
+        assert_eq!(
+            tokens.access(),
+            "syt_renewed",
+            "the renewed token must be the one in play",
+        );
+        assert_eq!(
+            creds.peek("matrix.test.refresh").as_deref(),
+            Some("rot_next"),
+            "the rotated refresh token must be persisted for the next process",
+        );
+        let _ = std::fs::remove_file(&state);
     }
 }

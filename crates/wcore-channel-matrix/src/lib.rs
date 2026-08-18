@@ -18,6 +18,7 @@ pub mod error;
 mod rest;
 mod sync;
 mod sync_store;
+mod token;
 
 /// The single source of this adapter's inbound media bounds.
 ///
@@ -51,12 +52,19 @@ use wcore_config::credentials::CredentialsStore;
 pub use config::MatrixConfig;
 pub use error::MatrixError;
 
+use token::{Renewal, TokenSource, TokenSourceParams};
+
 /// Production Matrix channel adapter.
 pub struct MatrixChannel {
     name: String,
     config: MatrixConfig,
     state: ConnectionState,
-    access_token: Option<String>,
+    /// The live access token and the only path that renews it, shared with the
+    /// `/sync` task. A plain `String` here was the whole of #936: the token was
+    /// read once in `start()` and could never be replaced, so an expiring
+    /// credential (the OIDC / Matrix Authentication Service default) took the
+    /// channel down permanently. `None` until started.
+    tokens: Option<Arc<TokenSource>>,
     http: wcore_egress::EgressClient,
     /// Background `/sync` task pushes into this; `poll_events` drains it.
     inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
@@ -95,7 +103,7 @@ impl MatrixChannel {
             name: name.into(),
             config,
             state: ConnectionState::Disconnected,
-            access_token: None,
+            tokens: None,
             http,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             poll_handle: None,
@@ -116,31 +124,75 @@ impl MatrixChannel {
     /// keyed one drift away from the unkeyed one and quietly stop transmitting
     /// the key while `supports_outbound_idempotency` still claimed it did.
     async fn put_message(
-        &mut self,
+        &self,
         msg: OutgoingMessage,
         delivery_key: Option<&str>,
     ) -> Result<MessageReceipt, ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
-
-        let event_id = rest::send_text_message(
-            &self.http,
-            &self.api_base,
-            token,
-            &msg.conversation_id,
-            &msg.text,
-            delivery_key,
-        )
-        .await
-        .map_err(|e| ChannelError::Transport(e.to_string()))?;
+        let room: &str = &msg.conversation_id;
+        let text: &str = &msg.text;
+        let event_id = self
+            .with_access_token(|token| async move {
+                rest::send_text_message(
+                    &self.http,
+                    &self.api_base,
+                    &token,
+                    room,
+                    text,
+                    delivery_key,
+                )
+                .await
+            })
+            .await?;
 
         Ok(MessageReceipt {
             id: event_id,
             conversation_id: msg.conversation_id.clone(),
             ts_secs: chrono::Utc::now().timestamp(),
         })
+    }
+
+    /// Run one authenticated call, renewing the credential once if the
+    /// homeserver rejects it.
+    ///
+    /// **Every** outbound call goes through here, so there is exactly one
+    /// place that decides what a 401 means on the send side — and it is the
+    /// same decision the `/sync` loop takes, because both delegate to
+    /// [`TokenSource`]. A send path with its own opinion is how "the channel
+    /// reports healthy and every message fails" gets built.
+    ///
+    /// Retrying is safe: a call the homeserver answered 401 was never applied,
+    /// so the second attempt cannot duplicate a delivery.
+    async fn with_access_token<T, F, Fut>(&self, op: F) -> Result<T, ChannelError>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = Result<T, MatrixError>>,
+    {
+        let tokens = self.tokens.as_ref().ok_or(ChannelError::NotStarted)?;
+        let presented = tokens.access();
+        let rejection = match op(presented.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(e) => e,
+        };
+        // The errcode, not the bare status: a 403 `M_FORBIDDEN` is the bot's
+        // power level and must not be reported as a dead credential.
+        if !token::is_credential_rejection(&rejection) {
+            return Err(ChannelError::Transport(rejection.to_string()));
+        }
+        // Secret-free from here on: the homeserver's error body is an echo of
+        // a request we authenticated, so only the errcode label travels.
+        let label = token::auth_rejection_label(&rejection);
+        match tokens.renew_after_rejection(&presented, &rejection).await {
+            Renewal::Renewed => op(tokens.access())
+                .await
+                .map_err(|e| ChannelError::Transport(e.to_string())),
+            Renewal::Deferred(why) => Err(ChannelError::Transport(format!(
+                "{label}; could not renew it yet: {why}"
+            ))),
+            // `TokenSource` has already published `AuthExpired`, so health
+            // reads `Unauthenticated` even though a SEND — not the `/sync`
+            // loop — is what discovered the dead credential.
+            Renewal::Fatal => Err(ChannelError::Auth(label)),
+        }
     }
 }
 
@@ -186,7 +238,20 @@ impl Channel for MatrixChannel {
                 ))
             })?;
 
-        self.access_token = Some(token.clone());
+        // One shared token for the send path and the `/sync` task: a renewal
+        // driven by either is immediately visible to the other, so the
+        // outbound half never keeps authenticating with a token the loop has
+        // already replaced.
+        let tokens = Arc::new(TokenSource::new(TokenSourceParams {
+            creds: Arc::clone(&self.creds),
+            access_handle: self.config.credential_handle_access_token.clone(),
+            refresh_handle: self.config.credential_handle_refresh_token.clone(),
+            access_token: token,
+            http: self.http.clone(),
+            api_base: self.api_base.clone(),
+            inbox: Arc::clone(&self.inbox),
+        }));
+        self.tokens = Some(Arc::clone(&tokens));
 
         // Emit a Connected state-change so subscribers know the channel
         // went live (the manager will tag and broadcast it).
@@ -202,7 +267,7 @@ impl Channel for MatrixChannel {
         let args = sync::SyncArgs {
             http: self.http.clone(),
             api_base: self.api_base.clone(),
-            access_token: token,
+            tokens,
             user_id: self.config.user_id.clone(),
             inbox: Arc::clone(&self.inbox),
             shutdown: rx,
@@ -246,7 +311,7 @@ impl Channel for MatrixChannel {
                 }
             }
         }
-        self.access_token = None;
+        self.tokens = None;
         self.state = ConnectionState::Disconnected;
         self.inbox
             .lock()
@@ -303,20 +368,18 @@ impl Channel for MatrixChannel {
     /// config field) is the path subject. 30s server-side timeout; the
     /// subscriber re-sends on a shorter cadence while a turn runs.
     async fn send_typing(&self, conversation_id: &str) -> Result<(), ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
-        rest::send_typing(
-            &self.http,
-            &self.api_base,
-            token,
-            conversation_id,
-            &self.config.user_id,
-            30_000,
-        )
+        self.with_access_token(|token| async move {
+            rest::send_typing(
+                &self.http,
+                &self.api_base,
+                &token,
+                conversation_id,
+                &self.config.user_id,
+                30_000,
+            )
+            .await
+        })
         .await
-        .map_err(|e| ChannelError::Transport(e.to_string()))
     }
 
     /// `m.reaction` annotation relating to the inbound event — the ack
@@ -327,20 +390,18 @@ impl Channel for MatrixChannel {
         message_id: &str,
         emoji: &str,
     ) -> Result<(), ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
-        rest::send_reaction(
-            &self.http,
-            &self.api_base,
-            token,
-            conversation_id,
-            message_id,
-            emoji,
-        )
+        self.with_access_token(|token| async move {
+            rest::send_reaction(
+                &self.http,
+                &self.api_base,
+                &token,
+                conversation_id,
+                message_id,
+                emoji,
+            )
+            .await
+        })
         .await
-        .map_err(|e| ChannelError::Transport(e.to_string()))
     }
 
     /// Download unencrypted inbound media by its `mxc://` URI via the
@@ -350,13 +411,11 @@ impl Channel for MatrixChannel {
         &self,
         attachment: &wcore_channels::Attachment,
     ) -> Result<Vec<u8>, ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
-        rest::download_media(&self.http, &self.api_base, token, &attachment.url)
-            .await
-            .map_err(|e| ChannelError::Transport(e.to_string()))
+        let url: &str = &attachment.url;
+        self.with_access_token(|token| async move {
+            rest::download_media(&self.http, &self.api_base, &token, url).await
+        })
+        .await
     }
 
     /// This adapter's inbound intake policy — see [`MEDIA_BOUNDS`], from which
@@ -396,20 +455,19 @@ impl Channel for MatrixChannel {
         message_id: &str,
         new_text: &str,
     ) -> Result<MessageReceipt, ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
-        let new_event_id = rest::edit_message(
-            &self.http,
-            &self.api_base,
-            token,
-            conversation_id,
-            message_id,
-            new_text,
-        )
-        .await
-        .map_err(|e| ChannelError::Transport(e.to_string()))?;
+        let new_event_id = self
+            .with_access_token(|token| async move {
+                rest::edit_message(
+                    &self.http,
+                    &self.api_base,
+                    &token,
+                    conversation_id,
+                    message_id,
+                    new_text,
+                )
+                .await
+            })
+            .await?;
         Ok(MessageReceipt {
             id: new_event_id,
             conversation_id: conversation_id.to_string(),
@@ -423,20 +481,18 @@ impl Channel for MatrixChannel {
         conversation_id: &str,
         message_id: &str,
     ) -> Result<(), ChannelError> {
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ChannelError::NotStarted)?;
-        rest::redact_event(
-            &self.http,
-            &self.api_base,
-            token,
-            conversation_id,
-            message_id,
-        )
+        self.with_access_token(|token| async move {
+            rest::redact_event(
+                &self.http,
+                &self.api_base,
+                &token,
+                conversation_id,
+                message_id,
+            )
+            .await
+            .map(|_| ())
+        })
         .await
-        .map(|_| ())
-        .map_err(|e| ChannelError::Transport(e.to_string()))
     }
 }
 
@@ -447,50 +503,15 @@ impl Channel for MatrixChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-    use wcore_config::credentials::{CredentialsError, CredentialsStore as CredsTrait};
-
-    struct MemCreds {
-        inner: StdMutex<std::collections::HashMap<String, String>>,
-    }
-    impl MemCreds {
-        fn with_token(handle: &str, token: &str) -> Arc<dyn CredsTrait> {
-            let s = Self {
-                inner: StdMutex::new(std::collections::HashMap::new()),
-            };
-            s.inner
-                .lock()
-                .unwrap()
-                .insert(handle.to_string(), token.to_string());
-            Arc::new(s)
-        }
-        fn empty() -> Arc<dyn CredsTrait> {
-            Arc::new(Self {
-                inner: StdMutex::new(std::collections::HashMap::new()),
-            })
-        }
-    }
-    impl CredsTrait for MemCreds {
-        fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
-            Ok(self.inner.lock().unwrap().get(key).cloned())
-        }
-        fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
-            self.inner
-                .lock()
-                .unwrap()
-                .insert(key.to_string(), value.to_string());
-            Ok(())
-        }
-        fn delete(&self, key: &str) -> Result<(), CredentialsError> {
-            self.inner.lock().unwrap().remove(key);
-            Ok(())
-        }
-    }
+    // One in-memory credentials store for the whole crate's tests; it lives
+    // beside the token source because that is what reads and rotates it.
+    use crate::token::tests::MemCreds;
 
     fn cfg() -> MatrixConfig {
         MatrixConfig {
             homeserver_url: "https://matrix.example.org".to_string(),
             credential_handle_access_token: "matrix.test.token".to_string(),
+            credential_handle_refresh_token: None,
             user_id: "@bot:matrix.example.org".to_string(),
         }
     }
@@ -823,6 +844,90 @@ user_id = "@bot:matrix.example.org"
             "the homeserver's own errcode must reach the operator, got {err}"
         );
         ch.stop().await.unwrap();
+    }
+
+    /// A PERMISSION error must not be reported as a dead credential.
+    ///
+    /// `with_access_token` funnels every outbound call through one 401/403
+    /// decision, which is what stops the send path having its own opinion about
+    /// expiry. But Matrix uses those two statuses for two different things:
+    /// `M_UNKNOWN_TOKEN` says *who you are* is no longer accepted, while
+    /// `M_FORBIDDEN` says *what you asked for* is not allowed — an
+    /// under-privileged bot asked to redact someone else's event, with a
+    /// perfectly live token.
+    ///
+    /// Collapsing them publishes `AuthExpired`, which the channel manager
+    /// projects onto `HealthState::Unauthenticated` and which `TokenSource`
+    /// latches so it can never be walked back. One refused redaction would
+    /// therefore mark the channel permanently unauthenticated while every
+    /// subsequent send kept succeeding — health lying, in the direction the
+    /// operator acts on, because `channel reload` cannot fix a power level.
+    ///
+    /// **The negative half is paired with a known-positive on purpose.** An
+    /// "no `AuthExpired` was published" assertion passes just as happily if the
+    /// event can never be published at all, so the same shape is run against a
+    /// genuine `M_UNKNOWN_TOKEN` revocation, which must still fail closed.
+    #[tokio::test]
+    async fn a_permission_error_is_not_a_dead_credential() {
+        async fn auth_expired_after_a_refused_redaction(status: usize, body: &str) -> Vec<String> {
+            let mut server = mockito::Server::new_async().await;
+            let _m = server
+                .mock(
+                    "PUT",
+                    mockito::Matcher::Regex(
+                        r"/_matrix/client/v3/rooms/[^/]+/redact/.*".to_string(),
+                    ),
+                )
+                .with_status(status)
+                .with_header("content-type", "application/json")
+                .with_body(body)
+                .create_async()
+                .await;
+
+            let creds = MemCreds::with_token("matrix.test.token", TEST_TOKEN);
+            let mut ch = MatrixChannel::with_base("test", cfg(), creds, server.url());
+            ch.start().await.unwrap();
+            let err = ch.delete_message(TEST_ROOM, "$orig123").await.unwrap_err();
+            assert!(
+                err.to_string().contains("M_"),
+                "the homeserver's errcode must reach the operator, got {err}"
+            );
+            let events = ch.poll_events().await.unwrap();
+            ch.stop().await.unwrap();
+            events
+                .into_iter()
+                .filter_map(|e| match e {
+                    ChannelEvent::AuthExpired { reason } => Some(reason),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        // Known-positive: a real revocation on the same route, same shape.
+        let revoked = auth_expired_after_a_refused_redaction(
+            401,
+            r#"{"errcode":"M_UNKNOWN_TOKEN","error":"Token is not active"}"#,
+        )
+        .await;
+        assert_eq!(
+            revoked.len(),
+            1,
+            "a revoked token must still fail closed on the send path, or the \
+             assertion below proves nothing: {revoked:?}"
+        );
+
+        // The case under test: a live token, an operation the bot may not do.
+        let forbidden = auth_expired_after_a_refused_redaction(
+            403,
+            r#"{"errcode":"M_FORBIDDEN","error":"You don't have permission to redact this event"}"#,
+        )
+        .await;
+        assert!(
+            forbidden.is_empty(),
+            "a permission error marked the credential dead; health would read \
+             Unauthenticated for a live token and `channel reload` cannot fix a \
+             power level: {forbidden:?}"
+        );
     }
 
     /// Declaration ↔ behaviour, both directions.
