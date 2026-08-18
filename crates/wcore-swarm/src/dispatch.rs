@@ -477,7 +477,18 @@ pub(crate) async fn run_worker(
         }
     };
 
-    if output.stdout.len() > stream_output_bytes || output.stderr.len() > stream_output_bytes {
+    // Names the offending stream. The sandbox no longer reports a typed
+    // overflow error for the buffered backends — it truncates and reports the
+    // bytes it kept (FerroxLabs/wayland#1071) — so this per-stream check is now
+    // the only place a swarm caller learns WHICH stream a worker flooded.
+    let flooded = if output.stdout.len() > stream_output_bytes {
+        Some("stdout")
+    } else if output.stderr.len() > stream_output_bytes {
+        Some("stderr")
+    } else {
+        None
+    };
+    if let Some(stream) = flooded {
         return release_terminal(
             manager,
             workspace,
@@ -485,7 +496,7 @@ pub(crate) async fn run_worker(
                 worker_id,
                 branch,
                 format!(
-                    "output limit exceeded: worker stream exceeded the {stream_output_bytes}-byte limit"
+                    "output limit exceeded: worker {stream} exceeded the {stream_output_bytes}-byte limit"
                 ),
                 start.elapsed(),
             ),

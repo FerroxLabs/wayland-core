@@ -263,8 +263,8 @@ pub(super) fn allocate_sid(authority: [u8; 6], subauthorities: &[u32]) -> Result
 /// this thread, which happens after the wait — so an offender that floods and
 /// then sleeps (the `flood_worker_fixture` shape) was never killed, and the
 /// failure was reported as a Timeout instead of `OutputLimitExceeded`. Linux
-/// gets this for free: `read_bounded` returns `Err(OutputLimitExceeded)` the
-/// moment the ceiling is hit.
+/// gets this for free: `read_bounded` stops reading and wakes its waiter the
+/// moment the drain ceiling is hit.
 pub(super) unsafe fn drain_pipe(
     h: HANDLE,
     output_bytes: Arc<AtomicUsize>,
@@ -288,20 +288,20 @@ pub(super) unsafe fn drain_pipe(
             break;
         }
         let read = read as usize;
-        if super::super::super::reserve_output(&output_bytes, read) {
-            out.extend_from_slice(&buf[..read]);
-        } else {
+        // A partial grant is kept: the ceiling can land mid-read, and those
+        // bytes are as much of the head as the shared budget allows.
+        let granted = super::super::super::reserve_output(&output_bytes, read);
+        out.extend_from_slice(&buf[..granted]);
+        if granted < read && !exceeded {
             // Keep draining after the ceiling is hit so the child does not
             // deadlock on a full pipe while the waiter tears the job down.
             // Discarding the excess bounds host memory.
-            if !exceeded {
-                exceeded = true;
-                // Signal once, on the transition. The waiter reaps the job,
-                // which EOFs this pipe and ends the loop.
-                if !exceeded_event.is_null() {
-                    unsafe {
-                        SetEvent(exceeded_event);
-                    }
+            exceeded = true;
+            // Signal once, on the transition. The waiter reaps the job,
+            // which EOFs this pipe and ends the loop.
+            if !exceeded_event.is_null() {
+                unsafe {
+                    SetEvent(exceeded_event);
                 }
             }
         }
