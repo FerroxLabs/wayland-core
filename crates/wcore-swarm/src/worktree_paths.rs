@@ -34,6 +34,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 
+use super::security::io_at;
+
 /// Canonicalize the real on-disk object named by `path` and render it in the
 /// crate's one worktree path representation.
 ///
@@ -42,6 +44,7 @@ use crate::error::Result;
 /// (see the module docs) — correctness comes from both operands of a
 /// comparison sharing this one derivation, never from an assumed prefix form.
 pub(super) fn normalized_root(path: &Path) -> Result<PathBuf> {
-    let canonical = std::fs::canonicalize(path)?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| io_at("canonicalization of the worktree path", path, error))?;
     Ok(dunce::simplified(&canonical).to_path_buf())
 }
