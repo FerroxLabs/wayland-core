@@ -1100,6 +1100,90 @@ async fn seal_workspace() -> (
     (fixture, control, manager, workspace)
 }
 
+/// A failure in the TAIL of the registration critical section must return the
+/// error rather than hang.
+///
+/// `TransactionCleanup::release` re-acquires the swarm sentinel, and `flock` is
+/// per open file description, so a cleanup dropped by an unwind from INSIDE
+/// that critical section blocks forever on the lock this very thread already
+/// holds. A poisoned active-reservation registry is the one reachable trigger
+/// for such an unwind, so it is what this drives.
+///
+/// The admission runs on its own thread behind a bounded wait: a re-entrant
+/// `flock` never returns, so an unbounded assertion would hang the runner
+/// instead of failing it. The poisoning panic is deliberate and prints to
+/// stderr.
+#[cfg(target_os = "linux")]
+#[test]
+fn poisoned_reservation_registry_refuses_admission_without_deadlock() {
+    let (outcome_tx, outcome_rx) = mpsc::channel();
+    let admission = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async move {
+            let fixture = tempfile::tempdir().expect("fixture");
+            let control = tempfile::tempdir().expect("orchestrator control root");
+            seal_init_repo(fixture.path()).await;
+            let manager = WorktreeManager::new_with_workspace_root(
+                fixture.path(),
+                &control.path().join("checkouts"),
+            )
+            .expect("external manager");
+            let head = manager.pinned_head().await.expect("pinned head");
+            let registry = Arc::clone(&manager.active_reservations);
+            let poisoner = std::thread::spawn(move || {
+                let _held = registry.lock().unwrap();
+                panic!("poison the active reservation registry");
+            });
+            assert!(
+                poisoner.join().is_err(),
+                "the registry was never poisoned, so the tail failure is unreachable"
+            );
+            let outcome = manager
+                .create_isolated_checkout(
+                    "child-poison",
+                    "wayland-child/child-poison",
+                    &head,
+                    WorkspaceCapacity {
+                        available_bytes: u64::MAX,
+                        safety_margin_bytes: 0,
+                        max_transaction_bytes: u64::MAX,
+                        max_aggregate_bytes: u64::MAX,
+                    },
+                )
+                .await
+                .err()
+                .map(|error| error.to_string());
+            // The critical section must also have EXITED. A refusal that left
+            // the sentinel held is the same permanent hang one call later.
+            let probe = DirectoryAuthority::open(&manager.swarm_root).expect("swarm authority");
+            let sentinel_free =
+                fd_lock::RwLock::new(swarm_lock_handle(&probe).expect("swarm sentinel"))
+                    .try_write()
+                    .is_ok();
+            let _ = outcome_tx.send((outcome, sentinel_free));
+        });
+    });
+
+    let outcome = outcome_rx.recv_timeout(Duration::from_secs(60)).expect(
+        "isolated checkout never returned: the registration critical section deadlocked \
+         against the swarm sentinel it already held",
+    );
+    admission.join().expect("admission thread");
+    let (error, sentinel_free) = outcome;
+    let error = error.expect("a poisoned reservation registry must refuse admission");
+    assert!(
+        error.contains("active reservation registry is poisoned"),
+        "{error}"
+    );
+    assert!(
+        sentinel_free,
+        "the refused admission left the swarm sentinel held"
+    );
+}
+
 /// A NEED_WORK_TREE git subcommand must still be able to chdir into the
 /// repository root while `WorktreeManager`s hold their repository authority.
 ///

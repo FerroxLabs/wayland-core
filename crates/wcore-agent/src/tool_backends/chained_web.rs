@@ -16,6 +16,40 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use wcore_tools::web_tools::{CrawlRequest, ExtractRequest, WebBackend, WebOutcome};
 
+/// Record on a fallback result that the primary was tried and failed.
+///
+/// Without this the degradation is invisible: the caller receives an ordinary
+/// success from DuckDuckGo and has no way to learn that the backend the user
+/// actually configured never ran. gh#1068 — a user whose `EXA_API_KEY` was
+/// being ignored was advised to set a Brave key, because the only backend
+/// anyone could see was the fallback.
+///
+/// Additive only. `payload` is splice-merged into the final result object, so
+/// a new key cannot disturb the `web` / `results` shapes callers match on. A
+/// non-object payload is passed through untouched rather than coerced.
+fn note_degraded(outcome: WebOutcome, primary: &str, fallback: &str, reason: &str) -> WebOutcome {
+    match outcome {
+        WebOutcome::Ok { mut payload } => {
+            if let Some(map) = payload.as_object_mut() {
+                map.insert(
+                    "degraded_from".to_string(),
+                    serde_json::json!({
+                        "backend": primary,
+                        "served_by": fallback,
+                        "reason": reason,
+                    }),
+                );
+            }
+            WebOutcome::Ok { payload }
+        }
+        // Both failed. The fallback's own message is the one worth surfacing,
+        // but it is misleading on its own, so carry the primary's with it.
+        WebOutcome::Err { message } => WebOutcome::Err {
+            message: format!("{message} (primary '{primary}' also failed: {reason})"),
+        },
+    }
+}
+
 /// Wraps a primary backend with a fallback (always DuckDuckGo in practice).
 /// On any primary `Err`, the same operation is retried on the fallback.
 pub struct ChainedWebBackend {
@@ -35,12 +69,21 @@ impl WebBackend for ChainedWebBackend {
         match self.primary.search(query, limit).await {
             WebOutcome::Ok { payload } => WebOutcome::Ok { payload },
             WebOutcome::Err { message } => {
-                tracing::debug!(
+                // WARN, not DEBUG: with `RUST_LOG` unset a debug! record is not
+                // written anywhere at all, so the single most useful line for
+                // diagnosing "web search is broken" did not survive the run.
+                tracing::warn!(
                     "web search: primary '{}' failed ({message}); falling back to '{}'",
                     self.primary.backend_id(),
                     self.fallback.backend_id()
                 );
-                self.fallback.search(query, limit).await
+                let out = self.fallback.search(query, limit).await;
+                note_degraded(
+                    out,
+                    self.primary.backend_id(),
+                    self.fallback.backend_id(),
+                    &message,
+                )
             }
         }
     }
@@ -110,6 +153,69 @@ mod tests {
             fb.snapshot().len(),
             1,
             "fallback must be invoked exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_result_records_which_backend_was_skipped_and_why() {
+        // gh#1068. The whole harm was that this degradation was invisible: the
+        // caller saw a clean DuckDuckGo success and could not tell that the
+        // configured backend had been refused, so users were diagnosed against
+        // a backend that was never involved.
+        let fb = Arc::new(CapturingWebBackend::new().with_search_payload(json!({
+            "web": [{"title": "ddg", "url": "https://x/", "snippet": "ok"}]
+        })));
+        let chain = ChainedWebBackend::new(Arc::new(ErrBackend), fb);
+        let WebOutcome::Ok { payload } = chain.search("q", 5).await else {
+            panic!("fallback should have served this");
+        };
+        let note = payload
+            .get("degraded_from")
+            .expect("a served-by-fallback result must say so");
+        assert_eq!(note.get("backend").and_then(|v| v.as_str()), Some("err"));
+        assert_eq!(
+            note.get("served_by").and_then(|v| v.as_str()),
+            Some("capturing")
+        );
+        assert!(
+            note.get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .contains("boom"),
+            "the primary's actual failure reason must survive, not just the fact of it"
+        );
+        // The note is additive: the payload callers match on is untouched.
+        assert!(payload.get("web").is_some(), "results must be unchanged");
+    }
+
+    #[tokio::test]
+    async fn a_successful_primary_is_not_marked_degraded() {
+        // Guards the obvious way to "pass" the test above — annotating always.
+        let primary = Arc::new(CapturingWebBackend::new().with_search_payload(json!({
+            "web": [{"title": "p", "url": "https://p/", "snippet": "ok"}]
+        })));
+        let chain = ChainedWebBackend::new(primary, Arc::new(CapturingWebBackend::new()));
+        let WebOutcome::Ok { payload } = chain.search("q", 5).await else {
+            panic!("primary should have served this");
+        };
+        assert!(
+            payload.get("degraded_from").is_none(),
+            "a result the primary served is not degraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn when_both_fail_the_primary_reason_is_not_lost() {
+        // The fallback's own error alone is actively misleading — it names
+        // DuckDuckGo for a failure that started with the user's configured
+        // backend being refused.
+        let chain = ChainedWebBackend::new(Arc::new(ErrBackend), Arc::new(ErrBackend));
+        let WebOutcome::Err { message } = chain.search("q", 5).await else {
+            panic!("both arms fail, so this must be an Err");
+        };
+        assert!(
+            message.contains("primary 'err'"),
+            "the primary that failed first must be named: {message}"
         );
     }
 

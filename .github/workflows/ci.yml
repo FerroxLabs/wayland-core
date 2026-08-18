@@ -135,6 +135,13 @@ jobs:
   ci:
     name: CI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # gh#1072. Without this the job inherits GitHub's 6-HOUR default, and this
+    # is a required context, so one wedged job blocks every PR in the repo.
+    # Sized from measurement, not guesswork: across the last four successful
+    # runs the slowest arm was CI (macos-latest) at 65 min and CI (Array) at
+    # 42 min. 120 gives ~1.8x headroom over the worst observed, and sits
+    # between the sibling `ci-linux` (90) and `ci-windows-hosted` (180).
+    timeout-minutes: 120
     # 2026-08-02. Skip this job entirely on a `lane/**` push that opted into
     # neither platform. See the matrix note below for why the self-hosted
     # Windows entry stopped being unconditional. Lanes keep `Lint`, the
@@ -1557,6 +1564,10 @@ jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # gh#1072. Slowest measured arm is Build (aarch64-pc-windows-msvc) at
+    # 33 min; the rest land 15-24 min. 75 leaves ~2.3x for a cold cache
+    # without letting a wedged build hold a required context for six hours.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       # Selects between two literals (see the admission-control note at the top
@@ -1875,6 +1886,21 @@ jobs:
     name: Browser live e2e (chromium)
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    # gh#1072 — THE job this issue was filed for. It hung twice in one day
+    # during the v0.13.1 release train (runs 32088384785 at ~4h06m and
+    # 32043535383 at ~3h13m), both times producing no output at all, both
+    # times cancelled by hand. In the second case this context had ALREADY
+    # gone green for the same commit, and branch protection scores the LATEST
+    # check-run per context, so the hung retry masked a passing result.
+    #
+    # `continue-on-error: true` does NOT save us here: it stops a FAILURE from
+    # failing the run, but a job that never finishes never reports at all, so
+    # the context simply stays in progress and holds the merge.
+    #
+    # Healthy runtime is 5 min flat across every sampled run. 30 is 6x that —
+    # deliberately loose enough never to fire on a slow-but-working run, and
+    # tight enough that a wedge costs half an hour instead of a working day.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -1926,6 +1952,10 @@ jobs:
     needs: ci
     if: always()
     runs-on: ubuntu-latest
+    # gh#1072. Pure aggregation — measures under a minute in every sampled
+    # run. It is last in the chain, so a wedge here strands everything that
+    # already passed.
+    timeout-minutes: 10
     permissions:
       # NOTE: a job-level `permissions:` block REPLACES the workflow-level
       # one entirely (GHA semantics), so `contents: read` from the

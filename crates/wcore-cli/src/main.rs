@@ -4177,6 +4177,27 @@ fn handle_session_resync(
     }
 }
 
+/// FerroxLabs/wayland#1070 — reason stamped on approvals denied because the
+/// host's command stream reached EOF while they were parked. Distinct from the
+/// TTL reaper's "approval timed out (no host response)", which means the host
+/// is still connected but silent.
+const HOST_EOF_DENY_REASON: &str = "host closed the command stream while this approval was pending";
+
+/// FerroxLabs/wayland#1070 — the command stream reached EOF. No approval
+/// decision can ever arrive after this, so every parked approval is resolved
+/// as denied NOW rather than stalling for the rest of the 5-minute approval
+/// TTL (live UAT measured a 330-second stall). Fails closed, matching the
+/// reaper.
+fn deny_pending_approvals_on_host_eof(approval_manager: &ToolApprovalManager) {
+    let denied = approval_manager.deny_all_pending(HOST_EOF_DENY_REASON);
+    if denied > 0 {
+        tracing::warn!(
+            denied,
+            "host closed the command stream with approvals pending; denied them immediately"
+        );
+    }
+}
+
 enum ActiveRecoveryOutcome<T> {
     Finished(T),
     Stopped(T),
@@ -4257,7 +4278,10 @@ where
                 Some(_) => {
                     eprintln!("[protocol] Ignoring uncorrelated command during active recovery");
                 }
-                None => commands_open = false,
+                None => {
+                    commands_open = false;
+                    deny_pending_approvals_on_host_eof(approval_manager);
+                }
             },
             result = &mut future => {
                 return if stop_requested {
@@ -5045,7 +5069,7 @@ async fn run_json_stream_mode(
     // defense-in-depth.
     protocol_sink.share_token_redactor_with(&approval_bridge.redactor());
 
-    let mut cmd_rx = spawn_stdin_reader();
+    let mut cmd_rx = spawn_stdin_reader(writer.clone());
 
     // --- Pre-message phase: accept AddMcpServer commands ---
     let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
@@ -5560,6 +5584,9 @@ async fn run_json_stream_mode(
                 };
 
                 let mut stopped = false;
+                // #1070: latched false once the host's command stream reaches
+                // EOF, so the select never polls a closed receiver again.
+                let mut commands_open = true;
                 let mut pending_config: Option<PendingConfig> = None;
                 let mut mode_changed = false;
                 // CORE-2: an errored run may still have consumed provider
@@ -5616,7 +5643,15 @@ async fn run_json_stream_mode(
                                 }
                                 break;
                             }
-                            Some(sub_cmd) = cmd_rx.recv() => {
+                            maybe_cmd = cmd_rx.recv(), if commands_open => {
+                                // #1070: `Some(sub_cmd) = ...` silently
+                                // disabled this branch on EOF, leaving a
+                                // parked approval to wait out its full TTL.
+                                let Some(sub_cmd) = maybe_cmd else {
+                                    commands_open = false;
+                                    deny_pending_approvals_on_host_eof(&approval_manager);
+                                    continue;
+                                };
                                 match sub_cmd {
                                     ProtocolCommand::ToolApprove { call_id, scope, answer } => {
                                         // v0.9.4 W1.3 (F7): was resolve() ignoring scope. Use
@@ -7201,6 +7236,116 @@ mod tests {
             ToolApprovalResult::Denied { reason }
                 if reason == "operator denied second recovered tool"
         ));
+    }
+
+    /// FerroxLabs/wayland#1070 (b) — the host's command stream reaching EOF
+    /// while a tool is parked on its approval must resolve that approval
+    /// immediately (denied), not after the approval TTL.
+    ///
+    /// Pre-fix, EOF only stopped the driver from reading commands; the parked
+    /// `rx.await` then sat until the background reaper fired. Live UAT of the
+    /// v0.13.1 candidate measured a 330-second stall before the correct
+    /// `tool_cancelled` finally arrived.
+    ///
+    /// The manager keeps its DEFAULT 300-second TTL here on purpose, and the
+    /// 1-second timeout is the assertion: if the reaper is what unblocks this,
+    /// the test fails instead of hanging CI.
+    #[tokio::test]
+    async fn host_command_stream_eof_denies_a_parked_approval_immediately() {
+        use wcore_protocol::events::ToolCategory;
+
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let future_manager = approval_manager.clone();
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let future = async move {
+            let parked = future_manager.request_approval("eof-call", &ToolCategory::Exec, "Bash");
+            parked_tx.send(()).unwrap();
+            parked.await.expect("the parked approval must resolve")
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        let host = tokio::spawn(async move {
+            parked_rx.await.unwrap();
+            // The host process went away mid-approval.
+            drop(cmd_tx);
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect("stdin EOF must resolve a parked approval promptly, not after the approval TTL");
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished(result) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        assert!(
+            matches!(result, ToolApprovalResult::Denied { reason } if reason == HOST_EOF_DENY_REASON),
+            "EOF must fail CLOSED, and say EOF was the cause rather than reusing the TTL reason"
+        );
+    }
+
+    /// CONTROL for the test above: with the command stream still OPEN, the
+    /// same parked approval is answered by the host and resolves as the
+    /// operator decided — the EOF denial is not firing on every approval.
+    #[tokio::test]
+    async fn an_open_command_stream_still_answers_a_parked_approval() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let future_manager = approval_manager.clone();
+        let (parked_tx, parked_rx) = tokio::sync::oneshot::channel();
+        let future = async move {
+            let parked = future_manager.request_approval("open-call", &ToolCategory::Exec, "Bash");
+            parked_tx.send(()).unwrap();
+            parked.await.expect("the parked approval must resolve")
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        let host = tokio::spawn(async move {
+            parked_rx.await.unwrap();
+            cmd_tx
+                .send(ProtocolCommand::ToolApprove {
+                    call_id: "open-call".into(),
+                    scope: ApprovalScope::Once,
+                    answer: None,
+                })
+                .await
+                .unwrap();
+            // Held open past the decision, then closed so the driver returns.
+            drop(cmd_tx);
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect("an answered approval must not deadlock");
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished(result) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        assert!(
+            matches!(result, ToolApprovalResult::Approved { answer: None }),
+            "an open stream must deliver the operator's decision, not an EOF denial"
+        );
     }
 
     #[tokio::test]
@@ -8827,6 +8972,120 @@ mod tests {
             event,
             ProtocolEvent::ApprovalRequired { call_id, .. } if call_id == "local-write"
         )));
+    }
+
+    /// FerroxLabs/wayland#1070 (c) — what `approval_required.resume_token`
+    /// carries, in both of its two cases.
+    ///
+    /// The `"resume_token": ""` seen in UAT is the DESIGNED value for an
+    /// ordinary tool gate (GHSA-8r7g): that gate has no bridge entry, so there
+    /// is no secret to mint or leak, and the host answers it with
+    /// `tool_approve` / `tool_deny` keyed by `call_id`. A gate that IS
+    /// bridge-backed must carry a non-empty token — and non-empty alone would
+    /// not prove it is USABLE, so this resolves the parked approval with the
+    /// exact token that went out on the wire.
+    #[tokio::test]
+    async fn a_bridge_backed_gate_carries_a_resume_token_that_round_trips() {
+        use wcore_agent::approval::{ApprovalBridge, ApprovalOutcome, ApprovalRequest};
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::{ToolCategory, ToolInfo};
+
+        let manager = Arc::new(ToolApprovalManager::new());
+        let bridge = Arc::new(ApprovalBridge::new());
+        let (_minted, parked) = bridge
+            .request_with_id(
+                "bridged-call".to_string(),
+                ApprovalRequest {
+                    call_id: "bridged-call".into(),
+                    reason: "egress".into(),
+                    context: String::new(),
+                },
+            )
+            .await;
+        let capture = Arc::new(CapturingProtocolEmitter::default());
+        let inner: Arc<dyn ProtocolEmitter> = capture.clone();
+        let writer = GatingProtocolWriter::new(inner, manager.clone(), Some(bridge.clone()));
+
+        for call_id in ["bridged-call", "plain-call"] {
+            writer
+                .emit(&ProtocolEvent::ToolRequest {
+                    msg_id: "m".into(),
+                    call_id: call_id.into(),
+                    tool: ToolInfo {
+                        name: "Bash".into(),
+                        category: ToolCategory::Exec,
+                        args: json!({}),
+                        description: String::new(),
+                    },
+                })
+                .unwrap();
+        }
+
+        let gates: Vec<(String, String, String)> = capture
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                ProtocolEvent::ApprovalRequired {
+                    call_id,
+                    resume_token,
+                    correlation_id,
+                    ..
+                } => Some((
+                    call_id.clone(),
+                    resume_token.clone(),
+                    correlation_id.clone(),
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gates.len(), 2, "both tools must be gated: {gates:?}");
+
+        let bridged = gates
+            .iter()
+            .find(|gate| gate.0 == "bridged-call")
+            .expect("the bridge-backed gate");
+        assert!(
+            !bridged.1.is_empty(),
+            "a bridge-backed gate must carry the minted secret: {bridged:?}"
+        );
+        assert!(
+            bridge
+                .resolve(
+                    &bridged.1,
+                    ApprovalOutcome {
+                        approved: true,
+                        modifications: None,
+                    },
+                )
+                .await,
+            "the token on the wire must be the one the bridge accepts — non-empty is not enough"
+        );
+        let outcome = parked.await.expect("the parked bridge approval resolves");
+        assert!(outcome.approved);
+
+        // CONTROL: the ordinary tool gate is the empty-token case, and it is
+        // not a dead end — `correlation_id` is the non-empty handle, and the
+        // manager answers it by `call_id`.
+        let plain = gates
+            .iter()
+            .find(|gate| gate.0 == "plain-call")
+            .expect("the ordinary tool gate");
+        assert!(
+            plain.1.is_empty(),
+            "an ordinary tool gate must mint NO bridge secret: {plain:?}"
+        );
+        assert_eq!(plain.2, "plain-call");
+        let rx = manager.request_approval("plain-call", &ToolCategory::Exec, "Bash");
+        assert!(
+            manager.resolve_host("plain-call", true, ApprovalScope::Once, None),
+            "the empty-token gate must be answerable by call_id"
+        );
+        assert!(matches!(
+            rx.await.expect("the tool gate resolves"),
+            ToolApprovalResult::Approved { .. }
+        ));
     }
 
     #[test]

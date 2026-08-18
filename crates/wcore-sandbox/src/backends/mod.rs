@@ -50,6 +50,11 @@ const STREAM_CHANNEL_CAP: usize = 64;
 /// Streaming callers have their own bounded channel/backpressure contract;
 /// buffered hooks, gates, and embedded skills must never grow host memory in
 /// proportion to child output.
+///
+/// Crossing the cap TRUNCATES the output; it never discards it. Discarding
+/// inverted the cap's own purpose — a command that printed 20 MB and failed
+/// handed its caller 129 bytes, none of them the output that explained the
+/// failure (FerroxLabs/wayland#1071).
 pub(crate) const BUFFERED_OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct BoundedChildOutput {
@@ -58,25 +63,68 @@ pub(crate) struct BoundedChildOutput {
     pub stderr: Vec<u8>,
 }
 
-pub(crate) fn reserve_output(used: &AtomicUsize, amount: usize) -> bool {
+/// Reserve up to `amount` bytes of the shared budget, returning how many bytes
+/// were granted.
+///
+/// A short grant (including zero) is the overflow signal: the caller keeps the
+/// bytes that fit rather than dropping the whole stream.
+pub(crate) fn reserve_output(used: &AtomicUsize, amount: usize) -> usize {
     let mut current = used.load(Ordering::Relaxed);
     loop {
-        let Some(next) = current.checked_add(amount) else {
-            return false;
-        };
-        if next > BUFFERED_OUTPUT_LIMIT_BYTES {
-            return false;
+        let granted = amount.min(BUFFERED_OUTPUT_LIMIT_BYTES.saturating_sub(current));
+        if granted == 0 {
+            return 0;
         }
-        match used.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return true,
+        match used.compare_exchange_weak(
+            current,
+            current + granted,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return granted,
             Err(observed) => current = observed,
         }
     }
 }
 
+/// The in-band notice that stands in for the bytes past the cap.
+///
+/// In-band because the bytes are: [`crate::SandboxOutput`] carries stdout and
+/// stderr and nothing else, so a marker in the stream is the only truncation
+/// signal that reaches the reader. Silently handing back a partial result would
+/// be the same class of defect as handing back none of it.
+///
+/// It says the command was STOPPED because that is what happens next, and a
+/// reader who is not told will assume the command ran to completion.
+fn truncation_marker(kept: usize) -> Vec<u8> {
+    format!(
+        "\n[wcore-sandbox: OUTPUT TRUNCATED. This command produced more than the \
+         {BUFFERED_OUTPUT_LIMIT_BYTES}-byte buffered output cap. The {kept} bytes above \
+         are the start of the output; everything after them was discarded, and the \
+         command was STOPPED at that point — it did not run to completion, so any work \
+         it had not yet done has not happened.]\n"
+    )
+    .into_bytes()
+}
+
+/// Drain one pipe, keeping as much as the shared budget allows.
+///
+/// Crossing the cap TRUNCATES: the bytes that fit are kept, [`truncation_marker`]
+/// records that the rest were discarded, and `overflow_abort` is signalled so
+/// the waiter stops the child.
+///
+/// Reading on to EOF instead — to reach the end of the output, where a failing
+/// build's error usually is — is deliberately NOT done. Crossing the cap is the
+/// trip wire that stops the child, and that is load-bearing: the abuse shape
+/// this guards against (flood the pipe, then sit there) never reaches EOF at
+/// all, so draining would trade a prompt stop for a wait on the caller's
+/// wall-clock timeout. And a child stopped at the cap has no tail to keep —
+/// its last bytes would be where reading stopped, not where the command ended,
+/// which is a more misleading thing to hand a reader than a plain head.
 async fn read_bounded(
     mut reader: impl AsyncRead + Unpin,
     used: Arc<AtomicUsize>,
+    overflow_abort: Arc<tokio::sync::Notify>,
 ) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut chunk = [0_u8; 16 * 1024];
@@ -85,12 +133,14 @@ async fn read_bounded(
         if count == 0 {
             return Ok(output);
         }
-        if !reserve_output(&used, count) {
-            return Err(crate::SandboxError::OutputLimitExceeded {
-                limit_bytes: BUFFERED_OUTPUT_LIMIT_BYTES,
-            });
+        let granted = reserve_output(&used, count);
+        output.extend_from_slice(&chunk[..granted]);
+        if granted < count {
+            let marker = truncation_marker(output.len());
+            output.extend_from_slice(&marker);
+            overflow_abort.notify_one();
+            return Ok(output);
         }
-        output.extend_from_slice(&chunk[..count]);
     }
 }
 
@@ -111,10 +161,11 @@ pub(crate) async fn wait_with_bounded_output_on_exit(
         .take()
         .ok_or_else(|| crate::SandboxError::ExecFailed("child stderr was not piped".into()))?;
     let used = Arc::new(AtomicUsize::new(0));
+    let overflow_abort = Arc::new(tokio::sync::Notify::new());
     let drains = async {
         let (stdout, stderr) = tokio::try_join!(
-            read_bounded(stdout, Arc::clone(&used)),
-            read_bounded(stderr, used),
+            read_bounded(stdout, Arc::clone(&used), Arc::clone(&overflow_abort)),
+            read_bounded(stderr, used, Arc::clone(&overflow_abort)),
         )?;
         Ok::<_, crate::SandboxError>((stdout, stderr))
     };
@@ -127,6 +178,19 @@ pub(crate) async fn wait_with_bounded_output_on_exit(
             let status = waited?;
             on_exit.take().expect("exit callback runs once")();
             let (stdout, stderr) = drains.await?;
+            Ok(BoundedChildOutput { status, stdout, stderr })
+        }
+        _ = overflow_abort.notified() => {
+            // A stream crossed the cap, so this child has nothing left to give
+            // us. Tear the tree down HERE, before waiting on the other pipe:
+            // killing only the direct child is not enough, because the write
+            // end can be held by a surviving grandchild (any shell pipeline),
+            // and waiting for an EOF that will never come is the wait the
+            // discard-everything error used to avoid. `on_exit` is the tree
+            // teardown, so running it early is exactly that kill.
+            on_exit.take().expect("exit callback runs once")();
+            let (stdout, stderr) = drains.await?;
+            let status = child.wait().await?;
             Ok(BoundedChildOutput { status, stdout, stderr })
         }
         drained = &mut drains => {
