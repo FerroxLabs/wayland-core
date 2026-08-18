@@ -4341,8 +4341,12 @@ fn try_load_config_file_with_disposition(
 /// failure on upgrade. Warning keeps the config loading while making the
 /// misconfiguration visible. A genuinely malformed TOML still errors on the
 /// real parse downstream.
+///
+/// #1069: the trace below is the RECORD; [`unknown_config_keys_notice`] is the
+/// CHANNEL. Both are emitted, because a trace alone reaches nobody by default.
 fn warn_unknown_config_keys(raw: &str, path: &Path) {
-    for key in collect_unknown_config_keys(raw) {
+    let keys = collect_unknown_config_keys(raw);
+    for key in &keys {
         tracing::warn!(
             target: "wcore_config",
             key = %key,
@@ -4351,6 +4355,84 @@ fn warn_unknown_config_keys(raw: &str, path: &Path) {
              it has no effect; check for a typo or wrong [section]",
             path.display(),
         );
+    }
+    if let Some(notice) = unknown_config_keys_notice(&keys, path) {
+        warn_ignored_config_keys_once(&notice);
+    }
+}
+
+/// Render the operator-facing stderr block for the ignored keys, or `None`
+/// when every key was recognised. Split out of [`warn_unknown_config_keys`] so
+/// the exact words the user reads are under test.
+///
+/// #1069: `tracing::warn!` is not a user-facing channel here. With `RUST_LOG`
+/// unset — the normal case — only ERROR reaches stderr and everything below it
+/// is routed to `$WAYLAND_HOME/logs/wayland-core.log` (see the log-routing
+/// decision in `wcore-cli/src/main.rs`), so #326's warning was invisible to
+/// exactly the user it was written for. stderr is the sink that already carries
+/// the malformed-TOML error and the world-readable-permissions warning raised
+/// by this same load, so the notice goes there too.
+fn unknown_config_keys_notice(keys: &[String], path: &Path) -> Option<String> {
+    if keys.is_empty() {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "warning: {} setting(s) in {} were not recognised and are IGNORED:",
+        keys.len(),
+        path.display()
+    )];
+    for key in keys {
+        lines.push(format!("  {key}"));
+        if let Some(hint) = unknown_config_key_hint(key) {
+            lines.push(format!("    hint: {hint}"));
+        }
+    }
+    lines.push(
+        "warning: none of the settings above took effect — check for a typo or a wrong [section]."
+            .to_string(),
+    );
+    Some(lines.join("\n"))
+}
+
+/// Targeted remediation for the misplacement whose silence costs the most.
+///
+/// Only a top-level `base_url` qualifies today. It is the natural guess, and in
+/// #1069 the user set it to route AWAY from the vendor: the key was dropped
+/// without a word and the run then sent the prompt and the real API key to the
+/// vendor's default endpoint — the exact disclosure the setting was meant to
+/// prevent. A generic "unknown key" line does not tell that user where the
+/// setting actually lives, so name the spelling.
+fn unknown_config_key_hint(key: &str) -> Option<&'static str> {
+    match key {
+        "base_url" => Some(
+            "a top-level `base_url` is never read. An endpoint override belongs to a \
+             provider: put `base_url = \"...\"` under `[providers.<name>]` (e.g. \
+             `[providers.anthropic]`). As written, requests still go to the provider's \
+             default endpoint with your real credentials.",
+        ),
+        _ => None,
+    }
+}
+
+/// Print an ignored-key notice on stderr, at most once per distinct notice.
+///
+/// Guarded for the same reason [`warn_replay_protection_unavailable_once`] is:
+/// config resolution runs several times per launch (the boot path, the
+/// session-dir probe, the merged-file readers and each fallback provider all
+/// resolve), and the operator must hear this once per file — not stapled to
+/// every resolve. Keyed on the rendered notice rather than a bare `Once` so the
+/// global file and the project file each still get their own.
+fn warn_ignored_config_keys_once(notice: &str) {
+    static EMITTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let emitted = EMITTED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    // A poisoned lock must never swallow the notice: fall through and print.
+    let first_time = match emitted.lock() {
+        Ok(mut seen) => seen.insert(notice.to_string()),
+        Err(_) => true,
+    };
+    if first_time {
+        eprintln!("{notice}");
     }
 }
 
@@ -10855,5 +10937,80 @@ require_priced = true
         // Malformed TOML is reported by the authoritative parse, not here.
         let keys = collect_unknown_config_keys("this is = = not toml");
         assert!(keys.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // #1069 — the ignored keys must reach the USER, not just the log file.
+    // -------------------------------------------------------------------------
+
+    /// The issue's verbatim repro. Every one of its four silent keys — a
+    /// top-level `base_url`, a typo'd `modle`, a wrong section `[defaults]` and
+    /// a typo'd sub-table `[browser.polcy]` — must be collected. If this ever
+    /// goes red, detection (not delivery) is the defect.
+    #[test]
+    fn issue_1069_repro_collects_every_silent_key() {
+        let raw = "base_url = \"http://127.0.0.1:8899\"\n\
+                   provider = \"anthropic\"\n\
+                   modle = \"typo-model\"\n\
+                   [defaults]\n\
+                   [browser.polcy]\n";
+        let keys = collect_unknown_config_keys(raw);
+        for expected in ["base_url", "modle", "defaults", "browser.polcy"] {
+            assert!(
+                keys.iter().any(|k| k == expected),
+                "#1069 repro key `{expected}` must be surfaced, got {keys:?}"
+            );
+        }
+    }
+
+    /// The notice a user actually reads must name the file, say the settings
+    /// were IGNORED, and — for the highest-consequence key — spell out where
+    /// `base_url` really lives.
+    #[test]
+    fn base_url_notice_names_the_file_and_the_provider_spelling() {
+        let keys = vec!["base_url".to_string()];
+        let notice = unknown_config_keys_notice(&keys, Path::new("/home/u/config.toml"))
+            .expect("an ignored key must produce a notice");
+        assert!(
+            notice.contains("/home/u/config.toml"),
+            "the notice must name the file, got:\n{notice}"
+        );
+        assert!(
+            notice.contains("IGNORED"),
+            "the notice must say the setting had no effect, got:\n{notice}"
+        );
+        assert!(
+            notice.contains("[providers.<name>]") && notice.contains("[providers.anthropic]"),
+            "a top-level base_url must be told where the key really lives, got:\n{notice}"
+        );
+    }
+
+    /// CONTROL for the assertion above: the `[providers.…]` spelling is a
+    /// TARGETED hint, not boilerplate every notice carries. A different unknown
+    /// key must be listed but must NOT be handed the base_url remedy — so the
+    /// previous test cannot pass on text that is always present.
+    #[test]
+    fn notice_hint_is_targeted_not_boilerplate() {
+        let keys = vec!["modle".to_string()];
+        let notice = unknown_config_keys_notice(&keys, Path::new("/home/u/config.toml"))
+            .expect("an ignored key must produce a notice");
+        assert!(
+            notice.contains("modle"),
+            "the notice must name the offending key, got:\n{notice}"
+        );
+        assert!(
+            !notice.contains("providers."),
+            "the base_url hint must not be attached to unrelated keys, got:\n{notice}"
+        );
+    }
+
+    /// CONTROL for the notice tests: a config with nothing unknown must produce
+    /// NO notice at all, so an upgrading user with a valid file sees silence.
+    #[test]
+    fn clean_config_produces_no_notice() {
+        assert!(
+            unknown_config_keys_notice(&[], Path::new("/home/u/config.toml")).is_none(),
+            "a config with no unknown keys must produce no notice"
+        );
     }
 }
