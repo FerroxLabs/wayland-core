@@ -5345,14 +5345,49 @@ fn merge_config_files_with_trust(
     // qualifies — and merging them separately would synthesise a
     // project-denies/operator-allows pairing that neither layer wrote.
     let default_browser_policy = crate::browser::BrowserPolicyConfig::default();
+    // `loopback` is resolved SEPARATELY from the three fields above it, and is
+    // deliberately NOT part of their unit.
+    //
+    // `default_action` and the two origin lists are one decision — an
+    // allowlist only means something alongside the action it qualifies. A
+    // loopback grant is not part of that decision: it is an independent
+    // local-only capability (gh#911) that says nothing about which REMOTE
+    // origins are reachable.
+    //
+    // Folding it into the triple made it vanish in BOTH directions. A project
+    // that set only `[browser.policy.loopback]` failed the triple's predicate,
+    // so the whole project policy — grant included — was discarded; and a
+    // project that set any origin list won the triple as a unit, discarding
+    // the OPERATOR's grant. The capability landed with the loopback field and
+    // this predicate was never extended to mention it, so the feature was
+    // inert for project-level config in either direction.
+    //
+    // Same presence-over-default shape as `camoufox_download` below, and for
+    // the same reason this block is field-wise at all: a setting one layer
+    // never mentioned must not disappear because of one it did.
+    //
+    // This is on the TRUSTED path only. `restrict_untrusted_project_config`
+    // builds from `ConfigFile::default()` and never forwards `browser`, so an
+    // untrusted project reaches this point with no grant to promote. Locked by
+    // `an_untrusted_project_cannot_enable_a_loopback_grant`.
+    let loopback = if project.browser.policy.loopback != default_browser_policy.loopback {
+        project.browser.policy.loopback.clone()
+    } else {
+        global.browser.policy.loopback.clone()
+    };
+    let policy_triple = if project.browser.policy.default_action
+        != default_browser_policy.default_action
+        || !project.browser.policy.allowed_origins.is_empty()
+        || !project.browser.policy.denied_origins.is_empty()
+    {
+        project.browser.policy
+    } else {
+        global.browser.policy
+    };
     let browser = crate::browser::BrowserConfig {
-        policy: if project.browser.policy.default_action != default_browser_policy.default_action
-            || !project.browser.policy.allowed_origins.is_empty()
-            || !project.browser.policy.denied_origins.is_empty()
-        {
-            project.browser.policy
-        } else {
-            global.browser.policy
+        policy: crate::browser::BrowserPolicyConfig {
+            loopback,
+            ..policy_triple
         },
         stealth: crate::browser::StealthConfig {
             preferred_provider: if project.browser.stealth.preferred_provider
