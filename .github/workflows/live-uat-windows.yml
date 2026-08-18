@@ -159,9 +159,12 @@ jobs:
             }
             Remove-Job $job -Force
           }
-          Invoke-Smoke -Label 'wayland-core --version'        -Argv @('--version')
-          Invoke-Smoke -Label 'wayland-core doctor'           -Argv @('doctor')
-          Invoke-Smoke -Label 'wayland-core sandbox status'   -Argv @('sandbox','status')
+          # `doctor` is a FLAG on the root command, not a subcommand (main.rs
+          # `--doctor`, wired to the shared `wcore_cli::doctor` module).
+          Invoke-Smoke -Label 'wayland-core --version'             -Argv @('--version')
+          Invoke-Smoke -Label 'wayland-core --doctor'              -Argv @('--doctor')
+          Invoke-Smoke -Label 'wayland-core sandbox status'        -Argv @('sandbox','status')
+          Invoke-Smoke -Label 'wayland-core sandbox status --json' -Argv @('sandbox','status','--json')
 
       - name: CLAIM A + CLAIM B — live evidence
         shell: pwsh
