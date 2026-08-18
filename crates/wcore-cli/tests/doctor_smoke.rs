@@ -115,25 +115,40 @@ fn doctor_prints_mcp_section_and_does_not_probe_by_default() {
 
 #[test]
 fn doctor_marks_macos_accessibility_correctly_for_platform() {
-    // On macOS the row is rendered as MANUAL; on every other platform
-    // it is SKIPPED. Either way the label must appear.
+    // On macOS the row must be ANSWERED; on every other platform it is
+    // SKIPPED. Either way the label must appear.
+    //
+    // This used to assert `[MANUAL]` on macOS. That tag no longer exists on
+    // this row: `check_macos_tcc` now runs a real probe and maps
+    // Granted -> Pass, Denied -> Warn, NotApplicable -> Skip. So the old
+    // assertion could not pass on macOS in ANY permission state, and it
+    // failed 3/3 on `macos-latest` where the grant happens to be present.
+    //
+    // The replacement deliberately does NOT assert which of the two answers
+    // comes back. That depends on the host's TCC database — the runner's
+    // permission state, not the product's behaviour — and pinning it would
+    // make this test green or red according to who is running it. What the
+    // test is named for, and what must hold, is that macOS answers the row
+    // instead of skipping it as a foreign platform.
     let out = run_doctor();
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    assert!(
-        stdout.contains("macOS Accessibility"),
-        "stdout missing 'macOS Accessibility' row:\n{stdout}"
-    );
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("macOS Accessibility"))
+        .unwrap_or_else(|| panic!("stdout missing 'macOS Accessibility' row:\n{stdout}"))
+        .trim_start();
 
     if cfg!(target_os = "macos") {
         assert!(
-            stdout.contains("[MANUAL]"),
-            "macOS run should mark Accessibility as [MANUAL]:\n{stdout}"
+            row.starts_with("[PASS]") || row.starts_with("[WARN]"),
+            "macOS must answer the Accessibility row (granted -> [PASS], \
+             denied -> [WARN]); got: {row}"
         );
     } else {
         assert!(
-            stdout.contains("[SKIP] macOS Accessibility"),
-            "non-macOS run should mark Accessibility as [SKIP]:\n{stdout}"
+            row.starts_with("[SKIP]"),
+            "non-macOS run should mark Accessibility as [SKIP]; got: {row}"
         );
     }
 }
