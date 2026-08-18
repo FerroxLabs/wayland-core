@@ -3833,7 +3833,7 @@ fn resolve_live_mcp_credential_references(config: &mut McpServerConfig) -> Resul
     let store = resolved
         .open_credentials_store()
         .map_err(|error| format!("credentials store unavailable: {error}"))?;
-    wcore_config::mcp_cred_refs::resolve_server_headers(config, &*store)
+    wcore_config::mcp_cred_refs::resolve_server_credential_refs(config, &*store)
         .map_err(|error| error.to_string())
 }
 

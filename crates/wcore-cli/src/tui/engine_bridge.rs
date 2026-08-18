@@ -2752,21 +2752,27 @@ impl TuiEngine {
         }
         let egress_policy = engine.lock().await.egress_policy();
 
-        // Resolve `${cred:KEY}` header references just before connecting. This
+        // Resolve `${cred:KEY}` header and stdio `env` references just before
+        // connecting. This
         // is the single-server live-add path: per the `mcp_cred_refs` contract,
         // a resolution failure (missing key / store error / malformed ref) is a
         // HARD error the user must see — the user just asked to connect THIS
         // server, so silently falling through to a literal `${cred:...}` bearer
         // would be a confusing mis-connect (F22). A no-reference header (the
-        // plain `/mcp add` path) never touches the store and never errors.
+        // plain `/mcp add` path) never touches the store and never errors. An
+        // stdio `env` reference behaves identically: unresolvable means refused
+        // here, never launched with the placeholder in the child environment.
         if wcore_config::mcp_cred_refs::server_has_credential_references(&config) {
             let resolution =
                 wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
                     .map_err(|e| e.to_string())
                     .and_then(|cfg| cfg.open_credentials_store().map_err(|e| e.to_string()))
                     .and_then(|store| {
-                        wcore_config::mcp_cred_refs::resolve_server_headers(&mut config, &*store)
-                            .map_err(|e| e.to_string())
+                        wcore_config::mcp_cred_refs::resolve_server_credential_refs(
+                            &mut config,
+                            &*store,
+                        )
+                        .map_err(|e| e.to_string())
                     });
             if let Err(reason) = resolution {
                 if !reservation.complete_failed(reason.clone()) {

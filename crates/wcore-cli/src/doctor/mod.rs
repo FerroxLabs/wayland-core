@@ -468,7 +468,32 @@ async fn print_mcp_section(probe: bool) {
                 // agent tool set or exposed to a model, and it is dropped at the
                 // end of this block. If this manager is ever wired into an agent,
                 // it MUST be filtered by the active assistant first.
-                match wcore_mcp::manager::McpManager::connect_all(&cfg.mcp.servers).await {
+                // fix/904 — the probe spawns real transports, including stdio
+                // child processes that inherit the declared `env`. Run the same
+                // `${cred:KEY}` rail the connect boundaries use so an
+                // unresolvable reference is reported as skipped instead of
+                // being handed to a child process literally.
+                let (probe_servers, credential_skips) = match cfg.open_credentials_store() {
+                    Ok(store) => {
+                        let report =
+                            wcore_config::mcp_cred_refs::resolve_servers_for_connect_with_report(
+                                &cfg.mcp.servers,
+                                &*store,
+                            );
+                        (report.connectable, report.skipped)
+                    }
+                    Err(_) => {
+                        let report =
+                            wcore_config::mcp_cred_refs::without_credential_references_with_report(
+                                &cfg.mcp.servers,
+                            );
+                        (report.connectable, report.skipped)
+                    }
+                };
+                for (name, reason) in &credential_skips {
+                    println!("  \u{2298} {name:<20} skipped: {}", reason.message());
+                }
+                match wcore_mcp::manager::McpManager::connect_all(&probe_servers).await {
                     Ok(mgr) => {
                         let mut names: Vec<&String> = mgr.health().keys().collect();
                         names.sort();
