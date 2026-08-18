@@ -748,6 +748,46 @@ impl WorkspacePolicy {
         out
     }
 
+    /// #922 R1: the OS read-deny list, computed only for a backend that will
+    /// actually apply it.
+    ///
+    /// `manifest.fs_read_deny` has exactly one producer
+    /// ([`secret_deny_paths_dynamic`](Self::secret_deny_paths_dynamic)) and the
+    /// backends are its only enforcing consumer. A backend whose
+    /// `SandboxBackend::enforces_read_deny()` is `false` — the trait default,
+    /// which the Windows session default `windows_job_object` deliberately
+    /// keeps — takes no filesystem action on the field at all. Producing it for
+    /// such a backend is a full no-prune walk of the workspace whose only
+    /// result is dropped: measured on SeanDesktop at 76,367 ms against a real
+    /// user profile versus 175 ms against an empty directory (#922).
+    ///
+    /// This is NOT a relaxation of a security profile — the precedent this
+    /// project set with "enforces_read_deny is liveness, not policy" is about
+    /// using this predicate to WEAKEN a profile, and that is not what happens
+    /// here. A `false` answer is the definition of "this field is discarded",
+    /// so skipping its computation is observationally identical. The gate also
+    /// fails in the safe direction: every enforcing backend
+    /// (`bwrap`/`sandbox_exec`/live `docker`) hardcodes `true`, and
+    /// `AppContainerBackend` derives its answer from a monotone probe that
+    /// answers `true` while unsettled — an unknown answer therefore
+    /// over-reports enforcement and we still walk (stale-POSITIVE, an
+    /// availability cost, never a leak). That single assumption is pinned by
+    /// `crates/wcore-sandbox/tests/enforces_read_deny_pairing.rs` (A2).
+    ///
+    /// Note the layering: this gate gets to exist only because it guards the
+    /// OS-enforced list. The IN-PROCESS file-tool predicate
+    /// ([`is_project_secret`](Self::is_project_secret), via
+    /// `vfs::SecretDenyFs`) is enforced by this process and must NEVER be
+    /// routed through a backend capability — pinned by
+    /// `crates/wcore-tools/tests/vfs_secret_deny_backend_independent.rs` (A7).
+    pub fn secret_deny_paths_for_backend(&self, backend_enforces_read_deny: bool) -> Vec<PathBuf> {
+        if !backend_enforces_read_deny {
+            // The backend discards this field; producing it is pure cost.
+            return Vec::new();
+        }
+        self.secret_deny_paths_dynamic()
+    }
+
     /// #667 (F2): true when `Bash` must be REFUSED on a backend that cannot
     /// enforce `fs_read_deny` at the OS layer — because this policy relies on
     /// that enforcement to keep secrets unreadable from the shell. Replaces the
@@ -997,6 +1037,12 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     // prefilter: we canonicalize (an expensive symlink-resolving syscall) ONLY for
     // secret-NAMED files and for symlinks — not for every entry. Visiting (readdir)
     // a large `node_modules` is cheap; canonicalizing every file in it was the cost.
+    //
+    // Pinned by `tests::no_prune_survives_the_922_backend_gate` (#922 A4), which
+    // asserts a secret under `node_modules/` and under `target/` is still in the
+    // list. #922's fix declines to COMPUTE this walk on a backend that discards
+    // it; it must never become a reason to PRUNE it, because a prune is a
+    // permanent stale-negative against the in-process predicate above.
     let walker = ignore::WalkBuilder::new(root)
         .standard_filters(false) // a .gitignore'd .env must still be denied
         .hidden(false)
