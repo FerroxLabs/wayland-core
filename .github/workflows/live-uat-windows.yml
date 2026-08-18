@@ -98,16 +98,24 @@ jobs:
       # genuinely large real working tree (source + build artifacts), which is
       # the shape #922/#1000 were reported against. Building into it also keeps
       # multi-GB of artifacts off C:.
-      - name: Prepare D: work area
+      - name: 'Prepare the D: drive work area'
         shell: pwsh
         run: |
           $base = $env:UAT_BASE
+          # Stale directories from an earlier attempt may hold locked files, so
+          # never reuse a name: everything is keyed by run id.
           if (Test-Path $base) { Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue }
           New-Item -ItemType Directory -Force -Path $base | Out-Null
-          $real = Join-Path $base 'realtree'
+          $real  = Join-Path $base ("realtree-" + $env:GITHUB_RUN_ID)
+          $empty = Join-Path $base ("empty-"    + $env:GITHUB_RUN_ID)
           git clone --quiet --no-hardlinks "$env:GITHUB_WORKSPACE" $real
-          if ($LASTEXITCODE -ne 0) { throw "clone into $real failed" }
-          $empty = Join-Path $base ("empty-" + $env:GITHUB_RUN_ID)
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "git clone failed (exit $LASTEXITCODE); falling back to a file copy"
+            Copy-Item -Recurse -Force "$env:GITHUB_WORKSPACE" $real
+          }
+          if (-not (Test-Path (Join-Path $real 'Cargo.toml'))) {
+            throw "the real tree at $real has no Cargo.toml — the copy did not land"
+          }
           New-Item -ItemType Directory -Force -Path $empty | Out-Null
           "UAT_REAL_TREE=$real"       | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "UAT_EMPTY_DIR=$empty"      | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -167,7 +175,7 @@ jobs:
           cargo test --release -p wcore-tools --test live_uat_0131 -- --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { throw "live UAT harness failed — see the assertions above" }
 
-      - name: Clean up the D: work area
+      - name: 'Clean up the D: drive work area'
         if: always()
         shell: pwsh
         run: |

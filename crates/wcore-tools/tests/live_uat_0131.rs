@@ -277,9 +277,11 @@ fn ctx_for(policy: Arc<WorkspacePolicy>) -> ToolContext {
         ))))
 }
 
-fn timed_echo(ctx: &ToolContext, tag: &str) -> u128 {
+fn timed_echo(rt: &tokio::runtime::Runtime, ctx: &ToolContext, tag: &str) -> u128 {
+    // The runtime is built by the caller: constructing one costs milliseconds
+    // and this measurement is reported in milliseconds.
     let started = Instant::now();
-    let result = rt().block_on(BashTool.execute_with_ctx(json!({ "command": "echo uat" }), ctx));
+    let result = rt.block_on(BashTool.execute_with_ctx(json!({ "command": "echo uat" }), ctx));
     let ms = started.elapsed().as_millis();
     let ok = result.content.contains("uat");
     println!("  {tag:<22} {ms:>8} ms   ok={ok}");
@@ -331,13 +333,14 @@ fn claim_b_read_deny_walk_timing() {
     let empty_ctx = ctx_for(Arc::clone(&empty_policy));
 
     println!("\n-- BashTool `echo uat` (shipping path, PR #278 applied)");
-    let real_cold = timed_echo(&real_ctx, "real-tree COLD");
-    let empty_cold = timed_echo(&empty_ctx, "empty-dir COLD");
+    let runtime = rt();
+    let real_cold = timed_echo(&runtime, &real_ctx, "real-tree COLD");
+    let empty_cold = timed_echo(&runtime, &empty_ctx, "empty-dir COLD");
     let mut real_warm = Vec::new();
     let mut empty_warm = Vec::new();
     for _ in 0..3 {
-        real_warm.push(timed_echo(&real_ctx, "real-tree warm"));
-        empty_warm.push(timed_echo(&empty_ctx, "empty-dir warm"));
+        real_warm.push(timed_echo(&runtime, &real_ctx, "real-tree warm"));
+        empty_warm.push(timed_echo(&runtime, &empty_ctx, "empty-dir warm"));
     }
     let real_warm_best = *real_warm.iter().min().expect("warm samples");
     let empty_warm_best = *empty_warm.iter().min().expect("warm samples");
