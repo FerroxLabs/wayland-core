@@ -86,6 +86,12 @@ impl ActiveTokenRedactor {
     pub fn set(&self, tokens: Vec<String>) {
         let inner = self.inner.lock().clone();
         *inner.write() = tokens;
+        // #584: publish this set process-wide so producers that never see a
+        // `ProtocolSink` — the authoritative `ToolResult` card, `ToolCancelled`,
+        // the Crucible error card — scrub it too. Registering on `set` (rather
+        // than on construction) means only sets a bridge actually publishes to
+        // are ever consulted.
+        crate::output_redaction::register_active_token_source(&inner);
     }
 
     /// Snapshot the current active tokens (read-side).
@@ -1119,11 +1125,22 @@ impl OutputSink for ProtocolSink {
         tool_name: &str,
         panic_message: &str,
     ) {
+        // #584: a panic payload is tool-derived text like any other, and this
+        // was the only tool-text emitter on this struct not scrubbing it.
+        //
+        // It goes through the PROCESS-WIDE `redact_active_tokens`, not through
+        // `self.token_redactor`. A per-handle redactor only knows the tokens
+        // its OWN bridge published; a token minted by a different bridge — a
+        // sub-agent, a second session, or any sink whose `set()` never ran —
+        // would ride this frame unscrubbed. That per-handle reachability gap is
+        // the whole reason this fix exists, so this call site must not
+        // reintroduce it. The process-wide set is a strict superset of any one
+        // handle's (tokens only ever enter via `set`, which registers).
         let _ = self.writer.emit(&ProtocolEvent::ToolPanicked {
             msg_id: msg_id.to_string(),
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            panic_message: panic_message.to_string(),
+            panic_message: crate::output_redaction::redact_active_tokens(panic_message),
         });
     }
 
@@ -1727,5 +1744,89 @@ mod tests {
         let writer = Arc::new(ProtocolWriter::new());
         let sink = ProtocolSink::new(writer);
         sink.emit_compaction("m1", "window_pressure", 4096, Some(41));
+    }
+
+    /// Pull the `panic_message` off the one `ToolPanicked` frame an emitter
+    /// recorded, failing loudly if no frame was written at all.
+    fn recorded_panic_message(emitter: &RecordingEmitter) -> String {
+        emitter
+            .events
+            .lock()
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::ToolPanicked { panic_message, .. } => Some(panic_message.clone()),
+                _ => None,
+            })
+            .expect("emit_tool_panicked must write a frame")
+    }
+
+    /// #584 — `emit_tool_panicked` is a method on the ONE struct that owns
+    /// `token_redactor`, and it was the only tool-text emitter on that struct
+    /// not scrubbing. A panic payload quotes whatever the tool was holding,
+    /// which on the snooping path is the live approval token.
+    ///
+    /// The token here is published by sink A's redactor and the panic is
+    /// emitted through sink B, whose own redactor was NEVER `set`. That is the
+    /// CROSS-BRIDGE case: a sub-agent, a second session, or any sink that never
+    /// saw the minting bridge. A same-sink test cannot observe it — scrubbing
+    /// through `self.token_redactor` passes that shape and still leaks here,
+    /// which is exactly the per-handle reachability gap this PR exists to close.
+    #[test]
+    fn tool_panicked_scrubs_a_token_minted_on_another_sink() {
+        let token = "apr-11111111-2222-3333-4444-555555555555".to_string();
+
+        // Bridge/sink A mints and publishes the token. Held for the whole test:
+        // the process-wide registry holds sources WEAKLY, so dropping A would
+        // prune the very set under test.
+        let emitter_a = Arc::new(RecordingEmitter::default());
+        let sink_a = ProtocolSink::with_emitter(emitter_a.clone());
+        sink_a.token_redactor().set(vec![token.clone()]);
+
+        // Sink B is a different bridge's sink: its redactor is untouched.
+        let emitter_b = Arc::new(RecordingEmitter::default());
+        let sink_b = ProtocolSink::with_emitter(emitter_b.clone());
+        // CONTROL: the two sinks really do have independent token sets,
+        // otherwise "cross-bridge" would be a same-bridge test in disguise.
+        assert!(
+            sink_b.token_redactor().snapshot().is_empty(),
+            "control failed: sink B already knows the token, so this proves nothing"
+        );
+
+        sink_b.emit_tool_panicked("m1", "c1", "Bash", &format!("panicked at {token} !"));
+
+        let panic_message = recorded_panic_message(&emitter_b);
+        // CONTROL: the payload really rode the frame.
+        assert!(
+            panic_message.contains("panicked at"),
+            "control failed: the frame lost the panic text: {panic_message}"
+        );
+        assert!(
+            !panic_message.contains(&token),
+            "tool_panicked leaked an approval token minted on another bridge: {panic_message}"
+        );
+        drop(sink_a);
+    }
+
+    /// The same-bridge case still has to hold — the cross-bridge fix must not
+    /// come at the cost of the sink that DID mint the token.
+    #[test]
+    fn tool_panicked_scrubs_an_active_approval_token() {
+        let emitter = Arc::new(RecordingEmitter::default());
+        let sink = ProtocolSink::with_emitter(emitter.clone());
+        let token = "apr-99999999-8888-7777-6666-555555555555".to_string();
+        sink.token_redactor().set(vec![token.clone()]);
+
+        sink.emit_tool_panicked("m1", "c1", "Bash", &format!("panicked at {token} !"));
+
+        let panic_message = recorded_panic_message(&emitter);
+        // CONTROL: the payload really rode the frame.
+        assert!(
+            panic_message.contains("panicked at"),
+            "control failed: the frame lost the panic text: {panic_message}"
+        );
+        assert!(
+            !panic_message.contains(&token),
+            "tool_panicked leaked the live approval token: {panic_message}"
+        );
     }
 }

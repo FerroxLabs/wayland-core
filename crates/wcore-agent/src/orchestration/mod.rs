@@ -3290,10 +3290,12 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
                 Ok(ToolApprovalResult::Approved { answer: None }) => { /* fall through to existing dispatch */
                 }
                 Ok(ToolApprovalResult::Denied { reason }) => {
+                    // #584: the paired `ToolResult` block three lines down is
+                    // scrubbed; the wire event carrying the same text was not.
                     let _ = writer.emit(&ProtocolEvent::ToolCancelled {
                         msg_id: msg_id.to_string(),
                         call_id: id.clone(),
-                        reason: reason.clone(),
+                        reason: crate::output_redaction::redact_active_tokens(&reason),
                     });
                     let denied = ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
@@ -3407,12 +3409,22 @@ async fn execute_tool_calls_with_approval_budget_effects_inner(
             } else {
                 ToolStatus::Success
             };
+            // #584: this is the AUTHORITATIVE tool card — it supersedes the
+            // `ToolChunk` stream the sink already scrubs. `writer` is the RAW
+            // emitter, so it can never reach the sink's redactor.
+            //
+            // Every `content` reaching here today was already scrubbed
+            // pre-truncation by `redact_tool_output`, so this pass is
+            // redundant BY CONSTRUCTION rather than by accident, and no test
+            // isolates it. It stays because #584 was precisely a result path
+            // that reached the wire without passing a redactor: the guarantee
+            // belongs at the wire boundary, not only upstream of it.
             let _ = writer.emit(&ProtocolEvent::ToolResult {
                 msg_id: msg_id.to_string(),
                 call_id: id.clone(),
                 tool_name: name.clone(),
                 status,
-                output: content.clone(),
+                output: crate::output_redaction::redact_active_tokens(content),
                 output_type: OutputType::Text,
                 metadata: None,
             });
@@ -5356,5 +5368,344 @@ mod tests {
             panic!("expected a ToolResult");
         };
         assert!(is_error, "a cancelled dispatch yields an error result");
+    }
+
+    // ---- #584 active approval tokens on the tool-output wire ---------------
+
+    /// Echoes its `cmd` input straight back as tool output, with a
+    /// caller-chosen `max_result_size` so a test can force truncation to cut
+    /// through a specific offset. The point is to model the real threat: a tool
+    /// that reads text it was never meant to see (captured protocol output, a
+    /// log tail) and returns it as ordinary result content.
+    struct EchoTool(usize);
+
+    #[async_trait::async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "Echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes its cmd input"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": { "cmd": { "type": "string" } },
+                "required": ["cmd"]
+            })
+        }
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+        fn max_result_size(&self) -> usize {
+            self.0
+        }
+        async fn execute(&self, input: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: input
+                    .get("cmd")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                is_error: false,
+            }
+        }
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Exec
+        }
+    }
+
+    /// Park a real approval on a real bridge and hand back its live secret
+    /// token. The receiver is returned so the entry stays pending — dropping it
+    /// would let the bridge reap the token out of the active set.
+    async fn pending_bridge_token() -> (
+        crate::approval::ApprovalBridge,
+        String,
+        tokio::sync::oneshot::Receiver<crate::approval::ApprovalOutcome>,
+    ) {
+        let bridge = crate::approval::ApprovalBridge::new();
+        let (token, rx) = bridge
+            .request(crate::approval::ApprovalRequest {
+                call_id: "gate-584".into(),
+                reason: "test".into(),
+                context: "ctx".into(),
+            })
+            .await;
+        (bridge, token, rx)
+    }
+
+    fn emitted_tool_result_output(emitter: &CapturingEmitter, call_id: &str) -> Option<String> {
+        emitter
+            .0
+            .lock()
+            .expect("emitter mutex")
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::ToolResult {
+                    call_id: cid,
+                    output,
+                    ..
+                } if cid == call_id => Some(output.clone()),
+                _ => None,
+            })
+    }
+
+    /// #584 — THE defect. `ActiveTokenRedactor` had three production call
+    /// sites, all `ProtocolSink` methods, and none of them on the `ToolResult`
+    /// wire path: the live emit here takes the RAW `Arc<dyn ProtocolEmitter>`,
+    /// so it structurally could not reach the sink's redactor. Net effect —
+    /// the streaming `ToolChunk` was scrubbed and the authoritative card that
+    /// SUPERSEDES it was not, handing a tool that snoops protocol output the
+    /// secret it needs to self-approve.
+    ///
+    /// This drives the real dispatch path and asserts on the frame that
+    /// actually went out. `approval_token_redact_test.rs` passes today only
+    /// because it calls `sink.token_redactor().redact()` directly and never
+    /// touches a wire.
+    #[tokio::test]
+    async fn active_approval_token_never_reaches_the_tool_result_card() {
+        use wcore_protocol::commands::ApprovalScope;
+
+        let (bridge, token, _rx) = pending_bridge_token().await;
+        // CONTROL: the token must actually be live, or every assertion below
+        // passes against a build with no redaction at all.
+        assert!(
+            bridge.redactor().snapshot().contains(&token),
+            "control failed: the bridge never published the token as active"
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool(50_000)));
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        let calls = vec![ContentBlock::ToolUse {
+            id: "call-584".into(),
+            name: "Echo".into(),
+            input: json!({ "cmd": format!("snooped >>{token}<< from stdout") }),
+            extra: None,
+        }];
+
+        let mgr_clone = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                mgr_clone.approve("call-584", ApprovalScope::Once, None);
+            }
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            execute_tool_calls_with_approval(
+                &registry,
+                &calls,
+                &mgr,
+                &writer,
+                "msg-584",
+                &[],
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("approval round-trip timed out")
+        .expect("should not return ExecutionControl");
+        assert_eq!(outcome.results.len(), 1);
+
+        let output = emitted_tool_result_output(&emitter, "call-584")
+            .expect("the dispatch must emit a tool_result card");
+        // CONTROL: the echo really happened, so we are asserting on tool text
+        // and not on an empty or error card.
+        assert!(
+            output.contains("snooped") && output.contains("from stdout"),
+            "control failed: the card does not carry the tool's own output: {output}"
+        );
+        assert!(
+            !output.contains(&token),
+            "the authoritative tool_result card leaked the live approval token: {output}"
+        );
+        assert!(
+            output.contains("[REDACTED]"),
+            "the token must be replaced by the redaction marker, not merely dropped: {output}"
+        );
+
+        // The model-visible result block must be clean too — the same text
+        // reaches the provider, the hooks, and the transcript.
+        let ContentBlock::ToolResult { content, .. } = &outcome.results[0] else {
+            panic!("expected a ToolResult block");
+        };
+        assert!(
+            !content.contains(&token),
+            "the model-visible tool result leaked the live approval token: {content}"
+        );
+    }
+
+    /// #584 ordering constraint. `ActiveTokenRedactor::redact` is an exact
+    /// `str::replace`, so a token cut in half by `truncate_result` survives an
+    /// emit-time-only scrub as two unmatched fragments — the same reason the
+    /// PII scrubber has always run BEFORE truncation.
+    ///
+    /// The echoed payload is laid out so the token straddles the head cut: with
+    /// `max_result_size = 200` the head keeps the first 100 chars, and the
+    /// token starts at offset 80.
+    #[tokio::test]
+    async fn active_approval_token_split_by_truncation_leaves_no_fragment() {
+        use wcore_protocol::commands::ApprovalScope;
+
+        let (bridge, token, _rx) = pending_bridge_token().await;
+        assert!(
+            bridge.redactor().snapshot().contains(&token),
+            "control failed: the bridge never published the token as active"
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool(200)));
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        let payload = format!("{}{token}{}", "A".repeat(80), "B".repeat(400));
+        // CONTROL: the layout must actually straddle the head boundary, or the
+        // test degenerates into the whole-token case above.
+        assert!(
+            payload.len() > 200 && token.len() > 20,
+            "fixture must truncate"
+        );
+        let calls = vec![ContentBlock::ToolUse {
+            id: "call-584-trunc".into(),
+            name: "Echo".into(),
+            input: json!({ "cmd": payload }),
+            extra: None,
+        }];
+
+        let mgr_clone = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                mgr_clone.approve("call-584-trunc", ApprovalScope::Once, None);
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            execute_tool_calls_with_approval(
+                &registry,
+                &calls,
+                &mgr,
+                &writer,
+                "msg-584-trunc",
+                &[],
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("approval round-trip timed out")
+        .expect("should not return ExecutionControl");
+
+        let output = emitted_tool_result_output(&emitter, "call-584-trunc")
+            .expect("the dispatch must emit a tool_result card");
+        // CONTROL: truncation really fired, so the fragment assertion below is
+        // testing the boundary case it claims to.
+        assert!(
+            output.contains("truncated"),
+            "control failed: the fixture did not truncate: {output}"
+        );
+        let fragment = &token[..16];
+        assert!(
+            !output.contains(fragment),
+            "a truncation-split token left the fragment {fragment} on the wire: {output}"
+        );
+    }
+
+    /// #584 — the denial path. The paired `ContentBlock::ToolResult` three
+    /// lines below the emit was scrubbed; the `ToolCancelled` frame carrying
+    /// the same operator-supplied text was not.
+    #[tokio::test]
+    async fn active_approval_token_never_reaches_the_tool_cancelled_reason() {
+        let (bridge, token, _rx) = pending_bridge_token().await;
+        assert!(
+            bridge.redactor().snapshot().contains(&token),
+            "control failed: the bridge never published the token as active"
+        );
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool(50_000)));
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        let calls = vec![ContentBlock::ToolUse {
+            id: "call-584-deny".into(),
+            name: "Echo".into(),
+            input: json!({ "cmd": "anything" }),
+            extra: None,
+        }];
+
+        let mgr_clone = Arc::clone(&mgr);
+        let denial = format!("refused; resume with {token} instead");
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                mgr_clone.resolve(
+                    "call-584-deny",
+                    ToolApprovalResult::Denied {
+                        reason: denial.clone(),
+                    },
+                );
+            }
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            execute_tool_calls_with_approval(
+                &registry,
+                &calls,
+                &mgr,
+                &writer,
+                "msg-584-deny",
+                &[],
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .expect("approval round-trip timed out")
+        .expect("should not return ExecutionControl");
+
+        let reason = emitter
+            .0
+            .lock()
+            .expect("emitter mutex")
+            .iter()
+            .find_map(|e| match e {
+                ProtocolEvent::ToolCancelled {
+                    call_id, reason, ..
+                } if call_id == "call-584-deny" => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("a denied call must emit tool_cancelled");
+        // CONTROL: the denial text really rode the frame.
+        assert!(
+            reason.contains("refused"),
+            "control failed: the frame does not carry the denial reason: {reason}"
+        );
+        assert!(
+            !reason.contains(&token),
+            "tool_cancelled leaked the live approval token: {reason}"
+        );
     }
 }
