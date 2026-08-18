@@ -219,6 +219,20 @@ impl TransactionCleanup {
         let _ = self.checkout_authority.set(checkout);
     }
 
+    /// Release this transaction's lease, reservation and root.
+    ///
+    /// MUST NOT be called from inside a swarm critical section: it acquires the
+    /// swarm sentinel, `flock` is per open file description, and
+    /// [`swarm_lock_handle`] opens a fresh descriptor on every call, so a
+    /// second acquisition from the SAME process blocks exactly as a foreign
+    /// process would — a permanent hang, not an error.
+    ///
+    /// The `released` short-circuit below sits ABOVE the lock deliberately, and
+    /// that ordering is load-bearing: a transaction is released explicitly and
+    /// then released AGAIN by `Drop`, so the redundant release must not contend
+    /// for the sentinel at all. Hoisting the acquisition above the short-circuit
+    /// was measured to hang `dispatches_4_noop_workers_in_parallel` forever,
+    /// with the blocked thread parked in `flock` on this sentinel.
     fn release(&self) -> Result<()> {
         let _release = self.release_lock.lock().map_err(|_| {
             SwarmError::WorktreeIo("transaction cleanup authority is poisoned".to_owned())
@@ -344,6 +358,12 @@ impl TransactionCleanup {
 }
 
 impl Drop for TransactionCleanup {
+    /// Releasing here is sound ONLY because no path constructs or drops a
+    /// `TransactionCleanup` while a swarm critical section is held: both
+    /// registration closures take the reservation-registry lock before the
+    /// cleanup exists, so nothing fallible can unwind past a live one. A
+    /// cleanup dropped inside that critical section would re-enter `flock` on a
+    /// sentinel this process already holds and never return.
     fn drop(&mut self) {
         let _ = self.release();
     }
