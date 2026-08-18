@@ -27,6 +27,13 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    # gh#1072. `scan` is one of the 14 required contexts, so an unbounded job
+    # here can hold every PR for GitHub's 6-hour default exactly the way
+    # `Browser live e2e` did twice during the v0.13.1 release train. Measured
+    # at 11-12 SECONDS across the last four successful runs (it early-exits to
+    # success on PRs that touch no dependency file), so 15 minutes is ~75x the
+    # observed worst case and can only fire on a genuine wedge.
+    timeout-minutes: 15
     steps:
       # fetch-depth: 0 so the PR base is reachable for the changed-files diff
       # below (schedule/dispatch runs don't diff, so the cost is PR-only).
