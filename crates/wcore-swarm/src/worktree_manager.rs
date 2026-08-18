@@ -944,6 +944,19 @@ impl WorktreeManager {
                     let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
                     let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
                     let root_identity = root_authority.identity_token();
+                    let reservation_receipt = Arc::clone(&reservation_authority);
+                    // The registry lock is taken BEFORE the cleanup exists, and
+                    // NOTHING fallible may follow `Arc::new` while this closure
+                    // holds the swarm sentinel. `TransactionCleanup::release`
+                    // re-acquires that sentinel, and `flock` is per open file
+                    // description, so a cleanup dropped by an unwind from in
+                    // here blocks forever on the lock this very thread already
+                    // holds — a hang, not an error. Any teardown a future edit
+                    // needs inside this critical section has to happen before
+                    // the unwind can reach a live cleanup.
+                    let mut reservations = self.active_reservations.lock().map_err(|_| {
+                        SwarmError::WorktreeIo("active reservation registry is poisoned".to_owned())
+                    })?;
                     let cleanup = Arc::new(TransactionCleanup {
                         owner: worker_id.to_owned(),
                         root: transaction_root.clone(),
@@ -960,21 +973,15 @@ impl WorktreeManager {
                         lease: StdMutex::new(Some(lease)),
                         released: AtomicBool::new(false),
                     });
-                    self.active_reservations
-                        .lock()
-                        .map_err(|_| {
-                            SwarmError::WorktreeIo(
-                                "active reservation registry is poisoned".to_owned(),
-                            )
-                        })?
-                        .insert(
-                            worker_id.to_owned(),
-                            ActiveReservation {
-                                root_identity,
-                                authority: Arc::clone(&cleanup.reservation_authority),
-                                bytes: reserved_bytes,
-                            },
-                        );
+                    reservations.insert(
+                        worker_id.to_owned(),
+                        ActiveReservation {
+                            root_identity,
+                            authority: reservation_receipt,
+                            bytes: reserved_bytes,
+                        },
+                    );
+                    drop(reservations);
                     Ok((checkout, scratch, cleanup))
                 })();
                 if registration.is_err() {
@@ -1292,6 +1299,19 @@ impl WorktreeManager {
                     let swarm_authority = DirectoryAuthority::open(&self.swarm_root)?;
                     let quarantine_authority = DirectoryAuthority::open(&self.control_root)?;
                     let root_identity = root_authority.identity_token();
+                    let reservation_receipt = Arc::clone(&reservation_authority);
+                    // The registry lock is taken BEFORE the cleanup exists, and
+                    // NOTHING fallible may follow `Arc::new` while this closure
+                    // holds the swarm sentinel. `TransactionCleanup::release`
+                    // re-acquires that sentinel, and `flock` is per open file
+                    // description, so a cleanup dropped by an unwind from in
+                    // here blocks forever on the lock this very thread already
+                    // holds — a hang, not an error. Any teardown a future edit
+                    // needs inside this critical section has to happen before
+                    // the unwind can reach a live cleanup.
+                    let mut reservations = self.active_reservations.lock().map_err(|_| {
+                        SwarmError::WorktreeIo("active reservation registry is poisoned".to_owned())
+                    })?;
                     let cleanup = Arc::new(TransactionCleanup {
                         owner: worker_id.to_owned(),
                         root: transaction_root.clone(),
@@ -1308,21 +1328,15 @@ impl WorktreeManager {
                         lease: StdMutex::new(Some(lease)),
                         released: AtomicBool::new(false),
                     });
-                    self.active_reservations
-                        .lock()
-                        .map_err(|_| {
-                            SwarmError::WorktreeIo(
-                                "active reservation registry is poisoned".to_owned(),
-                            )
-                        })?
-                        .insert(
-                            worker_id.to_owned(),
-                            ActiveReservation {
-                                root_identity,
-                                authority: Arc::clone(&cleanup.reservation_authority),
-                                bytes: reserved_bytes,
-                            },
-                        );
+                    reservations.insert(
+                        worker_id.to_owned(),
+                        ActiveReservation {
+                            root_identity,
+                            authority: reservation_receipt,
+                            bytes: reserved_bytes,
+                        },
+                    );
+                    drop(reservations);
                     Ok((checkout, scratch, cleanup))
                 })();
                 if registration.is_err() {
