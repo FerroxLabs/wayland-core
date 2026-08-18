@@ -44,9 +44,20 @@ const WELL_KNOWN_DOMAINS: &[&str] = &[
     "minimax.io",
     "minimaxi.com", // MiniMax's second region + 401 region-failover target
     // built-in tool backends (web search / code hosts / docs APIs)
+    //
+    // Every host here backs a search provider this product SHIPS and selects
+    // itself. Omitting one does not make that backend optional, it makes it
+    // structurally unreachable: the request is refused by our own egress
+    // policy before it leaves the process, no matter what the user configures.
+    // gh#1068 — `parallel.ai` (the KEYLESS DEFAULT), `exa.ai` and
+    // `firecrawl.dev` were missing, so the default install could never run a
+    // successful primary search and two documented API keys were inert.
     "tavily.com",
     "brave.com",
     "duckduckgo.com",
+    "parallel.ai",   // keyless default: search.parallel.ai + api.parallel.ai
+    "exa.ai",        // EXA_API_KEY: api.exa.ai
+    "firecrawl.dev", // FIRECRAWL_API_KEY: api.firecrawl.dev
     "github.com",
     "gitlab.com",
     "notion.com",
@@ -185,6 +196,58 @@ mod tests {
                 &allow
             ),
             EgressVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn every_shipped_search_backend_host_is_reachable() {
+        // gh#1068. These are not third-party integrations a user opts into —
+        // they are backends `build_web_search_backend` selects on its own, one
+        // of them with no key at all. A shipped default that our own egress
+        // policy refuses is unreachable by construction, and the denial was
+        // swallowed into a debug! log, so it presented as "web search is
+        // broken" with a diagnosis pointing at an unrelated backend.
+        //
+        // Default config, no user allowlist entries: exactly what a fresh
+        // install has.
+        let allow = build_allowlist(&cfg("", &[]));
+        for url in [
+            "https://search.parallel.ai/mcp",      // keyless DEFAULT backend
+            "https://api.parallel.ai/v1/search",   // PARALLEL_API_KEY
+            "https://api.exa.ai/search",           // EXA_API_KEY
+            "https://api.firecrawl.dev/v1/search", // FIRECRAWL_API_KEY
+            "https://api.tavily.com/search",       // regression guard
+        ] {
+            assert_eq!(
+                classify(&Method::POST, &u(url), &allow),
+                EgressVerdict::Allow,
+                "{url} is a shipped search backend and must not be blocked by our own policy"
+            );
+        }
+    }
+
+    #[test]
+    fn allowlisting_a_search_backend_does_not_open_unrelated_hosts() {
+        // The entries added for gh#1068 are registrable domains, so the guard
+        // that matters is that they did not widen into anything else. Without
+        // this, the test above would pass just as well if the allowlist had
+        // been replaced with "allow everything".
+        let allow = build_allowlist(&cfg("", &[]));
+        // There is no `Deny` verdict. An unknown POST destination classifies as
+        // `Exfil` (the gated class), and it is the non-interactive tool path,
+        // which has no operator to prompt, that turns this into the observed
+        // "egress denied: POST with body to a non-allowlisted host".
+        //
+        // The property under test is only that it is not silently allowed, so
+        // assert exactly that rather than pinning the specific gated class.
+        let verdict = classify(
+            &Method::POST,
+            &u("https://api.not-a-backend.example/search"),
+            &allow,
+        );
+        assert!(
+            !matches!(verdict, EgressVerdict::Allow),
+            "an unrelated host must NOT be silently allowed, got {verdict:?}"
         );
     }
 
