@@ -18,7 +18,11 @@ command and scaled with the size of the tree: measured on a real profile, one
 it completely, which is why it survived so long — the reproduction only appears
 against a real checkout. The deny list is now computed only for a backend that
 actually enforces it, read off the same backend handle that runs the command, so
-it fails safe. This is a latency fix, not a containment fix: `sandbox status` on
+it fails safe. Re-measured live on real Windows hardware: the walk itself costs
+15,418 ms on a large real tree and 0 ms once skipped. Note the corollary — on a
+repo-sized checkout the same walk costs about 79 ms, so if you re-test this in a
+small tree or a temp directory you will correctly see no difference at all.
+This is a latency fix, not a containment fix: `sandbox status` on
 the Windows default still reports that it does not confine the filesystem, which
 is accurate. Addresses FerroxLabs/wayland#892, #912, #918 and the core half of
 #921.
@@ -27,9 +31,13 @@ is accurate. Addresses FerroxLabs/wayland#892, #912, #918 and the core half of
 so it took the quote-preserving branch and a nested `cmd /c echo …` came back
 with a stray trailing double-quote — a single wrong byte on stdout that the
 model then reasons over. `/S` is now passed from one shared prefix helper.
-Stated plainly: this was derived from `cmd /?` and is pinned by tests that
-assert the exact argument string, but no `cmd.exe` was run against the fix. If
-you reported FerroxLabs/wayland#943 or #929, please confirm on your machine.
+This is now confirmed against a running `cmd.exe` on Windows 11 build 26200,
+not just reasoned from `cmd /?`: driving the same production code path with and
+without `/S`, the payload `cmd /c echo NESTED` returns the bytes
+`4e 45 53 54 45 44 0d 0a` with the fix and `4e 45 53 54 45 44 22 0d 0a` without
+it. The stray `0x22` is real, and `/S` is what removes it. Payloads with no
+nested `cmd` are byte-identical in both arms, so this is the switch and not an
+output trim.
 
 **Windows binaries are now signed.** This project has never shipped an
 Authenticode signature. The signed release manifest and Sigstore provenance are
