@@ -841,8 +841,19 @@ impl WorktreeManager {
         pinned_head: &str,
         capacity: WorkspaceCapacity,
     ) -> Result<TransactionWorkspace> {
+        // Every filesystem site on this path names itself (see `io_at`). This
+        // is the enforcement point that keeps that true for sites added later:
+        // a bare `SwarmError::Io` reaching a caller renders as `io: <errno>`
+        // and nothing else — no path, no probe — which is precisely what made
+        // the macOS ENOENT in wayland#1025 unmeasurable from its CI output.
         Box::pin(self.create_isolated_checkout_inner(worker_id, branch, pinned_head, capacity))
             .await
+            .map_err(|error| match error {
+                SwarmError::Io(error) => {
+                    SwarmError::WorktreeIo(format!("isolated checkout for {worker_id}: {error}"))
+                }
+                other => other,
+            })
     }
 
     // Keep the construction future behind one allocation. This operation
@@ -910,9 +921,17 @@ impl WorktreeManager {
                     )));
                 }
                 ensure_absent_destination(&transaction_root)?;
-                std::fs::create_dir(&transaction_root)?;
+                std::fs::create_dir(&transaction_root).map_err(|error| {
+                    io_at("creation of the transaction root", &transaction_root, error)
+                })?;
                 let registration = (|| {
-                    make_guard_dir_private(&transaction_root)?;
+                    make_guard_dir_private(&transaction_root).map_err(|error| {
+                        io_at(
+                            "private-mode set on the transaction root",
+                            &transaction_root,
+                            error,
+                        )
+                    })?;
                     // One representation for everything derived below: the root
                     // authority, the checkout/scratch joins, the lease file and
                     // TransactionCleanup.root. The checkout authority is opened on
@@ -931,8 +950,11 @@ impl WorktreeManager {
                     );
                     let checkout = transaction_root.join("checkout");
                     let scratch = transaction_root.join("scratch");
-                    std::fs::create_dir(&scratch)?;
-                    make_guard_dir_private(&scratch)?;
+                    std::fs::create_dir(&scratch)
+                        .map_err(|error| io_at("creation of the scratch root", &scratch, error))?;
+                    make_guard_dir_private(&scratch).map_err(|error| {
+                        io_at("private-mode set on the scratch root", &scratch, error)
+                    })?;
                     // The lease is taken on the LEASE_FILE that the transaction
                     // derivation opens-or-creates, never on the transaction-root
                     // DIRECTORY object: Windows byte-range locking is undefined
@@ -1022,7 +1044,8 @@ impl WorktreeManager {
                 String::from_utf8_lossy(&clone.stderr).trim()
             )));
         }
-        make_guard_dir_private(&checkout)?;
+        make_guard_dir_private(&checkout)
+            .map_err(|error| io_at("private-mode set on the cloned checkout", &checkout, error))?;
 
         Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
         let actual = Box::pin(
@@ -1258,9 +1281,17 @@ impl WorktreeManager {
                     )));
                 }
                 ensure_absent_destination(&transaction_root)?;
-                std::fs::create_dir(&transaction_root)?;
+                std::fs::create_dir(&transaction_root).map_err(|error| {
+                    io_at("creation of the transaction root", &transaction_root, error)
+                })?;
                 let registration = (|| {
-                    make_guard_dir_private(&transaction_root)?;
+                    make_guard_dir_private(&transaction_root).map_err(|error| {
+                        io_at(
+                            "private-mode set on the transaction root",
+                            &transaction_root,
+                            error,
+                        )
+                    })?;
                     // One representation for everything derived below: the root
                     // authority, the checkout/scratch joins, the lease file and
                     // TransactionCleanup.root. The checkout authority is opened on
@@ -1279,8 +1310,11 @@ impl WorktreeManager {
                     );
                     let checkout = transaction_root.join("checkout");
                     let scratch = transaction_root.join("scratch");
-                    std::fs::create_dir(&scratch)?;
-                    make_guard_dir_private(&scratch)?;
+                    std::fs::create_dir(&scratch)
+                        .map_err(|error| io_at("creation of the scratch root", &scratch, error))?;
+                    make_guard_dir_private(&scratch).map_err(|error| {
+                        io_at("private-mode set on the scratch root", &scratch, error)
+                    })?;
                     // The lease is taken on the LEASE_FILE that the transaction
                     // derivation opens-or-creates, never on the transaction-root
                     // DIRECTORY object: Windows byte-range locking is undefined
@@ -1376,7 +1410,8 @@ impl WorktreeManager {
                 String::from_utf8_lossy(&clone.stderr).trim()
             )));
         }
-        make_guard_dir_private(&checkout)?;
+        make_guard_dir_private(&checkout)
+            .map_err(|error| io_at("private-mode set on the cloned checkout", &checkout, error))?;
 
         Box::pin(self.run_checkout_git(&checkout, &["remote", "remove", "origin"])).await?;
 
