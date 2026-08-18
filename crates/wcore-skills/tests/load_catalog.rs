@@ -41,7 +41,7 @@ async fn load_catalog_returns_one_ref_per_skill_file() {
         "expected at least 5 refs from fixture, got {}",
         catalog.len()
     );
-    let names: Vec<String> = catalog.refs().map(|r| r.name.clone()).collect();
+    let names: Vec<String> = catalog.refs().into_iter().map(|r| r.name.clone()).collect();
     for i in 0..5 {
         let expected = format!("skill-{i}");
         assert!(

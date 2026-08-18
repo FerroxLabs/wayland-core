@@ -57,6 +57,13 @@ pub struct BootstrapResult {
     /// Hosts emit these additive events only after their `Ready` boundary.
     pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
     pub mcp_managers: Vec<Arc<McpManager>>,
+    /// wayland#562 — late-bind seam for config MCP servers deferred out of
+    /// `build()` by [`AgentBootstrap::defer_config_mcp`]. The caller that
+    /// performs the background connect hands each settled manager to
+    /// [`crate::late_mcp::LateMcpBinder::bind`] so its `skill://` resources
+    /// and plugin-hook bindings reach the live session. Unused (and inert)
+    /// when config MCP was NOT deferred.
+    pub late_mcp: crate::late_mcp::LateMcpBinder,
     /// Redacted declarations retained even when a plugin MCP connection fails.
     /// Command arguments, environment, and URLs never cross this boundary.
     pub plugin_mcp_declarations: Vec<PluginMcpDeclaration>,
@@ -620,14 +627,17 @@ impl AgentBootstrap {
     /// See the field doc; the caller becomes responsible for connecting
     /// `config.mcp.servers` (with `${cred:...}` resolution) after boot.
     ///
-    /// Documented, accepted limitations of deferral (tracked follow-up):
-    /// boot-time consumers that read the config MCP manager during
-    /// `build()` do not see deferred servers — (1) MCP-provided skills
-    /// (`skill://` resources via `load_catalog`) are not loaded for the
-    /// session, and (2) the plugin hook dispatcher / `McpManagerCaller`
-    /// resolve against the boot manager set only (a gap already shared
-    /// with the dynamic `AddMcpServer` path). Late tool REGISTRATION is
-    /// fully supported; late skill/hook binding is not.
+    /// wayland#562 — boot-time consumers that read the config MCP manager
+    /// during `build()` (MCP-provided `skill://` skills, and the plugin hook
+    /// dispatcher / `McpManagerCaller`) still cannot see a deferred server at
+    /// `build()` time, but they are no longer permanently blind to it: the
+    /// caller MUST hand each settled background manager to
+    /// [`BootstrapResult::late_mcp`]
+    /// ([`crate::late_mcp::LateMcpBinder::skill_refs_for`] then
+    /// [`crate::late_mcp::LateMcpBinder::bind`]), which merges the server's
+    /// skills into the live shared catalog + system prompt and re-resolves the
+    /// plugin hook binding over the widened manager set. A caller that skips
+    /// that step gets late tool registration only.
     pub fn defer_config_mcp(mut self, v: bool) -> Self {
         self.defer_config_mcp = v;
         self
@@ -1850,59 +1860,60 @@ impl AgentBootstrap {
         // Gated by `config.hooks.dispatch_enabled` (default ON). When off, or
         // when no plugin hook resolves to a server, no dispatcher is wired and
         // plugin hooks stay log-only (the legacy behavior).
-        let hook_dispatcher: Option<Arc<dyn crate::hooks::HookDispatcher>> = if self
-            .config
-            .hooks
-            .dispatch_enabled
-            && !applied.plugin_hooks.is_empty()
-            && !mcp_managers.is_empty()
-        {
-            // plugin name -> set of its hook tool names
-            let mut hooks_by_plugin: std::collections::HashMap<&str, Vec<&str>> =
-                std::collections::HashMap::new();
-            for h in &applied.plugin_hooks {
-                hooks_by_plugin
-                    .entry(h.plugin.as_str())
-                    .or_default()
-                    .push(h.name.as_str());
-            }
-            // Snapshot each connected server's advertised tool names.
-            let mut servers: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
-            for mgr in &mcp_managers {
-                for (server_name, tool) in mgr.all_tools() {
-                    servers
-                        .entry(server_name.to_string())
+        // wayland#562 — captured before `self.config` is moved into the engine,
+        // so the late-MCP rebind applies the SAME gate this boot-time block does.
+        let hook_dispatch_enabled = self.config.hooks.dispatch_enabled;
+        let hook_dispatcher: Option<Arc<dyn crate::hooks::HookDispatcher>> =
+            if hook_dispatch_enabled && !applied.plugin_hooks.is_empty() && !mcp_managers.is_empty()
+            {
+                // plugin name -> set of its hook tool names
+                let mut hooks_by_plugin: std::collections::HashMap<&str, Vec<&str>> =
+                    std::collections::HashMap::new();
+                for h in &applied.plugin_hooks {
+                    hooks_by_plugin
+                        .entry(h.plugin.as_str())
                         .or_default()
-                        .push(tool.name.to_string());
+                        .push(h.name.as_str());
                 }
-            }
-            let servers_view: Vec<(&str, Vec<&str>)> = servers
-                .iter()
-                .map(|(s, tools)| (s.as_str(), tools.iter().map(String::as_str).collect()))
-                .collect();
-            let server_for_plugin =
-                crate::hooks::resolve_server_for_plugin(&hooks_by_plugin, &servers_view);
-            if server_for_plugin.is_empty() {
-                None
+                // Snapshot each connected server's advertised tool names.
+                let mut servers: std::collections::HashMap<String, Vec<String>> =
+                    std::collections::HashMap::new();
+                for mgr in &mcp_managers {
+                    for (server_name, tool) in mgr.all_tools() {
+                        servers
+                            .entry(server_name.to_string())
+                            .or_default()
+                            .push(tool.name.to_string());
+                    }
+                }
+                let servers_view: Vec<(&str, Vec<&str>)> = servers
+                    .iter()
+                    .map(|(s, tools)| (s.as_str(), tools.iter().map(String::as_str).collect()))
+                    .collect();
+                let server_for_plugin =
+                    crate::hooks::resolve_server_for_plugin(&hooks_by_plugin, &servers_view);
+                if server_for_plugin.is_empty() {
+                    None
+                } else {
+                    let mut bound: Vec<&str> =
+                        server_for_plugin.keys().map(String::as_str).collect();
+                    bound.sort_unstable();
+                    tracing::info!(
+                        target: "wcore_agent::hooks",
+                        count = bound.len(),
+                        plugins = ?bound,
+                        "plugin hook dispatcher wired"
+                    );
+                    let caller =
+                        Arc::new(crate::hooks::McpManagerCaller::new(mcp_managers.clone()));
+                    Some(Arc::new(crate::hooks::McpHookDispatcher::new(
+                        caller,
+                        server_for_plugin,
+                    )))
+                }
             } else {
-                let mut bound: Vec<&str> = server_for_plugin.keys().map(String::as_str).collect();
-                bound.sort_unstable();
-                tracing::info!(
-                    target: "wcore_agent::hooks",
-                    count = bound.len(),
-                    plugins = ?bound,
-                    "plugin hook dispatcher wired"
-                );
-                let caller = Arc::new(crate::hooks::McpManagerCaller::new(mcp_managers.clone()));
-                Some(Arc::new(crate::hooks::McpHookDispatcher::new(
-                    caller,
-                    server_for_plugin,
-                )))
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         // M3.6.2 — build memory_api BEFORE skill_refs so the prioritizer
         // can reorder the catalog at session start. Moved up from its
@@ -2503,7 +2514,8 @@ impl AgentBootstrap {
         // construction below.
         let skill_router_to_install: wcore_skills::SkillRouter = {
             let mut sk_router = wcore_skills::SkillRouter::new();
-            let candidate_names: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
+            let candidate_names: Vec<String> =
+                catalog.visible().into_iter().map(|r| r.name).collect();
             // Layer 1 — GEPA winners. Requires a real Db handle; the
             // `NullMemory` fallback skips this branch entirely.
             if let Some(db_arc) = mem_db_for_router.clone() {
@@ -3282,6 +3294,16 @@ impl AgentBootstrap {
         // v0.6.4 Task 1.3/1.7 — forward plugin-contributed hooks into the
         // engine's `HookEngine` (constructed inside `new_with_provider` /
         // `resume_with_provider`, so this must happen post-construction).
+        // wayland#562 — snapshot the boot state a LATE config-MCP connect
+        // needs to bind the same surfaces boot would have bound (MCP skills,
+        // plugin hook dispatcher). Built here because `applied.plugin_hooks`
+        // is moved into the engine on the next line.
+        let late_mcp = crate::late_mcp::LateMcpBinder::new(
+            Arc::clone(&catalog),
+            &applied.plugin_hooks,
+            mcp_managers.clone(),
+            hook_dispatch_enabled,
+        );
         engine.register_plugin_hooks(applied.plugin_hooks);
         // C1 / Task A1 — wire the host hook dispatcher built above (gated by
         // `config.hooks.dispatch_enabled`). `None` ⇒ plugin hooks stay
@@ -4132,6 +4154,7 @@ impl AgentBootstrap {
             workspace_policy_receipt,
             capability_activations,
             mcp_managers,
+            late_mcp,
             plugin_mcp_declarations,
             has_mcp,
             host_send_bridge,
