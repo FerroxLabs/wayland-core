@@ -96,7 +96,12 @@ on:
     branches:
       - main
       - plan/f20-unified-audit-repair
-      - 'lane/**'
+      # lane/live-uat-0131-windows ONLY: this lane branch exists to run
+      # .github/workflows/live-uat-windows.yml on the single self-hosted
+      # Windows runner. Leaving the wildcard on would queue this workflow's
+      # own self-hosted Windows leg against the SAME one runner and the two
+      # would contend. Never merged.
+      # - 'lane/**'
 
 permissions:
   contents: read

@@ -1,0 +1,177 @@
+name: live-uat-windows
+
+# Throwaway evidence job for the v0.13.1 pre-tag UAT. It exists only on the
+# lane branch named below and is never merged.
+#
+# Two claims shipped to main without anyone running the binary on Windows:
+#   A. 845446a6 / #272 — the Bash argv now carries `/S`, so a nested
+#      `cmd /c echo ...` payload no longer returns a stray trailing 0x22.
+#      PR #272 says verbatim that no cmd.exe was run against the fix.
+#   B. #278 — the per-exec workspace read-deny walk is skipped on a backend
+#      that discards the list.
+#
+# Both are graded here by `crates/wcore-tools/tests/live_uat_0131.rs`, which
+# runs real `cmd.exe` processes on real Windows hardware and prints bytes and
+# milliseconds. Claim A carries a RED ARM (the pre-fix `cmd /C` argv through
+# the same production backend); a green arm alone cannot distinguish "fixed"
+# from "never broken on this machine".
+
+on:
+  push:
+    branches:
+      - 'lane/live-uat-0131-windows'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-uat-windows
+  cancel-in-progress: false
+
+jobs:
+  uat:
+    name: v0.13.1 live UAT (self-hosted Windows msvc)
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - msvc
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '1'
+      # Everything this job creates lives under here, on D:, never a C: root
+      # and never inside a runner-owned directory.
+      UAT_BASE: 'D:\wl-uat0131'
+      # The exact main commit this lane was cut from. Production code must be
+      # byte-identical to it.
+      SHIPPING_SHA: '22edff934ede33edb60dd0632cd7667a42d8bf3c'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The self-hosted checkout dir is owned by BUILTIN\Administrators while
+      # the runner service is NT AUTHORITY\NETWORK SERVICE, so git otherwise
+      # aborts on "dubious ownership". Same step every self-hosted job here has.
+      - name: Trust the checkout for git
+        shell: pwsh
+        run: git config --global --add safe.directory '*'
+
+      - name: Host and tree provenance
+        shell: pwsh
+        run: |
+          Write-Host "runner_name   = $env:RUNNER_NAME"
+          Write-Host "workspace     = $env:GITHUB_WORKSPACE"
+          Write-Host "head_sha      = $(git rev-parse HEAD)"
+          Write-Host "shipping_sha  = $env:SHIPPING_SHA"
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List
+          Get-PSDrive -PSProvider FileSystem |
+            Select-Object Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} |
+            Format-Table -AutoSize
+          # PRODUCTION CODE MUST BE THE SHIPPING TREE. This lane adds only the
+          # evidence harness and CI plumbing; anything else under crates/ or
+          # scripts/ differing from main would make every number below describe
+          # a tree that is not shipping.
+          $changed = git diff --name-only "$env:SHIPPING_SHA" HEAD
+          Write-Host "--- files this lane changes vs the shipping tree ---"
+          $changed | ForEach-Object { Write-Host "  $_" }
+          $allowed = @(
+            'crates/wcore-tools/tests/live_uat_0131.rs',
+            '.github/workflows/live-uat-windows.yml',
+            '.github/workflows/ci.yml',
+            '.github/workflows/lint.yml'
+          )
+          $bad = $changed | Where-Object { $allowed -notcontains $_ }
+          if ($bad) { throw "this lane modifies production code: $($bad -join ', ')" }
+          Write-Host "OK: production code is identical to $env:SHIPPING_SHA"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # The "real tree" for CLAIM B: a full clone of the shipping tree on D:,
+      # which then receives the cargo target directory. After the build it is a
+      # genuinely large real working tree (source + build artifacts), which is
+      # the shape #922/#1000 were reported against. Building into it also keeps
+      # multi-GB of artifacts off C:.
+      - name: Prepare D: work area
+        shell: pwsh
+        run: |
+          $base = $env:UAT_BASE
+          if (Test-Path $base) { Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue }
+          New-Item -ItemType Directory -Force -Path $base | Out-Null
+          $real = Join-Path $base 'realtree'
+          git clone --quiet --no-hardlinks "$env:GITHUB_WORKSPACE" $real
+          if ($LASTEXITCODE -ne 0) { throw "clone into $real failed" }
+          $empty = Join-Path $base ("empty-" + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Force -Path $empty | Out-Null
+          "UAT_REAL_TREE=$real"       | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "UAT_EMPTY_DIR=$empty"      | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=$real\target" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "real tree = $real"
+          Write-Host "empty dir = $empty"
+
+      - name: Build the release CLI and the UAT harness
+        shell: pwsh
+        run: |
+          Write-Host "CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR"
+          cargo build --release -p wcore-cli --bin wayland-core
+          if ($LASTEXITCODE -ne 0) { throw "release build failed" }
+          cargo test --release -p wcore-tools --test live_uat_0131 --no-run
+          if ($LASTEXITCODE -ne 0) { throw "harness build failed" }
+
+      # Basic live smoke, straight from the binary's own mouth. Each is timeout
+      # guarded so a hang costs 120 s and still leaves evidence, rather than
+      # eating the job's whole budget.
+      - name: Smoke — version, doctor, sandbox status
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:CARGO_TARGET_DIR 'release\wayland-core.exe'
+          if (-not (Test-Path $exe)) { throw "no binary at $exe" }
+          Write-Host "binary   = $exe"
+          Write-Host "sha256   = $((Get-FileHash $exe -Algorithm SHA256).Hash)"
+          function Invoke-Smoke {
+            param([string]$Label, [string[]]$Argv)
+            Write-Host ""
+            Write-Host "########## $Label ##########"
+            $job = Start-Job -ScriptBlock {
+              param($e, $a)
+              & $e @a 2>&1 | Out-String
+            } -ArgumentList $exe, $Argv
+            if (Wait-Job $job -Timeout 120) {
+              Receive-Job $job | Write-Host
+              Write-Host "---- (completed) ----"
+            } else {
+              Write-Host "!! TIMEOUT after 120 s — no output is a FAILED measurement"
+              Stop-Job $job
+            }
+            Remove-Job $job -Force
+          }
+          Invoke-Smoke -Label 'wayland-core --version'        -Argv @('--version')
+          Invoke-Smoke -Label 'wayland-core doctor'           -Argv @('doctor')
+          Invoke-Smoke -Label 'wayland-core sandbox status'   -Argv @('sandbox','status')
+
+      - name: CLAIM A + CLAIM B — live evidence
+        shell: pwsh
+        env:
+          WAYLAND_LIVE_UAT: '1'
+        run: |
+          $env:WAYLAND_UAT_REAL_TREE = $env:UAT_REAL_TREE
+          $env:WAYLAND_UAT_EMPTY_DIR = $env:UAT_EMPTY_DIR
+          Write-Host "WAYLAND_UAT_REAL_TREE = $env:WAYLAND_UAT_REAL_TREE"
+          Write-Host "WAYLAND_UAT_EMPTY_DIR = $env:WAYLAND_UAT_EMPTY_DIR"
+          cargo test --release -p wcore-tools --test live_uat_0131 -- --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { throw "live UAT harness failed — see the assertions above" }
+
+      - name: Clean up the D: work area
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:UAT_BASE -and (Test-Path $env:UAT_BASE)) {
+            Remove-Item -Recurse -Force $env:UAT_BASE -ErrorAction SilentlyContinue
+          }
+          Write-Host "cleanup done"
