@@ -520,7 +520,7 @@ An error occurred. The agent may or may not continue depending on severity.
 | `auth_invalid` | Provider denied access (HTTP 403). Hard failure — do not retry. |
 | `init_failed` | The engine failed during startup and is exiting. Terminal. |
 | `recovery_busy` | A recovery action was refused because another is active. Resync and retry. |
-| `engine_error` | **The default.** Every error that is not one of the above arrives with this code, including all tool, config, provider and `add_mcp_server` failures. |
+| `engine_error` | **The default.** Every error that is not one of the above arrives with this code, including all tool, config, provider and `add_mcp_server` failures, and the rejection of a malformed host command (§4.1). |
 
 > Hosts should branch on `error.code` where a specific code exists — but note
 > that `engine_error` is by far the most common code, and it is not a
@@ -1155,23 +1155,58 @@ Agent  → stdout: {"type":"tool_result","call_id":"t2",...}
 
 Client closes stdin (EOF) or sends SIGTERM. Agent cleans up and exits.
 
+**EOF while an approval is pending denies it immediately** (FerroxLabs/wayland#1070).
+A tool parked on `approval_required` can never be answered once the command
+stream is gone, so the engine resolves every pending approval as denied at EOF
+rather than waiting out the 5-minute approval TTL. The turn then unwinds and the
+host sees `tool_cancelled` promptly. This fails CLOSED — the same posture the
+TTL reaper already took — and the two are distinguishable by reason: the TTL
+path says `approval timed out (no host response)`, the EOF path says
+`host closed the command stream while this approval was pending`.
+
 ## 4. Error Handling
 
 ### 4.1 Invalid Command
 
-**A malformed or unrecognised command produces no wire response at all.** The
-reader fails to deserialize the line, writes a `tracing::warn!` to the agent's
-own log, and drops it (`crates/wcore-protocol/src/reader.rs`). Nothing is
-emitted on stdout.
+**A malformed or unrecognised command is answered with an `error` frame**
+(FerroxLabs/wayland#1070). The reader fails to deserialize the line, logs it,
+and emits exactly one `error` on stdout naming the offending command `type`
+(when the line at least parsed as a JSON object carrying one) and quoting the
+deserializer's own reason (`crates/wcore-protocol/src/reader.rs`).
 
-This is a silent failure by design of the current implementation, and hosts must
-account for it: a command that is never acknowledged may have been malformed
-rather than slow. Do not wait on an `error` frame to detect a bad command —
-correlate on the response you expected instead, and time out.
+```
+Client → stdin:  {"type":"teleport"}
+Agent  → stdout: {"type":"error","error":{"code":"engine_error","message":"invalid protocol command of type \"teleport\": unknown variant `teleport`, expected one of `message`, `stop`, `tool_approve`, ...","retryable":false}}
+Client → stdin:  {"type":"message","msg_id":"m1"}
+Agent  → stdout: {"type":"error","error":{"code":"engine_error","message":"invalid protocol command of type \"message\": missing field `content`","retryable":false}}
+Client → stdin:  this is not json
+Agent  → stdout: {"type":"error","error":{"code":"engine_error","message":"invalid protocol command: expected ident at line 1 column 2 (expected one JSON object per line with a string \"type\" field)","retryable":false}}
+```
 
-An unknown `type`, an unknown field, a bad field type, and an over-long
-`request_id` all take this same path. There is no `protocol_error` code; the
-engine has never emitted one.
+Properties a host can rely on:
+
+- **The rejection carries no `msg_id`.** A line that failed to parse has no
+  trustworthy correlation handle, so none is invented. Match on the message.
+- **The code is `engine_error`.** Rejections deliberately introduce no new code:
+  the vocabulary in §1.10 is unchanged, and the detail rides the message. There
+  is still no `protocol_error` code; the engine has never emitted one.
+- **The stream continues.** The bad line is dropped, the reader resumes at the
+  next newline, and the commands before and after it are unaffected.
+- **The echoed text is length-bounded.** The `type` and the deserializer reason
+  are host-supplied, so each is truncated (with a trailing `...`) rather than
+  reflected at full length.
+
+An unknown `type`, an unknown field, a bad field type, an over-long
+`request_id`, and a line over the 8 MiB per-line cap all take this path. A
+command that parses but is refused later by an authority check answers through
+its own correlated result frame instead (for example `budget_grant_result`,
+`session_recovery_unavailable`, `mcp_removal_result`).
+
+> **Hosts written against v0.13.1 or earlier:** a malformed command used to
+> produce *nothing at all*, so any timeout-based "the engine never answered"
+> recovery you built for it will now see an `error` frame first. This is
+> additive — no existing frame changed shape — but a host that treats an
+> uncorrelated `error` as fatal should relax that before adopting this build.
 
 ### 4.2 Provider Errors
 

@@ -142,3 +142,48 @@ fn resolve_host_unknown_call_id_reports_not_found_and_is_idempotent() {
         "second resolution of the same id must report not-found, not re-fire"
     );
 }
+
+/// FerroxLabs/wayland#1070 (b) — `deny_all_pending` resolves EVERY parked
+/// approval at once, regardless of TTL, and reports how many it resolved. This
+/// is the mechanism the CLI uses when the host's command stream reaches EOF:
+/// no decision can arrive after that, so waiting out the remaining 5-minute
+/// TTL only converts a known answer into a stall.
+#[tokio::test]
+async fn deny_all_pending_resolves_every_parked_approval_at_once() {
+    let manager = ToolApprovalManager::new();
+    let first = manager.request_approval("eof-1", &ToolCategory::Exec, "Bash");
+    let second = manager.request_approval("eof-2", &ToolCategory::Edit, "Write");
+
+    assert_eq!(manager.deny_all_pending("host went away"), 2);
+
+    for rx in [first, second] {
+        let result = rx.await.expect("a denied approval must resolve");
+        assert!(
+            matches!(result, ToolApprovalResult::Denied { reason } if reason == "host went away"),
+            "EOF must fail CLOSED with the supplied reason"
+        );
+    }
+
+    // Idempotent: the map is drained, so a second sweep resolves nothing and
+    // cannot double-send on a consumed sender.
+    assert_eq!(manager.deny_all_pending("host went away"), 0);
+}
+
+/// CONTROL for the test above: an approval that was already answered is NOT
+/// re-resolved by a later sweep, so `deny_all_pending` cannot overwrite a real
+/// operator decision with a denial.
+#[tokio::test]
+async fn deny_all_pending_leaves_an_already_answered_approval_alone() {
+    let manager = ToolApprovalManager::new();
+    let rx = manager.request_approval("answered", &ToolCategory::Exec, "Bash");
+
+    manager.approve("answered", ApprovalScope::Once, None);
+    assert_eq!(
+        manager.deny_all_pending("host went away"),
+        0,
+        "an answered approval is no longer pending"
+    );
+
+    let result = rx.await.expect("the operator's answer must survive");
+    assert!(matches!(result, ToolApprovalResult::Approved { .. }));
+}
