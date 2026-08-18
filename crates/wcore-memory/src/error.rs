@@ -92,6 +92,19 @@ pub enum MemoryError {
         id: String,
     },
 
+    /// #694 — the store on disk was written by a newer build than this one.
+    ///
+    /// Migrations only run forward, so a newer store leaves every arm of the
+    /// runner ladder false and the binary would otherwise proceed against a
+    /// schema it cannot read. Refusing is the only safe answer: rewriting the
+    /// store to fit this build would destroy data the newer build owns.
+    #[error(
+        "memory store schema v{found} is newer than this build supports (v{supported}) — \
+         it was written by a newer version of wayland-core; upgrade back to that \
+         version, or restore a backup taken before the upgrade"
+    )]
+    SchemaTooNew { found: u32, supported: u32 },
+
     /// F23-03 — an operator control was given an argument it cannot honour
     /// (for example a negative retention bound).
     #[error("invalid memory control: {0}")]

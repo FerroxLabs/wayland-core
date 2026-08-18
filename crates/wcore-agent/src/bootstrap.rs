@@ -2480,14 +2480,15 @@ impl AgentBootstrap {
         //      empty.
         //   1b. Auto-drafted skills (scorer="auto_drafter"). The U6
         //      `SkillDrafter` records each on-disk draft into
-        //      `evolved_prompts` with AUTO_DRAFT_SCORE (0.7 → 4 simulated
-        //      successes) precisely so the skill learned in session 1 gets
-        //      a router head-start in session 2. Without this pass the
-        //      draft lands on disk + in the catalog but the router never
-        //      receives its intended prior — the closed-loop weight was
-        //      written but never read. `restore_seeds` is idempotent on
-        //      names a `bench` GEPA winner already seeded, so proven
-        //      winners still outrank fresh auto-drafts.
+        //      `evolved_prompts` so a skill learned in session 1 can be
+        //      hydrated in session 2. A fresh draft has `score: None` —
+        //      nothing has ever run it — and `seed_pairs_for` skips
+        //      unmeasured rows, so this pass credits an auto-draft only
+        //      once something actually measures it (#694). Until then the
+        //      draft competes at the cold-start posterior like any other
+        //      unmeasured arm. `restore_seeds` is idempotent on names a
+        //      `bench` GEPA winner already seeded, so proven winners keep
+        //      priority regardless.
         //   2. Session-start prioritizer ranking — head-start of
         //      `seed_from_prioritizer` (3 for top quartile, fading to
         //      0 at the tail). `restore_seeds` is idempotent on names
@@ -2519,9 +2520,10 @@ impl AgentBootstrap {
                 }
                 // Layer 1b — auto-drafted skills (scorer="auto_drafter").
                 // Closes the U6 read-back: the SkillDrafter writes this row
-                // in session 1; here in session 2 the router consumes it so
-                // the freshly-learned skill is preferred. Idempotent against
-                // the `bench` pass above — a real GEPA winner keeps priority.
+                // in session 1; here in session 2 the router consumes it.
+                // Unmeasured drafts contribute nothing (#694); a measured one
+                // pays out. Idempotent against the `bench` pass above — a real
+                // GEPA winner keeps priority.
                 if self.config.observability.skills_lifecycle {
                     match store.seed_pairs_for(&candidate_names, "auto_drafter", 1) {
                         Ok(pairs) => {

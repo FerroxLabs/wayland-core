@@ -21,6 +21,16 @@ use wcore_memory::error::MemoryError;
 use crate::error::EvolveError;
 use crate::evolve::EvolveOutcome;
 
+/// Value stored in the `score` column for a row nothing has measured.
+///
+/// It is a placeholder, not a measurement — `score_measured = 0` is the
+/// statement of record and every reader here keys off that flag. 0.0 is the
+/// chosen value because of what an *older* binary does with it: a pre-v7
+/// `seed_pairs_for` scales it to zero simulated successes and skips the row,
+/// and `ORDER BY score DESC` puts it below every real measurement. So a
+/// rolled-back build reaches the same answer this one does.
+const UNMEASURED_PLACEHOLDER: f64 = 0.0;
+
 /// One row in the `evolved_prompts` table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvolvedPrompt {
@@ -30,9 +40,23 @@ pub struct EvolvedPrompt {
     /// Optional pointer to the prior winner that seeded this variant.
     pub parent_id: Option<String>,
     pub prompt_body: String,
-    /// `pass_ratio` for BenchScorer, `dimensions.combined` for DefaultScorer.
-    pub score: f64,
-    /// Stable scorer identifier — currently `"bench"` or `"default"`.
+    /// The measured quality of this variant: `pass_ratio` for BenchScorer,
+    /// `dimensions.combined` for DefaultScorer.
+    ///
+    /// `None` means **no scorer has ever measured this row** (#694). It is not
+    /// a zero and it is not a default — it is the absence of a measurement,
+    /// and readers must treat it as such rather than substituting a number.
+    ///
+    /// Persisted as the schema-v7 pair (`score`, `score_measured`): the flag
+    /// carries the meaning and `score` stores 0.0 as a placeholder. It is NOT
+    /// stored as SQL NULL, deliberately — `score` stays `REAL NOT NULL` so an
+    /// already-released pre-v7 binary, which maps this column into a bare
+    /// `f64`, can still read a store this build wrote. Reads order by
+    /// `score_measured DESC, score DESC`, so an unmeasured row cannot outrank
+    /// a measured one whatever the placeholder is.
+    pub score: Option<f64>,
+    /// Stable scorer identifier — currently `"bench"`, `"default"` or
+    /// `"auto_drafter"`.
     pub scorer: String,
     /// Zero-based generation index at which this variant was emitted.
     pub generation: u32,
@@ -69,14 +93,17 @@ impl PromptStore {
         let conn = tc.conn.lock();
         conn.execute(
             "INSERT INTO evolved_prompts \
-             (id, skill_name, parent_id, prompt_body, score, scorer, generation, created_at, metadata) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (id, skill_name, parent_id, prompt_body, score, score_measured, scorer, generation, created_at, metadata) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 v.id,
                 v.skill_name,
                 v.parent_id,
                 v.prompt_body,
-                v.score,
+                // Unmeasured rows store the placeholder, never NULL — see
+                // `EvolvedPrompt::score`. `score_measured` is what means it.
+                v.score.unwrap_or(UNMEASURED_PLACEHOLDER),
+                i64::from(v.score.is_some()),
                 v.scorer,
                 v.generation,
                 v.created_at,
@@ -108,7 +135,7 @@ impl PromptStore {
             skill_name: skill_name.to_string(),
             parent_id: None, // M5+ will thread parent chains
             prompt_body: winner.mutation.body.clone(),
-            score: winner.score.dimensions.combined,
+            score: Some(winner.score.dimensions.combined),
             scorer: scorer.to_string(),
             generation: outcome.generations_run.saturating_sub(1),
             created_at,
@@ -118,9 +145,10 @@ impl PromptStore {
         Ok(Some(id))
     }
 
-    /// Read the top-N winners for `skill_name` filtered by `scorer`,
-    /// ordered by score DESC. Bounded by the index
-    /// `idx_evolved_prompts_skill_scorer_score`.
+    /// Read the top-N winners for `skill_name` filtered by `scorer`, ordered
+    /// by (score_measured DESC, score DESC) so an unmeasured row can never
+    /// outrank a measured one. Bounded by the index
+    /// `idx_evolved_prompts_skill_scorer_measured`.
     pub fn best_for_skill(
         &self,
         skill_name: &str,
@@ -131,10 +159,10 @@ impl PromptStore {
         let conn = tc.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, skill_name, parent_id, prompt_body, score, scorer, generation, created_at, metadata \
+                "SELECT id, skill_name, parent_id, prompt_body, score, score_measured, scorer, generation, created_at, metadata \
                  FROM evolved_prompts \
                  WHERE skill_name = ?1 AND scorer = ?2 \
-                 ORDER BY score DESC, created_at DESC \
+                 ORDER BY score_measured DESC, score DESC, created_at DESC \
                  LIMIT ?3",
             )
             .map_err(|e| EvolveError::PromptStore(MemoryError::Db(e).to_string()))?;
@@ -156,10 +184,15 @@ impl PromptStore {
     /// `wcore-skills::SkillRouter::restore_seeds`. For each name we look
     /// up the top-scored winner via [`PromptStore::best_for_skill`] and
     /// map `clamp(score, 0.0..=1.0)` × 5, rounded, to a simulated-success
-    /// count. Names with no winner, or a winner whose scaled value is 0,
-    /// are skipped. This is the inter-crate seam: `wcore-skills` cannot
-    /// depend on `wcore-evolve` (the dep already runs the other way), so
-    /// callers (e.g. agent bootstrap) bridge the two via this helper.
+    /// count. Names with no winner, a winner that was never measured
+    /// (`score: None`), or a winner whose scaled value is 0, are skipped.
+    ///
+    /// The unmeasured case is skipped rather than defaulted (#694): a prior is
+    /// a claim about observed performance, so a row nothing ever scored must
+    /// leave the arm at its cold-start posterior instead of inventing one.
+    /// This is the inter-crate seam: `wcore-skills` cannot depend on
+    /// `wcore-evolve` (the dep already runs the other way), so callers
+    /// (e.g. agent bootstrap) bridge the two via this helper.
     pub fn seed_pairs_for(
         &self,
         candidates: &[String],
@@ -172,8 +205,12 @@ impl PromptStore {
             let Some(top) = winners.first() else {
                 continue;
             };
+            // No measurement, no prior. See the doc comment above.
+            let Some(measured) = top.score else {
+                continue;
+            };
             // 0.0..=1.0 → 0..=5 simulated successes.
-            let scaled = (top.score.clamp(0.0, 1.0) * 5.0).round() as u64;
+            let scaled = (measured.clamp(0.0, 1.0) * 5.0).round() as u64;
             if scaled > 0 {
                 out.push((name.clone(), scaled));
             }
@@ -182,16 +219,16 @@ impl PromptStore {
     }
 
     /// Read every winner for `skill_name` across all scorers, ordered by
-    /// (generation DESC, score DESC).
+    /// (generation DESC, score_measured DESC, score DESC).
     pub fn all_for_skill(&self, skill_name: &str) -> Result<Vec<EvolvedPrompt>, EvolveError> {
         let tc = self.db.global.clone();
         let conn = tc.conn.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT id, skill_name, parent_id, prompt_body, score, scorer, generation, created_at, metadata \
+                "SELECT id, skill_name, parent_id, prompt_body, score, score_measured, scorer, generation, created_at, metadata \
                  FROM evolved_prompts \
                  WHERE skill_name = ?1 \
-                 ORDER BY generation DESC, score DESC",
+                 ORDER BY generation DESC, score_measured DESC, score DESC",
             )
             .map_err(|e| EvolveError::PromptStore(MemoryError::Db(e).to_string()))?;
         let rows = stmt
@@ -206,16 +243,23 @@ impl PromptStore {
 }
 
 fn row_to_evolved_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<EvolvedPrompt> {
+    // `score` is NOT NULL at every schema version; `score_measured` is what
+    // distinguishes a measurement from the placeholder that stands in for one.
+    let measured: i64 = row.get(5)?;
     Ok(EvolvedPrompt {
         id: row.get(0)?,
         skill_name: row.get(1)?,
         parent_id: row.get(2)?,
         prompt_body: row.get(3)?,
-        score: row.get(4)?,
-        scorer: row.get(5)?,
-        generation: row.get::<_, i64>(6)? as u32,
-        created_at: row.get(7)?,
-        metadata: row.get(8)?,
+        score: if measured != 0 {
+            Some(row.get(4)?)
+        } else {
+            None
+        },
+        scorer: row.get(6)?,
+        generation: row.get::<_, i64>(7)? as u32,
+        created_at: row.get(8)?,
+        metadata: row.get(9)?,
     })
 }
 
@@ -240,7 +284,7 @@ mod tests {
             skill_name: skill.to_string(),
             parent_id: None,
             prompt_body: format!("body for {id}"),
-            score,
+            score: Some(score),
             scorer: scorer.to_string(),
             generation,
             created_at: 1_000 + generation as i64,
@@ -417,5 +461,85 @@ mod tests {
                 .is_empty()
         );
         assert!(s.all_for_skill("never-evolved").unwrap().is_empty());
+    }
+
+    /// #694 — a row nothing has measured must not be handed a router prior.
+    /// The prior is a claim about observed performance; substituting any
+    /// number for a missing measurement is the defect, whatever the number.
+    #[test]
+    fn seed_pairs_for_skips_unmeasured_rows() {
+        let s = fresh_store();
+        let mut unmeasured = sample("u", "drafted", 0, 0.0, "auto_drafter");
+        unmeasured.score = None;
+        s.record_variant(&unmeasured).unwrap();
+
+        let pairs = s
+            .seed_pairs_for(&["drafted".to_string()], "auto_drafter", 1)
+            .unwrap();
+        assert!(
+            pairs.is_empty(),
+            "an unmeasured row must seed nothing, got {pairs:?}"
+        );
+
+        // Control: the same name with a real measurement DOES seed, so the
+        // assertion above is about the missing score and not about the query
+        // failing to find anything.
+        s.record_variant(&sample("m", "drafted", 1, 0.6, "auto_drafter"))
+            .unwrap();
+        let pairs = s
+            .seed_pairs_for(&["drafted".to_string()], "auto_drafter", 1)
+            .unwrap();
+        assert_eq!(pairs, vec![("drafted".to_string(), 3)]);
+    }
+
+    /// An unmeasured row must never sort above a measured one. Since v7 that
+    /// is carried by the `score_measured DESC` leg of `best_for_skill`'s
+    /// ORDER BY, NOT by the value sitting in `score` — the guarantee must hold
+    /// whatever placeholder an unmeasured row stores.
+    #[test]
+    fn unmeasured_rows_sort_below_measured_ones() {
+        let s = fresh_store();
+        let mut unmeasured = sample("u", "s", 0, 0.0, "bench");
+        unmeasured.score = None;
+        s.record_variant(&unmeasured).unwrap();
+        s.record_variant(&sample("low", "s", 1, 0.01, "bench"))
+            .unwrap();
+
+        let got = s.best_for_skill("s", "bench", 10).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            got[0].id, "low",
+            "even a near-zero measurement outranks none"
+        );
+        assert_eq!(got[1].score, None);
+    }
+
+    /// A missing measurement survives a write/read round trip as `None` rather
+    /// than being silently coerced to a number by the row mapper — even though
+    /// it is stored as a non-NULL placeholder plus a cleared `score_measured`.
+    #[test]
+    fn unmeasured_score_round_trips_as_none() {
+        let s = fresh_store();
+        let mut unmeasured = sample("u", "s", 0, 0.0, "auto_drafter");
+        unmeasured.score = None;
+        s.record_variant(&unmeasured).unwrap();
+
+        let got = s.all_for_skill("s").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].score, None);
+
+        // ...and on disk it is the placeholder plus a cleared flag, never SQL
+        // NULL. `score` must stay mappable into a bare `f64`, because that is
+        // what an already-released pre-v7 binary does with it (#694 rollback).
+        let tc = s.db.global.clone();
+        let conn = tc.conn.lock();
+        let raw: (f64, i64) = conn
+            .query_row(
+                "SELECT score, score_measured FROM evolved_prompts WHERE id = 'u'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("an unmeasured row must still read as a non-null f64");
+        assert_eq!(raw, (0.0, 0));
     }
 }

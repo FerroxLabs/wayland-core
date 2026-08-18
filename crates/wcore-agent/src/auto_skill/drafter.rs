@@ -21,16 +21,16 @@ use uuid::Uuid;
 
 use super::bucketer::DraftTrigger;
 
-/// Score baseline credited to the auto-drafted prompt in the
-/// `evolved_prompts` table. The U1 SkillRouter's `seed_pairs_for` helper
-/// scales this `0.0..=1.0` value by 5 to produce simulated successes —
-/// `0.7` → 4 simulated successes, a "confident-but-not-pinned" weight
-/// that puts the new skill ahead of cold-start arms without dominating
-/// proven winners.
-const AUTO_DRAFT_SCORE: f64 = 0.7;
-
 /// Tag in the `scorer` column so we can filter auto-drafts out of the
 /// real GEPA winners (`bench` / `default`) when slicing the store.
+///
+/// The rows it tags carry `score: None` (#694). Nothing has ever executed a
+/// fresh draft, so there is no measurement to record; the drafter used to
+/// write a hardcoded `0.7` here, which `PromptStore::seed_pairs_for` scaled
+/// into 4 simulated successes and fed to the live SkillRouter — a prior
+/// stronger than a skill whose pass ratio had actually been measured. An
+/// auto-draft now starts where an unmeasured arm belongs: cold. A real score
+/// lands on these rows only once something measures one.
 const AUTO_DRAFT_SCORER: &str = "auto_drafter";
 
 pub struct SkillDrafter {
@@ -164,7 +164,9 @@ impl SkillDrafter {
             "signature": trigger.signature,
             "evidence_count": trigger.trajectories.len(),
             "needs_review": true,
-            "score": AUTO_DRAFT_SCORE,
+            // Explicitly null, not omitted: the field exists and is
+            // unmeasured, which is a different statement from "no opinion".
+            "score": serde_json::Value::Null,
             "scorer": AUTO_DRAFT_SCORER,
         });
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
@@ -184,7 +186,8 @@ impl SkillDrafter {
                 skill_name: name.clone(),
                 parent_id: None,
                 prompt_body: body.clone(),
-                score: AUTO_DRAFT_SCORE,
+                // Unmeasured. See AUTO_DRAFT_SCORER.
+                score: None,
                 scorer: AUTO_DRAFT_SCORER.to_string(),
                 generation: 0,
                 created_at: Utc::now().timestamp(),
@@ -321,6 +324,11 @@ mod tests {
         assert_eq!(manifest["needs_review"], serde_json::Value::Bool(true));
         assert_eq!(manifest["evidence_count"], serde_json::json!(3));
         assert_eq!(manifest["scorer"], serde_json::json!("auto_drafter"));
+        assert_eq!(
+            manifest["score"],
+            serde_json::Value::Null,
+            "a draft nothing has run must not publish a score"
+        );
         assert!(
             !legacy_root.path().join(&res.name).exists(),
             "F06 must publish one canonical draft only"
@@ -481,7 +489,10 @@ mod tests {
         assert_eq!(rows.len(), 1, "expected one auto_drafter row after draft");
         let row = &rows[0];
         assert_eq!(row.skill_name, res.name);
-        assert!((row.score - AUTO_DRAFT_SCORE).abs() < 1e-9);
+        assert_eq!(
+            row.score, None,
+            "the drafter must record the absence of a measurement, not a number"
+        );
         assert_eq!(row.scorer, "auto_drafter");
         assert!(
             row.metadata
@@ -491,12 +502,18 @@ mod tests {
     }
 
     #[test]
-    fn drafted_skill_hydrates_router_seed_via_auto_drafter_scorer() {
-        // Closed-loop read-back guard: the row the drafter writes in
-        // session 1 must become a NONZERO router seed in session 2 via the
-        // exact helper bootstrap calls — `seed_pairs_for(.., "auto_drafter",
-        // ..)`. Regression target for the gap where bootstrap only hydrated
-        // scorer="bench", so auto-drafts were written but never read.
+    fn auto_draft_row_is_read_back_but_seeds_the_router_only_once_measured() {
+        // Closed-loop read-back guard, in the shape #694 left it. The row the
+        // drafter writes in session 1 must still be reachable in session 2
+        // through the exact helper bootstrap calls — `seed_pairs_for(..,
+        // "auto_drafter", ..)`. Regression target for the gap where bootstrap
+        // only hydrated scorer="bench", so auto-drafts were written but never
+        // read.
+        //
+        // What changed is what the read-back is allowed to produce. While the
+        // draft is unmeasured it contributes NO prior. The third leg proves
+        // Layer 1b is still live wiring rather than dead code: give the same
+        // name a real measurement and the seed appears.
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
         let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
@@ -507,14 +524,40 @@ mod tests {
         );
         let res = drafter.draft(&fake_trigger()).unwrap();
 
+        // 1. The row is there, under the auto_drafter scorer.
+        let rows = store.best_for_skill(&res.name, "auto_drafter", 10).unwrap();
+        assert_eq!(rows.len(), 1, "the drafted row must be readable back");
+
+        // 2. Unmeasured → no seed at all.
         let pairs = store
             .seed_pairs_for(std::slice::from_ref(&res.name), "auto_drafter", 1)
             .unwrap();
-        // AUTO_DRAFT_SCORE (0.7) × 5 = 3.5 → round → 4 simulated successes.
+        assert!(
+            pairs.is_empty(),
+            "an unmeasured draft must contribute no router prior, got {pairs:?}"
+        );
+
+        // 3. Once something actually measures it, the same seam pays out.
+        store
+            .record_variant(&wcore_evolve::prompt_store::EvolvedPrompt {
+                id: Uuid::new_v4().to_string(),
+                skill_name: res.name.clone(),
+                parent_id: None,
+                prompt_body: "measured variant".to_string(),
+                score: Some(0.8),
+                scorer: AUTO_DRAFT_SCORER.to_string(),
+                generation: 1,
+                created_at: Utc::now().timestamp(),
+                metadata: None,
+            })
+            .unwrap();
+        let pairs = store
+            .seed_pairs_for(std::slice::from_ref(&res.name), "auto_drafter", 1)
+            .unwrap();
         assert_eq!(
             pairs,
             vec![(res.name.clone(), 4)],
-            "auto-drafted skill must hydrate as a 4-success router seed"
+            "a measured 0.8 must still hydrate as a 4-success router seed"
         );
     }
 
@@ -531,5 +574,134 @@ mod tests {
         let res = drafter.draft(&trigger).unwrap();
         assert!(res.md_path.exists());
         assert!(res.json_path.exists());
+    }
+
+    /// #694 — the auto-drafter fabricates a measurement.
+    ///
+    /// Nothing has ever executed the drafted skill, yet the drafter writes a
+    /// `score` into `evolved_prompts` in the SAME field and the SAME units as
+    /// a real, measured GEPA pass ratio. Bootstrap's Layer 1 (`bench`) and
+    /// Layer 1b (`auto_drafter`) then push both through `seed_pairs_for` into
+    /// the same Beta prior, so the router cannot tell them apart.
+    ///
+    /// The consequence under test: an auto-draft with ZERO measurements is
+    /// handed a STRONGER router prior than a skill whose 0.5 pass ratio was
+    /// actually measured, and therefore wins the live per-turn pick.
+    #[test]
+    fn unmeasured_auto_draft_must_not_outseed_a_measured_skill() {
+        use wcore_dispatch::DecisionRouter;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
+        let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
+
+        // A genuinely measured arm: the GEPA bench harness really ran this
+        // skill and recorded a 0.5 pass ratio.
+        let measured_name = "measured-skill".to_string();
+        store
+            .record_variant(&wcore_evolve::prompt_store::EvolvedPrompt {
+                id: Uuid::new_v4().to_string(),
+                skill_name: measured_name.clone(),
+                parent_id: None,
+                prompt_body: "measured body".to_string(),
+                score: Some(0.5),
+                scorer: "bench".to_string(),
+                generation: 0,
+                created_at: Utc::now().timestamp(),
+                metadata: None,
+            })
+            .unwrap();
+
+        // The unmeasured arm: an auto-draft. Never executed, never scored.
+        let drafter = SkillDrafter::with_loader_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Some(store.clone()),
+        );
+        let drafted = drafter.draft(&fake_trigger()).unwrap();
+
+        // Exactly the two bootstrap seams.
+        let measured_seed = store
+            .seed_pairs_for(std::slice::from_ref(&measured_name), "bench", 1)
+            .unwrap();
+        let drafted_seed = store
+            .seed_pairs_for(std::slice::from_ref(&drafted.name), "auto_drafter", 1)
+            .unwrap();
+        let measured_successes = measured_seed.first().map(|p| p.1).unwrap_or(0);
+
+        // Exact, not comparative. "fewer successes than the measured arm" is
+        // satisfied by a smaller fabricated number, which is the same defect
+        // with the volume turned down. The contract is that an unmeasured row
+        // contributes NO prior.
+        assert!(
+            drafted_seed.is_empty(),
+            "an unmeasured auto-draft must contribute no router prior at all, \
+             got {drafted_seed:?}"
+        );
+        assert!(
+            measured_successes > 0,
+            "control: the measured skill must still seed ({measured_successes}), \
+             or the assertion above passes for the wrong reason"
+        );
+
+        // ...and the same property expressed in live routing.
+        //
+        // Why not a majority vote: with Beta priors the measured arm (3
+        // successes) takes the majority for ANY drafted seed of 2 or less, so
+        // a majority assertion only reddens on a near-total reintroduction of
+        // the defect and a partial regression -- a fabricated 0.3, say -- sails
+        // through it. Assert the exact property instead: routing with whatever
+        // the store yields for the draft must be INDISTINGUISHABLE from
+        // routing with no draft prior at all. Any nonzero prior moves the
+        // distribution, however small.
+        let candidates = vec![measured_name.clone(), drafted.name.clone()];
+        let picks = |draft_seed: &[(String, u64)]| -> (usize, usize) {
+            let mut drafted_picks = 0usize;
+            let mut measured_picks = 0usize;
+            for seed in 0..600u64 {
+                let mut router = wcore_skills::SkillRouter::with_seed(seed);
+                router.restore_seeds(measured_seed.clone());
+                router.restore_seeds(draft_seed.to_vec());
+                let pick = router
+                    .choose(wcore_skills::SkillRouterInput {
+                        task: "some task",
+                        candidates: &candidates,
+                    })
+                    .unwrap();
+                if pick == drafted.name {
+                    drafted_picks += 1;
+                } else {
+                    measured_picks += 1;
+                }
+            }
+            (drafted_picks, measured_picks)
+        };
+
+        let observed = picks(&drafted_seed);
+        let no_prior_at_all = picks(&[]);
+        assert_eq!(
+            observed, no_prior_at_all,
+            "live routing must treat the unmeasured draft exactly as an arm \
+             carrying no prior: got {observed:?} vs {no_prior_at_all:?} \
+             (drafted, measured) picks over 600 seeds"
+        );
+        assert!(
+            observed.1 > observed.0,
+            "live routing preferred the UNMEASURED auto-draft {}/600 times vs \
+             {}/600 for the measured skill",
+            observed.0,
+            observed.1
+        );
+
+        // Positive control for the equality above: the SMALLEST partial
+        // regression representable -- one simulated success -- must make the
+        // two differ. Otherwise the equality could hold because the comparison
+        // is blind rather than because the prior is absent.
+        let partial_regression = picks(&[(drafted.name.clone(), 1)]);
+        assert_ne!(
+            partial_regression, no_prior_at_all,
+            "a 1-success prior is invisible to this comparison, so the \
+             assertion above proves nothing"
+        );
     }
 }
