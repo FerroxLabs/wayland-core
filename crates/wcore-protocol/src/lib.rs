@@ -299,6 +299,31 @@ impl ToolApprovalManager {
         count
     }
 
+    /// FerroxLabs/wayland#1070 — resolve EVERY pending approval as `Denied`
+    /// with `reason`, regardless of TTL, and return how many were resolved.
+    ///
+    /// The TTL reaper exists for a host that went quiet; this exists for a
+    /// host that provably went away. When the command stream reaches EOF while
+    /// a tool is parked on its approval, no decision can ever arrive, so
+    /// waiting out the remaining [`DEFAULT_APPROVAL_TTL`] only converts a
+    /// known-final answer into a five-minute stall. Failing CLOSED (deny, not
+    /// approve) is the same posture the reaper already takes.
+    pub fn deny_all_pending(&self, reason: &str) -> usize {
+        let drained: Vec<PendingApproval> = match self.pending.lock() {
+            Ok(mut map) => map.drain().map(|(_, pending)| pending).collect(),
+            Err(_) => return 0,
+        };
+        let count = drained.len();
+        for pending in drained {
+            // A requester that already went away leaves a closed receiver;
+            // the send is a harmless `Err` and the entry is gone either way.
+            let _ = pending.tx.send(ToolApprovalResult::Denied {
+                reason: reason.to_string(),
+            });
+        }
+        count
+    }
+
     /// AUDIT B-2 — spawn the background reaper task. Call once at
     /// engine/host bootstrap on the shared `Arc<ToolApprovalManager>`.
     /// Returns the `JoinHandle` so the caller can abort it on shutdown.
