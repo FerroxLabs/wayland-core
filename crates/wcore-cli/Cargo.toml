@@ -94,6 +94,12 @@ wcore-compact.workspace  = true
 # independently (F26-SC3-O1). Additive — wcore-memory already enables it, so
 # this adds no build.
 wcore-config = { workspace = true, features = ["sqlite"] }
+# Issue #114: `--doctor` probes the macOS TCC grants (Accessibility, Screen
+# Recording) and `--request-permissions` raises the consent prompt. Both go
+# through `wcore_cua::permissions`, which is the single home for the
+# platform-specific TCC calls. Already in the graph transitively via
+# wcore-agent; named here because the CLI calls it directly.
+wcore-cua.workspace      = true
 wcore-memory.workspace   = true
 # Wave OL: needed for the `PluginProvider` trait surface that the
 # CLI-side `make_plugin_provider_router` consumes (downcasts via

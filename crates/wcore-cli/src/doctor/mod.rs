@@ -23,6 +23,7 @@
 use std::process::ExitCode;
 
 use wcore_config::shell::shell_command_argv;
+use wcore_cua::permissions::{TccCapability, TccStatus};
 
 /// A structured doctor report: every check row plus the version banner.
 ///
@@ -64,11 +65,13 @@ pub enum Outcome {
     /// Accessibility on Linux). Prints `SKIP` and does NOT affect the
     /// exit code.
     Skip { reason: String },
-    /// Check cannot be automatically verified (e.g. macOS
-    /// Accessibility permission, which lives in TCC and requires
-    /// `AXIsProcessTrusted()` or a manual System Settings visit).
-    /// Surfaced as a manual-action hint per the W5 hard rule against
-    /// fake passes.
+    /// Check cannot be automatically verified by any API we have, so
+    /// the only honest report is a manual-action hint. Surfaced per the
+    /// W5 hard rule against fake passes.
+    ///
+    /// The macOS TCC rows no longer use this: since issue #114 they are
+    /// real probes (`AXIsProcessTrusted` /
+    /// `CGPreflightScreenCaptureAccess`) via `wcore_cua::permissions`.
     Manual { hint: String },
 }
 
@@ -185,15 +188,13 @@ async fn collect_checks(version: &str) -> Vec<CheckResult> {
         out.push(skip("X DISPLAY", "Linux-only"));
     }
 
-    // 4. macOS Accessibility permission — cannot be programmatically
-    //    verified without linking ApplicationServices/CoreFoundation
-    //    (would require a new dep just for one check). Surfaced as a
-    //    `Manual` row per the W5 hard rule against fake passes.
-    if cfg!(target_os = "macos") {
-        out.push(check_macos_accessibility_manual());
-    } else {
-        out.push(skip("macOS Accessibility", "non-macOS platform"));
-    }
+    // 4. macOS TCC permissions — REAL probes since issue #114.
+    //    `AXIsProcessTrusted()` gates synthesized input and
+    //    `CGPreflightScreenCaptureAccess()` gates display capture; both
+    //    answer without showing a dialog, so the doctor stays
+    //    side-effect-free. Off macOS these SKIP exactly as before.
+    out.push(check_macos_tcc(TccCapability::Accessibility));
+    out.push(check_macos_tcc(TccCapability::ScreenRecording));
 
     // 5. Optional providers — warnings only, never flip the exit code.
     out.push(check_browserbase());
@@ -313,13 +314,39 @@ fn check_x_display() -> CheckResult {
     }
 }
 
-fn check_macos_accessibility_manual() -> CheckResult {
+/// A macOS TCC grant, probed for real.
+///
+/// The probe is non-prompting, so running the doctor never raises a
+/// consent dialog. A missing grant is a `Warn`, not a `Fail`: computer
+/// use is optional, and the same reasoning that made Chromium a warning
+/// on macOS (F-073) applies here — a user who never touches CUA should
+/// not get a non-zero doctor exit for a permission they do not need.
+/// The row still names the exact Settings pane and the one command that
+/// raises the prompt.
+fn check_macos_tcc(capability: TccCapability) -> CheckResult {
+    let label = match capability {
+        TccCapability::Accessibility => "macOS Accessibility",
+        TccCapability::ScreenRecording => "macOS Screen Record",
+    };
     CheckResult {
-        label: "macOS Accessibility",
-        outcome: Outcome::Manual {
-            hint: "verify in System Settings -> Privacy & Security -> Accessibility \
-                   (wayland-core / Terminal / iTerm must be enabled to use CUA)"
-                .into(),
+        label,
+        outcome: match wcore_cua::permissions::probe(capability) {
+            TccStatus::Granted => Outcome::Pass {
+                detail: format!("{} granted (CUA can run)", capability.settings_pane()),
+            },
+            TccStatus::Denied => Outcome::Warn {
+                detail: format!(
+                    "{} NOT granted — computer-use ops will refuse with a typed error",
+                    capability.settings_pane()
+                ),
+                hints: vec![
+                    capability.remediation(),
+                    "or run `wayland-core --request-permissions` to raise the system prompt".into(),
+                ],
+            },
+            TccStatus::NotApplicable => Outcome::Skip {
+                reason: "non-macOS platform".into(),
+            },
         },
     }
 }
@@ -804,6 +831,38 @@ mod tests {
             3,
             "the classifier collapsed states that need different remedies"
         );
+    }
+
+    /// The macOS TCC rows must reflect the host's real grant state, and
+    /// off macOS they must SKIP — never PASS. A row that passed on a
+    /// platform with no TCC at all would be a fake green for the exact
+    /// permission the check exists to report on.
+    #[test]
+    fn macos_tcc_rows_track_the_probe_and_skip_off_macos() {
+        for capability in [TccCapability::Accessibility, TccCapability::ScreenRecording] {
+            let row = check_macos_tcc(capability);
+            match (wcore_cua::permissions::probe(capability), &row.outcome) {
+                (TccStatus::Granted, Outcome::Pass { .. }) => {}
+                (TccStatus::Denied, Outcome::Warn { hints, .. }) => assert!(
+                    hints.iter().any(|h| h.contains(capability.settings_pane())),
+                    "a denied grant must name the pane to visit: {hints:?}"
+                ),
+                (TccStatus::NotApplicable, Outcome::Skip { .. }) => {}
+                (status, outcome) => {
+                    panic!("probe said {status:?} but the row rendered {outcome:?}")
+                }
+            }
+        }
+    }
+
+    /// The two capabilities must occupy distinct rows with distinct
+    /// labels — collapsing them would hide one missing grant behind the
+    /// other.
+    #[test]
+    fn accessibility_and_screen_recording_are_reported_separately() {
+        let a = check_macos_tcc(TccCapability::Accessibility);
+        let s = check_macos_tcc(TccCapability::ScreenRecording);
+        assert_ne!(a.label, s.label);
     }
 
     #[test]

@@ -466,6 +466,17 @@ struct Cli {
     #[arg(long, requires = "doctor")]
     probe_mcp: bool,
 
+    /// macOS only: ask the OS to show the TCC consent prompts that
+    /// computer-use needs (Accessibility, Screen Recording), then print
+    /// the resulting state.
+    ///
+    /// This is the ONLY path that raises a system dialog. `--doctor`
+    /// and every agent run use the non-prompting probe instead, so a
+    /// user is never surprised by a consent sheet mid-task. Off macOS
+    /// it prints that there is nothing to grant and exits 0.
+    #[arg(long)]
+    request_permissions: bool,
+
     /// Run the skills audit. Writes JSON to .wayland-core/skills-audit.json
     /// and renders Markdown to stdout.
     #[arg(long)]
@@ -1740,6 +1751,13 @@ async fn run() -> anyhow::Result<ExitCode> {
     // touching config files, OAuth, or the engine bootstrap.
     if cli.doctor {
         return Ok(doctor::run(cli.probe_mcp).await);
+    }
+
+    // Issue #114: the explicit, user-initiated TCC prompt. Kept next to
+    // --doctor so it runs before config/OAuth/engine bootstrap — a user
+    // fixing permissions must not have to get past anything else first.
+    if cli.request_permissions {
+        return Ok(request_permissions());
     }
 
     // Handle --build-info: print version + embedded source SHA and exit.
@@ -6196,6 +6214,44 @@ async fn run_json_stream_mode(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// `wayland-core --request-permissions` — the single explicit path that
+/// is allowed to raise a macOS TCC consent dialog (issue #114).
+///
+/// Everything else in the binary uses `wcore_cua::permissions::probe`,
+/// which never shows UI. Accessibility consent is not granted
+/// in-process: macOS opens the Settings pane and the grant takes effect
+/// only after the user adds the binary and restarts it, so a still-
+/// denied result here is the expected first-run answer and NOT an
+/// error — the exit code stays 0 either way so a first run is not
+/// reported as a failure.
+fn request_permissions() -> ExitCode {
+    use wcore_cua::permissions::{TccCapability, TccStatus, prime};
+
+    if !cfg!(target_os = "macos") {
+        println!("No permissions to request on this platform — TCC is macOS-only.");
+        return ExitCode::SUCCESS;
+    }
+
+    println!("Requesting macOS computer-use permissions. Approve the prompts that appear.\n");
+    for capability in TccCapability::ALL {
+        match prime(capability) {
+            TccStatus::Granted => println!("[GRANTED] {}", capability.settings_pane()),
+            TccStatus::Denied => {
+                println!("[PENDING] {}", capability.settings_pane());
+                println!("          {}", capability.remediation());
+            }
+            TccStatus::NotApplicable => {
+                println!(
+                    "[SKIP]    {} — not applicable here",
+                    capability.settings_pane()
+                );
+            }
+        }
+    }
+    println!("\nRe-run `wayland-core --doctor` to confirm the grants took effect.");
+    ExitCode::SUCCESS
+}
 
 #[cfg(test)]
 mod tests {
