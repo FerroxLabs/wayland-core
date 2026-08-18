@@ -90,8 +90,32 @@ jobs:
           if ($bad) { throw "this lane modifies production code: $($bad -join ', ')" }
           Write-Host "OK: production code is identical to $env:SHIPPING_SHA"
 
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # NOT dtolnay/rust-toolchain: on this box that action's bash probe
+      # (`command -v rustup`) misses the installed rustup and it then tries to
+      # re-run rustup-init, which fails with
+      #   error: could not remove 'rustup-bin' file:
+      #   'C:\WINDOWS\ServiceProfiles\NetworkService\.cargo\bin\rustup.exe'
+      # because a concurrent job on the same shared runner holds it. The
+      # toolchain is already installed for the runner's service account, so use
+      # it and RECORD its version rather than reinstalling under contention.
+      - name: Use the runner's installed Rust toolchain
+        shell: pwsh
+        run: |
+          $candidates = @(
+            $(if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' }),
+            $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.cargo\bin' }),
+            'C:\WINDOWS\ServiceProfiles\NetworkService\.cargo\bin'
+          ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'cargo.exe')) }
+          if (-not $candidates) {
+            throw "no cargo.exe found; searched CARGO_HOME, USERPROFILE\.cargo\bin and the NetworkService profile"
+          }
+          $bin = @($candidates)[0]
+          Write-Host "cargo bin dir = $bin"
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          $env:PATH = "$bin;$env:PATH"
+          & (Join-Path $bin 'rustc.exe') -vV
+          & (Join-Path $bin 'cargo.exe') -V
+          if ($LASTEXITCODE -ne 0) { throw "cargo is not runnable" }
 
       # The "real tree" for CLAIM B: a full clone of the shipping tree on D:,
       # which then receives the cargo target directory. After the build it is a
