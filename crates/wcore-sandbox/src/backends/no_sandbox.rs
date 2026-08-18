@@ -528,9 +528,112 @@ mod tests {
         assert!(matches!(err, SandboxError::ExecFailed(_)));
     }
 
+    /// Run `/bin/sh -c <script>` through the buffered path. The manifest env
+    /// is empty on purpose — that is the production shape, and `sh` does not
+    /// need one.
+    #[cfg(unix)]
+    async fn buffered_sh(script: &str) -> SandboxOutput {
+        let backend = NoSandboxBackend::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            backend.execute(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+                    cwd: None,
+                },
+            ),
+        )
+        .await
+        .expect("a finite producer must not hang the buffered path")
+        .expect("a finite producer must not fail the buffered path")
+    }
+
+    /// CONTROL for `over_cap_output_is_truncated_not_discarded`: an under-cap
+    /// payload arrives byte-for-byte with no marker, so that test cannot pass
+    /// by truncating everything.
     #[cfg(unix)]
     #[tokio::test]
-    async fn buffered_output_is_bounded() {
+    async fn under_cap_output_passes_through_byte_exact() {
+        const SIZE: usize = 2_000_000;
+        let output = buffered_sh("head -c 2000000 /dev/zero | tr '\\0' A").await;
+
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            output.stdout.len(),
+            SIZE,
+            "under-cap output must not be reshaped"
+        );
+        assert!(
+            output.stdout.iter().all(|byte| *byte == b'A'),
+            "under-cap output must be the child's exact bytes"
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("OUTPUT TRUNCATED"),
+            "an under-cap payload must not be marked truncated"
+        );
+    }
+
+    /// FerroxLabs/wayland#1071: 20 MB in, 129 bytes out. Overflowing the cap
+    /// discarded the whole stream, including the head the cap was sized to let
+    /// the caller keep.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn over_cap_output_is_truncated_not_discarded() {
+        let cap = super::super::BUFFERED_OUTPUT_LIMIT_BYTES;
+        let output = buffered_sh("head -c 20000000 /dev/zero | tr '\\0' A").await;
+
+        // The retained BYTES are the assertion, not that the call returned.
+        assert!(
+            output.stdout.len() > cap,
+            "over-cap output retained {} bytes; the cap alone allows {cap}",
+            output.stdout.len()
+        );
+        assert!(
+            output.stdout[..cap].iter().all(|byte| *byte == b'A'),
+            "the kept bytes must be the child's own, in order"
+        );
+        let marker = format!(
+            "[wcore-sandbox: OUTPUT TRUNCATED. This command produced more than the \
+             {cap}-byte buffered output cap. The {cap} bytes above are the start of the \
+             output; everything after them was discarded, and the command was STOPPED at \
+             that point"
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.contains(&marker),
+            "expected marker {marker:?}; got {:?}",
+            &text[cap..]
+        );
+        assert_eq!(
+            output.stdout.len(),
+            cap + truncation_marker_len(cap),
+            "retained bytes must be exactly the cap plus the marker"
+        );
+    }
+
+    /// Length of the marker `read_bounded` appends after keeping `kept` bytes.
+    /// Rebuilt here rather than imported so the test states the shape it
+    /// expects instead of restating the implementation's own expression.
+    #[cfg(unix)]
+    fn truncation_marker_len(kept: usize) -> usize {
+        let cap = super::super::BUFFERED_OUTPUT_LIMIT_BYTES;
+        format!(
+            "\n[wcore-sandbox: OUTPUT TRUNCATED. This command produced more than the \
+             {cap}-byte buffered output cap. The {kept} bytes above are the start of the \
+             output; everything after them was discarded, and the command was STOPPED at \
+             that point — it did not run to completion, so any work it had not yet done \
+             has not happened.]\n"
+        )
+        .len()
+    }
+
+    /// The cap's OTHER job, which truncation must not forfeit: crossing it
+    /// stops the child at once. `yes` never ends on its own, so a run that
+    /// waited for EOF would sit here until the caller's wall-clock timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn crossing_the_cap_stops_the_child_and_still_yields_its_head() {
         let Some(yes) = ["/usr/bin/yes", "/bin/yes"]
             .into_iter()
             .find(|path| std::path::Path::new(path).exists())
@@ -539,7 +642,7 @@ mod tests {
             return;
         };
         let backend = NoSandboxBackend::new();
-        let error = tokio::time::timeout(
+        let output = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             backend.execute(
                 &SandboxManifest::default(),
@@ -550,15 +653,24 @@ mod tests {
             ),
         )
         .await
-        .expect("output ceiling must stop an infinite producer promptly")
-        .unwrap_err();
+        .expect("crossing the cap must stop an infinite producer promptly")
+        .expect("a stopped producer still reports what it printed");
 
-        assert!(matches!(
-            error,
-            SandboxError::OutputLimitExceeded {
-                limit_bytes: super::super::BUFFERED_OUTPUT_LIMIT_BYTES
-            }
-        ));
+        let cap = super::super::BUFFERED_OUTPUT_LIMIT_BYTES;
+        assert!(
+            output.stdout.len() > cap,
+            "an infinite producer must still yield its head; got {} bytes",
+            output.stdout.len()
+        );
+        assert_eq!(
+            output.stdout.len(),
+            cap + truncation_marker_len(cap),
+            "host memory must stay bounded by the cap plus the marker"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("OUTPUT TRUNCATED"),
+            "a truncated stream must say so"
+        );
     }
 
     #[cfg(unix)]
