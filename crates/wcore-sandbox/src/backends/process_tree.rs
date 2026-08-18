@@ -87,11 +87,11 @@ impl ProcessTreeGuard {
             #[cfg(target_os = "linux")]
             linux_group: Some(linux_group),
             #[cfg(target_os = "macos")]
-            mac_group: Some(MacProcessGroupAuthority::attach(
-                libc::pid_t::try_from(pid).map_err(|_| {
+            mac_group: MacProcessGroupAuthority::attach(libc::pid_t::try_from(pid).map_err(
+                |_| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, "child PID exceeds pid_t")
-                })?,
-            )?),
+                },
+            )?)?,
             #[cfg(windows)]
             job: Some(WindowsJob::attach(pid)?),
         })
@@ -125,15 +125,15 @@ impl ProcessTreeGuard {
         }
         #[cfg(target_os = "macos")]
         {
-            self.mac_group
-                .as_ref()
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "macOS process-group authority is unavailable",
-                    )
-                })?
-                .signal_group(libc::SIGTERM)
+            // `None` here is not "the authority is missing", it is "the
+            // workload's process group no longer exists" — see
+            // `MacProcessGroupAuthority::attach_with_hook`. There is nothing to
+            // ask to unwind, and reporting that as a refusal made a completed
+            // workload look like a containment fault.
+            match self.mac_group.as_ref() {
+                Some(group) => group.signal_group(libc::SIGTERM),
+                None => Ok(()),
+            }
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -253,22 +253,93 @@ struct MacProcessGroupAuthority {
 
 #[cfg(target_os = "macos")]
 impl MacProcessGroupAuthority {
-    fn attach(process_group: libc::pid_t) -> std::io::Result<Self> {
+    fn attach(process_group: libc::pid_t) -> std::io::Result<Option<Self>> {
         Self::attach_with_hook(process_group, || {})
     }
 
+    /// Attach to the workload's process group, or answer `Ok(None)` when that
+    /// group no longer exists at all.
+    ///
+    /// # The ENTRY half of the Darwin corpse defect
+    ///
+    /// The post-fork check below already documents that Darwin answers ESRCH
+    /// from BOTH `proc_pidinfo(PROC_PIDTBSDINFO)` and `getpgid()` for an
+    /// unreaped zombie, where Linux answers normally — and it relaxed the
+    /// check that ran AFTER the sentinel joined. The two probes at the TOP of
+    /// this function were left on the old rule, so the identical failure
+    /// survived one window earlier: a child that finishes BEFORE
+    /// `ProcessTreeGuard::new` is even reached — routine for `git config`,
+    /// `git rev-list` and every other fast command on a loaded host — made
+    /// `MacProcessIdentity::open` return ESRCH and turned a subprocess that had
+    /// already run to completion into
+    /// `failed to establish process-tree containment: No such process`.
+    ///
+    /// Measured on `macos-latest` (runner image macos-26-arm64/20260728.0273),
+    /// 12 concurrent runs of `wcore-swarm`'s
+    /// `independent_cli_processes_cannot_overbook_shared_capacity`: 4 spurious
+    /// failures in 3 rounds, every one of them this message. Linux never
+    /// reproduces it — `/proc/<pid>` survives a zombie — which is why this is
+    /// a macOS-only leg failure.
+    ///
+    /// # Why ESRCH is safe to read as "our child is a corpse"
+    ///
+    /// Every caller passes the pid of a child it has not yet reaped, so the
+    /// kernel cannot hand that pid to a stranger while the zombie is held. A
+    /// stranger would in any case be LIVE, which takes the normal path and is
+    /// still refused by the `Recycled` arm below.
+    ///
+    /// # What `Ok(None)` means, and what it does NOT mean
+    ///
+    /// `Ok(None)` means one thing only: **this process group is confirmed
+    /// absent**, so there is no tree to own.
+    ///
+    /// It used to be inferred instead from "the sentinel's `setpgid` was
+    /// refused and the root is a corpse", and that inference is wrong twice
+    /// over. Measured on macOS 26.3 (xnu 25.3.0):
+    ///
+    /// * An UNREAPED corpse keeps its process group alive — XNU removes a
+    ///   process from its pgrp at REAP, not at exit — so `setpgid` SUCCEEDS
+    ///   and the refusal never happens for the corpse case this arm was
+    ///   written for. `kill(-pg, 0)` answers EPERM there (the group exists;
+    ///   nothing in it can be signalled), not ESRCH.
+    /// * A refused `setpgid` is not proof of absence in general: EPERM is
+    ///   also the answer for a group that exists in another session.
+    ///
+    /// So the arm now requires a direct probe — see
+    /// [`macos_process_group_is_gone`]. The group can still be genuinely gone
+    /// without any reap by the caller: a child may `setpgid` itself into
+    /// another same-session group before exiting, leaving its launch group
+    /// empty. That is why this stays an `Option` rather than becoming an
+    /// unconditional error.
+    ///
+    /// If a descendant IS alive the group exists, the sentinel joins, and a
+    /// full authority is returned — pinned by
+    /// `a_corpse_root_with_a_live_descendant_still_yields_containment`.
     fn attach_with_hook(
         process_group: libc::pid_t,
         after_sentinel_ready: impl FnOnce(),
-    ) -> std::io::Result<Self> {
+    ) -> std::io::Result<Option<Self>> {
         use std::os::fd::FromRawFd;
 
-        let root = MacProcessIdentity::open(process_group)?;
-        if macos_process_group(process_group)? != process_group {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "spawned macOS process does not own its expected process group",
-            ));
+        let root = match MacProcessIdentity::open(process_group) {
+            Ok(identity) => Some(identity),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => None,
+            Err(error) => return Err(error),
+        };
+        if root.is_some() {
+            match macos_process_group(process_group) {
+                Ok(group) if group == process_group => {}
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "spawned macOS process does not own its expected process group",
+                    ));
+                }
+                // The root exited between the two probes. Same disposition as
+                // a root that was already a corpse when this function started.
+                Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
+                Err(error) => return Err(error),
+            }
         }
         let mut sockets = [0; 2];
         // SAFETY: `sockets` is writable storage for two descriptors.
@@ -309,12 +380,38 @@ impl MacProcessGroupAuthority {
         let channel = unsafe { std::os::fd::OwnedFd::from_raw_fd(sockets[0]) };
         let mut ready = 0_u8;
         use std::os::fd::AsRawFd;
-        // SAFETY: `ready` is writable for one byte and channel is live.
-        let read = unsafe { libc::read(channel.as_raw_fd(), (&mut ready as *mut u8).cast(), 1) };
-        if read != 1 || ready != 1 {
+        // A short read, an EOF or an EINTR is NOT the sentinel reporting
+        // failure — it is this process failing to hear the report at all.
+        // Reading `read != 1` as "the sentinel did not join" let a single
+        // interrupted `read` fall into the corpse arm below and answer
+        // "nothing to contain" for a group whose sentinel had in fact joined
+        // and which could still hold a live descendant. That is fail-open
+        // cleanup, so the two outcomes are now distinct: `Some(joined)` is a
+        // report, `None` is the absence of one.
+        let report = loop {
+            // SAFETY: `ready` is writable for one byte and channel is live.
+            let read =
+                unsafe { libc::read(channel.as_raw_fd(), (&mut ready as *mut u8).cast(), 1) };
+            if read == 1 {
+                break Some(ready == 1);
+            }
+            if read < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break None;
+        };
+        if report != Some(true) {
             unsafe {
                 libc::kill(sentinel_pid, libc::SIGKILL);
                 libc::waitpid(sentinel_pid, std::ptr::null_mut(), 0);
+            }
+            // Every conjunct is load-bearing: the sentinel must have actually
+            // REPORTED a refusal (not gone unheard), the root must already
+            // have been a corpse, and the group must be confirmed absent by a
+            // direct probe rather than inferred from the refusal.
+            if report == Some(false) && root.is_none() && macos_process_group_is_gone(process_group)
+            {
+                return Ok(None);
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -365,11 +462,16 @@ impl MacProcessGroupAuthority {
         // that a child can escape at any later instant, so this closes an
         // attach-time window rather than providing hard containment — but a
         // window that was closed should not be opened for free.)
-        let root_state = root.recheck();
-        let root_ok = match root_state {
-            MacIdentityRecheck::Same => {
+        let root_state = match &root {
+            Some(root) => root.recheck(),
+            // Already a corpse when this function started: the same state the
+            // `Corpse` arm below accepts, reached one window earlier.
+            None => MacIdentityRecheck::Corpse,
+        };
+        let root_ok = match &root_state {
+            MacIdentityRecheck::Same => root.as_ref().is_some_and(|root| {
                 macos_process_group(root.pid).is_ok_and(|group| group == process_group)
-            }
+            }),
             MacIdentityRecheck::Corpse => true,
             MacIdentityRecheck::Recycled | MacIdentityRecheck::Unreadable(_) => false,
         };
@@ -405,11 +507,11 @@ impl MacProcessGroupAuthority {
                 ),
             ));
         }
-        Ok(Self {
+        Ok(Some(Self {
             process_group,
             sentinel,
             channel,
-        })
+        }))
     }
 
     fn signal_group(&self, signal: libc::c_int) -> std::io::Result<()> {
@@ -546,6 +648,27 @@ fn macos_bsd_info(pid: libc::pid_t) -> std::io::Result<libc::proc_bsdinfo> {
     Ok(unsafe { info.assume_init() })
 }
 
+/// Is `process_group` confirmed absent — no pgrp of that id at all?
+///
+/// Darwin separates the two answers this question rests on. `kill(-pg, 0)`
+/// answers **ESRCH** only when `pgrp_find` located no such group, and
+/// **EPERM** when the group EXISTS but nothing in it could be signalled —
+/// which is exactly an unreaped corpse, because XNU filters zombies out of
+/// explicit-group signal iteration while leaving them in the member list.
+///
+/// Measured on macOS 26.3 (xnu 25.3.0), corpse-led group with no other
+/// member: `getpgid` ESRCH, `proc_pidinfo` ESRCH, `kill(-pg, 0)` **EPERM**,
+/// `setpgid(0, pg)` **succeeds**. Only ESRCH may be read as absence.
+#[cfg(target_os = "macos")]
+fn macos_process_group_is_gone(process_group: libc::pid_t) -> bool {
+    // SAFETY: signal 0 delivers nothing; it performs the existence and
+    // permission check only, against the captured group id.
+    if unsafe { libc::kill(-process_group, 0) } == 0 {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 #[cfg(target_os = "macos")]
 fn macos_process_group(pid: libc::pid_t) -> std::io::Result<libc::pid_t> {
     // SAFETY: getpgid is read-only and accepts the captured positive PID.
@@ -582,8 +705,9 @@ mod macos_tests {
         isolate_std(&mut child_command);
         let mut child = child_command.spawn().expect("spawn fixture");
         let process_group = child.id() as libc::pid_t;
-        let mut authority =
-            MacProcessGroupAuthority::attach(process_group).expect("group authority");
+        let mut authority = MacProcessGroupAuthority::attach(process_group)
+            .expect("group authority")
+            .expect("a live root must yield a full authority, never \"nothing to contain\"");
 
         authority.sentinel.start_usec = authority.sentinel.start_usec.saturating_add(1);
         let error = authority
@@ -620,6 +744,144 @@ mod macos_tests {
     /// requires before it reaches the post-check, is itself proof that the
     /// group still exists. A root that was *replaced* by a different process
     /// is still refused; only a corpse is tolerated.
+    /// Spawn `argv` as its own process-group leader, let it exit, and leave it
+    /// UNREAPED so its pid still names a corpse rather than a stranger.
+    ///
+    /// Returns only once Darwin actually reports that corpse state, so neither
+    /// test below can pass by racing the fixture instead of exercising it. The
+    /// preconditions are asserted rather than assumed: a fixture that never
+    /// reached the state under test has proved nothing and must not read as a
+    /// pass.
+    fn corpse_group_leader(argv: &[&str]) -> (std::process::Child, libc::pid_t) {
+        let mut child_command = std::process::Command::new(argv[0]);
+        child_command.args(&argv[1..]);
+        isolate_std(&mut child_command);
+        let child = child_command.spawn().expect("spawn fixture");
+        let process_group = child.id() as libc::pid_t;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while macos_process_group(process_group).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture root never became an unreaped corpse"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // `MacProcessIdentity::open` is the exact probe `attach_with_hook` runs
+        // FIRST, and the one that used to fail the whole capture closed. Assert
+        // it refuses too, so the tests are pinned to that probe and not merely
+        // to `getpgid`.
+        assert_eq!(
+            MacProcessIdentity::open(process_group)
+                .err()
+                .and_then(|error| error.raw_os_error()),
+            Some(libc::ESRCH),
+            "precondition: Darwin must answer ESRCH for an unreaped corpse"
+        );
+        (child, process_group)
+    }
+
+    /// A root that is ALREADY a corpse when containment attaches is not a
+    /// containment fault.
+    ///
+    /// This is the macOS-only defect that made `main` red. On a loaded host a
+    /// fast `git` child routinely exits before `ProcessTreeGuard::new` runs,
+    /// and the entry probes then failed the whole capture with
+    /// `failed to establish process-tree containment: No such process`, even
+    /// though the subprocess had already completed successfully.
+    ///
+    /// The answer is a FULL authority, not "nothing to contain": an unreaped
+    /// corpse keeps its process group alive (XNU removes a process from its
+    /// pgrp when it is reaped, not when it exits), so the sentinel joins.
+    /// This test first asserted `None`, which its own fixture cannot produce —
+    /// the fixture deliberately leaves the corpse unreaped, which is precisely
+    /// what holds the group open.
+    #[test]
+    fn attaching_to_an_already_exited_root_is_not_a_containment_failure() {
+        let (mut child, process_group) = corpse_group_leader(&["sh", "-c", "exit 0"]);
+        // The old precondition asserted only `kill(-pg, 0) == -1` and called
+        // that "the group must have no members left". It was EPERM, which is
+        // the kernel saying the group EXISTS — the literal opposite — and
+        // `== -1` cannot tell the two apart. Assert absence the way production
+        // decides it, so the test and the code cannot drift.
+        assert!(
+            !macos_process_group_is_gone(process_group),
+            "precondition: an unreaped corpse must still hold its group open"
+        );
+
+        let authority = MacProcessGroupAuthority::attach(process_group)
+            .expect("an already-exited root must not be a containment failure")
+            .expect("the corpse holds its group open, so there IS a group to own");
+        // Usable, not merely constructible: a handle that cannot signal its
+        // group is containment in name only.
+        authority
+            .signal_group(libc::SIGKILL)
+            .expect("the attached authority must be able to signal its own group");
+
+        child.wait().expect("reap fixture");
+    }
+
+    /// `macos_process_group_is_gone` is the single predicate the `Ok(None)`
+    /// arm rests on, so it must separate the two errno answers that arm was
+    /// previously blind to: EPERM ("the group is there, nothing in it can be
+    /// signalled") must NOT read as absence, ESRCH must.
+    ///
+    /// Both directions are asserted from the same fixture, one reap apart, so
+    /// this cannot pass by finding the predicate stuck on either answer.
+    #[test]
+    fn only_a_reaped_group_reads_as_gone() {
+        let (mut child, process_group) = corpse_group_leader(&["sh", "-c", "exit 0"]);
+
+        // Before the reap: the corpse is still a member.
+        assert_eq!(
+            unsafe { libc::kill(-process_group, 0) },
+            -1,
+            "a corpse-only group must refuse signal 0"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EPERM),
+            "Darwin must answer EPERM — the group exists, the corpse is unsignalable"
+        );
+        assert!(
+            !macos_process_group_is_gone(process_group),
+            "EPERM must NOT be read as absence; that is the fail-open direction"
+        );
+
+        child.wait().expect("reap fixture");
+
+        // After the reap: the last member left, so the group is really gone.
+        assert!(
+            macos_process_group_is_gone(process_group),
+            "a fully reaped group must read as gone; otherwise Ok(None) is unreachable \
+             and a finished workload is reported as a containment fault"
+        );
+    }
+
+    /// The security half of the same relaxation: a corpse root that DID leave a
+    /// descendant keeps its group alive, so containment must still be a real
+    /// authority that can kill the survivor. If this ever answers `None`, the
+    /// relaxation above has become a hole rather than a repair.
+    #[test]
+    fn a_corpse_root_with_a_live_descendant_still_yields_containment() {
+        // The shell exits immediately; the backgrounded `sleep` stays in the
+        // group it inherited, so the group outlives its leader.
+        let (mut child, process_group) = corpse_group_leader(&["sh", "-c", "sleep 30 & exit 0"]);
+        assert_eq!(
+            unsafe { libc::kill(-process_group, 0) },
+            0,
+            "precondition: the descendant must keep the fixture's group alive"
+        );
+
+        let authority = MacProcessGroupAuthority::attach(process_group)
+            .expect("a corpse root with a live descendant must still attach")
+            .expect("a surviving descendant means there IS a tree to contain");
+        authority
+            .signal_group(libc::SIGKILL)
+            .expect("the attached authority must be able to kill the surviving descendant");
+
+        child.wait().expect("reap fixture");
+    }
+
     #[test]
     fn root_exit_after_sentinel_joins_still_yields_containment() {
         let mut child_command = std::process::Command::new("sleep");
@@ -632,7 +894,10 @@ mod macos_tests {
             child.kill().expect("stop original root");
             child.wait().expect("reap original root");
         })
-        .expect("a root that finished after the sentinel joined must still yield containment");
+        .expect("a root that finished after the sentinel joined must still yield containment")
+        .expect(
+            "the sentinel joined, so the group exists and containment must be a full authority",
+        );
 
         // And the authority must be usable, not merely constructible: a
         // handle that cannot signal its group is containment in name only.

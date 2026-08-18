@@ -197,18 +197,30 @@ async fn capacity_registration_fixture() {
         .await
     {
         Ok(workspace) => {
-            std::fs::write(coordination.join(format!("{worker}.result")), b"ok").unwrap();
+            publish_result(&coordination, &worker, "ok");
             wait_for_path(&coordination.join("release")).await;
             manager.release_transaction(&workspace).unwrap();
         }
         Err(error) => {
-            std::fs::write(
-                coordination.join(format!("{worker}.result")),
-                error.to_string(),
-            )
-            .unwrap();
+            publish_result(&coordination, &worker, &error.to_string());
         }
     }
+}
+
+/// Publish a worker verdict so the parent can never read it half-written.
+///
+/// The parent waits on the result path EXISTING and then reads it, but
+/// `std::fs::write` creates-and-truncates before it writes, so the file is
+/// observable as zero bytes for a window in between. Measured on
+/// `macos-latest` under 12 concurrent copies of this test: one run failed with
+/// `["", "dispatch admission refused: aggregate workspace budget exhausted"]`
+/// — an empty verdict, which reads as a product defect and is a harness race.
+/// A rename into place is atomic, so the parent sees either nothing or the
+/// whole verdict.
+fn publish_result(coordination: &Path, worker: &str, verdict: &str) {
+    let staged = coordination.join(format!("{worker}.result.staged"));
+    std::fs::write(&staged, verdict).unwrap();
+    std::fs::rename(&staged, coordination.join(format!("{worker}.result"))).unwrap();
 }
 
 async fn wait_for_path(path: &Path) {
