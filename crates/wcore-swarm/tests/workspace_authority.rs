@@ -202,9 +202,25 @@ async fn capacity_registration_fixture() {
             manager.release_transaction(&workspace).unwrap();
         }
         Err(error) => {
+            let listing = std::fs::read_dir(&root)
+                .map(|entries| {
+                    let mut names = entries
+                        .filter_map(Result::ok)
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    names.sort();
+                    names.join("|")
+                })
+                .unwrap_or_else(|e| format!("<read_dir failed: {e}>"));
             std::fs::write(
                 coordination.join(format!("{worker}.result")),
-                error.to_string(),
+                format!(
+                    "{error} [DIAGSTATE root_exists={} parent_exists={} worker_dir_exists={} entries={}]",
+                    root.exists(),
+                    root.parent().map(std::path::Path::exists).unwrap_or(false),
+                    root.join(&worker).exists(),
+                    listing
+                ),
             )
             .unwrap();
         }

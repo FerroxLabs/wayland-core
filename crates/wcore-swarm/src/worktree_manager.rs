@@ -203,7 +203,9 @@ impl WorktreeManager {
         &self,
         workspace: &TransactionWorkspace,
     ) -> Result<Vec<PathBuf>> {
-        self.validate_swarm_root()?;
+        self.validate_swarm_root().map_err(|error| {
+            SwarmError::WorktreeIo(format!("DIAG-D1 validate_swarm_root: {error}"))
+        })?;
         let mut denied = vec![
             self.git_common_dir().await?,
             self.control_root.clone(),
@@ -234,7 +236,9 @@ impl WorktreeManager {
     /// worktree root cannot force an unbounded admission scan.
     pub fn retained_worker_count(&self, stop_after: usize) -> Result<usize> {
         self.validate_repo_authority()?;
-        self.validate_swarm_root()?;
+        self.validate_swarm_root().map_err(|error| {
+            SwarmError::WorktreeIo(format!("DIAG-D2 validate_swarm_root: {error}"))
+        })?;
         let mut count = 0_usize;
         for entry in std::fs::read_dir(&self.swarm_root)? {
             let entry = entry?;
@@ -392,7 +396,9 @@ impl WorktreeManager {
         admitted_transactions: usize,
     ) -> Result<WorkspaceCapacity> {
         self.validate_repo_authority()?;
-        self.validate_swarm_root()?;
+        self.validate_swarm_root().map_err(|error| {
+            SwarmError::WorktreeIo(format!("DIAG-D3 validate_swarm_root: {error}"))
+        })?;
         let active_workers = u64::try_from(active_workers.max(1)).map_err(|_| {
             SwarmError::DispatchAdmission("active worker count exceeds u64".to_owned())
         })?;
@@ -791,7 +797,9 @@ impl WorktreeManager {
         reject_option_like_ref("base", base)?;
         let tree_path = self.swarm_root.join(worker_id);
         self.reject_executable_checkout_config().await?;
-        self.validate_swarm_root()?;
+        self.validate_swarm_root().map_err(|error| {
+            SwarmError::WorktreeIo(format!("DIAG-D4 validate_swarm_root: {error}"))
+        })?;
         // Git has no descriptor-relative worktree-add API, so there is an
         // unavoidable same-UID race after this check. Keep the window to the
         // final pre-spawn step and fail closed on an existing destination.
@@ -869,7 +877,9 @@ impl WorktreeManager {
         self.validate_repo_authority()?;
         self.reject_executable_checkout_config().await?;
         self.assert_clean().await?;
-        self.validate_swarm_root()?;
+        self.validate_swarm_root().map_err(|error| {
+            SwarmError::WorktreeIo(format!("DIAG-D5 validate_swarm_root: {error}"))
+        })?;
         let _admission = self.admission_lock.lock().await;
         let closure_bytes = self.transfer_closure_bytes(pinned_head).await?;
         let checkout_bytes = self.checkout_logical_bytes(pinned_head).await?;
@@ -891,7 +901,9 @@ impl WorktreeManager {
             &self.swarm_root,
             &self.swarm_authority,
             || {
-                let aggregate = self.reserved_workspace_bytes()?;
+                let aggregate = self.reserved_workspace_bytes().map_err(|error| {
+                    SwarmError::WorktreeIo(format!("DIAG-C1 reserved_workspace_bytes: {error}"))
+                })?;
                 if aggregate
                     .checked_add(reserved_bytes)
                     .is_none_or(|total| total > capacity.max_aggregate_bytes)
@@ -909,8 +921,18 @@ impl WorktreeManager {
                         capacity.available_bytes,
                     )));
                 }
-                ensure_absent_destination(&transaction_root)?;
-                std::fs::create_dir(&transaction_root)?;
+                ensure_absent_destination(&transaction_root).map_err(|error| {
+                    SwarmError::WorktreeIo(format!(
+                        "DIAG-A1 ensure_absent_destination {}: {error}",
+                        transaction_root.display()
+                    ))
+                })?;
+                std::fs::create_dir(&transaction_root).map_err(|error| {
+                    SwarmError::WorktreeIo(format!(
+                        "DIAG-B1 create_dir transaction_root {}: {error}",
+                        transaction_root.display()
+                    ))
+                })?;
                 let registration = (|| {
                     make_guard_dir_private(&transaction_root)?;
                     // One representation for everything derived below: the root
@@ -1217,7 +1239,9 @@ impl WorktreeManager {
         self.validate_repo_authority()?;
         self.reject_executable_checkout_config().await?;
         self.assert_clean().await?;
-        self.validate_swarm_root()?;
+        self.validate_swarm_root().map_err(|error| {
+            SwarmError::WorktreeIo(format!("DIAG-D6 validate_swarm_root: {error}"))
+        })?;
         let _admission = self.admission_lock.lock().await;
         let closure_bytes = self.transfer_closure_bytes(expected_head).await?;
         let checkout_bytes = self.checkout_logical_bytes(expected_head).await?;
@@ -1239,7 +1263,9 @@ impl WorktreeManager {
             &self.swarm_root,
             &self.swarm_authority,
             || {
-                let aggregate = self.reserved_workspace_bytes()?;
+                let aggregate = self.reserved_workspace_bytes().map_err(|error| {
+                    SwarmError::WorktreeIo(format!("DIAG-C2 reserved_workspace_bytes: {error}"))
+                })?;
                 if aggregate
                     .checked_add(reserved_bytes)
                     .is_none_or(|total| total > capacity.max_aggregate_bytes)
@@ -1257,8 +1283,18 @@ impl WorktreeManager {
                         capacity.available_bytes,
                     )));
                 }
-                ensure_absent_destination(&transaction_root)?;
-                std::fs::create_dir(&transaction_root)?;
+                ensure_absent_destination(&transaction_root).map_err(|error| {
+                    SwarmError::WorktreeIo(format!(
+                        "DIAG-A2 ensure_absent_destination {}: {error}",
+                        transaction_root.display()
+                    ))
+                })?;
+                std::fs::create_dir(&transaction_root).map_err(|error| {
+                    SwarmError::WorktreeIo(format!(
+                        "DIAG-B2 create_dir transaction_root {}: {error}",
+                        transaction_root.display()
+                    ))
+                })?;
                 let registration = (|| {
                     make_guard_dir_private(&transaction_root)?;
                     // One representation for everything derived below: the root
