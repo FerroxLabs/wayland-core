@@ -1,0 +1,101 @@
+name: repro-1025-macos
+
+# gh#1025 hunt. The admission flake is macOS-only and has never been caught with
+# a usable error: it surfaces as a bare `io: No such file or directory (os error
+# 2)` with no path and no probe, which is why it has survived several release
+# trains unmeasured.
+#
+# This branch carries the diagnostics from integration/0.13.2, which name the
+# probe and the object at every filesystem site on the admission and
+# materialization paths. So the job here is not to fix anything — it is to make
+# the flake fire on a GitHub-hosted macOS runner and READ WHAT IT NAMES.
+#
+# Hosted runner deliberately: the self-hosted macOS runner is the owner's own
+# machine, and a 60-iteration loop has no business occupying it.
+
+on:
+  push:
+    branches:
+      - 'verify/1025-macos'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repro-1025-macos
+  cancel-in-progress: false
+
+jobs:
+  repro:
+    name: 'gh#1025 macOS repro loop'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment provenance
+        run: |
+          sw_vers
+          uname -a
+          echo "TMPDIR=$TMPDIR"
+          # macOS puts the per-user temp dir under /var/folders, and /var is a
+          # symlink to /private/var. Any code that compares a canonicalized path
+          # against a non-canonicalized one differs HERE and nowhere on Linux,
+          # which is the shape a macOS-only ENOENT tends to have.
+          echo "--- symlink check ---"
+          ls -ld /var /tmp || true
+          python3 -c "import os,sys; t=os.environ.get('TMPDIR','/tmp'); print('TMPDIR       :',t); print('realpath     :',os.path.realpath(t)); print('differs      :',os.path.realpath(t)!=t.rstrip('/'))"
+          df -h /
+
+      - name: Build the test binary once
+        run: |
+          cargo test -p wcore-swarm --test workspace_authority --no-run 2>&1 | tail -5
+
+      - name: Repro loop — 60 iterations, record every failure verbatim
+        id: loop
+        run: |
+          set +e
+          PASS=0; FAIL=0
+          mkdir -p /tmp/r1025
+          for i in $(seq 1 60); do
+            LOG=/tmp/r1025/iter-$i.log
+            cargo test -p wcore-swarm --test workspace_authority \
+              independent_cli_processes_cannot_overbook_shared_capacity \
+              -- --exact --nocapture > "$LOG" 2>&1
+            if [ $? -eq 0 ]; then
+              PASS=$((PASS+1))
+              printf "."
+            else
+              FAIL=$((FAIL+1))
+              echo ""
+              echo "########## ITERATION $i FAILED ##########"
+              # The assertion prints the verdict vector; that is the payload.
+              grep -E "panicked|assertion|verdict|results|worktree io|io:|No such file|exhausted" "$LOG" | head -25
+              echo "########## end iteration $i ##########"
+            fi
+          done
+          echo ""
+          echo "=== RESULT: $PASS passed, $FAIL failed out of 60 ==="
+          echo "fail_count=$FAIL" >> "$GITHUB_OUTPUT"
+          # Never fail the job on a reproduced flake — a red here would say
+          # nothing that the count does not already say, and the artifact upload
+          # below is the point of the run.
+          exit 0
+
+      - name: Aggregate what the failures actually named
+        if: always()
+        run: |
+          set +e
+          echo "=== distinct error lines across all failing iterations ==="
+          grep -h -E "worktree io|io: |No such file" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -30
+          echo ""
+          echo "=== distinct verdict vectors ==="
+          grep -h -E "results|verdict" /tmp/r1025/*.log 2>/dev/null | sed 's/^[[:space:]]*//' | sort | uniq -c | sort -rn | head -20
+
+      - name: Upload every log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-1025-logs
+          path: /tmp/r1025
+          if-no-files-found: warn
